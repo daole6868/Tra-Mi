@@ -156,6 +156,7 @@ class VideoView(QGraphicsView):
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.video_size = QSizeF(16, 9)
         self.edit: dict = {}
+        self.src_w = self.src_h = 0
         self.out_h = 1080
         self.on_layout = None   # gọi lại khi khung thay đổi (để vẽ lại phụ đề)
         self.video.nativeSizeChanged.connect(self._native)
