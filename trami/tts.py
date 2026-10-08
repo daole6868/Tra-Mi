@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import subprocess
 import unicodedata
@@ -33,6 +34,12 @@ CLONE = "clone"
 SR = 24000
 _vn_model = None
 _vn_lock = threading.Lock()
+_vn_infer_lock = threading.Lock()   # mỗi lúc chỉ 1 câu được đọc trên GPU
+
+
+def _vn_infer(tts, text: str, **kw):
+    with _vn_infer_lock:
+        return tts.infer(text, **kw)
 
 
 # ------------------------------------------------------------------ danh sách giọng
@@ -195,6 +202,9 @@ def _vieneu(mode: str):
     global _vn_model
     with _vn_lock:
         if _vn_model is None or getattr(_vn_model, "_trami_mode", None) != mode:
+            # Tắt "CUDA graph" của VieNeu: khi chụp graph, mọi việc GPU ở luồng khác (trình phát video giải mã
+            # bằng GPU, tách giọng…) làm hỏng phiên chụp -> lỗi cudaErrorStreamCaptureInvalidated.
+            os.environ.setdefault("VIENEU_FUSED_FRAME", "0")
             from vieneu import Vieneu
 
             _vn_model = Vieneu(mode=mode)
@@ -300,11 +310,11 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                     if spk not in refs:
                         refs[spk] = build_reference(ref_audio, segs, spk, work / f"ref_{spk}.wav") if ref_audio else None
                     if refs[spk] is None:  # không đủ mẫu -> dùng giọng mặc định
-                        wav = tts.infer(text)
+                        wav = _vn_infer(tts, text)
                     else:
-                        wav = tts.infer(text, ref_audio=str(refs[spk]))
+                        wav = _vn_infer(tts, text, ref_audio=str(refs[spk]))
                 else:
-                    wav = tts.infer(text, voice=spec[7:] or None)
+                    wav = _vn_infer(tts, text, voice=spec[7:] or None)
                 sr = int(getattr(tts, "sample_rate", 48000))
                 tmp = p.with_suffix(".raw.wav")
                 write_wav(tmp, wav, sr)
@@ -388,7 +398,7 @@ def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,
         return out.with_suffix(".mp3")
     tts = _vieneu(settings.get("vieneu_mode", "v3turbo"))
     if spec == CLONE or spec.startswith("clone"):
-        wav = tts.infer(text, ref_audio=str(ref_audio)) if ref_audio else tts.infer(text)
+        wav = _vn_infer(tts, text, ref_audio=str(ref_audio)) if ref_audio else _vn_infer(tts, text)
     else:
-        wav = tts.infer(text, voice=spec[7:] or None)
+        wav = _vn_infer(tts, text, voice=spec[7:] or None)
     return write_wav(out.with_suffix(".wav"), wav, int(getattr(tts, "sample_rate", 48000)))
