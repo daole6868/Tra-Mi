@@ -463,6 +463,15 @@ class ProjectPage(QWidget):
         self.d_status = label("", "muted")
         mix.add(gen)
         mix.add(hbox(self.d_status, None, button("Nghe bản lồng", "volume", flat=True, on_click=self._open_dub)))
+
+        hist = SectionCard("4. Các bản lồng tiếng đã tạo", "list",
+                           "Mỗi lần bấm 'Tạo bản lồng tiếng' được lưu thành 1 bản. Bản có dấu ✓ đang được dùng "
+                           "cho trình phát và khi xuất video.")
+        self.d_versions_box = QWidget()
+        self.d_versions = QVBoxLayout(self.d_versions_box)
+        self.d_versions.setContentsMargins(0, 0, 0, 0)
+        self.d_versions.setSpacing(6)
+        hist.add(self.d_versions_box)
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 6, 0)
@@ -470,6 +479,7 @@ class ProjectPage(QWidget):
         v.addWidget(sep)
         v.addWidget(spk)
         v.addWidget(mix)
+        v.addWidget(hist)
         v.addStretch(1)
         return scroll(w)
 
@@ -663,6 +673,7 @@ class ProjectPage(QWidget):
         self.d_sepstatus.setText("✓ Đã tách giọng / nhạc nền" if stems else "Chưa tách")
         has_dub = d.get("wav") and Path(d["wav"]).exists()
         self.d_status.setText(("✓ " + pipeline.dub_summary(self.p)) if has_dub else "Chưa tạo bản lồng tiếng")
+        self._fill_dub_versions()
         set_combo(self.x_crf, str(e.get("crf") or self.settings.get("video_crf", 20)))
 
     def collect_edit(self) -> dict:
@@ -1283,6 +1294,67 @@ class ProjectPage(QWidget):
         if not st:
             return self.win.toast("Chưa tách giọng / nhạc nền", "warn")
         QDesktopServices.openUrl(QUrl.fromLocalFile(st[which]))
+
+    def _fill_dub_versions(self):
+        lay = self.d_versions
+        while lay.count():
+            it = lay.takeAt(0)
+            w = it.widget()
+            if w:
+                w.hide()
+                w.deleteLater()
+            elif it.layout():
+                sub = it.layout()
+                while sub.count():
+                    sw = sub.takeAt(0).widget()
+                    if sw:
+                        sw.hide()
+                        sw.deleteLater()
+        vers = pipeline.dub_versions(self.p)
+        cur = (self.p.edit.get("dub") or {}).get("wav")
+        on = bool((self.p.edit.get("dub") or {}).get("enabled"))
+        if not vers:
+            lay.addWidget(label("Chưa có bản nào.", "muted"))
+            return
+        n = len(vers)
+        for k, v in enumerate(vers):
+            st = v.get("stats") or {}
+            cnt = f" · {st.get('placed', 0)}/{st.get('total', 0)} câu" if st.get("total") else ""
+            active = v["wav"] == cur
+            mark = ("✓ " if on else "◦ ") if active else "    "
+            text = f"{mark}Bản {n - k} · {v.get('time', '')}{cnt}" + (f" · {v['voices']}" if v.get("voices") else "")
+            lb = label(text, "" if active else "muted")
+            lb.setToolTip(v["wav"])
+            wav = v["wav"]
+            row = QWidget()
+            row.setLayout(hbox(lb, None,
+                               button("Nghe", "volume", flat=True, on_click=lambda _=False, w=wav: QDesktopServices.openUrl(
+                                   QUrl.fromLocalFile(w))),
+                               button("Dùng bản này" if not (active and on) else "Đang dùng", "check", flat=True,
+                                      on_click=lambda _=False, w=wav: self._use_dub(w)),
+                               button("", "trash", "Xoá bản này", danger=True, flat=True,
+                                      on_click=lambda _=False, w=wav: self._delete_dub(w))))
+            lay.addWidget(row)
+
+    def _use_dub(self, wav: str):
+        self.flush()
+        self.p.reload()
+        pipeline.use_dub_version(self.p, wav)
+        self.p.save()
+        self.populate(reload_media=False)
+        self._update_player_audio()
+        self.win.toast("Đã chọn bản lồng tiếng này cho video", "ok")
+
+    def _delete_dub(self, wav: str):
+        if QMessageBox.question(self, "Xoá bản lồng tiếng?", "Xoá hẳn bản lồng tiếng này khỏi máy?") != \
+                QMessageBox.StandardButton.Yes:
+            return
+        self.flush()
+        self.p.reload()
+        pipeline.delete_dub_version(self.p, wav)
+        self.p.save()
+        self.populate(reload_media=False)
+        self._update_player_audio()
 
     def _open_dub(self):
         w = self.p.edit["dub"].get("wav")

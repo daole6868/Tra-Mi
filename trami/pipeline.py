@@ -309,7 +309,8 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     st = stems(p)
     # mẫu giọng để nhái: lấy từ giọng đã tách (sạch) hoặc âm thanh gốc
     ref_audio = st.get("vocals") or str(p.source)
-    out = p.work / "dub_vi.wav"
+    (p.work / "dubs").mkdir(parents=True, exist_ok=True)
+    out = p.work / "dubs" / f"dub_{time.strftime('%Y%m%d_%H%M%S')}.wav"
     stats: dict = {}
     synthesize_dub(segs, out, p.data.get("info", {}).get("duration", 0), p.work / "tts",
                    default_voice, rate or settings.get("tts_rate", "+0%"),
@@ -317,6 +318,10 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
                    voices=voices, ref_audio=ref_audio, settings=settings,
                    skip_songs=bool(settings.get("dub_skip_songs", True)), stats=stats)
     p.data["dub_stats"] = stats
+    vers = dub_versions(p)
+    vers.insert(0, {"wav": str(out), "time": time.strftime("%H:%M %d/%m"), "voices": _voice_summary(voices, default_voice),
+                    "stats": stats})
+    p.data["dub_versions"] = vers
     ed = p.edit
     ed["dub"]["enabled"] = True
     ed["dub"]["wav"] = str(out)
@@ -328,6 +333,62 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     p.data["edit"] = ed
     p.save()
     return out
+
+
+def _voice_summary(voices: dict, default_voice: str) -> str:
+    def name(spec: str) -> str:
+        if spec == "clone":
+            return "Nhái giọng"
+        if spec.startswith("vieneu:"):
+            return (spec[7:] or "VieNeu") + " (VieNeu)"
+        if spec.startswith("edge:"):
+            return spec[5:].replace("vi-VN-", "").replace("Neural", "") + " (Edge)"
+        return spec
+    if not voices:
+        return name(default_voice)
+    return ", ".join(f"{k}: {name(v)}" for k, v in sorted(voices.items()))
+
+
+def dub_versions(p: Project) -> list[dict]:
+    """Các bản lồng tiếng đã tạo (mới nhất trước), chỉ giữ bản còn file."""
+    vers = [v for v in (p.data.get("dub_versions") or []) if v.get("wav") and Path(v["wav"]).exists()]
+    cur = (p.edit.get("dub") or {}).get("wav")
+    if cur and Path(cur).exists() and not any(v["wav"] == cur for v in vers):   # bản tạo từ phiên bản cũ của tool
+        t = time.strftime("%H:%M %d/%m", time.localtime(Path(cur).stat().st_mtime))
+        vers.append({"wav": cur, "time": t, "voices": "", "stats": p.data.get("dub_stats") or {}})
+    return vers
+
+
+def use_dub_version(p: Project, wav: str) -> None:
+    """Chọn bản lồng tiếng dùng cho xem trước + xuất video."""
+    v = next((x for x in dub_versions(p) if x["wav"] == wav), None)
+    if not v:
+        raise ValueError("Không tìm thấy bản lồng tiếng này")
+    ed = p.edit
+    ed["dub"]["wav"] = wav
+    ed["dub"]["enabled"] = True
+    p.data["edit"] = ed
+    p.data["dub_stats"] = v.get("stats") or {}
+    p.data["dub_versions"] = dub_versions(p)
+
+
+def delete_dub_version(p: Project, wav: str) -> None:
+    vers = [v for v in dub_versions(p) if v["wav"] != wav]
+    try:
+        Path(wav).unlink(missing_ok=True)
+    except OSError:
+        pass  # file đang được mở ở chương trình khác -> để lại, chỉ bỏ khỏi danh sách
+    p.data["dub_versions"] = vers
+    ed = p.edit
+    if ed["dub"].get("wav") == wav:
+        if vers:
+            ed["dub"]["wav"] = vers[0]["wav"]
+            p.data["dub_stats"] = vers[0].get("stats") or {}
+        else:
+            ed["dub"]["wav"] = ""
+            ed["dub"]["enabled"] = False
+            p.data["dub_stats"] = {}
+    p.data["edit"] = ed
 
 
 def dub_preview_audio(p: Project) -> Path | None:
@@ -349,7 +410,10 @@ def dub_preview_audio(p: Project) -> Path | None:
     if out.exists() and out.stat().st_size > 0:
         return out
     for old in p.work.glob("dub_preview_*.m4a"):
-        old.unlink(missing_ok=True)
+        try:
+            old.unlink(missing_ok=True)
+        except OSError:
+            pass  # đang được trình phát mở (Windows khoá file) -> xoá ở lần sau
     args, fc, mix = [], [], []
     mute = bool(p.edit.get("mute_original"))
     if bg:

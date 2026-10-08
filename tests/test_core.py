@@ -547,3 +547,35 @@ def test_sensevoice_broken_library_falls_back_to_whisper(sample_video, monkeypat
     pr = Project(p.id)
     assert n == 1 and pr.data["asr_engine_used"] == "whisper" and "Whisper" in pr.data["asr_warning"]
     p.delete()
+
+
+def test_dub_versions_use_and_delete(tmp_path, monkeypatch):
+    """Mỗi lần lồng tiếng là 1 bản; chọn bản nào thì bản đó dùng khi xuất; xoá bản đang dùng -> chuyển bản khác."""
+    from trami import pipeline, tts
+    from trami.project import Project
+
+    p = Project.create("dubver")
+    p.data["info"] = {"duration": 5}
+    p.segments = [Segment(0.5, 2.0, "a", "Xin chào", "S1")]
+    p.save()
+
+    def fake_synth(segs, out, *a, stats=None, **k):
+        tts.write_wav(out, np.zeros(1000, np.float32))
+        if stats is not None:
+            stats.update({"placed": 1, "total": 1})
+        return Path(out)
+    monkeypatch.setattr(tts, "synthesize_dub", fake_synth)
+    times = iter(["20260101_000001", "20260101_000002"])
+    real = pipeline.time.strftime
+    monkeypatch.setattr(pipeline.time, "strftime", lambda f, *a: next(times) if f == "%Y%m%d_%H%M%S" else real(f, *a))
+    w1 = pipeline.dub(p, "edge:vi-VN-HoaiMyNeural", engine="edge")
+    w2 = pipeline.dub(p, "edge:vi-VN-NamMinhNeural", engine="edge")
+    vers = pipeline.dub_versions(p)
+    assert [v["wav"] for v in vers] == [str(w2), str(w1)] and "NamMinh" in vers[0]["voices"]
+    assert p.edit["dub"]["wav"] == str(w2)
+    pipeline.use_dub_version(p, str(w1))
+    assert p.edit["dub"]["wav"] == str(w1) and p.edit["dub"]["enabled"]
+    pipeline.delete_dub_version(p, str(w1))
+    assert not w1.exists() and p.edit["dub"]["wav"] == str(w2) and len(pipeline.dub_versions(p)) == 1
+    pipeline.delete_dub_version(p, str(w2))
+    assert not p.edit["dub"]["enabled"] and pipeline.dub_versions(p) == []
