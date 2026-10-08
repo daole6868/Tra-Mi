@@ -137,6 +137,11 @@ class Player(QWidget):
         self.audio = QAudioOutput(self)
         self.mp.setAudioOutput(self.audio)
         self.mp.setVideoOutput(self.view.video)
+        # âm thanh thay thế (bản lồng tiếng đã trộn) phát song song, đồng bộ theo video
+        self.mp2 = QMediaPlayer(self)
+        self.audio2 = QAudioOutput(self)
+        self.mp2.setAudioOutput(self.audio2)
+        self.alt_audio = ""
         self.segments: list = []
         self.style: dict = {}
         self.which = "trans"
@@ -157,6 +162,7 @@ class Player(QWidget):
         self.vol.setValue(80)
         self.vol.setFixedWidth(80)
         self.audio.setVolume(0.8)
+        self.audio2.setVolume(0.8)
 
         ctrl = QHBoxLayout()
         ctrl.setSpacing(8)
@@ -180,7 +186,7 @@ class Player(QWidget):
         self.btn_fwd.clicked.connect(lambda: self.step(1))
         self.slider.sliderMoved.connect(lambda v: self.seek(v / 1000 * self._dur))
         self.slider.sliderPressed.connect(lambda: self.seek(self.slider.value() / 1000 * self._dur))
-        self.vol.valueChanged.connect(lambda v: self.audio.setVolume(v / 100))
+        self.vol.valueChanged.connect(self._set_volume)
         self.mp.positionChanged.connect(self._pos)
         self.mp.durationChanged.connect(lambda d: setattr(self, "_dur", d / 1000))
         self.mp.playbackStateChanged.connect(self._state)
@@ -188,8 +194,27 @@ class Player(QWidget):
         self.fps = 25.0
 
     # ------------------------------------------------------------ điều khiển
+    def _set_volume(self, v: int):
+        self.audio.setVolume(v / 100)
+        self.audio2.setVolume(v / 100)
+
+    def set_alt_audio(self, path: str | None):
+        """Phát file âm thanh khác thay cho tiếng của video (vd. bản lồng tiếng). None = tiếng gốc."""
+        path = str(path or "")
+        if path == self.alt_audio:
+            return
+        self.alt_audio = path
+        self.mp2.stop()
+        self.mp2.setSource(QUrl.fromLocalFile(path) if path else QUrl())
+        self.audio.setMuted(bool(path))
+        if path:
+            self.mp2.setPosition(self.mp.position())
+            if self.playing():
+                self.mp2.play()
+
     def load(self, path: str, duration: float = 0.0, fps: float = 25.0, height: int = 1080):
         self.mp.stop()
+        self.set_alt_audio(None)
         self._dur = duration
         self.fps = fps or 25
         self.video_h = height or 1080
@@ -207,6 +232,8 @@ class Player(QWidget):
 
     def seek(self, t: float):
         self.mp.setPosition(int(max(0.0, t) * 1000))
+        if self.alt_audio:
+            self.mp2.setPosition(int(max(0.0, t) * 1000))
         self._pos(int(max(0.0, t) * 1000))
 
     def step(self, n: int):
@@ -223,9 +250,17 @@ class Player(QWidget):
 
     def _state(self, st):
         self.btn_play.set_icon("pause" if self.playing() else "play")
+        if self.alt_audio:
+            if self.playing():
+                self.mp2.setPosition(self.mp.position())
+                self.mp2.play()
+            else:
+                self.mp2.pause()
 
     def _pos(self, ms: int):
         t = ms / 1000
+        if self.alt_audio and self.playing() and abs(self.mp2.position() - ms) > 250:
+            self.mp2.setPosition(ms)  # bù lệch tiếng / hình
         if self._dur and not self.slider.isSliderDown():
             self.slider.blockSignals(True)
             self.slider.setValue(int(t / self._dur * 1000))

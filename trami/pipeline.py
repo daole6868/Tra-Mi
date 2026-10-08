@@ -330,6 +330,58 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     return out
 
 
+def dub_preview_audio(p: Project) -> Path | None:
+    """Trộn sẵn âm thanh 'đã lồng tiếng' (giọng Việt + nhạc nền) theo mốc thời gian video gốc
+    để trình phát trong tool nghe được giống video xuất. Trả về None nếu chưa có bản lồng."""
+    import hashlib
+
+    d = (p.edit.get("dub") or {})
+    wav = d.get("wav")
+    if not (d.get("enabled") and wav and Path(wav).exists()):
+        return None
+    bg = d.get("bg_wav") if d.get("bg_wav") and Path(d["bg_wav"]).exists() else None
+    voc = d.get("vocals_wav") if bg and d.get("vocals_wav") and Path(d["vocals_wav"]).exists() else None
+    spans = d.get("song_spans") or []
+    vol = float(p.edit.get("volume", 1.0))
+    key = repr((Path(wav).stat().st_mtime, bg, voc, spans, vol, d.get("bg_volume"), d.get("vocals_volume"),
+                d.get("original_volume"), d.get("dub_volume"), p.edit.get("mute_original")))
+    out = p.work / f"dub_preview_{hashlib.md5(key.encode()).hexdigest()[:10]}.m4a"
+    if out.exists() and out.stat().st_size > 0:
+        return out
+    for old in p.work.glob("dub_preview_*.m4a"):
+        old.unlink(missing_ok=True)
+    args, fc, mix = [], [], []
+    mute = bool(p.edit.get("mute_original"))
+    if bg:
+        if not mute:
+            args += ["-i", str(bg)]
+            fc.append(f"[{len(args) // 2 - 1}:a]aresample=44100,volume={vol * float(d.get('bg_volume', 1.0)):.3f}[b]")
+            mix.append("[b]")
+        base_v = float(d.get("vocals_volume", 0.0))
+        if voc and not mute and (spans or base_v > 0.001):
+            cond = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in spans) or "0"
+            args += ["-i", str(voc)]
+            fc.append(f"[{len(args) // 2 - 1}:a]aresample=44100,"
+                      f"volume='if({cond},{vol:.3f},{base_v * vol:.3f})':eval=frame[v]")
+            mix.append("[v]")
+    elif p.data.get("info", {}).get("has_audio", True) and not mute:
+        ov = vol * float(d.get("original_volume", 0.15))
+        if ov > 0.001:
+            args += ["-i", str(p.source)]
+            fc.append(f"[{len(args) // 2 - 1}:a]aresample=44100,volume={ov:.3f}[o]")
+            mix.append("[o]")
+    args += ["-i", str(wav)]
+    fc.append(f"[{len(args) // 2 - 1}:a]aresample=44100,volume={float(d.get('dub_volume', 1.0)):.3f}[d]")
+    mix.append("[d]")
+    fc.append("".join(mix) + (f"amix=inputs={len(mix)}:duration=longest:dropout_transition=0:normalize=0,"
+                              if len(mix) > 1 else "anull,") + "alimiter=limit=0.95[out]")
+    tmp = out.with_suffix(".tmp.m4a")
+    ff.run(args + ["-filter_complex", ";".join(fc), "-map", "[out]", "-vn", "-c:a", "aac", "-b:a", "160k",
+                   str(tmp)], float(p.data.get("info", {}).get("duration", 0)), None, None, "Đang trộn bản nghe thử")
+    tmp.replace(out)
+    return out
+
+
 def dub_summary(p: Project) -> str:
     st = p.data.get("dub_stats") or {}
     if not st:

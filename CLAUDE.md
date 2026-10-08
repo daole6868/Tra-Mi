@@ -45,11 +45,12 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `mark_songs` không đoán bài hát theo nhạc nền nếu >25% số câu.
 - 2.0.8: `clean_tts_text` (bỏ chữ Hán sót, emoji); thông báo lỗi có tên lỗi (`err_text`); mọi lỗi ghi vào `data/logs/loi.txt`.
 
+- 2.0.9: trình phát trong tool phát luôn bản lồng tiếng: `pipeline.dub_preview_audio` trộn sẵn `work/dub_preview_<hash>.m4a`
+  (giọng Việt + nhạc nền/tiếng gốc theo các thanh âm lượng), `Player.set_alt_audio` phát song song, tắt tiếng video,
+  đồng bộ khi play/pause/tua (bù lệch > 250 ms). Bật/tắt bằng công tắc "Dùng bản lồng tiếng (xem trước + khi xuất)".
+  Nguyên nhân người dùng "không nghe thấy lồng tiếng": trước đây trình phát chỉ phát tiếng gốc; video XUẤT RA vẫn có
+  giọng lồng (đã kiểm chứng bằng sóng thử 1 kHz, cả nhánh có/không nhạc nền tách).
+
 ## Vấn đề đang mở
-- **Video xuất ra vẫn không nghe thấy giọng lồng** dù trạng thái "✓ Đã có bản lồng tiếng" và bật "Dùng bản lồng tiếng khi xuất".
-  VieNeu chạy độc lập OK (`infer` trả mảng 46080 mẫu). Cần kiểm tra:
-  1. Dòng trạng thái sau 2.0.7 ("Đã lồng tiếng X/Y câu") – X có > 0 không; nghe `work/dub_vi.wav` ("Nghe bản lồng").
-  2. Các câu có bị đánh dấu 🎵 (song) từ lần nhận dạng cũ → bị bỏ qua (tắt "Giữ nguyên bài hát").
-  3. Đường trộn âm thanh trong `video.build_and_render` (nhánh `bg_ok` + `vocals_wav` + `song_spans`), xem `last_ffmpeg_cmd.txt`.
-  4. Nhờ người dùng gửi `data/logs/loi.txt`.
+- Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - Đề xuất chưa làm: hiện %/MB khi tải mô hình; tải SenseVoice từ HuggingFace trước ModelScope.

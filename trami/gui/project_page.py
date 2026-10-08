@@ -452,7 +452,7 @@ class ProjectPage(QWidget):
         self.d_voc = f.row("Giọng Trung gốc còn lại", SliderRow(0, 1, 0.05, 0))
         self.d_orig = f.row("Tiếng gốc (khi chưa tách)", SliderRow(0, 1, 0.05, 0.15))
         self.d_vol = f.row("Âm lượng giọng lồng", SliderRow(0.2, 2, 0.05, 1))
-        self.d_enabled = f.row("Dùng bản lồng tiếng khi xuất", Switch(False))
+        self.d_enabled = f.row("Dùng bản lồng tiếng (xem trước + khi xuất)", Switch(False))
         for w in (self.d_bg, self.d_voc, self.d_orig, self.d_vol):
             w.changed.connect(lambda *_: self._save_edit_timer.start())
         self.d_enabled.toggledOn.connect(lambda *_: self._save_edit_timer.start())
@@ -565,6 +565,30 @@ class ProjectPage(QWidget):
         self.hs_editor.overlay = None
         if p.data.get("source"):
             QTimer.singleShot(400, self._grab_frame)
+        self._dub_key = None
+        self._update_player_audio()
+
+    def _update_player_audio(self):
+        """Trình phát trong tool phát luôn bản lồng tiếng (đã trộn nhạc nền) nếu đang bật lồng tiếng."""
+        if not self.p:
+            return
+        d = self.p.edit.get("dub") or {}
+        on = bool(d.get("enabled") and d.get("wav") and Path(d["wav"]).exists())
+        key = (on, d.get("wav"), Path(d["wav"]).stat().st_mtime if on else 0, d.get("bg_volume"), d.get("vocals_volume"),
+               d.get("original_volume"), d.get("dub_volume"), self.p.edit.get("volume"), self.p.edit.get("mute_original"))
+        if key == getattr(self, "_dub_key", None):
+            return
+        self._dub_key = key
+        if not on:
+            self.player.set_alt_audio(None)
+            return
+        pid = self.p.id
+
+        def done(path):
+            if self.p and self.p.id == pid:
+                self.player.set_alt_audio(str(path) if path else None)
+        run_async(lambda: pipeline.dub_preview_audio(Project(pid)), done,
+                  lambda m: self.win.toast("Không trộn được bản nghe thử lồng tiếng: " + m, "err"))
 
     def _fill_edit(self):
         e = self.p.edit
@@ -694,6 +718,7 @@ class ProjectPage(QWidget):
         self.p.save()
         self._update_summary()
         self._update_timeline()
+        self._update_player_audio()
 
     def _segs_edited(self):
         self._save_segs_timer.start()
@@ -746,6 +771,7 @@ class ProjectPage(QWidget):
     def job_finished(self, j: dict):
         if self.p and j["project_id"] == self.p.id:
             self.reload()
+            self._update_player_audio()
             if j["kind"] in ("preview", "download"):
                 self._load_media()
 
