@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QRectF, QSizeF, Qt, QUrl, Signal, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QGraphicsItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QSlider,
-                               QVBoxLayout, QWidget)
+from PySide6.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QTransform
+from PySide6.QtWidgets import (QGraphicsEffect, QGraphicsItem, QGraphicsRectItem, QGraphicsScene, QGraphicsView,
+                               QHBoxLayout, QLabel, QSlider, QVBoxLayout, QWidget)
 
 from . import theme
 from .widgets import IconButton
@@ -82,15 +82,71 @@ class SubtitleItem(QGraphicsItem):
             p.fillPath(path, QColor(st.get("color", "#FFFFFF")))
 
 
+class ColorEffect(QGraphicsEffect):
+    """Xem trước độ sáng / tương phản / bão hoà / gamma giống bộ lọc eq của FFmpeg (gần đúng)."""
+
+    def __init__(self):
+        super().__init__()
+        self.b, self.c, self.s, self.g = 0.0, 1.0, 1.0, 1.0
+        self._lut = None
+
+    def set_params(self, b: float, c: float, s: float, g: float):
+        self.b, self.c, self.s, self.g = b, c, s, g
+        import numpy as np
+
+        x = np.arange(256, dtype=np.float32) / 255.0
+        y = np.clip((x - 0.5) * c + 0.5 + b, 0, 1) ** (1.0 / max(0.1, g))
+        self._lut = (np.clip(y, 0, 1) * 255 + 0.5).astype(np.uint8)
+        self.update()
+
+    def draw(self, painter: QPainter):
+        import numpy as np
+
+        pix = self.sourcePixmap(Qt.CoordinateSystem.DeviceCoordinates)
+        if isinstance(pix, tuple):  # một số bản PySide trả (pixmap, offset)
+            pix, off = pix
+        else:
+            off = painter.worldTransform().mapRect(
+                self.sourceBoundingRect(Qt.CoordinateSystem.LogicalCoordinates)).topLeft().toPoint()
+        if pix.isNull() or self._lut is None:
+            return self.drawSource(painter)
+        img = pix.toImage().convertToFormat(QImage.Format.Format_ARGB32)
+        w, h = img.width(), img.height()
+        a = np.frombuffer(img.constBits(), np.uint8, img.sizeInBytes()).reshape(h, img.bytesPerLine() // 4, 4)[:, :w]
+        rgb = self._lut[a[:, :, :3]]
+        if abs(self.s - 1) > 1e-3:
+            f = rgb.astype(np.float32)
+            luma = f[:, :, 0:1] * 0.114 + f[:, :, 1:2] * 0.587 + f[:, :, 2:3] * 0.299   # BGRA
+            rgb = np.clip(luma + (f - luma) * self.s, 0, 255).astype(np.uint8)
+        out = np.dstack([rgb, a[:, :, 3:4]]).copy()
+        res = QImage(out.data, w, h, w * 4, QImage.Format.Format_ARGB32)
+        painter.save()
+        painter.setWorldTransform(QTransform())
+        painter.drawImage(off, res)
+        painter.restore()
+
+
 class VideoView(QGraphicsView):
+    """Khung xem: mô phỏng khung hình đầu ra (tỉ lệ khung, crop, lật, xoay, phóng to, màu) ngay khi chỉnh."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
         from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 
         self.scene_ = QGraphicsScene(self)
         self.setScene(self.scene_)
-        self.video = QGraphicsVideoItem()
-        self.scene_.addItem(self.video)
+        # canvas = khung hình đầu ra; clip = vùng nội dung video bên trong (cả hai cắt phần thừa)
+        self.canvas = QGraphicsRectItem()
+        self.canvas.setPen(QPen(Qt.PenStyle.NoPen))
+        self.canvas.setFlag(QGraphicsItem.GraphicsItemFlag.ItemClipsChildrenToShape, True)
+        self.scene_.addItem(self.canvas)
+        self.clip = QGraphicsRectItem(self.canvas)
+        self.clip.setPen(QPen(Qt.PenStyle.NoPen))
+        self.clip.setFlag(QGraphicsItem.GraphicsItemFlag.ItemClipsChildrenToShape, True)
+        self.video = QGraphicsVideoItem(self.clip)
+        self.color = ColorEffect()
+        self.color.setEnabled(False)
+        self.video.setGraphicsEffect(self.color)
         self.sub = SubtitleItem()
         self.sub.setZValue(10)
         self.scene_.addItem(self.sub)
@@ -99,6 +155,9 @@ class VideoView(QGraphicsView):
         self.setStyleSheet("background: #000; border: none; border-radius: 12px;")
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.video_size = QSizeF(16, 9)
+        self.edit: dict = {}
+        self.out_h = 1080
+        self.on_layout = None   # gọi lại khi khung thay đổi (để vẽ lại phụ đề)
         self.video.nativeSizeChanged.connect(self._native)
         self.setMinimumHeight(220)
 
@@ -111,17 +170,74 @@ class VideoView(QGraphicsView):
         super().resizeEvent(e)
         self._fit()
 
+    def set_edit(self, edit: dict, src_w: int, src_h: int):
+        self.edit = edit or {}
+        self.src_w, self.src_h = src_w or 0, src_h or 0
+        col = self.edit.get("color") or {}
+        b, c = float(col.get("brightness", 0)), float(col.get("contrast", 1))
+        s_, g = float(col.get("saturation", 1)), float(col.get("gamma", 1))
+        on = abs(b) > 1e-3 or abs(c - 1) > 1e-3 or abs(s_ - 1) > 1e-3 or abs(g - 1) > 1e-3
+        if on:
+            self.color.set_params(b, c, s_, g)
+        self.color.setEnabled(on)
+        self._fit()
+
     def _fit(self):
+        from ..video import ASPECTS, target_size
+
         w, h = self.viewport().width(), self.viewport().height()
         self.scene_.setSceneRect(0, 0, w, h)
         vs = self.video_size
-        sc = min(w / vs.width(), h / vs.height()) if vs.width() else 1
-        vw, vh = vs.width() * sc, vs.height() * sc
-        self.video.setSize(QSizeF(vw, vh))
-        self.video.setPos((w - vw) / 2, (h - vh) / 2)
+        if vs.width() <= 0 or w <= 0 or h <= 0:
+            return
+        e = self.edit
+        cr = e.get("crop") or {}
+        cx, cy = float(cr.get("x", 0)), float(cr.get("y", 0))
+        cw, ch = float(cr.get("w", 1)) or 1, float(cr.get("h", 1)) or 1
+        rot = int(e.get("rotate") or 0) % 360
+        zoom = max(1.0, float(e.get("zoom") or 1.0))
+        # nội dung sau crop + xoay (đơn vị: điểm ảnh của bản đang phát)
+        rw, rh = vs.width() * cw, vs.height() * ch
+        if rot in (90, 270):
+            rw, rh = rh, rw
+        aspect = e.get("aspect", "original")
+        if aspect in ASPECTS:
+            aw, ah = ASPECTS[aspect]
+        else:
+            aw, ah = rw, rh
+        # khung đầu ra vừa khít ô xem
+        k = min(w / aw, h / ah)
+        fw, fh = aw * k, ah * k
+        frame = QRectF((w - fw) / 2, (h - fh) / 2, fw, fh)
+        mode = e.get("aspect_mode", "blur")
+        self.canvas.setRect(frame)
+        self.canvas.setBrush(QBrush(QColor("#000" if mode == "pad" or aspect not in ASPECTS else "#20232b")))
+        sc = (max if (aspect in ASPECTS and mode == "crop") else min)(fw / rw, fh / rh)
+        content = QRectF(frame.center().x() - rw * sc / 2, frame.center().y() - rh * sc / 2, rw * sc, rh * sc)
+        self.clip.setRect(content)
+        # đặt video: tâm vùng crop -> tâm nội dung, lật, xoay, phóng
+        kk = sc * zoom
+        self.video.setSize(QSizeF(vs.width() * kk, vs.height() * kk))
+        self.video.setPos(0, 0)
+        ccx, ccy = (cx + cw / 2) * vs.width() * kk, (cy + ch / 2) * vs.height() * kk
+        t = QTransform.fromTranslate(-ccx, -ccy)
+        t = t * QTransform.fromScale(-1 if e.get("flip_h") else 1, -1 if e.get("flip_v") else 1)
+        t = t * QTransform().rotate(rot)
+        t = t * QTransform.fromTranslate(content.center().x(), content.center().y())
+        self.video.setTransform(t)
+        # chiều cao khung đầu ra thật (phụ đề tính theo nó)
+        if self.src_w and self.src_h:
+            sw, sh = self.src_w * cw, self.src_h * ch
+            if rot in (90, 270):
+                sw, sh = sh, sw
+            self.out_h = target_size(int(sw), int(sh), aspect, e.get("resolution", "original"))[1]
+        else:
+            self.out_h = 1080
+        if self.on_layout:
+            self.on_layout()
 
     def video_rect(self) -> QRectF:
-        return QRectF(self.video.pos(), self.video.size())
+        return self.canvas.rect()
 
 
 class Player(QWidget):
@@ -192,6 +308,8 @@ class Player(QWidget):
         self.mp.playbackStateChanged.connect(self._state)
         self.mp.errorOccurred.connect(lambda err, msg: self.mediaError.emit(msg or str(err)))
         self.fps = 25.0
+        self.keep: list = []        # các đoạn được giữ (sau cắt đầu/cuối, xoá đoạn giữa)
+        self.view.on_layout = lambda: self.update_sub()
 
     # ------------------------------------------------------------ điều khiển
     def _set_volume(self, v: int):
@@ -228,6 +346,10 @@ class Player(QWidget):
         if self.mp.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.mp.pause()
         else:
+            t = self.position()
+            if self.keep and not any(a - 0.02 <= t < b - 0.06 for a, b in self.keep):
+                nxt = next((a for a, b in self.keep if a > t), self.keep[0][0])   # đứng ở đoạn đã cắt / hết
+                self.seek(nxt + 0.001)
             self.mp.play()
 
     def seek(self, t: float):
@@ -257,8 +379,44 @@ class Player(QWidget):
             else:
                 self.mp2.pause()
 
+    def set_edit(self, edit: dict, src_w: int = 0, src_h: int = 0, duration: float = 0.0):
+        """Áp các chỉnh sửa (khung hình, màu, tốc độ, đoạn cắt) lên trình phát để xem ngay."""
+        from ..video import keep_ranges
+
+        edit = edit or {}
+        self.view.set_edit(edit, src_w, src_h)
+        rate = min(4.0, max(0.25, float(edit.get("speed") or 1.0)))
+        if abs(self.mp.playbackRate() - rate) > 1e-3:
+            self.mp.setPlaybackRate(rate)
+            self.mp2.setPlaybackRate(rate)
+        dur = duration or self._dur
+        try:
+            self.keep = keep_ranges(dur, edit.get("trim"), edit.get("cuts")) if dur else []
+        except Exception:
+            self.keep = []
+        if self.keep == [(0.0, dur)] or (len(self.keep) == 1 and self.keep[0][0] <= 0.001
+                                         and abs(self.keep[0][1] - dur) < 0.01):
+            self.keep = []
+
+    def _skip_cut(self, t: float) -> bool:
+        """Đang phát vào đoạn đã cắt -> nhảy qua. Trả về True nếu đã tua."""
+        if not self.keep or not self.playing():
+            return False
+        for a, b in self.keep:
+            if a - 0.02 <= t < b:
+                return False
+        nxt = next((a for a, b in self.keep if a > t), None)
+        if nxt is None:
+            self.mp.pause()
+            self.seek(self.keep[-1][1] - 0.05)
+        else:
+            self.seek(nxt + 0.001)
+        return True
+
     def _pos(self, ms: int):
         t = ms / 1000
+        if self._skip_cut(t):
+            return
         if self.alt_audio and self.playing() and abs(self.mp2.position() - ms) > 250:
             self.mp2.setPosition(ms)  # bù lệch tiếng / hình
         if self._dur and not self.slider.isSliderDown():
@@ -287,4 +445,4 @@ class Player(QWidget):
                     else:
                         text = s.trans
                     break
-        self.view.sub.set(text, self.view.video_rect(), self.style, self.video_h)
+        self.view.sub.set(text, self.view.video_rect(), self.style, self.view.out_h)

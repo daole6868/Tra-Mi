@@ -45,6 +45,7 @@ class ProjectPage(QWidget):
         self.cut_a: float | None = None
 
         self._save_edit_timer = QTimer(self, singleShot=True, interval=500, timeout=self._save_edit_now)
+        self._live_timer = QTimer(self, singleShot=True, interval=40, timeout=self._apply_live)
         self._save_segs_timer = QTimer(self, singleShot=True, interval=800, timeout=self._save_segs_now)
 
         # ---------------- đầu trang
@@ -253,7 +254,7 @@ class ProjectPage(QWidget):
 
     # ================================================================== TAB: Chỉnh sửa
     def _tab_edit(self):
-        sv = lambda *_: self._save_edit_timer.start()  # noqa: E731
+        sv = lambda *_: (self._save_edit_timer.start(), self._live_timer.start())  # noqa: E731
         # --- cắt
         cut = SectionCard("Cắt video", "scissors", "Phụ đề và lồng tiếng tự khớp lại sau khi cắt.")
         self.e_start = QDoubleSpinBox()
@@ -358,7 +359,7 @@ class ProjectPage(QWidget):
 
     # ================================================================== TAB: Kiểu chữ
     def _tab_style(self):
-        sv = lambda *_: (self._save_edit_timer.start(), self._refresh_overlay())  # noqa: E731
+        sv = lambda *_: (self._save_edit_timer.start(), self._live_timer.start())  # noqa: E731
         card = SectionCard("Kiểu phụ đề ghép vào video", "palette", "Xem trước trực tiếp trên khung video bên trái.")
         f = Form()
         self.st_burn = f.row("Ghép phụ đề vào video", Switch(True))
@@ -564,6 +565,7 @@ class ProjectPage(QWidget):
             self._refresh_overlay()
         finally:
             self.loading = False
+        self._apply_live()
 
     def _load_media(self):
         p = self.p
@@ -900,7 +902,7 @@ class ProjectPage(QWidget):
         which = self.ov_which.currentData()
         st = pipeline.effective_style(self.p, self.current_style())
         if st.get("margin_v_rel") is not None:
-            st["margin_v"] = st["margin_v_rel"] * (self.p.data.get("info", {}).get("height") or 1080)
+            st["margin_v"] = st["margin_v_rel"] * self.player.view.out_h
         self.player.set_subtitles(self.model.segs, st, which)
 
     def _media_error(self, msg: str):
@@ -1165,6 +1167,7 @@ class ProjectPage(QWidget):
         self.p.data["edit"] = e
         self.p.save()
         self.crop_info.setText("Không crop")
+        self._apply_live()
 
     def _pick_asset(self, kind: str):
         flt = "Âm thanh (*.mp3 *.wav *.m4a *.aac *.flac *.ogg)" if kind == "bgm" else "Ảnh (*.png *.jpg *.jpeg *.webp)"
@@ -1364,9 +1367,22 @@ class ProjectPage(QWidget):
             self.win.toast("Chưa có bản lồng tiếng", "warn")
 
     # ================================================================== xuất
+    def _apply_live(self):
+        """Áp ngay chỉnh sửa (khung hình, màu, tốc độ, đoạn cắt) + kiểu phụ đề lên trình phát bên trái."""
+        if not self.p or self.loading:
+            return
+        try:
+            ed = self.collect_edit()
+        except Exception:  # noqa: BLE001 – giao diện chưa dựng xong
+            return
+        i = self.p.data.get("info", {})
+        self.player.set_edit(ed, i.get("width", 0), i.get("height", 0), i.get("duration", 0))
+        self._refresh_overlay()
+
     def _update_summary(self):
         if not self.p:
             return
+        self._live_timer.start()
         e = self.p.edit
         segs = self.model.segs
         items = [f"Phụ đề: {len(segs)} câu, đã dịch {sum(1 for s in segs if s.trans)}" +
