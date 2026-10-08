@@ -15,6 +15,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import unicodedata
 import threading
 import wave
@@ -34,12 +35,6 @@ CLONE = "clone"
 SR = 24000
 _vn_model = None
 _vn_lock = threading.Lock()
-_vn_infer_lock = threading.Lock()   # mỗi lúc chỉ 1 câu được đọc trên GPU
-
-
-def _vn_infer(tts, text: str, **kw):
-    with _vn_infer_lock:
-        return tts.infer(text, **kw)
 
 
 # ------------------------------------------------------------------ danh sách giọng
@@ -198,17 +193,94 @@ async def _edge_all(items: list[tuple[int, str, Path, str]], rate: str, pitch: s
     return errors
 
 
-def _vieneu(mode: str):
+class VieneuWorker:
+    """Điều khiển tiến trình riêng chạy VieNeu (trami/vieneu_worker.py). Mỗi lúc chỉ 1 câu được đọc."""
+
+    def __init__(self, mode: str):
+        self.mode = mode
+        self.sr = 48000
+        self.proc: subprocess.Popen | None = None
+        self.lock = threading.Lock()
+        self.fused = "1"      # CUDA graph của VieNeu (nhanh); tắt nếu GPU báo lỗi chụp graph
+
+    def _cmd(self) -> list[str]:
+        from .config import APP_DIR, FROZEN
+
+        if FROZEN:
+            return [sys.executable, "--vieneu-worker", self.mode]
+        return [sys.executable, str(APP_DIR / "TraMi.py"), "--vieneu-worker", self.mode]
+
+    def _start(self):
+        from .config import APP_DIR, DATA_DIR
+
+        env = dict(os.environ, VIENEU_FUSED_FRAME=self.fused, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+        err = None  # log của VieNeu hiện trong cửa sổ đen; chạy không cửa sổ (pythonw/exe) thì ghi ra file
+        if sys.stderr is None or not getattr(sys.stderr, "fileno", None):
+            (DATA_DIR / "logs").mkdir(parents=True, exist_ok=True)
+            err = open(DATA_DIR / "logs" / "vieneu.txt", "a", encoding="utf-8")
+        self.proc = subprocess.Popen(self._cmd(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err,
+                                     text=True, encoding="utf-8", errors="replace", bufsize=1, cwd=str(APP_DIR),
+                                     env=env, creationflags=_NO_WINDOW)
+        r = self._read()
+        if "error" in r:
+            self.stop()
+            raise RuntimeError(r["error"])
+        self.sr = int(r.get("sr", 48000))
+
+    def _read(self) -> dict:
+        assert self.proc and self.proc.stdout
+        for line in self.proc.stdout:
+            if line.startswith("@@TRAMI@@"):
+                return json.loads(line[len("@@TRAMI@@"):])
+        code = self.proc.poll() if self.proc else None
+        self.proc = None
+        raise RuntimeError(f"Tiến trình VieNeu bị tắt đột ngột (mã {code}). Xem log trong cửa sổ đen để biết chi tiết.")
+
+    def synth(self, text: str, out: str | Path, voice: str | None = None, ref_audio: str | None = None) -> Path:
+        req = json.dumps({"text": text, "out": str(out), "voice": voice, "ref_audio": ref_audio}, ensure_ascii=False)
+        with self.lock:
+            for attempt in range(2):
+                try:
+                    if not self.proc or self.proc.poll() is not None:
+                        self._start()
+                    assert self.proc and self.proc.stdin
+                    self.proc.stdin.write(req + "\n")
+                    self.proc.stdin.flush()
+                    r = self._read()
+                except (OSError, RuntimeError) as e:
+                    self.stop()
+                    if attempt == 0:
+                        continue  # khởi động lại tiến trình 1 lần
+                    raise RuntimeError(str(e)) from None
+                if "error" in r:
+                    if attempt == 0 and "captur" in r["error"].lower():
+                        self.fused = "0"   # GPU không chụp được CUDA graph -> chạy lại không dùng graph
+                        self.stop()
+                        continue
+                    raise RuntimeError(r["error"])
+                return Path(out)
+        raise RuntimeError("VieNeu không đọc được câu này")
+
+    def stop(self):
+        p, self.proc = self.proc, None
+        if p and p.poll() is None:
+            try:
+                p.stdin.close()  # type: ignore[union-attr]
+                p.wait(5)
+            except Exception:
+                p.kill()
+
+
+def _vieneu(mode: str) -> VieneuWorker:
     global _vn_model
     with _vn_lock:
-        if _vn_model is None or getattr(_vn_model, "_trami_mode", None) != mode:
-            # Tắt "CUDA graph" của VieNeu: khi chụp graph, mọi việc GPU ở luồng khác (trình phát video giải mã
-            # bằng GPU, tách giọng…) làm hỏng phiên chụp -> lỗi cudaErrorStreamCaptureInvalidated.
-            os.environ.setdefault("VIENEU_FUSED_FRAME", "0")
-            from vieneu import Vieneu
+        if _vn_model is None or _vn_model.mode != mode:
+            if _vn_model is not None:
+                _vn_model.stop()
+            _vn_model = VieneuWorker(mode)
+            import atexit
 
-            _vn_model = Vieneu(mode=mode)
-            _vn_model._trami_mode = mode
+            atexit.register(_vn_model.stop)
         return _vn_model
 
 
@@ -309,15 +381,13 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                     spk = spec[6:]
                     if spk not in refs:
                         refs[spk] = build_reference(ref_audio, segs, spk, work / f"ref_{spk}.wav") if ref_audio else None
-                    if refs[spk] is None:  # không đủ mẫu -> dùng giọng mặc định
-                        wav = _vn_infer(tts, text)
-                    else:
-                        wav = _vn_infer(tts, text, ref_audio=str(refs[spk]))
+                    tmp = p.with_suffix(".raw.wav")
+                    # không đủ mẫu giọng -> dùng giọng mặc định
+                    tts.synth(text, tmp, ref_audio=str(refs[spk]) if refs[spk] else None)
                 else:
-                    wav = _vn_infer(tts, text, voice=spec[7:] or None)
-                sr = int(getattr(tts, "sample_rate", 48000))
-                tmp = p.with_suffix(".raw.wav")
-                write_wav(tmp, wav, sr)
+                    tmp = p.with_suffix(".raw.wav")
+                    tts.synth(text, tmp, voice=spec[7:] or None)
+                sr = tts.sr
                 if abs(speed - 1) > 0.01:
                     a = _decode(tmp, speed, sr)
                     write_wav(p, a, sr)
@@ -398,7 +468,5 @@ def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,
         return out.with_suffix(".mp3")
     tts = _vieneu(settings.get("vieneu_mode", "v3turbo"))
     if spec == CLONE or spec.startswith("clone"):
-        wav = _vn_infer(tts, text, ref_audio=str(ref_audio)) if ref_audio else _vn_infer(tts, text)
-    else:
-        wav = _vn_infer(tts, text, voice=spec[7:] or None)
-    return write_wav(out.with_suffix(".wav"), wav, int(getattr(tts, "sample_rate", 48000)))
+        return tts.synth(text, out.with_suffix(".wav"), ref_audio=str(ref_audio) if ref_audio else None)
+    return tts.synth(text, out.with_suffix(".wav"), voice=spec[7:] or None)

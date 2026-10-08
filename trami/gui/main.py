@@ -923,7 +923,25 @@ def _dark_titlebar(win: QMainWindow):
         pass
 
 
+def _crash_log():
+    """Ghi lại nếu chương trình bị sập ở tầng thư viện C/GPU (không có Traceback Python)."""
+    import faulthandler
+
+    from ..config import DATA_DIR
+
+    try:
+        (DATA_DIR / "logs").mkdir(parents=True, exist_ok=True)
+        f = open(DATA_DIR / "logs" / "sap.txt", "a", encoding="utf-8")
+        f.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} mở TraMi\n")
+        f.flush()
+        faulthandler.enable(file=f, all_threads=True)
+        return f
+    except OSError:
+        return None
+
+
 def run():
+    _keep_crash_file = _crash_log()  # noqa: F841
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     if sys.platform == "win32":
         try:
