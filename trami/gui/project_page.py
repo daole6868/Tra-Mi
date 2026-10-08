@@ -215,42 +215,97 @@ class ProjectPage(QWidget):
         return w
 
     # ================================================================== TAB: Xoá phụ đề cũ
+    HS_MODES = [("none", "Không xoá", "x"), ("inpaint", "Xoá sạch (AI)", "sparkle"), ("blur", "Làm mờ", "eye"),
+                ("box", "Che dải màu", "stack"), ("delogo", "Delogo", "eraser")]
+    HS_HELP = {
+        "none": "Giữ nguyên chữ Trung cũ trên video.",
+        "inpaint": "AI vẽ lại nền phía sau chữ – sạch nhất. Video bên trái chỉ hiện làm mờ gần đúng; "
+                   "bấm 'Xem trước kết quả' để thấy chính xác.",
+        "blur": "Làm mờ vùng chữ. Video bên trái hiện gần đúng ngay khi chỉnh.",
+        "box": "Phủ một dải màu lên vùng chữ (đặt phụ đề Việt đè lên). Video bên trái hiện đúng như khi xuất.",
+        "delogo": "Xoá nhanh bằng bộ lọc delogo của FFmpeg – hợp với logo nhỏ, chữ ít.",
+    }
+
     def _tab_hardsub(self):
-        card = SectionCard("Xoá / che phụ đề tiếng Trung cũ", "eraser",
-                           "Kéo chuột trên ảnh để khoanh vùng chữ (nhiều vùng được, cả logo). Chọn khung hình có chữ bằng trình phát.")
+        sv = lambda *_: (self._save_edit_timer.start(), self._live_timer.start())  # noqa: E731
+        # --- bước 1: khoanh vùng
+        area = SectionCard("1. Khoanh vùng chữ cần xoá", "eraser",
+                           "Kéo chuột trên ảnh để khoanh vùng phụ đề Trung (khoanh nhiều vùng được, cả logo). "
+                           "Vùng khoanh hiện ngay trên video bên trái.")
         self.hs_editor = RegionEditor(multi=True)
-        self.hs_editor.changed.connect(lambda r: self._save_edit_timer.start())
-        card.add(self.hs_editor)
-        card.add(hbox(button("Lấy khung hình", "image", on_click=self._grab_frame),
-                      button("Tự dò vùng phụ đề", "wand", on_click=self._detect_region),
-                      button("Xem trước", "eye", on_click=self._preview_hardsub),
-                      button("Ảnh gốc", "refresh", on_click=self._clear_preview),
-                      button("Xoá vùng", "trash", danger=True, on_click=lambda: (self.hs_editor.set_regions([]),
-                                                                                   self._save_edit_timer.start())),
-                      None))
+        self.hs_editor.changed.connect(sv)
+        area.add(self.hs_editor)
+        auto_btn = GradientButton("Tự dò vùng phụ đề", "wand")
+        auto_btn.clicked.connect(self._detect_region)
+        area.add(hbox(auto_btn,
+                      button("Chụp khung đang phát", "image", "Lấy khung hình ở vị trí đang phát để khoanh vùng",
+                             on_click=self._grab_frame),
+                      None,
+                      button("Xoá hết vùng", "trash", danger=True,
+                             on_click=lambda: (self.hs_editor.set_regions([]), sv()))))
+        # --- bước 2: cách xoá
+        how = SectionCard("2. Cách xoá", "sparkle")
+        self.hs_pills = PillTabs([(t, ic) for _, t, ic in self.HS_MODES])
+        self.hs_pills.changed.connect(self._hs_pill_changed)
+        how.add(self.hs_pills)
+        self.hs_help = label("", "muted", wrap=True)
+        how.add(self.hs_help)
         f = Form()
-        self.hs_mode = f.row("Cách xử lý", combo(C.HARDSUB[0:1] + [("inpaint", "Xoá sạch – AI tái tạo nền (đẹp nhất)")] + C.HARDSUB[2:]))
+        self.hs_form = f
+        self.hs_mode = combo([(k, t) for k, t, _ in self.HS_MODES])   # giữ trạng thái, ẩn (chọn bằng các nút trên)
+        self.hs_mode.hide()
         self.hs_backend = f.row("Công nghệ xoá", combo([("lama", "AI LaMa (đẹp, nên có GPU)"), ("opencv", "OpenCV (nhanh)")],
                                                         self.settings.get("inpaint_backend", "lama")))
         self.hs_strength = f.row("Độ mạnh", combo([("light", "Nhẹ"), ("normal", "Vừa"), ("strong", "Mạnh (chữ viền dày)")], "normal"))
-        self.hs_blur = f.row("Độ mờ (làm mờ)", SliderRow(4, 60, 1, 20, 0))
+        self.hs_useocr = f.row("Chỉ xoá lúc có chữ (OCR)", Switch(True),
+                               "Nếu đã OCR, chỉ xoá đúng lúc có chữ → giữ hình gốc ở các đoạn không có phụ đề")
+        self.hs_blur = f.row("Độ mờ", SliderRow(4, 60, 1, 20, 0))
         self.hs_color = f.row("Màu dải che", ColorButton("#000000"))
         self.hs_opacity = f.row("Độ đục dải che", SliderRow(0.2, 1, 0.05, 1))
-        self.hs_useocr = f.row("Dùng vị trí chữ từ OCR", Switch(True),
-                               "Nếu đã OCR, chỉ xoá đúng lúc có chữ → giữ hình gốc ở các đoạn không có phụ đề")
-        for w in (self.hs_mode, self.hs_backend, self.hs_strength):
-            w.currentIndexChanged.connect(lambda *_: self._save_edit_timer.start())
+        self.hs_mode.currentIndexChanged.connect(self._hs_mode_changed)
+        for w in (self.hs_backend, self.hs_strength):
+            w.currentIndexChanged.connect(sv)
         for w in (self.hs_blur, self.hs_opacity):
-            w.changed.connect(lambda *_: self._save_edit_timer.start())
-        self.hs_color.changed.connect(lambda *_: self._save_edit_timer.start())
-        self.hs_useocr.toggledOn.connect(lambda *_: self._save_edit_timer.start())
-        card.add(f)
+            w.changed.connect(sv)
+        self.hs_color.changed.connect(sv)
+        self.hs_useocr.toggledOn.connect(sv)
+        how.add(f)
+        # --- bước 3: kiểm tra
+        chk = SectionCard("3. Kiểm tra kết quả", "eye",
+                          "Tạo ảnh kết quả chính xác ở khung hình đang phát (giống hệt khi xuất video).")
+        chk.add(hbox(button("Xem trước kết quả", "eye", on_click=self._preview_hardsub),
+                     button("Về ảnh gốc", "refresh", on_click=self._clear_preview), None))
         w = QWidget()
+        self.hs_mode.setParent(w)
+        self.hs_mode.hide()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 6, 0)
-        v.addWidget(card)
+        v.setSpacing(12)
+        v.addWidget(area)
+        v.addWidget(how)
+        v.addWidget(chk)
         v.addStretch(1)
+        self._hs_mode_changed()
         return scroll(w)
+
+    def _hs_pill_changed(self, i: int):
+        set_combo(self.hs_mode, self.HS_MODES[i][0])
+        if self.HS_MODES[i][0] != "none" and not self.hs_editor.regions and not self.loading:
+            self.win.toast("Khoanh vùng chữ trên ảnh (hoặc bấm 'Tự dò vùng phụ đề') để xoá", "warn")
+
+    def _hs_mode_changed(self, *_):
+        mode = self.hs_mode.currentData() or "none"
+        i = next((k for k, m in enumerate(self.HS_MODES) if m[0] == mode), 0)
+        self.hs_pills.set_current(i, emit=False)
+        self.hs_help.setText(self.HS_HELP.get(mode, ""))
+        vis = {self.hs_backend: mode == "inpaint", self.hs_strength: mode == "inpaint",
+               self.hs_useocr: mode == "inpaint", self.hs_blur: mode == "blur",
+               self.hs_color: mode == "box", self.hs_opacity: mode == "box"}
+        for wdg, on in vis.items():
+            self.hs_form.setRowVisible(wdg, on)
+        if not self.loading:
+            self._save_edit_timer.start()
+            self._live_timer.start()
 
     # ================================================================== TAB: Chỉnh sửa
     def _tab_edit(self):
@@ -1441,6 +1496,8 @@ class ProjectPage(QWidget):
     # ================================================================== khác
     def _tab_changed(self, i: int):
         self.stack.setCurrentIndex(i)
+        self.player.view.hs.show_outline = i == 2   # tab Xoá phụ đề: hiện khung vùng đã khoanh trên video
+        self.player.view.hs.update()
         if i == 2 and not self.hs_editor.pix:
             self._grab_frame()
         if i == 6:

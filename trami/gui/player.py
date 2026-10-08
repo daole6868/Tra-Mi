@@ -126,6 +126,83 @@ class ColorEffect(QGraphicsEffect):
         painter.restore()
 
 
+class HardsubOverlay(QGraphicsItem):
+    """Vẽ hiệu ứng xoá / che phụ đề cũ lên video ngay khi chỉnh (gắn vào video nên theo cả crop, lật, phóng to).
+    Che dải màu: đúng như khi xuất. Làm mờ / xoá AI / delogo: làm mờ gần đúng từ khung hình đang hiện."""
+
+    def __init__(self, video):
+        super().__init__(video)
+        self.video = video
+        self.hs: dict = {}
+        self.show_outline = False
+        self._frame = None
+        self._img = None
+        self._sink_connected = False
+
+    def boundingRect(self):
+        s = self.video.size()
+        return QRectF(0, 0, s.width(), s.height())
+
+    def set_hardsub(self, hs: dict):
+        self.prepareGeometryChange()
+        self.hs = hs or {}
+        need = self.hs.get("mode") in ("blur", "inpaint", "delogo") and bool(self.hs.get("regions"))
+        if need and not self._sink_connected:
+            self.video.videoSink().videoFrameChanged.connect(self._on_frame)
+            self._sink_connected = True
+        elif not need and self._sink_connected:
+            try:
+                self.video.videoSink().videoFrameChanged.disconnect(self._on_frame)
+            except (RuntimeError, TypeError):
+                pass
+            self._sink_connected = False
+            self._img = None
+        self.update()
+
+    def _on_frame(self, frame):
+        self._frame = frame
+        self._img = None
+        self.update()
+
+    def paint(self, p: QPainter, opt, widget=None):
+        regs = self.hs.get("regions") or []
+        mode = self.hs.get("mode", "none")
+        if not regs:
+            return
+        br = self.boundingRect()
+        rects = [QRectF(br.width() * float(r["x"]), br.height() * float(r["y"]),
+                        br.width() * float(r["w"]), br.height() * float(r["h"])) for r in regs]
+        if mode == "box":
+            c = QColor(self.hs.get("box_color", "#000000"))
+            c.setAlphaF(max(0.0, min(1.0, float(self.hs.get("box_opacity", 1.0)))))
+            for r in rects:
+                p.fillRect(r, c)
+        elif mode in ("blur", "inpaint", "delogo"):
+            if self._img is None and self._frame is not None and self._frame.isValid():
+                self._img = self._frame.toImage()
+            img = self._img
+            if img is not None and not img.isNull():
+                k = 24 if mode != "blur" else max(2, int(self.hs.get("blur_strength", 20)) // 2)
+                for r in rects:
+                    src = QRectF(r.x() / br.width() * img.width(), r.y() / br.height() * img.height(),
+                                 r.width() / br.width() * img.width(), r.height() / br.height() * img.height()).toRect()
+                    part = img.copy(src)
+                    if part.isNull():
+                        continue
+                    small = part.scaled(max(1, part.width() // k), max(1, part.height() // k),
+                                        Qt.AspectRatioMode.IgnoreAspectRatio,
+                                        Qt.TransformationMode.SmoothTransformation)
+                    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                    p.drawImage(r, small)
+        if self.show_outline:
+            pen = QPen(QColor(theme.ACCENT), 1.5, Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            for r in rects:
+                p.drawRect(r)
+
+
 class VideoView(QGraphicsView):
     """Khung xem: mô phỏng khung hình đầu ra (tỉ lệ khung, crop, lật, xoay, phóng to, màu) ngay khi chỉnh."""
 
@@ -144,6 +221,7 @@ class VideoView(QGraphicsView):
         self.clip.setPen(QPen(Qt.PenStyle.NoPen))
         self.clip.setFlag(QGraphicsItem.GraphicsItemFlag.ItemClipsChildrenToShape, True)
         self.video = QGraphicsVideoItem(self.clip)
+        self.hs = HardsubOverlay(self.video)
         self.color = ColorEffect()
         self.color.setEnabled(False)
         self.video.setGraphicsEffect(self.color)
@@ -181,6 +259,7 @@ class VideoView(QGraphicsView):
         if on:
             self.color.set_params(b, c, s_, g)
         self.color.setEnabled(on)
+        self.hs.set_hardsub(self.edit.get("hardsub") or {})
         self._fit()
 
     def _fit(self):
@@ -218,6 +297,7 @@ class VideoView(QGraphicsView):
         self.clip.setRect(content)
         # đặt video: tâm vùng crop -> tâm nội dung, lật, xoay, phóng
         kk = sc * zoom
+        self.hs.prepareGeometryChange()
         self.video.setSize(QSizeF(vs.width() * kk, vs.height() * kk))
         self.video.setPos(0, 0)
         ccx, ccy = (cx + cw / 2) * vs.width() * kk, (cy + ch / 2) * vs.height() * kk

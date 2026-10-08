@@ -62,11 +62,16 @@ def separate(src: str | Path, out_dir: str | Path, model: str | None = None,
     tmp = out_dir / "_sep"
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir()
+    from .progress_hook import tqdm_progress
+
     sep = Separator(output_dir=str(tmp), model_file_dir=str(SEP_DIR), output_format="WAV", log_level=40)
-    sep.load_model(model_filename=model)
+    with tqdm_progress(progress, 0.08, 0.15, "Đang tải mô hình tách giọng", cancel,
+                       download="Đang tải mô hình tách giọng"):
+        sep.load_model(model_filename=model)
     if progress:
         progress(0.15, "Đang tách giọng nói khỏi nhạc nền (GPU nhanh hơn CPU rất nhiều)…")
-    outs = sep.separate(str(mix), {"Vocals": "vocals", "Instrumental": "instrumental"})
+    with tqdm_progress(progress, 0.15, 0.97, "Đang tách giọng nói khỏi nhạc nền – đoạn", cancel):
+        outs = sep.separate(str(mix), {"Vocals": "vocals", "Instrumental": "instrumental"})
     found_v = found_i = None
     for o in outs:
         p = Path(o) if Path(o).is_absolute() else tmp / o

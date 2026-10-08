@@ -105,9 +105,12 @@ def transcribe_sensevoice(audio_path: str | Path, settings: dict, language: str 
     dev = _device(settings.get("asr_device", "auto"))
     if progress:
         progress(0.0, "Đang tải SenseVoice + VAD (lần đầu tải ~1GB từ ModelScope)…")
+    from .progress_hook import tqdm_progress
+
     audio = load_wav16k(audio_path)
-    spans = vad_segments(audio, dev)
-    model = _model("sensevoice", model="iic/SenseVoiceSmall", device=dev)
+    with tqdm_progress(progress, 0.0, 0.05, "Đang chia đoạn giọng nói", cancel, download="Đang tải SenseVoice + VAD"):
+        spans = vad_segments(audio, dev)
+        model = _model("sensevoice", model="iic/SenseVoiceSmall", device=dev)
     lang = {"zh": "zh", "yue": "yue", "en": "en", "ja": "ja", "ko": "ko"}.get(language, "auto")
     max_chars = int(settings.get("asr_max_chars", 22))
     segs: list[Segment] = []
@@ -128,7 +131,7 @@ def transcribe_sensevoice(audio_path: str | Path, settings: dict, language: str 
                 seg.extra["tags"] = [x for x in tags if x not in ("withitn", "woitn")]
                 segs.append(seg)
         if progress:
-            progress(min(0.999, (b + len(chunk)) / max(1, len(spans))),
+            progress(0.05 + 0.949 * min(1.0, (b + len(chunk)) / max(1, len(spans))),
                      f"SenseVoice đang nhận dạng {b + len(chunk)}/{len(spans)} đoạn")
     mark_songs(segs)
     return segs
@@ -145,12 +148,16 @@ def transcribe_paraformer(audio_path: str | Path, settings: dict, progress=None,
     kw = dict(model="paraformer-zh", vad_model="fsmn-vad", punc_model="ct-punc", device=dev)
     if with_speakers:
         kw["spk_model"] = "cam++"
-    model = _model("paraformer" + ("_spk" if with_speakers else ""), **kw)
+    from .progress_hook import tqdm_progress
+
+    with tqdm_progress(progress, 0.02, 0.1, "Đang nạp Paraformer", cancel, download="Đang tải Paraformer + CAM++"):
+        model = _model("paraformer" + ("_spk" if with_speakers else ""), **kw)
     if cancel and cancel():
         raise Cancelled()
     if progress:
         progress(0.1, "Paraformer đang nhận dạng (video dài sẽ mất vài phút)…")
-    res = model.generate(input=str(audio_path), batch_size_s=300, sentence_timestamp=True)
+    with tqdm_progress(progress, 0.1, 0.99, "Paraformer đang nhận dạng", cancel):
+        res = model.generate(input=str(audio_path), batch_size_s=300, sentence_timestamp=True)
     max_chars = int(settings.get("asr_max_chars", 22))
     segs: list[Segment] = []
     for r in res or []:

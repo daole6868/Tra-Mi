@@ -156,7 +156,10 @@ def transcribe(audio_path: str | Path, settings: dict, language: str = "zh",
     model_name = settings.get("asr_model", "large-v3")
     if progress:
         progress(0.0, f"Đang tải mô hình nhận dạng giọng nói ({model_name})… lần đầu có thể mất vài phút")
-    model = get_model(model_name, settings.get("asr_device", "auto"), settings.get("asr_compute_type", "auto"))
+    from .progress_hook import tqdm_progress
+
+    with tqdm_progress(progress, 0.0, 0.02, "Đang nạp Whisper", cancel, download=f"Đang tải Whisper {model_name}"):
+        model = get_model(model_name, settings.get("asr_device", "auto"), settings.get("asr_compute_type", "auto"))
     lang = None if language in ("auto", "", None) else language
     seg_iter, info = model.transcribe(
         str(audio_path),
