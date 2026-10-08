@@ -65,6 +65,9 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Lưu nhiều bản lồng tiếng: mỗi lần tạo ghi `work/dubs/dub_<thời gian>.wav` + `p.data["dub_versions"]`
   (`pipeline.dub_versions / use_dub_version / delete_dub_version`); tab Lồng tiếng mục 4 liệt kê, nút Nghe / Dùng bản này / Xoá.
 
+- 2.0.13: Phân biệt người nói lỗi WinError 1314 (SpeechBrain tạo symlink từ cache HF sang `data/models/spkrec-ecapa`,
+  Windows cần quyền Admin) → `from_hparams(..., local_strategy=LocalStrategy.COPY)`.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - Đề xuất chưa làm: hiện %/MB khi tải mô hình; tải SenseVoice từ HuggingFace trước ModelScope.

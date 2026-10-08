@@ -35,9 +35,18 @@ def _encoder():
         except ImportError:  # speechbrain < 1.0
             from speechbrain.pretrained import EncoderClassifier  # type: ignore
         dev = "cuda" if torch.cuda.is_available() else "cpu"
+        kw = {}
+        try:
+            # Mặc định SpeechBrain tạo symlink tới cache – Windows không cho nếu không chạy quyền Admin
+            # (WinError 1314) -> chép file thay vì symlink.
+            from speechbrain.utils.fetching import LocalStrategy
+
+            kw["local_strategy"] = LocalStrategy.COPY
+        except ImportError:  # speechbrain cũ
+            pass
         _enc = EncoderClassifier.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb",
                                               savedir=str(MODELS_DIR / "spkrec-ecapa"),
-                                              run_opts={"device": dev})
+                                              run_opts={"device": dev}, **kw)
     return _enc
 
 
