@@ -210,7 +210,7 @@ class VieneuWorker:
             return [sys.executable, "--vieneu-worker", self.mode]
         return [sys.executable, str(APP_DIR / "TraMi.py"), "--vieneu-worker", self.mode]
 
-    def _start(self):
+    def _start(self, progress=None, cancel=None):
         from .config import APP_DIR, DATA_DIR
 
         env = dict(os.environ, VIENEU_FUSED_FRAME=self.fused, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
@@ -221,20 +221,35 @@ class VieneuWorker:
         self.proc = subprocess.Popen(self._cmd(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err,
                                      text=True, encoding="utf-8", errors="replace", bufsize=1, cwd=str(APP_DIR),
                                      env=env, creationflags=_NO_WINDOW)
-        r = self._read()
+        r = self._read(progress, cancel)
         if "error" in r:
             self.stop()
             raise RuntimeError(r["error"])
         self.sr = int(r.get("sr", 48000))
 
-    def _read(self) -> dict:
+    def _read(self, progress=None, cancel=None) -> dict:
         assert self.proc and self.proc.stdout
         for line in self.proc.stdout:
-            if line.startswith("@@TRAMI@@"):
-                return json.loads(line[len("@@TRAMI@@"):])
+            if not line.startswith("@@TRAMI@@"):
+                continue
+            obj = json.loads(line[len("@@TRAMI@@"):])
+            if "progress" in obj:   # tiến độ tải / nạp mô hình từ tiến trình VieNeu
+                if cancel and cancel():
+                    self.stop()
+                    raise Cancelled()
+                if progress:
+                    progress(float(obj["progress"]), obj.get("msg", ""))
+                continue
+            return obj
         code = self.proc.poll() if self.proc else None
         self.proc = None
         raise RuntimeError(f"Tiến trình VieNeu bị tắt đột ngột (mã {code}). Xem log trong cửa sổ đen để biết chi tiết.")
+
+    def ensure_started(self, progress=None, cancel=None):
+        """Mở tiến trình VieNeu và nạp mô hình (tự tải nếu chưa có), báo tiến độ tải."""
+        with self.lock:
+            if not self.proc or self.proc.poll() is not None:
+                self._start(progress, cancel)
 
     def synth(self, text: str, out: str | Path, voice: str | None = None, ref_audio: str | None = None) -> Path:
         req = json.dumps({"text": text, "out": str(out), "voice": voice, "ref_audio": ref_audio}, ensure_ascii=False)
@@ -369,8 +384,9 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     # --- VieNeu (offline): dựng sẵn hoặc nhái giọng
     if vn_items:
         if progress:
-            progress(0.01, "Đang tải VieNeu-TTS (lần đầu tải mô hình ~1GB)…")
+            progress(0.01, "Đang nạp VieNeu-TTS…")
         tts = _vieneu(mode)
+        tts.ensure_started((lambda x, m: progress(0.01 * x, m)) if progress else None, cancel)
         refs: dict[str, Path | None] = {}
         speed = _speed_tag(rate)
         for n, (i, text, p, spec) in enumerate(vn_items):

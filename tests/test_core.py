@@ -286,6 +286,9 @@ def test_multi_voice_clone_and_skip_song(monkeypatch, tmp_path):
     class FakeVieneu:
         sr = 48000
 
+        def ensure_started(self, progress=None, cancel=None):
+            pass
+
         def synth(self, text, out, voice=None, ref_audio=None):
             calls.append((text, ref_audio, voice))
             return tts.write_wav(out, np.sin(np.linspace(0, 800, 48000)).astype(np.float32) * 0.3, 48000)

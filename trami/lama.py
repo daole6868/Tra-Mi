@@ -26,15 +26,31 @@ def available() -> bool:
     return installed("torch")
 
 
-def ensure_model(progress=None) -> Path:
+def ensure_model(progress=None, cancel=None) -> Path:
     if LAMA_FILE.exists() and LAMA_FILE.stat().st_size > 100_000_000:
         return LAMA_FILE
+    import time
+
     LAMA_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = LAMA_FILE.with_suffix(".part")
+    st = {"t": time.time(), "b": 0, "speed": 0.0, "last": 0.0}
 
     def hook(n, bs, total):
-        if progress and total > 0:
-            progress(min(1.0, n * bs / total), f"Đang tải mô hình LaMa {n * bs / 1e6:.0f}/{total / 1e6:.0f} MB")
+        if cancel and cancel():
+            from .ffmpeg import Cancelled
+
+            raise Cancelled()
+        now, done = time.time(), n * bs
+        if now - st["t"] >= 1.0:
+            cur = (done - st["b"]) / (now - st["t"])
+            st["speed"] = cur if st["speed"] <= 0 else st["speed"] * 0.6 + cur * 0.4
+            st["t"], st["b"] = now, done
+        if progress and total > 0 and now - st["last"] > 0.4:
+            st["last"] = now
+            sp = f" · {st['speed'] / 1e6:.1f} MB/s" if st["speed"] > 0 else ""
+            progress(min(1.0, done / total),
+                     f"Đang tải mô hình LaMa {int(min(1.0, done / total) * 100)}% · "
+                     f"{done / 1e6:.0f} MB / {total / 1e6:.0f} MB{sp}")
 
     urllib.request.urlretrieve(LAMA_URL, tmp, hook)
     tmp.replace(LAMA_FILE)

@@ -104,7 +104,7 @@ def transcribe_sensevoice(audio_path: str | Path, settings: dict, language: str 
 
     dev = _device(settings.get("asr_device", "auto"))
     if progress:
-        progress(0.0, "Đang tải SenseVoice + VAD (lần đầu tải ~1GB từ ModelScope)…")
+        progress(0.0, "Đang nạp SenseVoice + chia đoạn giọng nói…")
     from .progress_hook import tqdm_progress
 
     audio = load_wav16k(audio_path)
@@ -144,7 +144,7 @@ def transcribe_paraformer(audio_path: str | Path, settings: dict, progress=None,
 
     dev = _device(settings.get("asr_device", "auto"))
     if progress:
-        progress(0.02, "Đang tải Paraformer + CAM++ (lần đầu tải ~1.5GB từ ModelScope)…")
+        progress(0.02, "Đang nạp Paraformer + CAM++…")
     kw = dict(model="paraformer-zh", vad_model="fsmn-vad", punc_model="ct-punc", device=dev)
     if with_speakers:
         kw["spk_model"] = "cam++"

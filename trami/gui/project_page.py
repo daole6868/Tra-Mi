@@ -88,10 +88,10 @@ class ProjectPage(QWidget):
         # ---------------- cột phải: tab
         self.tabs = PillTabs([("Tự động", "bolt"), ("Phụ đề", "subtitles"), ("Xoá phụ đề", "eraser"),
                               ("Chỉnh sửa", "scissors"), ("Kiểu chữ", "palette"), ("Lồng tiếng", "mic"),
-                              ("Xuất", "export")])
+                              ("Tài liệu", "download"), ("Xuất", "export")])
         self.stack = QStackedWidget()
         for build in (self._tab_auto, self._tab_subs, self._tab_hardsub, self._tab_edit, self._tab_style,
-                      self._tab_dub, self._tab_export):
+                      self._tab_dub, self._tab_models, self._tab_export):
             self.stack.addWidget(build())
         self.tabs.changed.connect(self._tab_changed)
         rcol = QVBoxLayout()
@@ -144,7 +144,7 @@ class ProjectPage(QWidget):
         steps.add(hbox(button("1. Lấy phụ đề", "subtitles", on_click=self.run_recognize),
                        button("2. Dịch", "globe", on_click=lambda: self.run_translate(False)),
                        button("3. Lồng tiếng", "mic", on_click=lambda: self.tabs.set_current(5)),
-                       button("4. Xuất", "export", on_click=lambda: self.tabs.set_current(6)), None))
+                       button("4. Xuất", "export", on_click=lambda: self.tabs.set_current(7)), None))
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 6, 0)
@@ -538,6 +538,13 @@ class ProjectPage(QWidget):
         v.addWidget(hist)
         v.addStretch(1)
         return scroll(w)
+
+    # ================================================================== TAB: Tài liệu (mô hình AI)
+    def _tab_models(self):
+        from .models_tab import ModelsTab
+
+        self.models_tab = ModelsTab(self.win)
+        return scroll(self.models_tab)
 
     # ================================================================== TAB: Xuất
     def _tab_export(self):
@@ -1500,7 +1507,7 @@ class ProjectPage(QWidget):
         self.player.view.hs.update()
         if i == 2 and not self.hs_editor.pix:
             self._grab_frame()
-        if i == 6:
+        if i == 7:
             self._update_summary()
 
     def _rename(self):

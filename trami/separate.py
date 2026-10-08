@@ -54,7 +54,7 @@ def separate(src: str | Path, out_dir: str | Path, model: str | None = None,
     if cancel and cancel():
         raise ff.Cancelled()
     if progress:
-        progress(0.08, f"Đang tải mô hình tách giọng {model} (lần đầu có thể mất vài phút)…")
+        progress(0.08, f"Đang nạp mô hình tách giọng {model}…")
 
     from audio_separator.separator import Separator
 
@@ -65,7 +65,7 @@ def separate(src: str | Path, out_dir: str | Path, model: str | None = None,
     from .progress_hook import tqdm_progress
 
     sep = Separator(output_dir=str(tmp), model_file_dir=str(SEP_DIR), output_format="WAV", log_level=40)
-    with tqdm_progress(progress, 0.08, 0.15, "Đang tải mô hình tách giọng", cancel,
+    with tqdm_progress(progress, 0.08, 0.15, "Đang nạp mô hình tách giọng", cancel,
                        download="Đang tải mô hình tách giọng"):
         sep.load_model(model_filename=model)
     if progress:

@@ -128,7 +128,7 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
     region = Region.from_any(region)
     total = info.duration or 1
     if progress:
-        progress(0.0, "Đang tải mô hình OCR…")
+        progress(0.0, "Đang nạp mô hình OCR…")
     get_engine()
 
     raw: list[tuple[float, str, float]] = []  # (t, text, score)

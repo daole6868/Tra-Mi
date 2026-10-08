@@ -35,8 +35,16 @@ def _report(bar) -> None:
     frac = max(0.0, min(1.0, n / total))
     unit = str(getattr(bar, "unit", "") or "")
     desc = str(getattr(bar, "desc", "") or "").strip().rstrip(":")
-    if unit.lower() in ("b", "byte", "bytes") or (getattr(bar, "unit_scale", False) and total > 5e6):
-        detail = f"{_fmt_bytes(n)} / {_fmt_bytes(total)}"
+    if unit.lower() in ("b", "ib", "byte", "bytes") or (getattr(bar, "unit_scale", False) and total > 5e6):
+        if total < 2e6:
+            return   # file cấu hình nhỏ, không cần báo
+        sp = ctx["speed"].setdefault(id(bar), [now, n, 0.0])
+        if now - sp[0] >= 1.0:   # tốc độ trung bình trượt theo từng giây
+            cur = (n - sp[1]) / (now - sp[0])
+            sp[2] = cur if sp[2] <= 0 else sp[2] * 0.6 + cur * 0.4
+            sp[0], sp[1] = now, n
+        speed = f" · {sp[2] / 1e6:.1f} MB/s" if sp[2] > 0 else ""
+        detail = f"{int(frac * 100)}% · {_fmt_bytes(n)} / {_fmt_bytes(total)}{speed}"
         label = ctx["download"] or ctx["label"]
         if desc and len(desc) < 50:
             label += f" ({desc})"
@@ -84,7 +92,7 @@ def tqdm_progress(progress: Callable[[float, str], None] | None, lo: float = 0.0
         return
     _install()
     ctx = {"progress": progress or (lambda *_: None), "lo": lo, "hi": hi, "label": label, "cancel": cancel,
-           "last": 0.0, "download": download or "Đang tải mô hình"}
+           "last": 0.0, "download": download or "Đang tải mô hình", "speed": {}}
     with _lock:
         prev, _active = _active, ctx
     try:

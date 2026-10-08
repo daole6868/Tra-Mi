@@ -38,9 +38,14 @@ def main(mode: str = "v3turbo") -> None:
     try:
         from vieneu import Vieneu
 
+        from .progress_hook import tqdm_progress
         from .tts import write_wav
 
-        tts = Vieneu(mode=mode)
+        def prog(x: float, msg: str):
+            _reply(proto, {"progress": round(x, 4), "msg": msg})
+
+        with tqdm_progress(prog, 0.0, 1.0, "Đang nạp VieNeu-TTS", download="Đang tải VieNeu-TTS"):
+            tts = Vieneu(mode=mode)
         sr = int(getattr(tts, "sample_rate", 48000))
     except Exception as e:  # noqa: BLE001
         _reply(proto, {"error": f"Không nạp được VieNeu: {type(e).__name__}: {e}"})

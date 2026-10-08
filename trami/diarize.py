@@ -132,7 +132,7 @@ def assign_speakers(audio_path: str | Path, segs: list[Segment], threshold: floa
     if not segs:
         return 0
     if progress:
-        progress(0.02, "Đang tải mô hình nhận diện giọng (ECAPA)…")
+        progress(0.02, "Đang nạp mô hình nhận diện giọng (ECAPA)…")
     from .progress_hook import tqdm_progress
 
     with tqdm_progress(progress, 0.02, 0.1, "Đang nạp mô hình nhận diện giọng", cancel,

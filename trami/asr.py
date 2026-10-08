@@ -155,7 +155,7 @@ def transcribe(audio_path: str | Path, settings: dict, language: str = "zh",
                cancel: Callable[[], bool] | None = None, duration: float = 0.0) -> list[Segment]:
     model_name = settings.get("asr_model", "large-v3")
     if progress:
-        progress(0.0, f"Đang tải mô hình nhận dạng giọng nói ({model_name})… lần đầu có thể mất vài phút")
+        progress(0.0, f"Đang nạp Whisper {model_name} (chưa có thì tự tải – xem tab Tài liệu)…")
     from .progress_hook import tqdm_progress
 
     with tqdm_progress(progress, 0.0, 0.02, "Đang nạp Whisper", cancel, download=f"Đang tải Whisper {model_name}"):
