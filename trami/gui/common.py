@@ -1,0 +1,113 @@
+"""Tiện ích dùng chung cho giao diện: chạy hàm nền không đơ giao diện, danh sách lựa chọn."""
+from __future__ import annotations
+
+import traceback
+from typing import Callable
+
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, QRunnable, Qt, QThreadPool, Signal
+from PySide6.QtWidgets import QAbstractScrollArea, QAbstractSlider, QAbstractSpinBox, QComboBox, QScrollBar
+
+ENGINES = [("google", "Google Dịch (miễn phí)"), ("deepseek", "DeepSeek AI (giỏi tiếng Trung, rẻ)"),
+           ("openai", "OpenAI GPT / API tương thích"), ("anthropic", "Claude (Anthropic)"),
+           ("gemini", "Google Gemini"), ("ollama", "Ollama (offline trên máy)")]
+STYLES = [("auto", "Tự nhận biết"), ("co_trang", "Cổ trang / tiên hiệp / kiếm hiệp"),
+          ("hien_dai", "Hiện đại / ngôn tình / đô thị"), ("review", "Review / tóm tắt phim"),
+          ("hoat_hinh", "Hoạt hình / donghua"), ("tai_lieu", "Tài liệu / hướng dẫn / bán hàng")]
+ASR_ENGINES = [("sensevoice", "SenseVoice – nhanh, giỏi tiếng Trung (khuyên dùng)"),
+               ("paraformer", "Paraformer – có dấu câu + tự phân người nói"),
+               ("whisper", "Whisper large-v3 – đa ngôn ngữ")]
+LANGS = [("zh", "Tiếng Trung (Phổ thông)"), ("yue", "Tiếng Quảng Đông"), ("auto", "Tự nhận diện"),
+         ("en", "Tiếng Anh"), ("ja", "Tiếng Nhật"), ("ko", "Tiếng Hàn")]
+METHODS = [("asr", "Nhận dạng giọng nói"), ("ocr", "OCR phụ đề cứng có sẵn trên video")]
+HARDSUB = [("none", "Giữ nguyên"), ("inpaint", "Xoá sạch bằng AI (LaMa)"), ("blur", "Làm mờ vùng phụ đề"),
+           ("box", "Che bằng dải màu"), ("delogo", "Delogo (nhanh)")]
+WHICH = [("trans", "Chỉ tiếng Việt"), ("both", "Song ngữ Việt + Trung"), ("source", "Chỉ tiếng Trung"),
+         ("none", "Không ghép (chỉ xuất SRT)")]
+TTS_ENGINES = [("edge", "Microsoft Edge (2 giọng, cần mạng)"), ("vieneu", "VieNeu-TTS (25 giọng + nhái giọng, offline)")]
+ASPECTS = [("original", "Giữ nguyên"), ("9:16", "9:16 – TikTok/Reels/Shorts"), ("16:9", "16:9 – YouTube/Facebook"),
+           ("1:1", "1:1 vuông"), ("4:5", "4:5 – Facebook dọc"), ("4:3", "4:3"), ("3:4", "3:4")]
+ASPECT_MODES = [("blur", "Nền mờ"), ("pad", "Viền đen"), ("crop", "Cắt cho đầy khung")]
+RESOLUTIONS = [("original", "Giữ nguyên"), ("480p", "480p"), ("720p", "720p HD"), ("1080p", "1080p Full HD"),
+               ("1440p", "2K"), ("2160p", "4K")]
+POSITIONS = [("top-right", "Trên phải"), ("top-left", "Trên trái"), ("top", "Trên giữa"),
+             ("bottom-right", "Dưới phải"), ("bottom-left", "Dưới trái"), ("center", "Giữa")]
+
+
+class _Signals(QObject):
+    done = Signal(object)
+    error = Signal(str)
+
+
+class _Task(QRunnable):
+    def __init__(self, fn, sig):
+        super().__init__()
+        self.fn, self.sig = fn, sig
+
+    def run(self):
+        try:
+            res = self.fn()
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            from ..config import err_text, log_error
+
+            log_error(getattr(self.fn, "__qualname__", ""))
+            try:
+                self.sig.error.emit(err_text(e))
+            except RuntimeError:  # cửa sổ đã đóng trong lúc việc nền đang chạy
+                pass
+            return
+        try:
+            self.sig.done.emit(res)
+        except RuntimeError:  # cửa sổ đã đóng trong lúc việc nền đang chạy
+            pass
+
+
+_keep: set = set()
+
+
+def run_async(fn: Callable, on_done: Callable | None = None, on_error: Callable | None = None):
+    """Chạy fn() ở luồng nền, gọi on_done(kết quả) / on_error(lỗi) trên luồng giao diện."""
+    sig = _Signals()
+    _keep.add(sig)
+
+    def finish_ok(r):
+        _keep.discard(sig)
+        if on_done:
+            on_done(r)
+
+    def finish_err(m):
+        _keep.discard(sig)
+        if on_error:
+            on_error(m)
+
+    sig.done.connect(finish_ok)
+    sig.error.connect(finish_err)
+    QThreadPool.globalInstance().start(_Task(fn, sig))
+
+
+_WHEEL_TYPES = (QComboBox, QAbstractSpinBox, QAbstractSlider)
+
+
+class WheelGuard(QObject):
+    """Lăn chuột lướt qua ô chọn / ô số / thanh trượt thì KHÔNG đổi giá trị mà cuộn trang.
+    Chỉ khi đã bấm vào ô đó (ô đang được chọn) thì lăn chuột mới đổi giá trị."""
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.Type.Wheel and isinstance(obj, _WHEEL_TYPES) \
+                and not isinstance(obj, QScrollBar):
+            if obj.focusPolicy() == Qt.FocusPolicy.WheelFocus:
+                obj.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # lăn chuột không tự chọn ô
+            if not obj.hasFocus():
+                p = obj.parentWidget()
+                while p is not None and not isinstance(p, QAbstractScrollArea):
+                    p = p.parentWidget()
+                if p is not None:  # chuyển cho khung cuộn phía ngoài để trang vẫn cuộn
+                    QCoreApplication.sendEvent(p.viewport(), ev)
+                return True
+        return False
+
+
+def install_wheel_guard(app):
+    guard = WheelGuard(app)
+    app.installEventFilter(guard)
+    return guard

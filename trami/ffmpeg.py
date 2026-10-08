@@ -1,0 +1,271 @@
+"""Tiện ích gọi FFmpeg: tìm binary, đọc thông tin video, chạy lệnh có tiến trình."""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Callable, Iterable
+
+ProgressCB = Callable[[float, str], None]  # (0..1, thông điệp)
+
+_FFMPEG: str | None = None
+_FFPROBE: str | None = None
+
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0  # ẩn cửa sổ console trên Windows
+
+
+class Cancelled(Exception):
+    """Người dùng đã huỷ tác vụ."""
+
+
+class FFmpegError(RuntimeError):
+    pass
+
+
+def ffmpeg_bin() -> str:
+    global _FFMPEG
+    if _FFMPEG:
+        return _FFMPEG
+    cand = os.environ.get("TRAMI_FFMPEG")
+    from .config import APP_DIR
+
+    local = APP_DIR / "bin" / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+    for c in (cand, str(local) if local.exists() else None, shutil.which("ffmpeg")):
+        if c:
+            _FFMPEG = c
+            return c
+    try:
+        import imageio_ffmpeg
+
+        _FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
+        return _FFMPEG
+    except Exception as e:  # pragma: no cover
+        raise FFmpegError(
+            "Không tìm thấy FFmpeg. Hãy cài FFmpeg hoặc chạy lại file cài đặt (pip install imageio-ffmpeg)."
+        ) from e
+
+
+def ffprobe_bin() -> str | None:
+    global _FFPROBE
+    if _FFPROBE is not None:
+        return _FFPROBE or None
+    ff = Path(ffmpeg_bin())
+    sib = ff.with_name(ff.name.replace("ffmpeg", "ffprobe"))
+    if sib.exists() and sib != ff:
+        _FFPROBE = str(sib)
+    else:
+        _FFPROBE = shutil.which("ffprobe") or ""
+    return _FFPROBE or None
+
+
+_NVENC_OK: dict = {}
+
+
+def encoder_works(name: str) -> bool:
+    """Thử encode 1 khung hình để chắc chắn GPU encoder hoạt động (có driver/GPU)."""
+    if name in _NVENC_OK:
+        return _NVENC_OK[name]
+    ok = False
+    if has_encoder(name):
+        try:
+            r = subprocess.run([ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                                "color=black:s=256x256:d=0.1", "-frames:v", "1", "-c:v", name, "-f", "null", "-"],
+                               capture_output=True, creationflags=_NO_WINDOW, timeout=30)
+            ok = r.returncode == 0
+        except Exception:
+            ok = False
+    _NVENC_OK[name] = ok
+    return ok
+
+
+def has_encoder(name: str) -> bool:
+    try:
+        out = subprocess.run([ffmpeg_bin(), "-hide_banner", "-encoders"], capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", creationflags=_NO_WINDOW, timeout=20).stdout or ""
+        return f" {name} " in out
+    except Exception:
+        return False
+
+
+@dataclass
+class MediaInfo:
+    path: str
+    duration: float = 0.0
+    width: int = 0
+    height: int = 0
+    fps: float = 25.0
+    has_audio: bool = False
+    has_video: bool = False
+    vcodec: str = ""
+    acodec: str = ""
+    rotation: int = 0
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def _parse_rate(r: str) -> float:
+    try:
+        if "/" in r:
+            a, b = r.split("/")
+            return float(a) / float(b) if float(b) else 0.0
+        return float(r)
+    except Exception:
+        return 0.0
+
+
+def probe(path: str | Path) -> MediaInfo:
+    path = str(path)
+    info = MediaInfo(path=path)
+    fp = ffprobe_bin()
+    if fp:
+        r = subprocess.run([fp, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", path],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           creationflags=_NO_WINDOW)
+        if r.returncode == 0:
+            d = json.loads(r.stdout or "{}")
+            info.duration = float(d.get("format", {}).get("duration") or 0)
+            for s in d.get("streams", []):
+                if s.get("codec_type") == "video" and not info.has_video:
+                    if (s.get("disposition") or {}).get("attached_pic"):
+                        continue
+                    info.has_video = True
+                    info.width, info.height = int(s.get("width") or 0), int(s.get("height") or 0)
+                    info.fps = _parse_rate(s.get("avg_frame_rate") or "") or _parse_rate(s.get("r_frame_rate") or "") or 25.0
+                    info.vcodec = s.get("codec_name", "")
+                    rot = (s.get("tags") or {}).get("rotate")
+                    for sd in s.get("side_data_list") or []:
+                        if "rotation" in sd:
+                            rot = sd["rotation"]
+                    try:
+                        info.rotation = int(float(rot or 0)) % 360
+                    except Exception:
+                        pass
+                    if not info.duration and s.get("duration"):
+                        info.duration = float(s["duration"])
+                elif s.get("codec_type") == "audio" and not info.has_audio:
+                    info.has_audio = True
+                    info.acodec = s.get("codec_name", "")
+            if info.rotation in (90, 270):
+                info.width, info.height = info.height, info.width
+            return info
+    # Dự phòng: đọc stderr của ffmpeg -i
+    r = subprocess.run([ffmpeg_bin(), "-hide_banner", "-i", path], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
+    txt = r.stderr
+    m = re.search(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)", txt)
+    if m:
+        info.duration = int(m[1]) * 3600 + int(m[2]) * 60 + float(m[3])
+    m = re.search(r"Stream #.*Video: (\w+).*?, (\d{2,5})x(\d{2,5})", txt)
+    if m:
+        info.has_video, info.vcodec = True, m[1]
+        info.width, info.height = int(m[2]), int(m[3])
+    m = re.search(r"([\d.]+) fps", txt)
+    if m:
+        info.fps = float(m[1])
+    m = re.search(r"Stream #.*Audio: (\w+)", txt)
+    if m:
+        info.has_audio, info.acodec = True, m[1]
+    return info
+
+
+def run(args: list[str], duration: float = 0.0, progress: ProgressCB | None = None,
+        cancel: Callable[[], bool] | None = None, msg: str = "Đang xử lý video", cwd: str | Path | None = None) -> None:
+    """Chạy ffmpeg với -progress để báo tiến độ. Ném FFmpegError nếu lỗi."""
+    cmd = [ffmpeg_bin(), "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-stats_period", "0.5"] + args
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            encoding="utf-8", errors="replace", creationflags=_NO_WINDOW,
+                            cwd=str(cwd) if cwd else None)
+    err_tail: list[str] = []
+
+    import threading
+
+    def _drain():
+        for line in proc.stderr:  # type: ignore[union-attr]
+            err_tail.append(line)
+            if len(err_tail) > 60:
+                del err_tail[:20]
+
+    t = threading.Thread(target=_drain, daemon=True)
+    t.start()
+    try:
+        for line in proc.stdout:  # type: ignore[union-attr]
+            if cancel and cancel():
+                proc.kill()
+                raise Cancelled()
+            if progress and duration > 0 and line.startswith("out_time_us="):
+                try:
+                    us = int(line.split("=", 1)[1])
+                    progress(max(0.0, min(1.0, us / 1e6 / duration)), msg)
+                except ValueError:
+                    pass
+        proc.wait()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    t.join(timeout=2)
+    if proc.returncode != 0:
+        raise FFmpegError("FFmpeg lỗi:\n" + "".join(err_tail[-25:]))
+    if progress:
+        progress(1.0, msg)
+
+
+def extract_audio(src: str | Path, dst: str | Path, sr: int = 16000, mono: bool = True,
+                  progress: ProgressCB | None = None, cancel=None) -> Path:
+    info = probe(src)
+    if not info.has_audio:
+        raise FFmpegError("Video không có âm thanh.")
+    args = ["-i", str(src), "-vn", "-ar", str(sr)]
+    if mono:
+        args += ["-ac", "1"]
+    args += ["-c:a", "pcm_s16le", str(dst)]
+    run(args, info.duration, progress, cancel, "Đang tách âm thanh")
+    return Path(dst)
+
+
+def snapshot(src: str | Path, t: float, dst: str | Path, width: int = 0) -> Path:
+    args = [ffmpeg_bin(), "-hide_banner", "-y", "-ss", f"{max(0.0, t):.3f}", "-i", str(src), "-frames:v", "1"]
+    if width:
+        args += ["-vf", f"scale={width}:-2"]
+    args += ["-q:v", "3", "-update", "1", str(dst)]
+    Path(dst).parent.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       creationflags=_NO_WINDOW)
+    if r.returncode != 0 or not Path(dst).exists():
+        raise FFmpegError("Không chụp được khung hình: " + r.stderr[-400:])
+    return Path(dst)
+
+
+def escape_filter_path(p: str | Path) -> str:
+    """Escape đường dẫn dùng trong filter (subtitles=, movie=...) - đặc biệt trên Windows."""
+    s = str(Path(p).resolve()).replace("\\", "/")
+    s = s.replace(":", r"\:").replace("'", r"\'")
+    s = s.replace("[", r"\[").replace("]", r"\]").replace(",", r"\,").replace(";", r"\;")
+    return s
+
+
+def video_encode_args(settings: dict, crf: int | None = None) -> list[str]:
+    codec = settings.get("video_codec", "libx264")
+    crf = settings.get("video_crf", 20) if crf is None else crf
+    preset = settings.get("video_preset", "medium")
+    if codec in ("h264_nvenc", "hevc_nvenc"):
+        if not encoder_works(codec):
+            codec = "libx264"
+        else:
+            return ["-c:v", codec, "-preset", "p5", "-cq", str(crf), "-b:v", "0", "-pix_fmt", "yuv420p"]
+    if codec == "libx265":
+        return ["-c:v", "libx265", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p", "-tag:v", "hvc1"]
+    return ["-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p"]
+
+
+def audio_encode_args(settings: dict) -> list[str]:
+    return ["-c:a", "aac", "-b:a", settings.get("audio_bitrate", "192k")]
+
+
+def join_filters(parts: Iterable[str]) -> str:
+    return ",".join(p for p in parts if p)
