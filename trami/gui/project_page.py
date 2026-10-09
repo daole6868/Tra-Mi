@@ -475,7 +475,7 @@ class ProjectPage(QWidget):
                      button("Nghe nhạc nền", "music", flat=True, on_click=lambda: self._open_stem("instrumental"))))
 
         spk = SectionCard("2. Giọng đọc cho từng người nói", "users",
-                          "Mỗi nhân vật một giọng. 'Nhái giọng' dùng chính giọng nhân vật trong video (VieNeu-TTS).")
+                          "Mỗi nhân vật một giọng. 'Nhái giọng' dùng chính giọng nhân vật trong video; OmniVoice nhái theo giọng mẫu ở khung bên dưới.")
         self.d_engine = combo(C.TTS_ENGINES, self.settings.get("tts_engine", "edge"))
         self.d_engine.setMinimumContentsLength(14)
         self.d_engine.currentIndexChanged.connect(self._dub_engine_changed)
@@ -532,8 +532,12 @@ class ProjectPage(QWidget):
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 6, 0)
         v.setSpacing(12)
+        from .voice_samples import VoiceSamplesCard
+
+        self.voice_samples = VoiceSamplesCard(self)
         v.addWidget(sep)
         v.addWidget(spk)
+        v.addWidget(self.voice_samples)
         v.addWidget(mix)
         v.addWidget(hist)
         v.addStretch(1)
@@ -1341,6 +1345,11 @@ class ProjectPage(QWidget):
     def _preview_voice(self, vid: str, spk: str):
         from .. import tts
 
+        if not vid and self.d_engine.currentData() == "omnivoice":
+            from .. import voices as vlib
+
+            smp = vlib.list_samples()
+            vid = f"omni:{smp[0]['id']}" if smp else tts.OMNI_CLONE
         vid = vid or (f"edge:{self.settings.get('tts_voice')}" if self.d_engine.currentData() == "edge" else "vieneu:")
         text = next((s.trans for s in self.model.segs if (s.speaker or "S1") == spk and s.trans), "")
         out = self.p.work / f"voice_preview_{int(time.time())}"
@@ -1349,6 +1358,12 @@ class ProjectPage(QWidget):
             st = pipeline.stems(self.p)
             ref = tts.build_reference(st.get("vocals") or str(self.p.source), self.model.segs, spk,
                                       self.p.work / "tts" / f"ref_{spk}.wav")
+        elif vid == tts.OMNI_CLONE:
+            st = pipeline.stems(self.p)
+            ref = tts.build_reference_text(st.get("vocals") or str(self.p.source), self.model.segs, spk,
+                                           self.p.work / "tts" / f"omniref_{spk}.wav")
+            if not ref:
+                return self.win.toast("Người nói này chưa có câu nào đủ rõ để lấy mẫu giọng", "warn")
         self.win.toast("Đang tạo giọng nghe thử…")
         run_async(lambda: tts.preview_voice(vid, text, out, self.settings, ref),
                   lambda path: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))),

@@ -4,6 +4,8 @@ Giọng cho từng người nói (S1, S2…) được ghi dạng chuỗi:
   - "edge:vi-VN-HoaiMyNeural"  : Microsoft Edge TTS (miễn phí, cần Internet)
   - "vieneu:Ngọc Huyền"        : 25 giọng Việt dựng sẵn của VieNeu-TTS (chạy offline, GPU nhanh)
   - "clone"                    : NHÁI GIỌNG nhân vật gốc bằng VieNeu-TTS (lấy mẫu 5–12 giây từ chính video)
+  - "omni:<id>"                : OmniVoice nhái giọng từ FILE GHI ÂM MẪU trong thư viện giọng mẫu (trami/voices.py)
+  - "omniclone"                : OmniVoice nhái giọng nhân vật gốc (mẫu 3–10 giây cắt từ video + lời gốc)
 
 Mỗi câu được đọc rồi tự co giãn tốc độ cho vừa khung thời gian của phụ đề.
 """
@@ -32,6 +34,7 @@ EDGE_VOICES = [
     {"id": "edge:vi-VN-NamMinhNeural", "name": "Nam Minh – Nam (Edge)", "gender": "male"},
 ]
 CLONE = "clone"
+OMNI_CLONE = "omniclone"
 SR = 24000
 _vn_model = None
 _vn_lock = threading.Lock()
@@ -69,6 +72,13 @@ def list_voices(settings: dict | None = None) -> list[dict]:
     if vieneu_available():
         voices.insert(0, {"id": CLONE, "name": "🎭 Nhái giọng nhân vật gốc (VieNeu)", "gender": ""})
         voices += vieneu_presets(mode)
+    if omnivoice_available():
+        from . import voices as vlib
+
+        omni = [{"id": f"omni:{v['id']}", "name": f"🎙 {v['name']} – giọng mẫu (OmniVoice)", "gender": ""}
+                for v in vlib.list_samples()]
+        omni.append({"id": OMNI_CLONE, "name": "🎭 Nhái giọng nhân vật gốc (OmniVoice)", "gender": ""})
+        voices = omni + voices
     return voices
 
 
@@ -78,6 +88,10 @@ def auto_assign(speakers: list[str], settings: dict | None = None, current: dict
     engine = (settings or {}).get("tts_engine", "edge")
     if engine == "vieneu" and vieneu_available():
         pool = [v["id"] for v in vieneu_presets((settings or {}).get("vieneu_mode", "v3turbo"))]
+    elif engine == "omnivoice" and omnivoice_available():
+        from . import voices as vlib
+
+        pool = [f"omni:{v['id']}" for v in vlib.list_samples()] or [OMNI_CLONE]
     else:
         pool = [v["id"] for v in EDGE_VOICES]
     used = set(current.values())
@@ -160,6 +174,40 @@ def build_reference(ref_audio: str | Path, segs: list[Segment], speaker: str, ou
     return write_wav(out, ref)
 
 
+def build_reference_text(ref_audio: str | Path, segs: list[Segment], speaker: str, out: Path,
+                         max_sec: float = 10.0) -> tuple[Path, str] | None:
+    """Mẫu giọng 3–10 giây ghép từ các CÂU NGUYÊN VẸN của 1 người nói + lời gốc tương ứng (cho OmniVoice)."""
+    cand = [s for s in segs if (s.speaker or "S1") == speaker and not s.extra.get("song")
+            and 1.0 <= s.duration <= 8.0 and s.text.strip()]
+    if not cand:
+        return None
+    cand.sort(key=lambda s: -s.duration)
+    audio = _decode(ref_audio, sr=SR)
+    if len(audio) == 0:
+        return None
+    parts, texts, total = [], [], 0.0
+    gap = np.zeros(int(0.2 * SR), np.float32)
+    for s in cand:
+        if total + s.duration > max_sec and total >= 3.0:
+            continue
+        clip = audio[int(s.start * SR):int(s.end * SR)]
+        if len(clip) < SR * 0.8 or np.abs(clip).max() < 0.02:
+            continue
+        parts += [clip, gap]
+        texts.append(s.text.strip())
+        total += len(clip) / SR
+        if total >= max_sec - 1:
+            break
+    if total < 2.0:
+        return None
+    ref = np.concatenate(parts)[: int(max_sec * SR)]
+    peak = float(np.abs(ref).max())
+    if peak > 0:
+        ref = ref * (0.9 / peak)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    return write_wav(out, ref), " ".join(texts)
+
+
 # ------------------------------------------------------------------ bộ đọc
 
 async def _edge_all(items: list[tuple[int, str, Path, str]], rate: str, pitch: str, progress, cancel,
@@ -196,6 +244,8 @@ async def _edge_all(items: list[tuple[int, str, Path, str]], rate: str, pitch: s
 class VieneuWorker:
     """Điều khiển tiến trình riêng chạy VieNeu (trami/vieneu_worker.py). Mỗi lúc chỉ 1 câu được đọc."""
 
+    title = "VieNeu"
+
     def __init__(self, mode: str):
         self.mode = mode
         self.sr = 48000
@@ -203,21 +253,28 @@ class VieneuWorker:
         self.lock = threading.Lock()
         self.fused = "1"      # CUDA graph của VieNeu (nhanh); tắt nếu GPU báo lỗi chụp graph
 
+    flag = "--vieneu-worker"
+    log_name = "vieneu.txt"
+
+    def _extra_env(self) -> dict:
+        return {}
+
     def _cmd(self) -> list[str]:
         from .config import APP_DIR, FROZEN
 
         if FROZEN:
-            return [sys.executable, "--vieneu-worker", self.mode]
-        return [sys.executable, str(APP_DIR / "TraMi.py"), "--vieneu-worker", self.mode]
+            return [sys.executable, self.flag, self.mode]
+        return [sys.executable, str(APP_DIR / "TraMi.py"), self.flag, self.mode]
 
     def _start(self, progress=None, cancel=None):
         from .config import APP_DIR, DATA_DIR
 
-        env = dict(os.environ, VIENEU_FUSED_FRAME=self.fused, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+        env = dict(os.environ, VIENEU_FUSED_FRAME=self.fused, PYTHONUTF8="1", PYTHONIOENCODING="utf-8",
+                   **self._extra_env())
         err = None  # log của VieNeu hiện trong cửa sổ đen; chạy không cửa sổ (pythonw/exe) thì ghi ra file
         if sys.stderr is None or not getattr(sys.stderr, "fileno", None):
             (DATA_DIR / "logs").mkdir(parents=True, exist_ok=True)
-            err = open(DATA_DIR / "logs" / "vieneu.txt", "a", encoding="utf-8")
+            err = open(DATA_DIR / "logs" / self.log_name, "a", encoding="utf-8")
         self.proc = subprocess.Popen(self._cmd(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err,
                                      text=True, encoding="utf-8", errors="replace", bufsize=1, cwd=str(APP_DIR),
                                      env=env, creationflags=_NO_WINDOW)
@@ -243,7 +300,7 @@ class VieneuWorker:
             return obj
         code = self.proc.poll() if self.proc else None
         self.proc = None
-        raise RuntimeError(f"Tiến trình VieNeu bị tắt đột ngột (mã {code}). Xem log trong cửa sổ đen để biết chi tiết.")
+        raise RuntimeError(f"Tiến trình {self.title} bị tắt đột ngột (mã {code}). Xem log trong cửa sổ đen để biết chi tiết.")
 
     def ensure_started(self, progress=None, cancel=None):
         """Mở tiến trình VieNeu và nạp mô hình (tự tải nếu chưa có), báo tiến độ tải."""
@@ -251,8 +308,10 @@ class VieneuWorker:
             if not self.proc or self.proc.poll() is not None:
                 self._start(progress, cancel)
 
-    def synth(self, text: str, out: str | Path, voice: str | None = None, ref_audio: str | None = None) -> Path:
-        req = json.dumps({"text": text, "out": str(out), "voice": voice, "ref_audio": ref_audio}, ensure_ascii=False)
+    def synth(self, text: str, out: str | Path, voice: str | None = None, ref_audio: str | None = None,
+              ref_text: str | None = None) -> Path:
+        req = json.dumps({"text": text, "out": str(out), "voice": voice, "ref_audio": ref_audio,
+                          "ref_text": ref_text or ""}, ensure_ascii=False)
         with self.lock:
             for attempt in range(2):
                 try:
@@ -274,7 +333,7 @@ class VieneuWorker:
                         continue
                     raise RuntimeError(r["error"])
                 return Path(out)
-        raise RuntimeError("VieNeu không đọc được câu này")
+        raise RuntimeError(f"{self.title} không đọc được câu này")
 
     def stop(self):
         p, self.proc = self.proc, None
@@ -297,6 +356,44 @@ def _vieneu(mode: str) -> VieneuWorker:
 
             atexit.register(_vn_model.stop)
         return _vn_model
+
+
+class OmniWorker(VieneuWorker):
+    """Tiến trình riêng chạy OmniVoice (trami/omni_worker.py); mode = tên mô hình trên HuggingFace."""
+    title = "OmniVoice"
+    flag = "--omni-worker"
+    log_name = "omnivoice.txt"
+
+    def __init__(self, repo: str, token: str = ""):
+        super().__init__(repo)
+        self.token = token
+
+    def _extra_env(self) -> dict:
+        return {"HF_TOKEN": self.token} if self.token else {}
+
+
+_omni_model: OmniWorker | None = None
+
+
+def omnivoice_available() -> bool:
+    from .config import installed
+
+    return installed("omnivoice", "torch")
+
+
+def _omni(settings: dict | None = None) -> OmniWorker:
+    global _omni_model
+    st = settings or {}
+    repo = st.get("omnivoice_model") or "k2-fsa/OmniVoice"
+    with _vn_lock:
+        if _omni_model is None or _omni_model.mode != repo:
+            if _omni_model is not None:
+                _omni_model.stop()
+            _omni_model = OmniWorker(repo, st.get("hf_token", ""))
+            import atexit
+
+            atexit.register(_omni_model.stop)
+        return _omni_model
 
 
 def _speed_tag(rate: str) -> float:
@@ -342,12 +439,18 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     work = Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
     voices = voices or {}
-    if not voice.startswith(("edge:", "vieneu:")) and voice != CLONE:
+    if not voice.startswith(("edge:", "vieneu:", "omni:")) and voice not in (CLONE, OMNI_CLONE):
         voice = "edge:" + voice  # tương thích bản cũ
     mode = settings.get("vieneu_mode", "v3turbo")
 
     edge_items: list[tuple[int, str, Path, str]] = []
     vn_items: list[tuple[int, str, Path, str]] = []
+    omni_items: list[tuple[int, str, Path, str]] = []
+    samples = {}
+    if omnivoice_available():
+        from . import voices as vlib
+
+        samples = {v["id"]: v for v in vlib.list_samples()}
     for i, s in enumerate(segs):
         t = clean_tts_text(s.trans or "")
         s.extra.pop("_tts", None)
@@ -364,10 +467,23 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         if spec in (CLONE,) or spec.startswith("vieneu:"):
             if not vieneu_available():
                 spec = "edge:vi-VN-HoaiMyNeural"
+        if spec == OMNI_CLONE or spec.startswith("omni:"):
+            if not omnivoice_available() or (spec.startswith("omni:") and spec[5:] not in samples):
+                spec = "edge:vi-VN-HoaiMyNeural"   # chưa cài OmniVoice / giọng mẫu đã bị xoá
         if spec == CLONE:
             spec = f"clone:{s.speaker or 'S1'}"
-        h = hashlib.md5(f"{t}|{spec}|{rate}|{pitch}|{mode}".encode()).hexdigest()[:14]
-        if spec.startswith("edge:"):
+        if spec == OMNI_CLONE:
+            spec = f"omniclone:{s.speaker or 'S1'}"
+        extra = ""
+        if spec.startswith("omni:"):   # sửa lời / file mẫu thì đọc lại
+            sm = samples[spec[5:]]
+            extra = f"{sm.get('text', '')}|{sm.get('file')}|{settings.get('omnivoice_model', '')}"
+        h = hashlib.md5(f"{t}|{spec}|{rate}|{pitch}|{mode}|{extra}".encode()).hexdigest()[:14]
+        if spec.startswith(("omni:", "omniclone:")):
+            p = work / f"tts_{h}.wav"
+            if not (p.exists() and p.stat().st_size > 0):
+                omni_items.append((i, t, p, spec))
+        elif spec.startswith("edge:"):
             p = work / f"tts_{h}.mp3"
             if not (p.exists() and p.stat().st_size > 0):
                 edge_items.append((i, t, p, spec[5:]))
@@ -376,7 +492,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             if not (p.exists() and p.stat().st_size > 0):
                 vn_items.append((i, t, p, spec))
         s.extra["_tts"] = str(p)
-    total_items = len(edge_items) + len(vn_items)
+    total_items = len(edge_items) + len(vn_items) + len(omni_items)
     if progress:
         progress(0.0, f"Đang tạo giọng đọc 0/{total_items}")
     errors: list[str] = []
@@ -415,9 +531,45 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             if progress:
                 progress((n + 1) / max(1, total_items) * 0.8, f"VieNeu đang đọc {n + 1}/{total_items}")
 
+    # --- OmniVoice (offline): nhái giọng từ file ghi âm mẫu / từ nhân vật gốc
+    if omni_items:
+        if progress:
+            progress(0.01, "Đang nạp OmniVoice…")
+        om = _omni(settings)
+        om.ensure_started((lambda x, m: progress(0.01 * x, m)) if progress else None, cancel)
+        orefs: dict[str, tuple] = {}
+        speed = _speed_tag(rate)
+        base = len(vn_items)
+        for n, (i, text, p, spec) in enumerate(omni_items):
+            if cancel and cancel():
+                raise Cancelled()
+            try:
+                if spec not in orefs:
+                    if spec.startswith("omni:"):
+                        sm = samples[spec[5:]]
+                        orefs[spec] = (str(vlib.path_of(sm)), sm.get("text", ""))
+                    else:
+                        spk = spec[10:]
+                        r = build_reference_text(ref_audio, segs, spk, work / f"omniref_{spk}.wav") if ref_audio else None
+                        orefs[spec] = (str(r[0]), r[1]) if r else (None, "")
+                ref, rtext = orefs[spec]
+                tmp = p.with_suffix(".raw.wav")
+                om.synth(text, tmp, ref_audio=ref, ref_text=rtext)
+                sr = om.sr
+                if abs(speed - 1) > 0.01:
+                    write_wav(p, _decode(tmp, speed, sr), sr)
+                    tmp.unlink(missing_ok=True)
+                else:
+                    tmp.replace(p)
+            except Exception as e:
+                errors.append(f"Câu {i + 1}: {e}")
+            if progress:
+                progress((base + n + 1) / max(1, total_items) * 0.8, f"OmniVoice đang đọc {n + 1}/{len(omni_items)}")
+
     # --- Edge (online)
     if edge_items:
-        errors += asyncio.run(_edge_all(edge_items, rate, pitch, progress, cancel, total_items, len(vn_items)))
+        errors += asyncio.run(_edge_all(edge_items, rate, pitch, progress, cancel, total_items,
+                                        len(vn_items) + len(omni_items)))
     if cancel and cancel():
         raise Cancelled()
     ok = sum(1 for s in segs if s.extra.get("_tts") and Path(s.extra["_tts"]).exists())
@@ -482,6 +634,17 @@ def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,
             await edge_tts.Communicate(text, spec[5:]).save(str(out.with_suffix(".mp3")))
         asyncio.run(run())
         return out.with_suffix(".mp3")
+    if spec.startswith("omni:") or spec == OMNI_CLONE:
+        om = _omni(settings)
+        if spec.startswith("omni:"):
+            from . import voices as vlib
+
+            sm = vlib.get(spec[5:])
+            if not sm:
+                raise ValueError("Giọng mẫu này đã bị xoá")
+            return om.synth(text, out.with_suffix(".wav"), ref_audio=str(vlib.path_of(sm)), ref_text=sm.get("text", ""))
+        ref, rtext = (ref_audio if isinstance(ref_audio, tuple) else (ref_audio, ""))
+        return om.synth(text, out.with_suffix(".wav"), ref_audio=str(ref) if ref else None, ref_text=rtext)
     tts = _vieneu(settings.get("vieneu_mode", "v3turbo"))
     if spec == CLONE or spec.startswith("clone"):
         return tts.synth(text, out.with_suffix(".wav"), ref_audio=str(ref_audio) if ref_audio else None)

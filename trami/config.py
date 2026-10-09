@@ -67,6 +67,8 @@ DEFAULT_SETTINGS: dict = {
     "tts_rate": "+0%",
     "tts_max_speedup": 1.6,
     "vieneu_mode": "v3turbo",         # v3turbo (đẹp) / v3nano (máy yếu)
+    "omnivoice_model": "k2-fsa/OmniVoice",   # hoặc g-group-ai-lab/g-omnivoice (tối ưu tiếng Việt, cần HF token)
+    "hf_token": "",                           # token HuggingFace cho mô hình cần đồng ý điều khoản
     "dub_skip_songs": True,           # không lồng tiếng các câu đang hát -> giữ nguyên bài hát gốc
     # Xoá phụ đề
     "inpaint_backend": "lama",        # lama (AI, đẹp) / opencv (nhanh)
@@ -196,6 +198,6 @@ def public_settings(s: dict | None = None) -> dict:
     """Ẩn bớt API key khi gửi ra giao diện."""
     s = dict(s or load_settings())
     for k in list(s):
-        if k.endswith("_api_key") and s[k]:
+        if (k.endswith("_api_key") or k == "hf_token") and s[k]:
             s[k] = "••••" + s[k][-4:]
     return s

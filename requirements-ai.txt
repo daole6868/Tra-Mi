@@ -4,3 +4,4 @@ funasr>=1.1                 # SenseVoice, Paraformer + phân người nói CAM++
 modelscope>=1.15
 speechbrain>=1.0            # nhận diện giọng (phân biệt người nói)
 vieneu>=3.0                 # VieNeu-TTS: 25 giọng Việt + nhái giọng
+omnivoice>=0.2              # OmniVoice: nhái giọng y hệt từ file ghi âm mẫu 3–10 giây

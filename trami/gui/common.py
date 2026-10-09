@@ -23,7 +23,8 @@ HARDSUB = [("none", "Giữ nguyên"), ("inpaint", "Xoá sạch bằng AI (LaMa)"
            ("box", "Che bằng dải màu"), ("delogo", "Delogo (nhanh)")]
 WHICH = [("trans", "Chỉ tiếng Việt"), ("both", "Song ngữ Việt + Trung"), ("source", "Chỉ tiếng Trung"),
          ("none", "Không ghép (chỉ xuất SRT)")]
-TTS_ENGINES = [("edge", "Microsoft Edge (2 giọng, cần mạng)"), ("vieneu", "VieNeu-TTS (25 giọng + nhái giọng, offline)")]
+TTS_ENGINES = [("edge", "Microsoft Edge (2 giọng, cần mạng)"), ("vieneu", "VieNeu-TTS (25 giọng + nhái giọng, offline)"),
+               ("omnivoice", "OmniVoice (nhái giọng từ file ghi âm mẫu, offline)")]
 ASPECTS = [("original", "Giữ nguyên"), ("9:16", "9:16 – TikTok/Reels/Shorts"), ("16:9", "16:9 – YouTube/Facebook"),
            ("1:1", "1:1 vuông"), ("4:5", "4:5 – Facebook dọc"), ("4:3", "4:3"), ("3:4", "3:4")]
 ASPECT_MODES = [("blur", "Nền mờ"), ("pad", "Viền đen"), ("crop", "Cắt cho đầy khung")]

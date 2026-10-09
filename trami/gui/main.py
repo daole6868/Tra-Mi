@@ -481,6 +481,7 @@ class SettingsPage(QWidget):
         ("ge_key", "gemini_api_key", "t"), ("ge_model", "gemini_model", "t"),
         ("ol_base", "ollama_base_url", "t"), ("ol_model", "ollama_model", "t"),
         ("glossary", "glossary", "p"), ("tts_engine", "tts_engine", "c"), ("vn_mode", "vieneu_mode", "c"),
+        ("omni_model", "omnivoice_model", "c"), ("hf_token", "hf_token", "t"),
         ("maxspeed", "tts_max_speedup", "f"), ("inpaint", "inpaint_backend", "c"),
         ("codec", "video_codec", "c"), ("crf", "video_crf", "i"), ("preset", "video_preset", "c"),
     ]
@@ -570,6 +571,12 @@ class SettingsPage(QWidget):
         f = Form()
         self.tts_engine = f.row("Bộ đọc mặc định", combo(C.TTS_ENGINES))
         self.vn_mode = f.row("VieNeu-TTS", combo([("v3turbo", "v3 Turbo – đẹp (khuyên dùng)"), ("v3nano", "v3 Nano – máy yếu")]))
+        self.omni_model = f.row("OmniVoice", combo([("k2-fsa/OmniVoice", "OmniVoice gốc – đa ngôn ngữ"),
+                                                    ("g-group-ai-lab/g-omnivoice",
+                                                     "G-OmniVoice – tối ưu tiếng Việt (cần HF token)")]))
+        self.hf_token = f.row("HuggingFace token", key(),
+                              "Chỉ cần cho G-OmniVoice: tạo token ở huggingface.co/settings/tokens và bấm đồng ý "
+                              "điều khoản ở trang mô hình g-group-ai-lab/g-omnivoice")
         self.maxspeed = f.row("Tăng tốc giọng tối đa", dspin(1, 2.5, 0.1))
         self.inpaint = f.row("Xoá phụ đề", combo([("lama", "AI LaMa (đẹp)"), ("opencv", "OpenCV (nhanh)")]))
         self.codec = f.row("Bộ mã hoá video", combo([("libx264", "H.264 CPU (tương thích nhất)"),
@@ -665,7 +672,7 @@ class SettingsPage(QWidget):
                 d[k] = w.text()
         cur = load_settings()
         for k in list(d):
-            if k.endswith("_api_key") and isinstance(d[k], str) and d[k].startswith("••••"):
+            if (k.endswith("_api_key") or k == "hf_token") and isinstance(d[k], str) and d[k].startswith("••••"):
                 d[k] = cur.get(k, "")
         return d
 

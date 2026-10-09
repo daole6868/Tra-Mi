@@ -582,3 +582,41 @@ def test_dub_versions_use_and_delete(tmp_path, monkeypatch):
     assert not w1.exists() and p.edit["dub"]["wav"] == str(w2) and len(pipeline.dub_versions(p)) == 1
     pipeline.delete_dub_version(p, str(w2))
     assert not p.edit["dub"]["enabled"] and pipeline.dub_versions(p) == []
+
+
+def test_omnivoice_samples_and_dub(monkeypatch, tmp_path):
+    """Giọng mẫu OmniVoice: thêm file ghi âm (cắt còn ≤10 giây), đọc theo giọng mẫu kèm lời mẫu; nhái nhân vật gốc."""
+    from trami import tts, voices
+
+    src = tmp_path / "rec.wav"
+    _fake_audio(src, 14, 300)
+    v = voices.add_sample(src, "Giọng A", "Xin chào các bạn")
+    assert v["dur"] <= 10.1 and voices.path_of(v).exists()
+    calls = []
+
+    class FakeOmni:
+        sr = 24000
+
+        def ensure_started(self, progress=None, cancel=None):
+            pass
+
+        def synth(self, text, out, voice=None, ref_audio=None, ref_text=None):
+            calls.append((text, Path(ref_audio).name if ref_audio else None, ref_text))
+            return tts.write_wav(out, np.sin(np.linspace(0, 800, 24000)).astype(np.float32) * 0.3, 24000)
+
+    monkeypatch.setattr(tts, "omnivoice_available", lambda: True)
+    monkeypatch.setattr(tts, "_omni", lambda settings=None: FakeOmni())
+    ref = tmp_path / "vocals.wav"
+    _fake_audio(ref, 12, 200)
+    segs = [Segment(0.5, 3.0, "你好", "Xin chào", "S1"), Segment(3.5, 6.0, "走吧", "Đi thôi", "S2")]
+    st = {}
+    tts.synthesize_dub(segs, tmp_path / "dub.wav", 8, tmp_path / "t",
+                       voices={"S1": f"omni:{v['id']}", "S2": tts.OMNI_CLONE}, ref_audio=ref, stats=st)
+    assert st["placed"] == 2
+    a = [c for c in calls if c[0] == "Xin chào"][0]
+    assert a[1] == voices.path_of(v).name and a[2] == "Xin chào các bạn"   # giọng mẫu + lời mẫu
+    b = [c for c in calls if c[0] == "Đi thôi"][0]
+    assert b[1] == "omniref_S2.wav" and b[2] == "走吧"                     # mẫu cắt từ video + lời gốc
+    assert any(x["id"] == f"omni:{v['id']}" for x in tts.list_voices({}))
+    voices.delete(v["id"])
+    assert voices.list_samples() == []

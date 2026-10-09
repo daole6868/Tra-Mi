@@ -130,6 +130,11 @@ TraMi/
 - VieNeu-TTS: Apache-2.0, kèm watermark âm thanh chống lạm dụng.
 - SpeechBrain: Apache-2.0.
 
+**OmniVoice (nhái giọng y hệt từ file ghi âm mẫu):** tab Lồng tiếng → khung *Giọng mẫu để nhái*: thêm file ghi âm 3–10 giây
+(hoặc ghi âm từ micro, hoặc lấy 8 giây từ video), gõ đúng lời nói trong đoạn đó, rồi chọn giọng mẫu cho từng người nói.
+Chọn bản *G-OmniVoice* (tối ưu tiếng Việt) ở Cài đặt cần token HuggingFace và bấm đồng ý điều khoản trên trang mô hình.
+Cài tay: `.venv\Scripts\python -m pip install omnivoice -c torch-constraints.txt`
+
 **Nhái giọng:** chỉ nhái giọng khi bạn có quyền sử dụng giọng đó.
 **Đăng lại video:** hãy tôn trọng bản quyền của tác giả video gốc.
 

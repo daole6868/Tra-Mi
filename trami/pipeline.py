@@ -304,7 +304,16 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     if not any(s.trans for s in segs):
         raise ValueError("Chưa có bản dịch để lồng tiếng.")
     engine = engine or settings.get("tts_engine", "edge")
-    default_voice = voice or (f"edge:{settings.get('tts_voice')}" if engine == "edge" else "vieneu:")
+    if voice:
+        default_voice = voice
+    elif engine == "omnivoice":
+        from . import voices as vlib
+        from .tts import OMNI_CLONE
+
+        smp = vlib.list_samples()
+        default_voice = f"omni:{smp[0]['id']}" if smp else OMNI_CLONE
+    else:
+        default_voice = f"edge:{settings.get('tts_voice')}" if engine == "edge" else "vieneu:"
     voices = dict(p.data.get("voices") or {})
     st = stems(p)
     # mẫu giọng để nhái: lấy từ giọng đã tách (sạch) hoặc âm thanh gốc

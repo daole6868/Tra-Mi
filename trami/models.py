@@ -51,7 +51,10 @@ MODELS = [
     ModelInfo("lama", "Xoá phụ đề – AI LaMa", "Vẽ lại nền phía sau chữ Trung cũ", "206 MB", ("torch",), "eraser"),
     ModelInfo("vieneu", "Giọng đọc – VieNeu-TTS v3 Turbo", "25 giọng Việt + nhái giọng nhân vật", "~1–2 GB",
               ("vieneu",), "volume"),
+    ModelInfo("omnivoice", "Nhái giọng – OmniVoice", "Nhái giọng y hệt từ file ghi âm mẫu 3–10 giây (chọn bản ở Cài đặt)",
+              "~2–3 GB", ("omnivoice", "torch"), "mic"),
 ]
+OMNI_TOKENIZER = "eustlb/higgs-audio-v2-tokenizer"
 BY_KEY = {m.key: m for m in MODELS}
 
 
@@ -61,6 +64,20 @@ def _sep_file(key: str) -> str:
     from .separate import SEP_MODELS
 
     return SEP_MODELS[0][0] if key == "sep_roformer" else next(f for f, _ in SEP_MODELS if f.startswith("UVR-MDX"))
+
+
+def _hf_snapshot(repo: str) -> Path | None:
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+        base = Path(HF_HUB_CACHE)
+    except Exception:  # noqa: BLE001
+        base = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
+    snaps = base / f"models--{repo.replace('/', '--')}" / "snapshots"
+    if snaps.is_dir():
+        for d in snaps.iterdir():
+            if d.is_dir() and any(d.iterdir()):
+                return d
+    return None
 
 
 def _hf_cached(repo: str) -> bool:
@@ -147,6 +164,9 @@ def is_ready(key: str, settings: dict | None = None) -> bool:
             return LAMA_FILE.exists() and LAMA_FILE.stat().st_size > 100_000_000
         if key == "vieneu":
             return _hf_cached(VIENEU_REPO)
+        if key == "omnivoice":
+            snap = _hf_snapshot((settings or {}).get("omnivoice_model") or "k2-fsa/OmniVoice")
+            return bool(snap) and ((snap / "audio_tokenizer").is_dir() or _hf_cached(OMNI_TOKENIZER))
     except Exception:  # noqa: BLE001 – chưa có / chưa cài gói
         return False
     return False
@@ -215,6 +235,25 @@ def download(key: str, progress: Prog | None = None, cancel=None, settings: dict
         from .lama import ensure_model
 
         ensure_model(progress, cancel)
+    elif key == "omnivoice":
+        from huggingface_hub import snapshot_download
+
+        st = settings or {}
+        repo = st.get("omnivoice_model") or "k2-fsa/OmniVoice"
+        token = st.get("hf_token") or None
+        try:
+            with tqdm_progress(progress, 0.0, 0.9, label, cancel, download=label):
+                d = Path(snapshot_download(repo, token=token))
+            if not (d / "audio_tokenizer").is_dir():
+                with tqdm_progress(progress, 0.9, 1.0, label, cancel, download=label + " (bộ mã hoá âm thanh)"):
+                    snapshot_download(OMNI_TOKENIZER, token=token)
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            if any(x in msg for x in ("401", "403", "gated", "Gated", "restricted")):
+                raise RuntimeError("Mô hình này cần đồng ý điều khoản: đăng nhập huggingface.co, mở trang "
+                                   f"{repo}, bấm đồng ý, rồi dán token (huggingface.co/settings/tokens) vào "
+                                   "Cài đặt → HuggingFace token.") from None
+            raise
     elif key == "vieneu":
         from .tts import _vieneu
 
