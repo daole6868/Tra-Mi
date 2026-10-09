@@ -73,20 +73,49 @@ def _hf_cached(repo: str) -> bool:
     return snaps.is_dir() and any(any(d.iterdir()) for d in snaps.iterdir() if d.is_dir())
 
 
-def _ms_cached(model_id: str) -> bool:
+_WEIGHTS = (".pt", ".pth", ".onnx", ".bin", ".safetensors", ".ckpt")
+
+
+def _has_weights(d: Path) -> bool:
     try:
+        return any(f.suffix.lower() in _WEIGHTS and f.stat().st_size > 1_000_000 for f in d.rglob("*") if f.is_file())
+    except OSError:
+        return False
+
+
+def ms_location(model_id: str) -> Path | None:
+    """Thư mục chứa mô hình ModelScope đã tải (mỗi bản ModelScope lưu một kiểu khác nhau) – None nếu chưa có."""
+    org, name = model_id.split("/", 1)
+    names = {name, name.replace(".", "___")}
+    bases = []
+    if os.environ.get("MODELSCOPE_CACHE"):
+        bases.append(Path(os.environ["MODELSCOPE_CACHE"]))
+    bases += [Path.home() / ".cache" / "modelscope" / "hub", Path.home() / ".cache" / "modelscope"]
+    for base in bases:
+        for sub in ("models/" + org, org, "hub/models/" + org, "hub/" + org):
+            for n in names:
+                d = base / sub / n
+                if d.is_dir() and _has_weights(d):
+                    return d
+    try:   # thử hỏi chính ModelScope (bản mới)
         from modelscope.hub.snapshot_download import snapshot_download
 
         d = snapshot_download(model_id, local_files_only=True)
-        if d and Path(d).is_dir() and (any(Path(d).glob("*.pt")) or any(Path(d).glob("*.onnx"))):
-            return True
+        if d and Path(d).is_dir() and _has_weights(Path(d)):
+            return Path(d)
     except Exception:  # noqa: BLE001
         pass
-    base = Path(os.environ.get("MODELSCOPE_CACHE", Path.home() / ".cache" / "modelscope" / "hub"))
-    for d in (base / model_id, base / "models" / model_id):
-        if d.is_dir() and (any(d.glob("*.pt")) or any(d.glob("*.onnx"))):
-            return True
-    return False
+    for base in bases:   # tìm sâu hơn (chậm hơn) nếu cấu trúc thư mục khác
+        if base.is_dir():
+            for n in names:
+                for d in base.rglob(n):
+                    if d.is_dir() and _has_weights(d):
+                        return d
+    return None
+
+
+def _ms_cached(model_id: str) -> bool:
+    return ms_location(model_id) is not None
 
 
 def missing_packages(key: str) -> list[str]:
