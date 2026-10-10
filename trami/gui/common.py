@@ -5,7 +5,8 @@ import traceback
 from typing import Callable
 
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QRunnable, Qt, QThreadPool, Signal
-from PySide6.QtWidgets import QAbstractScrollArea, QAbstractSlider, QAbstractSpinBox, QComboBox, QScrollBar
+import shiboken6
+from PySide6.QtWidgets import QAbstractScrollArea, QAbstractSlider, QAbstractSpinBox, QComboBox, QScrollBar, QWidget
 
 ENGINES = [("google", "Google Dịch (miễn phí)"), ("deepseek", "DeepSeek AI (giỏi tiếng Trung, rẻ)"),
            ("openai", "OpenAI GPT / API tương thích"), ("anthropic", "Claude (Anthropic)"),
@@ -109,12 +110,21 @@ class WheelGuard(QObject):
         return None
 
     def eventFilter(self, obj, ev):
+        try:
+            return self._filter(obj, ev)
+        except Exception:  # noqa: BLE001 – bộ lọc toàn cục tuyệt đối không được làm sập giao diện
+            self.armed = None
+            return False
+
+    def _filter(self, obj, ev):
         t = ev.type()
         if t == QEvent.Type.MouseButtonPress:
+            if self.armed is not None and not shiboken6.isValid(self.armed):
+                self.armed = None   # ô cũ đã bị xoá khỏi giao diện
             own = self._owner(obj) if hasattr(obj, "parentWidget") else None
             if own is not None:
                 self.armed = None if isinstance(own, QComboBox) else own
-            elif self.armed is not None and hasattr(obj, "isAncestorOf") and obj.isAncestorOf(self.armed):
+            elif self.armed is not None and isinstance(obj, QWidget) and obj.isAncestorOf(self.armed):
                 pass   # cú bấm vừa rồi được chuyển tiếp lên khung chứa ô – vẫn giữ
             else:
                 self.armed = None

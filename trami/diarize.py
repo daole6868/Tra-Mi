@@ -25,6 +25,26 @@ def available() -> bool:
     return installed("speechbrain", "torch")
 
 
+def drop_broken_lazy_modules() -> int:
+    """SpeechBrain đăng ký sẵn các module "lười" (VD speechbrain.integrations.k2_fsa) vào sys.modules; chạm vào là báo
+    ImportError (thiếu k2). PySide6 khi soạn thông báo lỗi sẽ duyệt sys.modules và SẬP cả chương trình vì chúng.
+    -> gỡ những module lười không nạp được khỏi sys.modules."""
+    import sys
+
+    removed = 0
+    for name, mod in list(sys.modules.items()):
+        if type(mod).__name__ not in ("LazyModule", "DeprecatedModuleRedirect"):
+            continue
+        try:
+            getattr(mod, "__dict__")
+            getattr(mod, "__name__")
+            getattr(mod, "__file__", None)
+        except Exception:  # noqa: BLE001
+            sys.modules.pop(name, None)
+            removed += 1
+    return removed
+
+
 def _encoder():
     global _enc
     if _enc is None:
@@ -44,9 +64,11 @@ def _encoder():
             kw["local_strategy"] = LocalStrategy.COPY
         except ImportError:  # speechbrain cũ
             pass
+        drop_broken_lazy_modules()
         _enc = EncoderClassifier.from_hparams(source="speechbrain/spkrec-ecapa-voxceleb",
                                               savedir=str(MODELS_DIR / "spkrec-ecapa"),
                                               run_opts={"device": dev}, **kw)
+    drop_broken_lazy_modules()
     return _enc
 
 

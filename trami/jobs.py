@@ -109,6 +109,12 @@ class JobManager:
                 log_error(job.title)
             finally:
                 job.finished = time.time()
+                try:   # thư viện AI vừa nạp có thể để lại module "lười" làm PySide6 sập -> dọn đi
+                    from .diarize import drop_broken_lazy_modules
+
+                    drop_broken_lazy_modules()
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 manager = JobManager()
