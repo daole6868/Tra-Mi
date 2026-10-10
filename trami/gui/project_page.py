@@ -9,7 +9,7 @@ from PySide6.QtGui import QDesktopServices, QFont, QKeySequence, QPixmap, QShort
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDoubleSpinBox, QFileDialog,
                                QHeaderView, QInputDialog, QLineEdit, QMessageBox, QPlainTextEdit,
                                QScrollArea, QSpinBox, QSplitter, QStackedWidget, QTableView, QTableWidget,
-                               QTableWidgetItem, QVBoxLayout, QWidget)
+                               QTableWidgetItem, QVBoxLayout, QWidget, QGridLayout)
 
 from .. import pipeline
 from ..config import _deep_merge, load_settings
@@ -141,11 +141,31 @@ class ProjectPage(QWidget):
         go = GradientButton("Bắt đầu dịch tự động", "bolt", big=True)
         go.clicked.connect(self.run_auto)
         card.add(go)
-        steps = SectionCard("Làm từng bước", "list", "Kiểm soát chất lượng tốt hơn: soát phụ đề trước khi xuất.")
-        steps.add(hbox(button("1. Lấy phụ đề", "subtitles", on_click=self.run_recognize),
-                       button("2. Dịch", "globe", on_click=lambda: self.run_translate(False)),
-                       button("3. Lồng tiếng", "mic", on_click=lambda: self.tabs.set_current(5)),
-                       button("4. Xuất", "export", on_click=lambda: self.tabs.set_current(7)), None))
+        steps = SectionCard("Làm từng bước", "list",
+                            "Đi lần lượt 4 bước, soát kết quả từng bước trước khi sang bước sau (bước nào xong có dấu ✓).")
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(4)
+        step_defs = [
+            ("1. Nghe && tách câu", "mic", self.run_recognize,
+             "Nghe lời thoại gốc: ghi mốc lúc nhân vật BẮT ĐẦU nói tới lúc DỨT câu, tách đúng từng câu (và từng người nói)."),
+            ("2. Dịch", "globe", lambda: self.run_translate(False),
+             "Dịch từng câu sang tiếng Việt, độ dài vừa với thời gian nhân vật nói."),
+            ("3. Lồng tiếng", "volume", self._step_dub,
+             "Đọc từng câu tiếng Việt và đặt đúng vào thời điểm nhân vật nói (không chồng câu)."),
+            ("4. Ghép vào video && xuất", "export", self._step_export,
+             "Ghép giọng lồng + nhạc nền + phụ đề vào video, xuất file MP4."),
+        ]
+        self.step_status = []
+        for i, (title, ic, fn, tip) in enumerate(step_defs):
+            b = button(title, ic, tip, on_click=fn)
+            st = label("", "muted", wrap=True)
+            st.setToolTip(tip)
+            grid.addWidget(b, 0, i)
+            grid.addWidget(st, 1, i)
+            grid.setColumnStretch(i, 1)
+            self.step_status.append(st)
+        steps.add(grid)
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 6, 0)
@@ -803,6 +823,7 @@ class ProjectPage(QWidget):
         self._update_player_audio()
 
     def _segs_edited(self):
+        self._update_steps()
         self._save_segs_timer.start()
         self._update_count()
         self._refresh_overlay()
@@ -931,6 +952,36 @@ class ProjectPage(QWidget):
             pipeline.dub(p, None, rate, st, j.update, j.cancelled, eng)
             return {"message": pipeline.dub_summary(p)}
         self.submit("dub", "Lồng tiếng", fn)
+
+    def _step_dub(self):
+        if not any(sg.trans.strip() for sg in self.model.segs):
+            return self.win.toast("Làm bước 2 (Dịch) trước đã", "warn")
+        self.run_dub()
+
+    def _step_export(self):
+        self.tabs.set_current(7)
+        self.run_render()
+
+    def _update_steps(self):
+        if not getattr(self, "step_status", None) or not self.p:
+            return
+        segs = self.model.segs
+        n = len(segs)
+        done_tr = sum(1 for sg in segs if sg.trans.strip())
+        st = self.p.data.get("dub_stats") or {}
+        d = self.p.edit.get("dub") or {}
+        vids = [o for o in (self.p.data.get("outputs") or []) if (o.get("kind") if isinstance(o, dict) else "") == "video"]
+        spk = len({sg.speaker for sg in segs if sg.speaker})
+        texts = [
+            (f"✓ {n} câu" + (f" · {spk} người nói" if spk > 1 else "")) if n else "Chưa có",
+            (f"✓ {done_tr}/{n} câu" if done_tr == n else f"{done_tr}/{n} câu") if n else "—",
+            (f"✓ {st.get('placed', 0)}/{st.get('total', 0)} câu" + (f" · ⚠ {st['fit']['long']} quá dài"
+                                                                     if (st.get('fit') or {}).get('long') else ""))
+            if d.get("wav") and st else "Chưa lồng",
+            f"✓ {len(vids)} video" if vids else "Chưa xuất",
+        ]
+        for lb, t in zip(self.step_status, texts):
+            lb.setText(t)
 
     def run_render(self):
         name = self.x_name.text().strip() or None
@@ -1474,6 +1525,7 @@ class ProjectPage(QWidget):
         if not self.p:
             return
         self._live_timer.start()
+        self._update_steps()
         e = self.p.edit
         segs = self.model.segs
         items = [f"Phụ đề: {len(segs)} câu, đã dịch {sum(1 for s in segs if s.trans)}" +
