@@ -1,6 +1,8 @@
 """Kiểm thử tự động: chạy bằng `python -m pytest -q tests`."""
 import json
+import re
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -167,7 +169,7 @@ def test_llm_translate_batches_and_repair(monkeypatch):
         if "KỊCH BẢN" in user:
             return json.dumps({"genre": "cổ trang", "terms": {"李逍遥": "Lý Tiêu Dao"}, "relations": ""})
         payload = json.loads(user[user.rindex("{"):])
-        out = {k: f"VI({v})" for k, v in payload.items()}
+        out = {k: "VI(" + re.sub(r"[㐀-鿿]", "x", v) + ")" for k, v in payload.items()}
         if len(payload) > 3:  # lần đầu thiếu 1 dòng -> phải tự bù
             out.pop(str(len(payload)))
         return json.dumps(out, ensure_ascii=False)
@@ -183,6 +185,39 @@ def test_llm_translate_batches_and_repair(monkeypatch):
     n = len(calls)
     t.translate_lines([s.text for s in segs])
     assert len(calls) == n
+
+
+def test_llm_retries_untranslated_and_does_not_cache_empty(monkeypatch):
+    """AI chép lại câu gốc (còn chữ Hán) hoặc bỏ trống -> hỏi lại; câu lỗi không bị nhớ rỗng mãi."""
+    from trami import translate as tr
+
+    calls = []
+
+    def fake_chat(self, system, user, max_tokens=8000, temperature=0.3):
+        calls.append(user)
+        payload = json.loads(user[user.rindex("{"):])
+        out = {k: f"vi{k}" for k in payload}
+        if len(calls) == 1:
+            out["2"] = "放开我放开我"   # lần đầu: chép nguyên câu gốc
+        return json.dumps(out, ensure_ascii=False)
+
+    monkeypatch.setattr(tr.LLMClient, "chat", fake_chat)
+    st = {"translate_engine": "openai", "openai_api_key": "x", "dub_fit": False}
+    t = tr.Translator(st)
+    segs = [Segment(0, 1, "不要再说了"), Segment(1, 2, "放开我放开我"), Segment(2, 3, "不要啊")]
+    t.translate_segments(segs, auto_terms=False)
+    assert all(s.trans and not tr.untranslated(s.trans) for s in segs)
+    assert len(calls) == 2
+
+    # API lỗi hẳn (Google cũng lỗi) -> câu rỗng KHÔNG được nhớ, lần sau dịch lại được
+    cache: dict = {}
+    t2 = tr.Translator(st, cache=cache)
+    monkeypatch.setattr(tr.LLMClient, "chat", lambda *a, **k: "không phải json")
+    monkeypatch.setattr(tr.Translator, "_google", lambda self, lines: [""] * len(lines))
+    assert t2.translate_lines(["你好"]) == [""]
+    assert not any(v == "" for v in cache.values())
+    monkeypatch.setattr(tr.LLMClient, "chat", fake_chat)
+    assert t2.translate_lines(["你好"])[0]
 
 
 def test_google_translate_mock(monkeypatch):
@@ -666,3 +701,97 @@ def test_align_split_at_pause_and_speaker_change():
         return sp / (np.linalg.norm(sp) + 1e-9)
     parts = align.split_speaker_changes([Segment(0, 6, "我们一起去吃饭吧好不好你说呢", "")], b, emb)
     assert len(parts) == 2 and abs(parts[0].end - 3.0) < 0.5
+
+
+def test_rescue_missed_speech():
+    """Đoạn có tiếng mà bộ chia đoạn bỏ sót -> nghe lại; bỏ câu trùng câu sát bên và mẩu 1 chữ."""
+    from trami import align
+
+    sr = 16000
+    a = np.zeros(sr * 12, np.float32)
+    t = np.arange(sr * 2) / sr
+    for s0, d in ((1, 1.6), (4, 1), (7, 1), (10, 1)):   # các đoạn có tiếng
+        a[int(s0 * sr):int((s0 + d) * sr)] = 0.3 * np.sin(2 * np.pi * 220 * t[:int(d * sr)])
+    segs = [Segment(0.95, 2.05, "第一句话")]   # chỉ nhận dạng được đoạn đầu (mốc hơi hụt cuối)
+    answers = iter(["一句话", "你别过来", "第一句话", "啊"])
+
+    wins = align.missed_speech([(s.start, s.end) for s in segs], a)
+    assert [round(w[0]) for w in wins] == [2, 4, 7, 10]
+    assert all(w[2] >= 2.05 for w in wins)              # cửa sổ nghe lại không lấn vào câu đã có
+    new = align.rescue_missed(segs, a, lambda clip: (next(answers), ["Speech"]))
+    # "一句话" = đuôi câu sát bên -> bỏ; "第一句话" ở xa 5 giây là câu nói lại -> giữ; "啊" 1 chữ -> bỏ
+    assert [n.text for n in new] == ["你别过来", "第一句话"]
+    assert all(n.extra.get("rescued") for n in new) and 3.9 < new[0].start < 4.1
+
+
+@pytest.mark.parametrize("model", ["vocals_mel_band_roformer.ckpt",
+                                   "ens:model_bs_roformer_ep_317_sdr_12.9755.ckpt+vocals_mel_band_roformer.ckpt"])
+def test_separate_picks_right_stems(tmp_path, monkeypatch, model):
+    """Mel-RoFormer ghi phần nhạc nền TRƯỚC, tên mặc định lại chứa chữ "vocals" (tên mô hình) -> không được lấy nhầm."""
+    import types
+
+    from trami import separate as sp
+
+    src = tmp_path / "a.wav"
+    subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                    str(src)], check=True)
+    seen = {}
+
+    class FakeSep:
+        def __init__(self, output_dir, model_file_dir, output_format, log_level, **kw):
+            self.out = Path(output_dir)
+            seen["kw"] = kw
+
+        def load_model(self, model_filename):
+            seen["model"] = model_filename
+
+        def separate(self, path, names):
+            other = self.out / "mix44k_(Other)_vocals_mel_band_roformer.wav"   # bản cũ bỏ qua tên tuỳ chỉnh
+            voc = self.out / "vocals.wav"
+            subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-y", "-i", path, "-af", "volume=0.1", str(other)], check=True)
+            shutil.copy(path, voc)
+            return [other.name, voc.name]
+
+    mod = types.ModuleType("audio_separator.separator")
+    mod.Separator = FakeSep
+    monkeypatch.setitem(sys.modules, "audio_separator", types.ModuleType("audio_separator"))
+    monkeypatch.setitem(sys.modules, "audio_separator.separator", mod)
+    monkeypatch.setattr(sp, "available", lambda: True)
+    v, i = sp.separate(src, tmp_path / "stems", model)
+    loud = lambda f: float(np.abs(np.frombuffer(open(f, "rb").read()[44:], np.int16)).mean())  # noqa: E731
+    assert loud(v) > 5 * loud(i)          # file "vocals" là giọng thật, không phải phần nhạc nền
+    if model.startswith("ens:"):
+        assert seen["model"] == sp.model_list(model) and seen["kw"] == {"ensemble_algorithm": "avg_wave"}
+    else:
+        assert seen["model"] == model and seen["kw"] == {}
+
+
+def test_ocr_drops_static_watermark():
+    """Chữ đứng yên gần suốt video (watermark "冬冰 bilibili") không được dính vào phụ đề."""
+    from trami.ocr import _is_mark, static_marks, subtitle_height
+
+    def box(x, y, w=60, h=30):
+        return np.array([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], np.float32)
+
+    frames = []
+    for k in range(400):                     # 100 giây, 4 khung/giây
+        wm = [(box(972, 83, 56), "冬冰", 0.99), (box(1003, 86, 24), "水", 0.98), (box(976, 88, 25), "冬", 0.96),
+              (box(972, 80, 280, 36), "冬冰b#", 0.9)][k % 4 if k % 7 == 0 else 0]   # OCR đọc lệch / dính logo
+        items = [wm]
+        if k % 40 < 12:                      # câu thoại: chữ cao 65 px giữa màn hình
+            items.insert(0, (box(380, 10, 270, 65), f"你根本不懂{k // 40}", 0.99))
+        if 300 <= k < 304:
+            items.insert(0, (box(397, 67, 34, 41), "米", 0.97))   # hoa văn trên áo
+        frames.append((k / 4, items))
+    marks = static_marks(frames, 4.0)
+    assert [m[0] for m in marks] == ["冬冰"]
+    h = subtitle_height(frames, marks)
+    assert 60 < h < 70
+    kept = {"".join(it[1] for it in items if not _is_mark(it, marks) and _bbox_h(it) >= 0.7 * h)
+            for _, items in frames}
+    assert kept == {""} | {f"你根本不懂{i}" for i in range(10)}
+    assert not static_marks(frames[:30], 4.0)   # video quá ngắn / câu thoại ngắn -> không coi là watermark
+
+
+def _bbox_h(item):
+    return float(item[0][:, 1].max() - item[0][:, 1].min())

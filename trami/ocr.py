@@ -117,6 +117,45 @@ def _similar(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
+def _bbox(pts) -> tuple[float, float, float, float]:
+    return float(pts[:, 0].min()), float(pts[:, 1].min()), float(pts[:, 0].max()), float(pts[:, 1].max())
+
+
+def static_marks(frames: list[tuple[float, list]], fps: float, min_share: float = 0.3,
+                 min_sec: float = 10.0) -> list[tuple[str, float, float, float, float]]:
+    """Chữ đứng yên 1 chỗ gần suốt video (logo / watermark tên kênh như "冬冰 bilibili") -> không phải phụ đề.
+    Trả về [(chữ, x0, y0, x1, y1)] – khung chữ (trung vị)."""
+    pos: dict[str, list[tuple[float, float, float, float]]] = {}
+    for _, items in frames:
+        for pts, txt, _ in items:
+            pos.setdefault(txt, []).append(_bbox(pts))
+    need = max(min_share * len(frames), min_sec * fps)
+    out = []
+    for txt, bs in pos.items():
+        if len(bs) < need:
+            continue
+        b = np.array(bs)
+        if b[:, :2].std(axis=0).max() < 12:   # không xê dịch -> chữ in cố định
+            out.append((txt, *(float(v) for v in np.median(b, axis=0))))
+    return out
+
+
+def _is_mark(item, marks, pad: float = 15) -> bool:
+    """Khung chữ nằm trong vùng watermark (kể cả khi OCR đọc lệch thành chữ khác: "冬", "水"…)."""
+    x0, y0, x1, y1 = _bbox(item[0])
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    return any((mx0 - pad <= cx <= mx1 + pad and my0 - pad <= cy <= my1 + pad)
+               # đọc dính cả logo bên cạnh ("冬冰bilibili" -> "冬冰b#"): cùng chỗ bắt đầu, có chữ watermark
+               or (abs(x0 - mx0) < 2 * pad and abs(y0 - my0) < 2 * pad and m in item[1])
+               for m, mx0, my0, mx1, my1 in marks)
+
+
+def subtitle_height(frames: list[tuple[float, list]], marks) -> float:
+    """Chiều cao chữ phụ đề chính (trung vị theo thời gian) – chữ nhỏ hơn hẳn là hoạ tiết / chữ trong cảnh."""
+    hs = [_bbox(it[0])[3] - _bbox(it[0])[1] for _, items in frames for it in items if not _is_mark(it, marks)]
+    return float(np.median(hs)) if len(hs) >= 8 else 0.0
+
+
 def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: float = 0.6,
                      progress: Callable[[float, str], None] | None = None,
                      cancel: Callable[[], bool] | None = None,
@@ -131,7 +170,7 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
         progress(0.0, "Đang nạp mô hình OCR…")
     get_engine()
 
-    raw: list[tuple[float, str, float]] = []  # (t, text, score)
+    frames: list[tuple[float, list]] = []      # (t, các khung chữ OCR của khung hình)
     boxes: list[dict] = []
     last_sig = None
     last_items: list = []
@@ -151,9 +190,7 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
             last_items = _ocr(img, min_score) if sig.sum() > 10 else []
             n_ocr += 1
             last_sig = sig
-        text = "".join(it[1] for it in last_items)
-        score = float(np.mean([it[2] for it in last_items])) if last_items else 0.0
-        raw.append((t, text, score))
+        frames.append((t, last_items))
         if last_items:
             bxs = []
             for pts, _, _ in last_items:
@@ -164,6 +201,16 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
             boxes.append({"t": round(t, 3), "boxes": bxs})
         if progress and int(t * fps) % 8 == 0:
             progress(min(0.999, t / total), f"OCR phụ đề {int(t)}/{int(total)} giây")
+
+    # bỏ logo / watermark tên kênh (chữ đứng yên gần suốt video) khỏi phụ đề,
+    # và chữ nhỏ hơn hẳn chữ phụ đề (hoạ tiết trên áo đọc nhầm thành "米"…)
+    marks = static_marks(frames, fps)
+    h_sub = subtitle_height(frames, marks)
+    raw: list[tuple[float, str, float]] = []  # (t, text, score)
+    for t, items in frames:
+        keep = [it for it in items if not _is_mark(it, marks)
+                and (not h_sub or _bbox(it[0])[3] - _bbox(it[0])[1] >= 0.7 * h_sub)]
+        raw.append((t, "".join(it[1] for it in keep), float(np.mean([it[2] for it in keep])) if keep else 0.0))
 
     # Gom các khung liên tiếp có cùng nội dung thành 1 câu
     segs: list[Segment] = []

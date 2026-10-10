@@ -37,8 +37,10 @@ class ModelInfo:
 
 
 MODELS = [
-    ModelInfo("sep_roformer", "Tách giọng – BS-RoFormer", "Tách giọng nói khỏi nhạc nền (tốt nhất, nên có GPU)",
-              "639 MB", ("audio_separator",), "layers"),
+    ModelInfo("sep_kim", "Tách giọng – Mel-RoFormer Kim", "Tách giọng nói khỏi nhạc nền sạch nhất (mặc định, nên có GPU)",
+              "913 MB", ("audio_separator",), "layers"),
+    ModelInfo("sep_roformer", "Tách giọng – BS-RoFormer", "Tách giọng rất tốt; tải cả 2 RoFormer để dùng chế độ "
+              "\"Kết hợp\" (chính xác nhất)", "639 MB", ("audio_separator",), "layers"),
     ModelInfo("sep_mdx", "Tách giọng – MDX-Net Voc FT", "Tách giọng nhanh, hợp máy chỉ có CPU", "67 MB",
               ("audio_separator",), "layers"),
     ModelInfo("sensevoice", "Nhận dạng – SenseVoice + VAD", "Nghe tiếng Trung thành chữ (mặc định, nhanh)", "~900 MB",
@@ -63,10 +65,13 @@ BY_KEY = {m.key: m for m in MODELS}
 
 # ------------------------------------------------------------------ kiểm tra đã tải chưa
 
-def _sep_file(key: str) -> str:
-    from .separate import SEP_MODELS
+SEP_KEYS = ("sep_kim", "sep_roformer", "sep_mdx")
 
-    return SEP_MODELS[0][0] if key == "sep_roformer" else next(f for f, _ in SEP_MODELS if f.startswith("UVR-MDX"))
+
+def _sep_file(key: str) -> str:
+    from .separate import BS_ROFORMER, KIM_ROFORMER
+
+    return {"sep_kim": KIM_ROFORMER, "sep_roformer": BS_ROFORMER}.get(key, "UVR-MDX-NET-Voc_FT.onnx")
 
 
 def _hf_snapshot(repo: str) -> Path | None:
@@ -155,7 +160,7 @@ def missing_packages(key: str) -> list[str]:
 
 def is_ready(key: str, settings: dict | None = None) -> bool:
     try:
-        if key in ("sep_roformer", "sep_mdx"):
+        if key in SEP_KEYS:
             from .separate import SEP_DIR
 
             f = SEP_DIR / _sep_file(key)
@@ -210,7 +215,7 @@ def download(key: str, progress: Prog | None = None, cancel=None, settings: dict
     if progress:
         progress(0.0, f"{label}: đang kết nối…")
 
-    if key in ("sep_roformer", "sep_mdx"):
+    if key in SEP_KEYS:
         from audio_separator.separator import Separator
 
         from .separate import SEP_DIR
@@ -220,7 +225,15 @@ def download(key: str, progress: Prog | None = None, cancel=None, settings: dict
         sep = Separator(model_file_dir=str(SEP_DIR), log_level=40)
         try:
             with tqdm_progress(progress, 0.0, 1.0, label, cancel, download=label):
-                sep.download_model_files(_sep_file(key))
+                try:
+                    sep.download_model_files(_sep_file(key))
+                except ValueError as e:
+                    if "not found" not in str(e):
+                        raise
+                    from .separate import UPGRADE_CMD
+
+                    raise RuntimeError("Bản audio-separator đang cài chưa có mô hình này. Cập nhật bằng lệnh:\n"
+                                       + UPGRADE_CMD) from None
         except BaseException:
             # file tải dở bị thư viện coi là "đã có" -> xoá để lần sau tải lại
             for p in SEP_DIR.iterdir():

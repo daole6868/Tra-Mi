@@ -1,9 +1,10 @@
 """Tách âm thanh thành GIỌNG NÓI (vocals) và NHẠC NỀN + HIỆU ỨNG (instrumental).
 
-Dùng thư viện audio-separator (mô hình của cộng đồng UVR):
-  - BS-RoFormer: chất lượng cao nhất, nên chạy GPU NVIDIA.
-  - MDX-Net Voc FT (ONNX): nhẹ, dùng được trên CPU.
-Mô hình tự tải về thư mục data/models/separator ở lần đầu.
+Dùng thư viện audio-separator (github.com/nomadkaraoke/python-audio-separator, mô hình cộng đồng UVR):
+  - Mel-RoFormer Kim: điểm tách giọng cao nhất trong bảng đo của thư viện (SDR giọng 12,6), nên chạy GPU NVIDIA.
+  - Kết hợp BS + Mel-RoFormer: chạy cả 2 mô hình rồi lấy trung bình -> sạch nhất, chậm gấp đôi.
+  - BS-RoFormer: rất tốt (SDR 11,8).  MDX-Net Voc FT (ONNX): nhẹ, dùng được trên CPU.
+Mô hình tự tải từ GitHub về thư mục data/models/separator ở lần đầu (hoặc tải trước ở tab Tài liệu).
 """
 from __future__ import annotations
 
@@ -14,13 +15,26 @@ from typing import Callable
 from . import ffmpeg as ff
 from .config import MODELS_DIR
 
+BS_ROFORMER = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
+KIM_ROFORMER = "vocals_mel_band_roformer.ckpt"
+ENSEMBLE = f"ens:{BS_ROFORMER}+{KIM_ROFORMER}"
 SEP_MODELS = [
-    ("model_bs_roformer_ep_317_sdr_12.9755.ckpt", "BS-RoFormer – tách sạch nhất (khuyên dùng với GPU)"),
-    ("model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt", "Mel-RoFormer – rất tốt, nhẹ hơn một chút"),
+    (KIM_ROFORMER, "Mel-RoFormer Kim – tách giọng sạch nhất (khuyên dùng với GPU)"),
+    (ENSEMBLE, "Kết hợp BS + Mel-RoFormer – chính xác nhất, chậm gấp đôi"),
+    (BS_ROFORMER, "BS-RoFormer – rất tốt"),
+    ("model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt", "Mel-RoFormer 3005 – nhẹ hơn"),
     ("UVR-MDX-NET-Voc_FT.onnx", "MDX-Net Voc FT – nhanh, hợp máy chỉ có CPU"),
     ("htdemucs_ft.yaml", "HT-Demucs FT – ổn định, tách nhiều loại nhạc"),
 ]
 SEP_DIR = MODELS_DIR / "separator"
+
+
+UPGRADE_CMD = ".venv\\Scripts\\python -m pip install -U \"audio-separator>=0.44\" -c torch-constraints.txt"
+
+
+def model_list(model: str) -> list[str]:
+    """"ens:a.ckpt+b.ckpt" -> [a, b] (kết hợp nhiều mô hình); tên thường -> [tên]."""
+    return model[4:].split("+") if model.startswith("ens:") else [model]
 
 
 def available() -> bool:
@@ -64,27 +78,43 @@ def separate(src: str | Path, out_dir: str | Path, model: str | None = None,
     tmp.mkdir()
     from .progress_hook import tqdm_progress
 
-    sep = Separator(output_dir=str(tmp), model_file_dir=str(SEP_DIR), output_format="WAV", log_level=40)
+    models = model_list(model)
+    try:
+        sep = Separator(output_dir=str(tmp), model_file_dir=str(SEP_DIR), output_format="WAV", log_level=40,
+                        **({"ensemble_algorithm": "avg_wave"} if len(models) > 1 else {}))
+    except TypeError:
+        raise RuntimeError("Bản audio-separator đang cài chưa hỗ trợ kết hợp 2 mô hình. Cập nhật bằng lệnh:\n"
+                           + UPGRADE_CMD) from None
     with tqdm_progress(progress, 0.08, 0.15, "Đang nạp mô hình tách giọng", cancel,
                        download="Đang tải mô hình tách giọng"):
-        sep.load_model(model_filename=model)
+        try:
+            sep.load_model(model_filename=models if len(models) > 1 else models[0])
+        except ValueError as e:
+            if "not found" not in str(e) or model == BS_ROFORMER:
+                raise
+            # bản audio-separator cũ chưa có mô hình mới -> dùng BS-RoFormer để không hỏng cả quy trình
+            if progress:
+                progress(0.1, "audio-separator cũ chưa có mô hình này -> dùng BS-RoFormer (nên cập nhật thư viện)")
+            model = BS_ROFORMER
+            sep.load_model(model_filename=model)
     if progress:
         progress(0.15, "Đang tách giọng nói khỏi nhạc nền (GPU nhanh hơn CPU rất nhiều)…")
-    with tqdm_progress(progress, 0.15, 0.97, "Đang tách giọng nói khỏi nhạc nền – đoạn", cancel):
-        outs = sep.separate(str(mix), {"Vocals": "vocals", "Instrumental": "instrumental"})
-    found_v = found_i = None
-    for o in outs:
-        p = Path(o) if Path(o).is_absolute() else tmp / o
-        name = p.name.lower()
-        if "vocal" in name and found_v is None:
-            found_v = p
-        elif ("instrumental" in name or "no_vocal" in name or "other" in name) and found_i is None:
-            found_i = p
+    names = {"Vocals": "vocals", "Instrumental": "instrumental"}
+    if not model.endswith(".yaml"):   # Mel-RoFormer xuất "vocals" + "other" (= nhạc nền); Demucs xuất 4 phần
+        names["Other"] = "instrumental"
+    with tqdm_progress(progress, 0.15, 0.97, "Đang tách giọng nói khỏi nhạc nền – đoạn", cancel,
+                       download="Đang tải mô hình tách giọng"):
+        outs = sep.separate(str(mix), names)
+    paths = [Path(o) if Path(o).is_absolute() else tmp / o for o in outs]
+    # nhận file theo ĐÚNG tên phần (tên file mặc định có cả tên mô hình, VD "..._(Other)_vocals_mel_band...")
+    found_v = next((p for p in paths if p.stem.lower() == "vocals"), None) or \
+        next((p for p in paths if "(vocals)" in p.name.lower()), None)
+    found_i = next((p for p in paths if p.stem.lower() == "instrumental"), None) or \
+        next((p for p in paths if "(instrumental)" in p.name.lower() or "(no vocals)" in p.name.lower()), None)
     if not found_v:
         raise RuntimeError(f"Tách giọng thất bại, không tìm thấy file vocals: {outs}")
     if not found_i:  # một số mô hình (Demucs) xuất nhiều stem -> trộn phần còn lại thành nhạc nền
-        others = [Path(o) if Path(o).is_absolute() else tmp / o for o in outs]
-        others = [p for p in others if p != found_v]
+        others = [p for p in paths if p != found_v]
         if not others:
             raise RuntimeError("Mô hình không xuất được phần nhạc nền.")
         found_i = tmp / "instrumental_mix.wav"

@@ -34,7 +34,7 @@ for _d in (DATA_DIR, PROJECTS_DIR, MODELS_DIR, CACHE_DIR):
 
 DEFAULT_SETTINGS: dict = {
     # Tách giọng / nhạc nền
-    "sep_model": "model_bs_roformer_ep_317_sdr_12.9755.ckpt",   # BS-RoFormer (đẹp nhất, nên dùng GPU)
+    "sep_model": "vocals_mel_band_roformer.ckpt",   # Mel-RoFormer Kim (tách giọng sạch nhất, nên dùng GPU)
     "sep_before_asr": True,           # nhận dạng trên giọng đã tách -> chính xác hơn khi có nhạc
     # Phân biệt người nói
     "diarize": True,
@@ -72,6 +72,7 @@ DEFAULT_SETTINGS: dict = {
     "dub_fit": True,                  # AI dịch vừa thời lượng câu (giới hạn số tiếng)
     "dub_auto_shorten": True,         # câu đọc vẫn quá dài -> AI rút gọn rồi đọc lại
     "align_words": True,              # căn thời gian từng chữ sau khi nhận dạng
+    "asr_rescue": True,               # nghe lại đoạn có tiếng mà bộ chia đoạn bỏ sót (cần tách giọng trước)
     "split_speaker_changes": True,    # tách câu có 2 người nói liền nhau
     "vieneu_mode": "v3turbo",         # v3turbo (đẹp) / v3nano (máy yếu)
     "omnivoice_model": "k2-fsa/OmniVoice",   # hoặc g-group-ai-lab/g-omnivoice (tối ưu tiếng Việt, cần HF token)

@@ -249,6 +249,81 @@ def refine(segs: list[Segment], audio: np.ndarray, use_fa: bool = True, progress
     return out
 
 
+# ------------------------------------------------------------------ nghe lại câu bị sót
+
+def missed_speech(covered: list[tuple[float, float]], audio: np.ndarray, min_len: float = 0.35,
+                  pad: float = 0.2) -> list[tuple[float, float, float, float]]:
+    """Đoạn CÓ TIẾNG NÓI (độ to của giọng đã tách khỏi nhạc nền) mà chưa câu nào phủ: bộ chia đoạn (VAD) bỏ sót.
+    Trả về (đầu, cuối của phần có tiếng, đầu, cuối cửa sổ nghe lại – nới `pad` giây nhưng không lấn câu đã có)."""
+    m, hop = voiced_mask(audio)
+    if not len(m):
+        return []
+    m = _close(m, int(0.3 / hop))
+    cov = np.zeros(len(m), bool)
+    for a, b in covered:
+        cov[max(0, int(a / hop)):max(0, int(np.ceil(b / hop)))] = True
+    free = _close(m & ~cov, int(0.3 / hop)) & ~cov
+    out = []
+    for i, j in _runs(free, True):
+        if (j - i) * hop < min_len:
+            continue
+        lo, hi = i, j
+        while lo > 0 and not cov[lo - 1] and (i - lo) * hop < pad:
+            lo -= 1
+        while hi < len(m) and not cov[hi] and (hi - j) * hop < pad:
+            hi += 1
+        out.append((round(i * hop, 3), round(j * hop, 3), round(lo * hop, 3), round(hi * hop, 3)))
+    return out
+
+
+def repeats_neighbor(text: str, segs: list[Segment], t0: float, t1: float, near: float = 1.0) -> bool:
+    """Câu nghe lại trùng với câu sát bên đã có (mốc câu cũ ước lượng lệch) -> bỏ, tránh 1 câu xuất hiện 2 lần."""
+    from difflib import SequenceMatcher
+
+    core = re.sub(r"[\W_]", "", text)
+    if not core:
+        return True
+    for s in segs:
+        if s.end < t0 - near or s.start > t1 + near:
+            continue
+        other = re.sub(r"[\W_]", "", s.text)
+        if other and (core in other or SequenceMatcher(None, core, other).ratio() >= 0.75):
+            return True
+    return False
+
+
+def rescue_missed(segs: list[Segment], audio: np.ndarray, decode: Callable, max_chars: int = 22,
+                  progress: Prog | None = None, cancel=None) -> list[Segment]:
+    """Nghe lại các đoạn có tiếng mà chưa có câu: decode(clip) -> (lời, nhãn). Trả về các câu mới (chưa sắp xếp)."""
+    from .asr import is_hallucination
+    from .asr_funasr import split_long
+    from .ffmpeg import Cancelled
+
+    wins = missed_speech([(s.start, s.end) for s in segs], audio)
+    new: list[Segment] = []
+    for k, (a, b, lo, hi) in enumerate(wins):
+        if cancel and cancel():
+            raise Cancelled()
+        if progress:
+            progress(k / max(1, len(wins)), f"Nghe lại đoạn bị sót {k + 1}/{len(wins)}")
+        text, tags = decode(audio[int(lo * SR):int(hi * SR)])
+        text = (text or "").strip()
+        core = re.sub(r"[\W_]", "", text)
+        n = len(CJK.findall(text)) if CJK.search(text) else len(core.split()) + (len(core) >= 4)
+        if n < 2 or is_hallucination(text):
+            continue   # mẩu 1 chữ ("啊", "嗯"…): tiếng thở / đuôi câu bên cạnh, không phải câu thoại
+        if any(t in tags for t in ("Breath", "Cough", "Sneeze")) or repeats_neighbor(text, segs, a, b):
+            continue
+        for x, y, t in split_long(a, b, text, max_chars):
+            s = Segment(round(x, 3), round(y, 3), t)
+            s.extra["tags"] = [g for g in tags if g not in ("withitn", "woitn")]
+            s.extra["rescued"] = True
+            if "Sing" in tags:
+                s.extra["song"] = True
+            new.append(s)
+    return new
+
+
 # ------------------------------------------------------------------ tách khi đổi người nói
 
 def speaker_change_points(emb_fn, clip: np.ndarray, win: float = 1.2, hop: float = 0.4,

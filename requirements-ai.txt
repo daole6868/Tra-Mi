@@ -1,5 +1,5 @@
 # ===== AI nâng cao (cài bằng CaiDat_AI_NangCao.bat – cần cài PyTorch trước) =====
-audio-separator>=0.30       # tách giọng / nhạc nền (BS-RoFormer, MDX, Demucs)
+audio-separator>=0.44       # tách giọng / nhạc nền (Mel-RoFormer Kim, BS-RoFormer, MDX, Demucs, kết hợp 2 mô hình)
 funasr>=1.1                 # SenseVoice, Paraformer + phân người nói CAM++
 modelscope>=1.15
 speechbrain>=1.0            # nhận diện giọng (phân biệt người nói)

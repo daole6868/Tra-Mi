@@ -150,6 +150,26 @@ def resegment(words: list[dict], max_chars: int = 22, max_dur: float = 7.0, max_
     return segs
 
 
+def whisper_decoder(settings: dict, language: str = "zh") -> Callable:
+    """Hàm nghe 1 đoạn ngắn (numpy 16 kHz) bằng Whisper – dùng để nghe lại các đoạn bị bỏ sót."""
+    model = get_model(settings.get("asr_model", "large-v3"), settings.get("asr_device", "auto"),
+                      settings.get("asr_compute_type", "auto"))
+    lang = None if language in ("auto", "", None) else language
+    zh = (lang or "zh").startswith("zh")
+
+    def decode(clip) -> tuple[str, list[str]]:
+        if len(clip) < 3200:
+            return "", []
+        segs, _ = model.transcribe(clip, language=lang, task="transcribe",
+                                   beam_size=int(settings.get("asr_beam_size", 5)), vad_filter=False,
+                                   condition_on_previous_text=False, initial_prompt=ZH_PROMPT if zh else None,
+                                   no_speech_threshold=0.6)
+        parts = [s.text.strip() for s in segs if getattr(s, "no_speech_prob", 0) < 0.6]
+        text = ("" if zh else " ").join(parts)
+        return _clean_repeats(to_simplified(text) if zh else text), []
+    return decode
+
+
 def transcribe(audio_path: str | Path, settings: dict, language: str = "zh",
                progress: Callable[[float, str], None] | None = None,
                cancel: Callable[[], bool] | None = None, duration: float = 0.0) -> list[Segment]:

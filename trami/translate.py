@@ -52,6 +52,7 @@ Yêu cầu bắt buộc:
 
 SYL_PER_SEC = 4.6      # tiếng Việt lồng tiếng tự nhiên ~4–5 tiếng/giây
 BUDGET_RE = re.compile(r"\s*⟪[^⟫]*⟫\s*")
+HAN_RE = re.compile(r"[㐀-鿿]")
 
 SHORTEN_PROMPT = """Bạn là biên tập viên lồng tiếng phim. Mỗi mục gồm câu gốc tiếng Trung, bản dịch tiếng Việt hiện tại và
 số tiếng (âm tiết) tối đa. Hãy viết lại bản dịch NGẮN HƠN, không vượt số tiếng tối đa, vẫn tự nhiên, giữ đúng ý chính,
@@ -65,6 +66,11 @@ def syllables(text: str) -> int:
 def budget_for(duration: float, speedup: float = 1.0) -> int:
     """Số tiếng tối đa nói vừa trong `duration` giây (cho phép tăng tốc nhẹ `speedup`)."""
     return max(2, int(duration * SYL_PER_SEC * speedup))
+
+
+def untranslated(text: str) -> bool:
+    """Bản dịch rỗng hoặc vẫn còn chữ Hán (AI chép lại câu gốc / bỏ sót) -> coi như chưa dịch."""
+    return not (text or "").strip() or len(HAN_RE.findall(text)) >= 2
 
 
 def parse_glossary(text: str) -> dict[str, str]:
@@ -228,7 +234,7 @@ class Translator:
         results = self.translate_lines(texts, progress, cancel, summary=summary)
         for i, t in zip(idx, results):
             segs[i].trans = BUDGET_RE.sub(" ", t or "").strip()
-            if segs[i].trans:   # nhớ cả theo câu gốc -> dịch lại / dịch câu chọn không tốn API
+            if segs[i].trans and not untranslated(segs[i].trans):   # nhớ theo câu gốc -> dịch lại không tốn API
                 self.cache.setdefault(f"{self.engine}|{self.style}|{segs[i].text}", segs[i].trans)
         return segs
 
@@ -254,9 +260,9 @@ class Translator:
         out: list[str | None] = [None] * len(lines)
         todo = []
         for i, l in enumerate(lines):
-            key = f"{self.engine}|{self.style}|{l}"
-            if key in self.cache:
-                out[i] = self.cache[key]
+            hit = self.cache.get(f"{self.engine}|{self.style}|{l}")
+            if hit and not untranslated(hit):   # bản dịch rỗng / còn chữ Hán (lần trước lỗi) -> dịch lại
+                out[i] = hit
             else:
                 todo.append(i)
         done = len(lines) - len(todo)
@@ -270,7 +276,8 @@ class Translator:
                 for j, r in enumerate(res):
                     gi = todo[pos + j]
                     out[gi] = r
-                    self.cache[f"{self.engine}|{self.style}|{lines[gi]}"] = r
+                    if r:
+                        self.cache[f"{self.engine}|{self.style}|{lines[gi]}"] = r
                 pos += len(chunk)
                 done += len(chunk)
                 if progress:
@@ -285,7 +292,8 @@ class Translator:
                 res = self._llm_batch([lines[i] for i in ids], ctx_before, ctx_after, summary)
                 for gi, r in zip(ids, res):
                     out[gi] = r
-                    self.cache[f"{self.engine}|{self.style}|{lines[gi]}"] = r
+                    if r and not untranslated(r):
+                        self.cache[f"{self.engine}|{self.style}|{lines[gi]}"] = r
                 done += len(ids)
                 if progress:
                     progress(done / len(lines), f"AI đang dịch {done}/{len(lines)} câu ({self.engine})")
@@ -353,7 +361,7 @@ class Translator:
             d = None
         if d is not None:
             res = [(d.get(str(i + 1)) or "").strip() if isinstance(d.get(str(i + 1)), str) else "" for i in range(len(lines))]
-            miss = [i for i, r in enumerate(res) if not r and lines[i].strip()]
+            miss = [i for i, r in enumerate(res) if (not r or untranslated(r)) and lines[i].strip()]
             if not miss:
                 return res
             if len(miss) <= max(2, len(lines) // 8) and depth < 4:

@@ -143,6 +143,22 @@ def transcribe_sensevoice(audio_path: str | Path, settings: dict, language: str 
     return segs
 
 
+def sensevoice_decoder(settings: dict, language: str = "zh") -> Callable[[np.ndarray], tuple[str, list[str]]]:
+    """Hàm nghe 1 đoạn ngắn (16 kHz) bằng SenseVoice – dùng để nghe lại các đoạn bị bộ chia đoạn bỏ sót."""
+    from .asr import to_simplified
+
+    model = _model("sensevoice", model="iic/SenseVoiceSmall", device=_device(settings.get("asr_device", "auto")))
+    lang = {"zh": "zh", "yue": "yue", "en": "en", "ja": "ja", "ko": "ko"}.get(language, "auto")
+
+    def decode(clip: np.ndarray) -> tuple[str, list[str]]:
+        if len(clip) < SR * 0.2:
+            return "", []
+        res = model.generate(input=[clip], language=lang, use_itn=True, batch_size=1)
+        text, tags = parse_sensevoice((res[0] if res else {}).get("text", ""))
+        return (to_simplified(text) if lang in ("zh", "auto", "yue") else text), tags
+    return decode
+
+
 def transcribe_paraformer(audio_path: str | Path, settings: dict, progress=None, cancel=None,
                           with_speakers: bool = True) -> list[Segment]:
     """Paraformer-zh + dấu câu + mốc thời gian câu + phân người nói CAM++ (chỉ tiếng Trung)."""

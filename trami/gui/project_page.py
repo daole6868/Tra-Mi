@@ -907,7 +907,8 @@ class ProjectPage(QWidget):
 
         def fn(j, p):
             n = pipeline.recognize(p, o["method"], o["language"], region, 4.0, st, j.update, j.cancelled, o["denoise"])
-            return {"message": f"Đã lấy {n} câu phụ đề"}
+            r = p.data.get("asr_rescued", 0)
+            return {"message": f"Đã lấy {n} câu phụ đề" + (f" (nghe lại được thêm {r} câu bị sót)" if r else "")}
         self.submit("recognize", "Lấy phụ đề", fn)
 
     def run_translate(self, only_empty: bool):
@@ -915,7 +916,8 @@ class ProjectPage(QWidget):
 
         def fn(j, p):
             n = pipeline.translate(p, eng, sty, only_empty, None, j.update, j.cancelled)
-            return {"message": f"Đã dịch {n} câu"}
+            w = p.data.get("translate_warning")
+            return {"message": f"Đã dịch {n} câu" + (f" – ⚠ {w}" if w else "")}
         self.submit("translate", "Dịch phụ đề", fn)
 
     def run_separate(self):

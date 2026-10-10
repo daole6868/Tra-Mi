@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import ffmpeg as ff
-from .config import load_settings
+from .config import load_settings, log_error
 from .project import Project, safe_name
 from .subtitle import normalize, save_subtitles
 
@@ -160,6 +160,41 @@ def align_segments(segs, wav: Path, language: str, settings: dict, progress: Pro
         return segs
 
 
+def rescue_segments(segs, wav: Path, engine: str, language: str, settings: dict, keep_speakers: bool = False,
+                    progress: Prog | None = None, cancel=None) -> tuple[list, int]:
+    """Tìm đoạn có tiếng nói (trên giọng đã tách) mà chưa có câu nào, nghe lại từng đoạn. Trả về (câu, số câu thêm)."""
+    from . import align
+    from .asr_funasr import load_wav16k
+
+    try:
+        if engine == "whisper":
+            from .asr import whisper_decoder
+
+            decode = whisper_decoder(settings, language)
+        else:
+            from . import models
+            from .asr_funasr import sensevoice_decoder
+
+            if engine == "paraformer" and not models.is_ready("sensevoice"):
+                return segs, 0
+            decode = sensevoice_decoder(settings, language)
+        new = align.rescue_missed(segs, load_wav16k(wav), decode, int(settings.get("asr_max_chars", 22)),
+                                  progress, cancel)
+    except ff.Cancelled:
+        raise
+    except Exception as e:  # noqa: BLE001 – bước phụ, lỗi thì giữ kết quả nhận dạng
+        log_error("Nghe lại đoạn bị sót")
+        if progress:
+            progress(1.0, f"Bỏ qua nghe lại đoạn bị sót ({str(e)[:80]})")
+        return segs, 0
+    if keep_speakers and segs:
+        for s in new:   # Paraformer đã phân người nói: câu nghe lại lấy người nói của câu gần nhất
+            s.speaker = min(segs, key=lambda x: abs((x.start + x.end) / 2 - (s.start + s.end) / 2)).speaker
+    if progress:
+        progress(1.0, f"Nghe lại: thêm {len(new)} câu bị sót" if new else "Không có câu bị sót")
+    return sorted(segs + new, key=lambda s: s.start), len(new)
+
+
 def realign(p: Project, settings: dict | None = None, progress: Prog | None = None, cancel=None) -> int:
     """Căn lại thời gian cho phụ đề đã có (dự án cũ). Trả về số câu sau khi căn. Câu bị tách mất bản dịch."""
     settings = settings or load_settings()
@@ -263,6 +298,11 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
             mark_songs(segs)
         p.data["asr_engine_used"] = engine
         p.data["language"] = language
+        # 2a) nghe lại các đoạn CÓ TIẾNG mà bộ chia đoạn (VAD) bỏ sót -> không còn câu bị bỏ không dịch
+        p.data["asr_rescued"] = 0
+        if settings.get("asr_rescue", True) and segs is not None and audio_in != Path(src):
+            segs, p.data["asr_rescued"] = rescue_segments(segs, wav, engine, language, settings, spk_from_asr,
+                                                          _sub(progress, asr_end - 0.03, asr_end), cancel)
         # 2b) căn thời gian từng chữ: mốc câu sát lời thật, cắt câu ở chỗ nghỉ
         if settings.get("align_words", True) and segs:
             segs = align_segments(segs, wav, language, settings, _sub(progress, asr_end, asr_end + 0.07), cancel)
@@ -317,8 +357,15 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
         if k not in user_g:
             proj_g.setdefault(k, v)
     p.data["glossary"] = glossary_text(proj_g)
-    p.data["translate_warning"] = (f"{tr.fallback_lines} câu AI trả lời lỗi định dạng nên đã dịch bằng Google – "
-                                   f"nên soát lại các câu này" if tr.fallback_lines else "")
+    from .translate import untranslated
+
+    left = sum(1 for s in segs if s.text.strip() and untranslated(s.trans))
+    warn = []
+    if tr.fallback_lines:
+        warn.append(f"{tr.fallback_lines} câu AI trả lời lỗi định dạng nên đã dịch bằng Google – nên soát lại các câu này")
+    if left:
+        warn.append(f"{left} câu chưa dịch được (mạng/API lỗi) – bấm 'Dịch dòng trống' ở tab Phụ đề để dịch nốt")
+    p.data["translate_warning"] = ". ".join(warn)
     p.segments = segs
     p.save()
     return sum(1 for s in segs if s.trans)
