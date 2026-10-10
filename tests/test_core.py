@@ -396,6 +396,32 @@ def test_diarize_cluster():
         assert purity > 0.97
 
 
+def test_diarize_merges_ghost_speakers():
+    """Vài câu gào / cười của 1 nhân vật lệch giọng thành cụm riêng -> gộp về nhân vật gần nhất;
+    nhân vật thật nói ít nhưng giọng khác hẳn thì vẫn giữ riêng."""
+    from trami.diarize import cluster
+
+    rng = np.random.default_rng(2)
+    c = rng.normal(size=(3, 192))
+    c /= np.linalg.norm(c, axis=1, keepdims=True)
+
+    def around(v, k, noise):
+        e = v + rng.normal(scale=noise, size=(k, 192))
+        return e / np.linalg.norm(e, axis=1, keepdims=True)
+
+    u = rng.normal(size=192)
+    u -= (u @ c[0]) * c[0]
+    ghost = 0.53 * c[0] + np.sqrt(1 - 0.53 ** 2) * u / np.linalg.norm(u)   # giọng A biến dạng (gào, cười)
+    e = np.vstack([around(c[0], 20, 0.04), around(c[1], 15, 0.04), around(ghost, 2, 0.02), around(c[2], 2, 0.02)])
+    durs = np.r_[np.full(35, 2.0), [0.9, 1.0], [1.5, 1.4]]
+    sim_ghost = float((e[35:37].mean(0) / np.linalg.norm(e[35:37].mean(0))) @ c[0])
+    assert 0.45 < sim_ghost < 0.62                        # đủ khác để thành cụm riêng ở ngưỡng 0,62
+    lab = cluster(e, 0.62, 0, durs)
+    assert len(set(lab[35:37])) == 1 and lab[35] == lab[0]   # cụm ảo gộp về A
+    assert lab[37] == lab[38] and lab[37] not in (lab[0], lab[20])   # người thứ 3 (giọng khác hẳn) giữ riêng
+    assert len(set(lab)) == 3
+
+
 def test_sensevoice_parsing_and_songs():
     from trami.asr_funasr import mark_songs, parse_sensevoice, split_long
 
@@ -699,8 +725,46 @@ def test_align_split_at_pause_and_speaker_change():
     def emb(w):
         sp = np.abs(np.fft.rfft(w))[:2000]
         return sp / (np.linalg.norm(sp) + 1e-9)
+    # không dấu câu, không mốc từng chữ -> KHÔNG cắt (trước đây cắt theo ước lượng, hay cắt đôi 1 từ)
     parts = align.split_speaker_changes([Segment(0, 6, "我们一起去吃饭吧好不好你说呢", "")], b, emb)
-    assert len(parts) == 2 and abs(parts[0].end - 3.0) < 0.5
+    assert len(parts) == 1
+    # có dấu phẩy gần chỗ đổi giọng -> cắt đúng ở dấu phẩy
+    parts = align.split_speaker_changes([Segment(0, 6, "我们一起去吃饭吧，好不好你说呢", "")], b, emb)
+    assert [p.text for p in parts] == ["我们一起去吃饭吧，", "好不好你说呢"] and abs(parts[0].end - 3.0) < 0.6
+    # có mốc từng chữ thật (fa-zh) và chỗ nghỉ ở 3,0 s -> cắt ở chỗ nghỉ dù không có dấu câu
+    ct = [[i * 0.4, i * 0.4 + 0.35] for i in range(7)] + [[3.1 + i * 0.4, 3.45 + i * 0.4] for i in range(7)]
+    seg = Segment(0, 6, "我们一起去吃饭吧好不好你说呢", "")
+    seg.extra["ct"] = ct
+    parts = align.split_speaker_changes([seg], b, emb)
+    assert [p.text for p in parts] == ["我们一起去吃饭", "吧好不好你说呢"]
+
+
+def test_plan_cuts_sentences():
+    """Tách câu: ở dấu câu, gộp mẩu ngắn, câu dài không dấu câu cắt ở ranh giới từ – không cắt đôi từ / số."""
+    from trami import align
+
+    def run(text, exact=False, gaps=None, max_chars=22):
+        pos = align._char_positions(text)
+        t, times = 0.0, []
+        for k in range(len(pos)):
+            times.append((t, t + 0.2))
+            t += 0.2 + ((gaps or {}).get(k, 0.0))
+        cuts = align.plan_cuts(text, pos, times, max_chars, exact)
+        return align._split_text(text, pos, cuts) if cuts else [text]
+
+    # số đi theo phần sau, không dính vào câu trước ("6" | "块钱" là lỗi cũ)
+    assert run("爸最好了，6块钱可以干啥，你根本不懂。") == ["爸最好了，", "6块钱可以干啥，", "你根本不懂。"]
+    # mẩu ngắn "哇，" gộp vào câu sau; câu dài không dấu câu cắt ở ranh giới từ
+    out = run("哇，这个形态的GPT好可爱啊")
+    assert out == ["哇，这个形态的GPT好可爱啊"]
+    out = run("这臭中转站到底黑了我们多少优惠啊没给用户留下豆包就不错了", max_chars=16)
+    assert len(out) == 2 and all(len(x) <= 16 for x in out)
+    assert not any(x.startswith("们") or x.endswith("我") for x in out)    # không cắt đôi "我们"
+    # có mốc thật: nghỉ dài 0,8 s giữa 2 vế không dấu câu -> tách; nghỉ ngắn -> không
+    assert run("快想办法给我变回去估计额度用完了", exact=True, gaps={8: 0.8}) == ["快想办法给我变回去", "估计额度用完了"]
+    assert run("快想办法给我变回去估计额度用完了", exact=True, gaps={8: 0.2}) == ["快想办法给我变回去估计额度用完了"]
+    # chỗ nghỉ có chữ Latin xen giữa (GPT đang được nói) -> không cắt
+    assert run("这个形态的GPT好可爱啊", exact=True, gaps={4: 0.9}) == ["这个形态的GPT好可爱啊"]
 
 
 def test_rescue_missed_speech():
@@ -713,15 +777,32 @@ def test_rescue_missed_speech():
     for s0, d in ((1, 1.6), (4, 1), (7, 1), (10, 1)):   # các đoạn có tiếng
         a[int(s0 * sr):int((s0 + d) * sr)] = 0.3 * np.sin(2 * np.pi * 220 * t[:int(d * sr)])
     segs = [Segment(0.95, 2.05, "第一句话")]   # chỉ nhận dạng được đoạn đầu (mốc hơi hụt cuối)
-    answers = iter(["一句话", "你别过来", "第一句话", "啊"])
+    queue = iter(["你别过来", "第一句话", "啊"])
+
+    def decode(clip):
+        d = len(clip) / sr
+        if d > 1.6:
+            return "第一句话", ["Speech"]           # nghe gộp với câu sát bên: không dài hơn -> giữ câu cũ
+        if d < 0.9:
+            return "一句话", ["Speech"]             # đuôi câu sát bên
+        return next(queue), ["Speech"]
 
     wins = align.missed_speech([(s.start, s.end) for s in segs], a)
     assert [round(w[0]) for w in wins] == [2, 4, 7, 10]
     assert all(w[2] >= 2.05 for w in wins)              # cửa sổ nghe lại không lấn vào câu đã có
-    new = align.rescue_missed(segs, a, lambda clip: (next(answers), ["Speech"]))
+    new = align.rescue_missed(segs, a, decode)
     # "一句话" = đuôi câu sát bên -> bỏ; "第一句话" ở xa 5 giây là câu nói lại -> giữ; "啊" 1 chữ -> bỏ
     assert [n.text for n in new] == ["你别过来", "第一句话"]
     assert all(n.extra.get("rescued") for n in new) and 3.9 < new[0].start < 4.1
+    assert not segs[0].extra.get("absorbed")
+
+    # nửa câu bị VAD bỏ ("不要再") nằm sát nửa kia đã nhận dạng ("说") -> nghe gộp, thay bằng 1 câu trọn vẹn
+    b = np.zeros(sr * 4, np.float32)
+    b[int(1.0 * sr):int(2.0 * sr)] = 0.3 * np.sin(2 * np.pi * 220 * t[:sr])
+    half = [Segment(1.6, 2.0, "说。")]
+    new = align.rescue_missed(half, b, lambda clip: ("不要再说了。" if len(clip) > 0.9 * sr else "不要再。", ["Speech"]))
+    assert [n.text for n in new] == ["不要再说了。"] and half[0].extra.get("absorbed")
+    assert new[0].start <= 1.05 and new[0].end >= 1.95
 
 
 @pytest.mark.parametrize("model", ["vocals_mel_band_roformer.ckpt",

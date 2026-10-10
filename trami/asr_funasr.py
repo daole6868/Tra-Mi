@@ -105,7 +105,10 @@ def vad_segments(audio: np.ndarray, device: str) -> list[tuple[float, float]]:
 
 
 def transcribe_sensevoice(audio_path: str | Path, settings: dict, language: str = "zh",
-                          progress: Callable[[float, str], None] | None = None, cancel=None) -> list[Segment]:
+                          progress: Callable[[float, str], None] | None = None, cancel=None,
+                          split: bool = True) -> list[Segment]:
+    """split=False: giữ nguyên mỗi đoạn giọng nói 1 dòng – bước căn thời gian sẽ tách câu theo mốc từng chữ
+    (đúng chỗ dấu câu / chỗ nghỉ), thay vì chia theo tỉ lệ số chữ (hay cắt đôi câu)."""
     from .asr import is_hallucination, to_simplified
 
     dev = _device(settings.get("asr_device", "auto"))
@@ -132,7 +135,7 @@ def transcribe_sensevoice(audio_path: str | Path, settings: dict, language: str 
             text = to_simplified(text) if lang in ("zh", "auto", "yue") else text
             if not text or is_hallucination(text):
                 continue
-            for a, z, t in split_long(s, e, text, max_chars):
+            for a, z, t in (split_long(s, e, text, max_chars) if split else [(s, e, text)]):
                 seg = Segment(round(a, 3), round(z, 3), t)
                 seg.extra["tags"] = [x for x in tags if x not in ("withitn", "woitn")]
                 segs.append(seg)

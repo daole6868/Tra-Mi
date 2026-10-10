@@ -135,6 +135,9 @@ def diarize(p: Project, settings: dict | None = None, progress: Prog | None = No
                         int(settings.get("diarize_speakers", 0)), progress, cancel,
                         split_changes=bool(settings.get("split_speaker_changes", True)))
     p.data["speaker_splits"] = int(getattr(assign_speakers, "splits", 0))
+    from .align import drop_char_times
+
+    drop_char_times(segs)
     p.segments = segs
     p.save()
     return n
@@ -146,18 +149,35 @@ def align_segments(segs, wav: Path, language: str, settings: dict, progress: Pro
     from .asr_funasr import available as fa_available, load_wav16k
     from .progress_hook import tqdm_progress
 
+    max_chars = int(settings.get("asr_max_chars", 22))
     try:
         audio = load_wav16k(wav)
         use_fa = language in ("zh", "auto", "yue") and fa_available() and bool(settings.get("align_fa", True))
         with tqdm_progress(progress, 0.0, 1.0, "Đang căn thời gian từng chữ", cancel,
                            download="Đang tải mô hình căn thời gian (fa-zh)"):
-            return align.refine(segs, audio, use_fa=use_fa, progress=progress, cancel=cancel)
+            return align.refine(segs, audio, use_fa=use_fa, progress=progress, cancel=cancel, max_chars=max_chars)
     except ff.Cancelled:
         raise
     except Exception as e:  # noqa: BLE001 – không để bước phụ làm hỏng cả quy trình
+        log_error("Căn thời gian")
         if progress:
             progress(1.0, f"Bỏ qua căn thời gian ({str(e)[:80]})")
-        return segs
+        return split_lines(segs, max_chars)
+
+
+def split_lines(segs, max_chars: int = 22):
+    """Chia dòng dài theo dấu câu / số chữ (cách cũ, khi không căn được thời gian từng chữ)."""
+    from .asr_funasr import split_long
+    from .subtitle import Segment
+
+    out = []
+    for s in segs:
+        parts = split_long(s.start, s.end, s.text, max_chars) if s.text else []
+        if len(parts) <= 1:
+            out.append(s)
+            continue
+        out += [Segment(round(a, 3), round(b, 3), t, "", s.speaker, dict(s.extra)) for a, b, t in parts]
+    return out
 
 
 def rescue_segments(segs, wav: Path, engine: str, language: str, settings: dict, keep_speakers: bool = False,
@@ -192,7 +212,8 @@ def rescue_segments(segs, wav: Path, engine: str, language: str, settings: dict,
             s.speaker = min(segs, key=lambda x: abs((x.start + x.end) / 2 - (s.start + s.end) / 2)).speaker
     if progress:
         progress(1.0, f"Nghe lại: thêm {len(new)} câu bị sót" if new else "Không có câu bị sót")
-    return sorted(segs + new, key=lambda s: s.start), len(new)
+    kept = [s for s in segs if not s.extra.pop("absorbed", None)]
+    return sorted(kept + new, key=lambda s: s.start), len(new)
 
 
 def realign(p: Project, settings: dict | None = None, progress: Prog | None = None, cancel=None) -> int:
@@ -208,6 +229,9 @@ def realign(p: Project, settings: dict | None = None, progress: Prog | None = No
         ff.run(["-i", str(src), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav)],
                p.data.get("info", {}).get("duration", 0), _sub(progress, 0, 0.1), cancel, "Đang chuẩn bị âm thanh")
     segs = align_segments(segs, wav, p.data.get("language", "zh"), settings, _sub(progress, 0.1, 1.0), cancel)
+    from .align import drop_char_times
+
+    drop_char_times(segs)
     p.segments = segs
     p.save()
     return len(segs)
@@ -278,7 +302,10 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         if engine in ("sensevoice", "paraformer"):
             try:
                 if engine == "sensevoice":
-                    segs = asr_funasr.transcribe_sensevoice(wav, settings, language, pr, cancel)
+                    # có căn thời gian thì để bước căn tách câu (theo mốc từng chữ), không chia theo số chữ trước
+                    segs = asr_funasr.transcribe_sensevoice(wav, settings, language, pr, cancel,
+                                                            split=not (settings.get("align_words", True)
+                                                                       and language in ("zh", "yue", "auto")))
                 else:
                     segs = asr_funasr.transcribe_paraformer(wav, settings, pr, cancel, with_speakers=want_spk)
                     spk_from_asr = want_spk and any(s.speaker for s in segs)
@@ -307,13 +334,18 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         if settings.get("align_words", True) and segs:
             segs = align_segments(segs, wav, language, settings, _sub(progress, asr_end, asr_end + 0.07), cancel)
     segs = normalize(segs)
+    want_dz = want_spk and not spk_from_asr and bool(segs)
+    if not want_dz:
+        from .align import drop_char_times
+
+        drop_char_times(segs)
     p.segments = segs
     p.data["sub_source"] = method
     if method != "ocr" and engine != "whisper":
         p.data.pop("asr_warning", None)
     p.save()
     # 3) phân biệt người nói
-    if want_spk and not spk_from_asr and segs:
+    if want_dz:
         from . import diarize as dz
 
         if dz.available():
@@ -324,7 +356,19 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
             except Exception as e:
                 if progress:
                     progress(1.0, f"Bỏ qua phân biệt người nói ({str(e)[:80]})")
-    return len(segs)
+        _drop_char_times(p)
+    return len(p.segments)
+
+
+def _drop_char_times(p: Project) -> None:
+    """Mốc từng chữ (extra["ct"]) chỉ dùng trong lúc nhận dạng – không lưu vào dự án (sửa chữ sẽ lệch)."""
+    from .align import drop_char_times
+
+    segs = p.segments
+    if any("ct" in s.extra for s in segs):
+        drop_char_times(segs)
+        p.segments = segs
+        p.save()
 
 
 # ------------------------------------------------------------------ dịch

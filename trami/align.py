@@ -16,7 +16,11 @@ from .subtitle import Segment
 
 SR = 16000
 CJK = re.compile(r"[㐀-鿿]")
-GAP_SPLIT = 0.35     # chỗ nghỉ dài hơn mức này thì tách câu
+GAP_SPLIT = 0.35     # (dự phòng theo độ to) cụm tiếng cách nhau hơn mức này là 2 vế
+LONG_PAUSE = 0.6     # có mốc từng chữ thật: nghỉ dài hơn mức này giữa 2 chữ (không dấu câu) cũng là hết câu
+SHORT_PIECE = 2      # mẩu ≤ 2 chữ ("哇，", "嘿嘿，") gộp vào câu sát bên nếu nói liền
+STRONG = "。！？!?…"
+WEAK = "，,；;：:"
 PAD = 0.05           # chừa thêm trước/sau mỗi câu
 Prog = Callable[[float, str], None]
 
@@ -174,11 +178,11 @@ def _char_positions(text: str) -> list[int]:
 
 
 def _split_text(text: str, pos: list[int], cuts: list[int]) -> list[str]:
-    """Cắt text sau chữ Hán thứ cuts[k]; dấu câu đi theo phần trước."""
+    """Cắt text sau chữ Hán thứ cuts[k]; dấu câu đi theo phần trước, số / chữ Latin đi theo phần sau."""
     parts, last = [], 0
     for c in cuts:
         end = pos[c] + 1
-        while end < len(text) and not CJK.match(text[end]):
+        while end < len(text) and not CJK.match(text[end]) and not text[end].isalnum():
             end += 1
         parts.append(text[last:end].strip())
         last = end
@@ -186,10 +190,88 @@ def _split_text(text: str, pos: list[int], cuts: list[int]) -> list[str]:
     return parts
 
 
+def _boundary(text: str, pos: list[int], k: int) -> str:
+    """Giữa chữ Hán thứ k và k+1 có gì: 'strong' (。！？) / 'weak' (，；：) / 'word' (số, chữ Latin) / ''."""
+    between = text[pos[k] + 1:pos[k + 1]]
+    if any(c in STRONG for c in between):
+        return "strong"
+    if any(c in WEAK for c in between):
+        return "weak"
+    return "word" if any(c.isalnum() for c in between) else ""
+
+
+def _word_cut(text: str, pos: list[int], cand: list[int]) -> int:
+    """Chỗ cắt (chỉ số chữ Hán, cắt SAU chữ đó) trong `cand` gần giữa nhất mà không cắt đôi 1 từ."""
+    mid = (cand[0] + cand[-1]) / 2
+    ok = list(cand)
+    try:
+        import jieba
+
+        jieba.setLogLevel(60)
+        ends, i = set(), 0
+        for w in jieba.cut(text):
+            i += len(w)
+            ends.add(i - 1)                       # vị trí ký tự cuối của mỗi từ
+        ok = [k for k in ok if pos[k] in ends or pos[k + 1] - pos[k] > 1] or ok
+    except Exception:  # noqa: BLE001 – không có jieba: cắt gần giữa
+        pass
+    return min(ok, key=lambda k: abs(k - mid))
+
+
+def plan_cuts(text: str, pos: list[int], times: list[tuple[float, float]], max_chars: int = 22,
+              exact: bool = False) -> list[int]:
+    """Chỗ tách câu (cắt SAU chữ Hán thứ k). Chỉ tách ở dấu câu, ở chỗ nghỉ dài thật (khi có mốc từng chữ) và khi
+    câu quá dài – không bao giờ cắt giữa 1 từ; mẩu quá ngắn được gộp lại vào câu sát bên."""
+    n = len(pos)
+    if n < 2:
+        return []
+    kind = [_boundary(text, pos, k) for k in range(n - 1)]
+    gap = [max(0.0, times[k + 1][0] - times[k][1]) for k in range(n - 1)]
+    cuts = {k for k in range(n - 1) if kind[k] in ("strong", "weak")}
+    if exact:
+        cuts |= {k for k in range(n - 1) if not kind[k] and gap[k] >= LONG_PAUSE and k >= 1 and n - k - 1 >= 2}
+    cuts = sorted(cuts)
+    while True:   # gộp mẩu ngắn vào câu kề, ưu tiên phía nghỉ ngắn hơn
+        bounds = [-1] + cuts + [n - 1]
+        best = None
+        for j in range(len(bounds) - 1):
+            size = bounds[j + 1] - bounds[j]
+            if size > SHORT_PIECE:
+                continue
+            for c, other in ((bounds[j + 1], bounds[j + 2] - bounds[j + 1] if j + 2 < len(bounds) else 0),
+                             (bounds[j], bounds[j] - bounds[j - 1] if j > 0 else 0)):
+                if other and c in cuts and size + other <= max_chars \
+                        and (gap[c] < 0.6 if kind[c] != "strong" else (size <= 1 and gap[c] < 0.3)):
+                    if best is None or gap[c] < best[0]:
+                        best = (gap[c], c)
+        if best is None:
+            break
+        cuts.remove(best[1])
+    # vế quá dài, không dấu câu: cắt ở chỗ nghỉ dài nhất (có mốc thật) hoặc ranh giới từ gần giữa
+    out: list[int] = []
+    bounds = [-1] + cuts + [n - 1]
+    for a, b in zip(bounds, bounds[1:]):
+        pieces = [(a, b)]
+        while pieces:
+            x, y = pieces.pop()
+            if y - x <= max_chars or y - x < 4:
+                out.append(y)
+                continue
+            lo, hi = x + 1 + (y - x) // 4, y - (y - x) // 4
+            cand = [k for k in range(lo, hi) if kind[k] != "word"] or list(range(lo, hi))
+            if exact and max(gap[k] for k in cand) >= 0.12:
+                c = max(cand, key=lambda k: gap[k])
+            else:
+                c = _word_cut(text, pos, cand)
+            pieces += [(c, y), (x, c)]
+    return sorted(set(out) - {n - 1})
+
+
 def refine(segs: list[Segment], audio: np.ndarray, use_fa: bool = True, progress: Prog | None = None,
-           cancel=None, duration: float = 0.0) -> list[Segment]:
-    """Trả về danh sách câu mới: mốc sát lời thật, câu có chỗ nghỉ dài được tách. Câu không phải tiếng Trung giữ nguyên
-    mốc (chỉ thu theo độ to)."""
+           cancel=None, duration: float = 0.0, max_chars: int = 22) -> list[Segment]:
+    """Trả về danh sách câu mới: mốc sát lời thật, mỗi dòng là 1 câu / vế câu trọn vẹn (`plan_cuts`).
+    Câu không phải tiếng Trung giữ nguyên mốc (chỉ thu theo độ to). Có mốc từng chữ thật thì lưu vào extra["ct"]
+    (để tách khi đổi người nói đúng chỗ nghỉ; xoá trước khi lưu dự án)."""
     from .ffmpeg import Cancelled
 
     total = duration or len(audio) / SR
@@ -204,9 +286,10 @@ def refine(segs: list[Segment], audio: np.ndarray, use_fa: bool = True, progress
         clip = audio[int(a0 * SR):int(a1 * SR)]
         pos = _char_positions(s.text)
         mask, hop = voiced_mask(clip)
-        times = None
+        times, exact = None, False
         if fa_ok and pos and len(clip) > SR * 0.3:
             times = char_times_fa(clip, "".join(s.text[i] for i in pos))
+            exact = times is not None
         if times is None and pos:
             # chỉ tính phần có tiếng nằm trong mốc gốc (không lấn sang câu bên cạnh)
             m2 = mask.copy()
@@ -222,12 +305,16 @@ def refine(segs: list[Segment], audio: np.ndarray, use_fa: bool = True, progress
                 en = min(s.end + 0.15, a0 + (vi[-1] + 1) * hop + PAD)
                 if en - st >= 0.3:
                     s.start, s.end = round(st, 3), round(en, 3)
+            if len(s.text) > max_chars:   # đoạn dài chưa tách (không đo được mốc) -> chia theo dấu câu / số chữ
+                from .asr_funasr import split_long
+
+                out += [Segment(round(x, 3), round(y, 3), t, "", s.speaker, dict(s.extra))
+                        for x, y, t in split_long(s.start, s.end, s.text, max_chars)]
+                continue
             out.append(s)
             continue
         times = [(a0 + a, a0 + b) for a, b in times]
-        cuts = [i for i in range(len(times) - 1)
-                if times[i + 1][0] - times[i][1] >= GAP_SPLIT
-                and i + 1 >= 2 and len(times) - (i + 1) >= 2]
+        cuts = plan_cuts(s.text, pos, times, max_chars, exact)
         texts = _split_text(s.text, pos, cuts) if cuts else [s.text]
         bounds = [0] + [c + 1 for c in cuts] + [len(times)]
         for j, t in enumerate(texts):
@@ -236,9 +323,11 @@ def refine(segs: list[Segment], audio: np.ndarray, use_fa: bool = True, progress
                          s.trans if not cuts else "", s.speaker, dict(s.extra))
             if ns.end - ns.start < 0.2:
                 ns.end = round(ns.start + 0.2, 3)
+            if exact:
+                ns.extra["ct"] = [[round(x, 3), round(y, 3)] for x, y in times[bounds[j]:bounds[j + 1]]]
             out.append(ns)
         if progress and k % 10 == 0:
-            progress(k / max(1, len(segs)), f"Đang căn thời gian từng chữ {k}/{len(segs)}")
+            progress(k / max(1, len(segs)), f"Đang căn thời gian và tách câu {k}/{len(segs)}")
     # không để câu chồng lên nhau sau khi nới mốc
     out.sort(key=lambda x: x.start)
     for a, b in zip(out, out[1:]):
@@ -247,6 +336,11 @@ def refine(segs: list[Segment], audio: np.ndarray, use_fa: bool = True, progress
             a.end = max(a.start + 0.1, min(a.end, mid))
             b.start = max(b.start, a.end)
     return out
+
+
+def drop_char_times(segs: list[Segment]) -> None:
+    for s in segs:
+        s.extra.pop("ct", None)
 
 
 # ------------------------------------------------------------------ nghe lại câu bị sót
@@ -294,7 +388,8 @@ def repeats_neighbor(text: str, segs: list[Segment], t0: float, t1: float, near:
 
 def rescue_missed(segs: list[Segment], audio: np.ndarray, decode: Callable, max_chars: int = 22,
                   progress: Prog | None = None, cancel=None) -> list[Segment]:
-    """Nghe lại các đoạn có tiếng mà chưa có câu: decode(clip) -> (lời, nhãn). Trả về các câu mới (chưa sắp xếp)."""
+    """Nghe lại các đoạn có tiếng mà chưa có câu: decode(clip) -> (lời, nhãn). Trả về các câu mới (chưa sắp xếp);
+    câu cũ được gộp vào câu mới có extra["absorbed"] = True – người gọi bỏ chúng đi."""
     from .asr import is_hallucination
     from .asr_funasr import split_long
     from .ffmpeg import Cancelled
@@ -306,13 +401,30 @@ def rescue_missed(segs: list[Segment], audio: np.ndarray, decode: Callable, max_
             raise Cancelled()
         if progress:
             progress(k / max(1, len(wins)), f"Nghe lại đoạn bị sót {k + 1}/{len(wins)}")
+        # câu ngắn nằm SÁT cửa sổ nghe lại thường là nửa kia của cùng 1 câu ("不要再" | "说") -> nghe gộp cả hai
+        touch = [s for s in segs if not s.extra.get("absorbed") and s.duration <= 2.5
+                 and len(CJK.findall(s.text)) <= 8 and (abs(s.start - hi) <= 0.15 or abs(lo - s.end) <= 0.15)]
+        if touch:
+            lo2, hi2 = min([lo] + [s.start for s in touch]), max([hi] + [s.end for s in touch])
+            text, tags = decode(audio[int(lo2 * SR):int(hi2 * SR)])
+            core = re.sub(r"[\W_]", "", text or "")
+            if len(core) >= max(len(re.sub(r"[\W_]", "", s.text)) for s in touch) + 2 and not is_hallucination(text):
+                for s in touch:
+                    s.extra["absorbed"] = True   # câu cũ bị thay bằng câu gộp (pipeline bỏ đi)
+                a, b = min([a] + [s.start for s in touch]), max([b] + [s.end for s in touch])
+                for x, y, t in split_long(a, b, text.strip(), max_chars):
+                    ns = Segment(round(x, 3), round(y, 3), t, "", touch[0].speaker)
+                    ns.extra.update({"tags": [g for g in tags if g not in ("withitn", "woitn")], "rescued": True})
+                    new.append(ns)
+                continue
         text, tags = decode(audio[int(lo * SR):int(hi * SR)])
         text = (text or "").strip()
         core = re.sub(r"[\W_]", "", text)
         n = len(CJK.findall(text)) if CJK.search(text) else len(core.split()) + (len(core) >= 4)
         if n < 2 or is_hallucination(text):
             continue   # mẩu 1 chữ ("啊", "嗯"…): tiếng thở / đuôi câu bên cạnh, không phải câu thoại
-        if any(t in tags for t in ("Breath", "Cough", "Sneeze")) or repeats_neighbor(text, segs, a, b):
+        if any(t in tags for t in ("Breath", "Cough", "Sneeze")) or \
+                repeats_neighbor(text, [s for s in segs if not s.extra.get("absorbed")], a, b):
             continue
         for x, y, t in split_long(a, b, text, max_chars):
             s = Segment(round(x, 3), round(y, 3), t)
@@ -349,37 +461,53 @@ def speaker_change_points(emb_fn, clip: np.ndarray, win: float = 1.2, hop: float
 
 def split_speaker_changes(segs: list[Segment], audio: np.ndarray, emb_fn, min_len: float = 2.4,
                           progress: Prog | None = None, cancel=None) -> list[Segment]:
-    """Câu dài có chỗ đổi giọng -> tách đôi tại chữ gần chỗ đổi nhất (theo thời gian từng chữ ước lượng)."""
+    """Câu dài có chỗ đổi giọng -> tách đôi, CHỈ ở dấu câu hoặc chỗ nghỉ thật (mốc từng chữ extra["ct"]) gần chỗ
+    đổi giọng (±0,8 s); không có chỗ như vậy thì giữ nguyên câu (không bao giờ cắt giữa 1 từ)."""
     from .ffmpeg import Cancelled
 
     out: list[Segment] = []
     for k, s in enumerate(segs):
         if cancel and cancel():
             raise Cancelled()
-        if s.duration < min_len:
+        pos = _char_positions(s.text)
+        if s.duration < min_len or len(pos) < 4:
             out.append(s)
             continue
         clip = audio[int(s.start * SR):int(s.end * SR)]
         pts = speaker_change_points(emb_fn, clip)
-        pos = _char_positions(s.text)
-        if not pts or len(pos) < 4:
+        if not pts:
             out.append(s)
             continue
-        mask, hop = voiced_mask(clip)
-        times = char_times_energy(mask, hop, len(pos)) or []
+        ct = s.extra.get("ct")
+        if ct and len(ct) == len(pos):
+            times = [(a - s.start, b - s.start) for a, b in ct]
+        else:
+            ct = None
+            mask, hop = voiced_mask(clip)
+            times = char_times_energy(mask, hop, len(pos)) or []
+        if len(times) != len(pos):
+            out.append(s)
+            continue
+        allowed = [c for c in range(1, len(pos) - 2)
+                   if _boundary(s.text, pos, c) in ("strong", "weak")
+                   or (ct and not _boundary(s.text, pos, c) and times[c + 1][0] - times[c][1] >= 0.15)]
         cuts = []
         for t in pts:
-            c = min(range(len(times) - 1), key=lambda i: abs(times[i][1] - t)) if len(times) > 1 else None
-            if c is not None and 1 <= c < len(pos) - 2 and c not in cuts:
-                cuts.append(c)
+            near = [c for c in allowed if abs((times[c][1] + times[c + 1][0]) / 2 - t) <= 0.8 and c not in cuts]
+            if near:
+                cuts.append(min(near, key=lambda c: abs((times[c][1] + times[c + 1][0]) / 2 - t)))
         if not cuts:
             out.append(s)
             continue
         cuts.sort()
         texts = _split_text(s.text, pos, cuts)
         edges = [s.start] + [round(s.start + (times[c][1] + times[c + 1][0]) / 2, 3) for c in cuts] + [s.end]
+        bounds = [0] + [c + 1 for c in cuts] + [len(pos)]
         for j, t in enumerate(texts):
-            out.append(Segment(edges[j], edges[j + 1], t, "", None, dict(s.extra)))
+            ex = dict(s.extra)
+            if ct:
+                ex["ct"] = ct[bounds[j]:bounds[j + 1]]
+            out.append(Segment(edges[j], edges[j + 1], t, "", None, ex))
         if progress and k % 10 == 0:
             progress(k / max(1, len(segs)), f"Đang tìm chỗ đổi người nói {k}/{len(segs)}")
     return out

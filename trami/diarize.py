@@ -83,7 +83,7 @@ def embed_segments(audio: np.ndarray, segs: list[Segment], progress=None, cancel
             raise Cancelled()
         a, b = int(s.start * SR), int(s.end * SR)
         wav = audio[a:b]
-        if len(wav) < SR * 0.5:  # câu quá ngắn -> giọng không đủ tin cậy, gán sau theo câu lân cận
+        if len(wav) < SR * 0.8:  # câu quá ngắn -> giọng không đủ tin cậy, gán sau theo câu lân cận
             continue
         wav = wav[: SR * 15]
         with torch.no_grad():
@@ -97,8 +97,10 @@ def embed_segments(audio: np.ndarray, segs: list[Segment], progress=None, cancel
     return idx, (np.vstack(embs) if embs else np.zeros((0, 192)))
 
 
-def cluster(embs: np.ndarray, threshold: float = 0.62, n_speakers: int = 0) -> np.ndarray:
-    """Gom cụm agglomerative (average linkage, cosine). Trả về nhãn 0..k-1, người nói nhiều nhất = 0."""
+def cluster(embs: np.ndarray, threshold: float = 0.62, n_speakers: int = 0,
+            durs: np.ndarray | None = None) -> np.ndarray:
+    """Gom cụm agglomerative (average linkage, cosine). Trả về nhãn 0..k-1, người nói nhiều nhất = 0.
+    durs: thời lượng từng câu – cụm "người nói" chỉ có ≤ 2 câu / < 3 giây thường là giọng gào, cười… của người đã có."""
     n = len(embs)
     if n == 0:
         return np.zeros(0, int)
@@ -132,14 +134,17 @@ def cluster(embs: np.ndarray, threshold: float = 0.62, n_speakers: int = 0) -> n
     labels = np.zeros(n, int)
     for k, g in enumerate(groups):
         labels[g] = k
-    # cụm quá nhỏ (1 câu) và gần 1 cụm lớn -> gộp vào để tránh "người nói ảo"
+    # cụm quá nhỏ (≤ 2 câu hoặc < 3 giây) và đủ gần 1 cụm lớn -> gộp vào để tránh "người nói ảo"
     if not n_speakers and len(groups) > 1:
+        w = np.ones(n) * 2.0 if durs is None else np.asarray(durs, float)
         cent = np.vstack([embs[g].mean(0) / np.linalg.norm(embs[g].mean(0)) for g in groups])
+        big = [k for k, g in enumerate(groups) if len(g) >= 3 and w[g].sum() >= 3.0] or [0]
         for k, g in enumerate(groups):
-            if len(g) == 1 and k > 0:
-                sims = cent[:k] @ embs[g[0]]
-                if sims.max() > threshold - 0.15:
-                    labels[g] = int(np.argmax(sims))
+            if k in big:
+                continue
+            sims = cent[big] @ cent[k]
+            if sims.max() > threshold - (0.15 if len(g) == 1 and durs is None else 0.2):
+                labels[g] = big[int(np.argmax(sims))]
         # đánh lại số liên tục
         uniq = {v: i for i, v in enumerate(sorted(set(labels.tolist()), key=lambda v: -np.sum(labels == v)))}
         labels = np.array([uniq[v] for v in labels])
@@ -186,7 +191,7 @@ def assign_speakers(audio_path: str | Path, segs: list[Segment], threshold: floa
         for s in segs:
             s.speaker = "S1"
         return 1
-    labels = cluster(embs, threshold, n_speakers)
+    labels = cluster(embs, threshold, n_speakers, np.array([segs[i].duration for i in idx]))
     for i, l in zip(idx, labels):
         segs[i].speaker = f"S{l + 1}"
     # câu ngắn chưa có nhãn -> lấy theo câu gần nhất về thời gian
