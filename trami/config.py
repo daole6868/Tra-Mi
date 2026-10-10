@@ -24,6 +24,9 @@ DATA_DIR = Path(os.environ.get("TRAMI_DATA", _default_data))
 PROJECTS_DIR = DATA_DIR / "projects"
 MODELS_DIR = DATA_DIR / "models"
 CACHE_DIR = DATA_DIR / "cache"
+# Mô hình ModelScope (SenseVoice, VAD, Paraformer, căn thời gian…) luôn cất ở MỘT chỗ: data/models/funasr
+# (trước 2.0.22: lúc dịch cất ở đây nhưng tab Tài liệu lại tải vào ~/.cache/modelscope -> tải lại 2 lần)
+os.environ.setdefault("MODELSCOPE_CACHE", str(MODELS_DIR / "funasr"))
 SETTINGS_FILE = DATA_DIR / "settings.json"
 
 for _d in (DATA_DIR, PROJECTS_DIR, MODELS_DIR, CACHE_DIR):

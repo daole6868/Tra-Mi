@@ -49,6 +49,12 @@ def _model(key: str, **kw):
     os.environ.setdefault("MODELSCOPE_CACHE", str(MODELS_DIR / "funasr"))
     with _lock:
         if key not in _cache:
+            from .models import ms_local_path
+
+            # mô hình đã có trên máy (ở bất kỳ thư mục cache nào) -> nạp thẳng từ thư mục đó, không tải lại
+            for k in ("model", "vad_model", "punc_model", "spk_model"):
+                if isinstance(kw.get(k), str):
+                    kw[k] = ms_local_path(kw[k])
             _cache[key] = AutoModel(disable_update=True, log_level="ERROR", **kw)
         return _cache[key]
 

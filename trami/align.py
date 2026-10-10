@@ -71,21 +71,39 @@ def _open(m: np.ndarray, k: int) -> np.ndarray:
 # ------------------------------------------------------------------ mốc từng chữ
 
 _fa_model = None
+_fa_error: str | None = None   # nạp mô hình lỗi 1 lần -> không thử lại (tránh tải đi tải lại)
 
 
 def _fa():
-    global _fa_model
+    global _fa_model, _fa_error
+    if _fa_error:
+        raise RuntimeError(_fa_error)
     if _fa_model is None:
-        from .asr_funasr import _device, _model
+        try:
+            from .asr_funasr import _device, _model
 
-        _fa_model = _model("fa-zh", model="fa-zh", device=_device("auto"))
+            _fa_model = _model("fa-zh", model="fa-zh", device=_device("auto"))
+        except Exception as e:  # noqa: BLE001
+            _fa_error = f"{type(e).__name__}: {e}"
+            raise
     return _fa_model
 
 
-def char_times_fa(clip: np.ndarray, chars: str) -> list[tuple[float, float]] | None:
-    """Mốc (giây, tính từ đầu clip) của từng chữ Hán bằng mô hình căn thời gian; None nếu không chạy được."""
+def fa_usable() -> bool:
+    """Nạp mô hình căn thời gian (chỉ thử 1 lần). False nếu không dùng được -> dùng cách dự phòng."""
     try:
-        res = _fa().generate(input=(clip, " ".join(chars)), data_type=("sound", "text"))
+        _fa()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def char_times_fa(clip: np.ndarray, chars: str) -> list[tuple[float, float]] | None:
+    """Mốc (giây, tính từ đầu clip) của từng chữ Hán bằng mô hình căn thời gian; None nếu câu này không căn được."""
+    if _fa_model is None:
+        return None
+    try:
+        res = _fa_model.generate(input=(clip, " ".join(chars)), data_type=("sound", "text"))
         ts = (res[0] or {}).get("timestamp") if res else None
         if not ts or len(ts) != len(chars):
             return None
@@ -176,7 +194,8 @@ def refine(segs: list[Segment], audio: np.ndarray, use_fa: bool = True, progress
 
     total = duration or len(audio) / SR
     out: list[Segment] = []
-    fa_ok = use_fa
+    # nạp mô hình căn thời gian đúng 1 lần cho cả video (lỗi -> cả video dùng cách dự phòng)
+    fa_ok = use_fa and any(CJK.search(s.text) for s in segs) and fa_usable()
     for k, s in enumerate(segs):
         if cancel and cancel():
             raise Cancelled()
@@ -188,8 +207,6 @@ def refine(segs: list[Segment], audio: np.ndarray, use_fa: bool = True, progress
         times = None
         if fa_ok and pos and len(clip) > SR * 0.3:
             times = char_times_fa(clip, "".join(s.text[i] for i in pos))
-            if times is None and k == 0:
-                fa_ok = False   # mô hình không chạy -> các câu sau dùng cách dự phòng luôn
         if times is None and pos:
             # chỉ tính phần có tiếng nằm trong mốc gốc (không lấn sang câu bên cạnh)
             m2 = mask.copy()

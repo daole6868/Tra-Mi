@@ -110,7 +110,8 @@ def ms_location(model_id: str) -> Path | None:
     bases = []
     if os.environ.get("MODELSCOPE_CACHE"):
         bases.append(Path(os.environ["MODELSCOPE_CACHE"]))
-    bases += [Path.home() / ".cache" / "modelscope" / "hub", Path.home() / ".cache" / "modelscope"]
+    bases += [MODELS_DIR / "funasr", Path.home() / ".cache" / "modelscope" / "hub", Path.home() / ".cache" / "modelscope"]
+    bases = list(dict.fromkeys(bases))
     for base in bases:
         for sub in ("models/" + org, org, "hub/models/" + org, "hub/" + org):
             for n in names:
@@ -132,6 +133,16 @@ def ms_location(model_id: str) -> Path | None:
                     if d.is_dir() and _has_weights(d):
                         return d
     return None
+
+
+def ms_local_path(name: str) -> str:
+    """Tên/mã mô hình FunASR -> thư mục đã tải trên máy (nếu có), để nạp thẳng không phải hỏi mạng / tải lại."""
+    mid = {"fsmn-vad": MS_IDS["fsmn-vad"], "paraformer-zh": MS_IDS["paraformer-zh"], "ct-punc": MS_IDS["ct-punc"],
+           "cam++": MS_IDS["cam++"], "fa-zh": MS_IDS["fa-zh"]}.get(name, name)
+    if "/" not in mid or os.path.isdir(mid):
+        return name
+    d = ms_location(mid)
+    return str(d) if d else name
 
 
 def _ms_cached(model_id: str) -> bool:
