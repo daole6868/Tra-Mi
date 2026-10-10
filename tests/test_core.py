@@ -620,3 +620,49 @@ def test_omnivoice_samples_and_dub(monkeypatch, tmp_path):
     assert any(x["id"] == f"omni:{v['id']}" for x in tts.list_voices({}))
     voices.delete(v["id"])
     assert voices.list_samples() == []
+
+
+def test_dub_placement_no_overlap(tmp_path, monkeypatch):
+    """Xếp giọng lồng: không câu nào chồng câu nào; câu quá dài bị đánh dấu 'long' và nằm trong too_long."""
+    from trami import tts
+
+    durs = {"vừa": 0.8, "dài": 1.6, "quá dài": 3.0, "cuối": 0.5}
+
+    async def fake(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, t, p, v in items:
+            _fake_audio(p.with_suffix(".x.wav"), durs[t], 300)
+            p.with_suffix(".x.wav").replace(p)
+        return []
+    monkeypatch.setattr(tts, "_edge_all", fake)
+    segs = [Segment(1.0, 2.0, "a", "vừa"), Segment(2.4, 3.4, "b", "dài"), Segment(3.6, 4.4, "c", "quá dài"),
+            Segment(4.7, 5.4, "d", "cuối")]
+    st = {}
+    tts.synthesize_dub(segs, tmp_path / "o.wav", 7, tmp_path / "w", max_speedup=1.3, stats=st)
+    lay = st["layout"]
+    assert all(lay[i][1] <= lay[i + 1][0] + 1e-6 for i in range(len(lay) - 1))
+    fits = {k: f for _, _, k, f in lay}
+    assert fits[0] == "ok" and fits[2] == "long" and [k for k, _, _ in st["too_long"]] == [2]
+    assert segs[2].extra["fit"] == "long"
+
+
+def test_align_split_at_pause_and_speaker_change():
+    from trami import align
+
+    sr = 16000
+    a = np.zeros(sr * 6, np.float32)
+    n1, n2 = np.arange(int(1.2 * sr)), np.arange(int(1.0 * sr))
+    a[int(1.2 * sr):int(1.2 * sr) + len(n1)] = 0.3 * np.sin(2 * np.pi * 220 * n1 / sr)
+    a[int(3.0 * sr):int(3.0 * sr) + len(n2)] = 0.3 * np.sin(2 * np.pi * 220 * n2 / sr)
+    out = align.refine([Segment(0.8, 4.5, "你好朋友，我们走吧。", "")], a, use_fa=False)
+    assert [x.text for x in out] == ["你好朋友，", "我们走吧。"]
+    assert abs(out[0].start - 1.15) < 0.1 and abs(out[1].end - 4.05) < 0.1
+    b = np.zeros(sr * 6, np.float32)
+    n = np.arange(sr * 3)
+    b[:sr * 3] = 0.3 * np.sin(2 * np.pi * 200 * n / sr)
+    b[sr * 3:] = 0.3 * np.sin(2 * np.pi * 900 * n / sr)
+
+    def emb(w):
+        sp = np.abs(np.fft.rfft(w))[:2000]
+        return sp / (np.linalg.norm(sp) + 1e-9)
+    parts = align.split_speaker_changes([Segment(0, 6, "我们一起去吃饭吧好不好你说呢", "")], b, emb)
+    assert len(parts) == 2 and abs(parts[0].end - 3.0) < 0.5

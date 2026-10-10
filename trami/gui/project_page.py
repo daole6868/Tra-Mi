@@ -21,7 +21,8 @@ from . import icons, theme
 from .common import run_async
 from .editors import RegionEditor, Timeline
 from .player import Player, fmt
-from .subs_model import C_END, C_NODUB, C_SONG, C_SPK, C_START, C_VI, C_ZH, SpeakerDelegate, SubsFilter, SubsModel
+from .subs_model import (C_END, C_FIT, C_NODUB, C_SONG, C_SPK, C_START, C_VI, C_ZH, SpeakerDelegate, SubsFilter,
+                         SubsModel)
 from .widgets import (Card, ColorButton, Form, GradientButton, IconButton, PillTabs, ProgressBar, SectionCard,
                       SliderRow, Switch, button, combo, hbox, label, set_combo, wrap)
 
@@ -169,7 +170,7 @@ class ProjectPage(QWidget):
         tv.verticalHeader().hide()
         tv.verticalHeader().setDefaultSectionSize(40)
         hh = tv.horizontalHeader()
-        for c, w in ((0, 40), (C_START, 92), (C_END, 92), (C_SPK, 58), (C_SONG, 34), (C_NODUB, 64)):
+        for c, w in ((0, 40), (C_START, 92), (C_END, 92), (C_SPK, 58), (C_SONG, 34), (C_NODUB, 64), (C_FIT, 74)):
             hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Fixed)
             tv.setColumnWidth(c, w)
         hh.setSectionResizeMode(C_ZH, QHeaderView.ResizeMode.Stretch)
@@ -195,8 +196,10 @@ class ProjectPage(QWidget):
                     button("Tách", "split", "Tách câu tại vị trí đang phát", on_click=lambda: self._seg_op("split")),
                     button("Xoá", "trash", "Xoá câu đang chọn", danger=True, on_click=lambda: self._seg_op("delete")),
                     button("Dời giờ", "clock", on_click=self._shift),
+                    button("Căn khớp thoại", "wand", "Căn mốc từng câu sát lời thoại thật, tách câu ở chỗ nghỉ "
+                           "(dùng cho phụ đề đã nhận dạng từ bản cũ)", on_click=self.run_realign),
                     button("Tìm && thay", "search", on_click=self._replace),
-                    None, label("Tự cuộn", "muted"), self.follow)
+                    None)
         self.glossary = QPlainTextEdit()
         self.glossary.setPlaceholderText("Mỗi dòng: 中文=Tiếng Việt   (VD: 李逍遥=Lý Tiêu Dao). AI tự điền khi dịch.")
         self.glossary.setFixedHeight(90)
@@ -209,7 +212,7 @@ class ProjectPage(QWidget):
         v.setSpacing(8)
         v.addLayout(bar1)
         v.addLayout(bar2)
-        v.addLayout(hbox(self.search, self.seg_count))
+        v.addLayout(hbox(self.search, self.seg_count, label("Tự cuộn", "muted"), self.follow))
         v.addWidget(tv, 1)
         v.addWidget(gl)
         return w
@@ -902,10 +905,20 @@ class ProjectPage(QWidget):
             return {"message": "Đã tách giọng nói / nhạc nền"}
         self.submit("separate", "Tách giọng/nhạc nền", fn)
 
+    def run_realign(self):
+        def fn(j, p):
+            before = len(p.segments)
+            n = pipeline.realign(p, None, j.update, j.cancelled)
+            extra = f" – tách thêm {n - before} câu, bấm 'Dịch dòng trống' để dịch các câu mới tách" if n > before else ""
+            return {"message": f"Đã căn lại thời gian {n} câu{extra}"}
+        self.submit("realign", "Căn lại thời gian", fn)
+
     def run_diarize(self):
         def fn(j, p):
             n = pipeline.diarize(p, None, j.update, j.cancelled)
-            return {"message": f"Tìm thấy {n} người nói"}
+            sp = p.data.get("speaker_splits", 0)
+            extra = f" – tách {sp} câu có 2 người nói liền nhau (bấm 'Dịch dòng trống' nếu đã dịch)" if sp else ""
+            return {"message": f"Tìm thấy {n} người nói{extra}"}
         self.submit("diarize", "Phân biệt người nói", fn)
 
     def run_dub(self):
@@ -980,7 +993,7 @@ class ProjectPage(QWidget):
 
     def _row_clicked(self, pidx):
         row = self.proxy.mapToSource(pidx).row()
-        if 0 <= row < len(self.model.segs) and pidx.column() not in (C_SONG, C_NODUB):
+        if 0 <= row < len(self.model.segs) and pidx.column() not in (C_SONG, C_NODUB, C_FIT):
             if pidx.column() in (0, C_START, C_END, C_SPK):
                 self.player.seek(self.model.segs[row].start + 0.01)
 
@@ -1197,6 +1210,7 @@ class ProjectPage(QWidget):
             return
         e = self.p.edit
         d = self.p.data.get("info", {}).get("duration", 0)
+        self.timeline.dub = (self.p.data.get("dub_layout") or []) if (e.get("dub") or {}).get("enabled") else []
         self.timeline.set_data(d, (e["trim"].get("start") or 0, e["trim"].get("end") or 0), e.get("cuts", []), self.model.segs)
 
     def _crop_dialog(self):

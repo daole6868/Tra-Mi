@@ -66,6 +66,8 @@ def main(repo: str = "k2-fsa/OmniVoice") -> None:
                 gen["voice_clone_prompt"] = prompts[key]
             elif req.get("instruct"):
                 gen["instruct"] = req["instruct"]
+            if req.get("duration"):
+                gen["duration"] = float(req["duration"])   # đọc vừa đúng số giây (khớp thời gian nhân vật)
             audio = model.generate(**gen)
             write_wav(req["out"], audio[0], sr)
             _reply(proto, {"ok": True, "sr": sr})

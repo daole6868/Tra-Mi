@@ -482,6 +482,8 @@ class SettingsPage(QWidget):
         ("ol_base", "ollama_base_url", "t"), ("ol_model", "ollama_model", "t"),
         ("glossary", "glossary", "p"), ("tts_engine", "tts_engine", "c"), ("vn_mode", "vieneu_mode", "c"),
         ("omni_model", "omnivoice_model", "c"), ("hf_token", "hf_token", "t"),
+        ("align_words", "align_words", "b"), ("split_spk", "split_speaker_changes", "b"),
+        ("dub_fit", "dub_fit", "b"), ("dub_short", "dub_auto_shorten", "b"),
         ("maxspeed", "tts_max_speedup", "f"), ("inpaint", "inpaint_backend", "c"),
         ("codec", "video_codec", "c"), ("crf", "video_crf", "i"), ("preset", "video_preset", "c"),
     ]
@@ -577,7 +579,16 @@ class SettingsPage(QWidget):
         self.hf_token = f.row("HuggingFace token", key(),
                               "Chỉ cần cho G-OmniVoice: tạo token ở huggingface.co/settings/tokens và bấm đồng ý "
                               "điều khoản ở trang mô hình g-group-ai-lab/g-omnivoice")
-        self.maxspeed = f.row("Tăng tốc giọng tối đa", dspin(1, 2.5, 0.1))
+        self.maxspeed = f.row("Tăng tốc giọng tối đa", dspin(1, 2.5, 0.1),
+                              "1,3 là vừa tự nhiên; cao hơn nghe vội")
+        self.align_words = f.row("Căn thời gian từng chữ", Switch(),
+                                 "Sau khi nhận dạng: mốc câu sát lúc nhân vật nói, tách câu ở chỗ nghỉ")
+        self.split_spk = f.row("Tách câu 2 người nói liền nhau", Switch(),
+                               "Khi phân biệt người nói: câu có 2 giọng khác nhau được tách đôi")
+        self.dub_fit = f.row("AI dịch vừa thời lượng", Switch(),
+                             "Gửi kèm số tiếng tối đa theo thời gian nói để giọng lồng khớp nhân vật")
+        self.dub_short = f.row("Tự rút gọn câu đọc quá dài", Switch(),
+                               "Sau khi lồng tiếng: câu vẫn quá dài được AI viết ngắn lại rồi đọc lại")
         self.inpaint = f.row("Xoá phụ đề", combo([("lama", "AI LaMa (đẹp)"), ("opencv", "OpenCV (nhanh)")]))
         self.codec = f.row("Bộ mã hoá video", combo([("libx264", "H.264 CPU (tương thích nhất)"),
                                                      ("h264_nvenc", "H.264 GPU NVIDIA (rất nhanh)"),

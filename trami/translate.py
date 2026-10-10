@@ -46,7 +46,25 @@ Yêu cầu bắt buộc:
 4. Tên người, địa danh, tổ chức, chiêu thức: phiên âm Hán Việt (VD: 李逍遥 -> Lý Tiêu Dao, 北京 -> Bắc Kinh). Tuân thủ tuyệt đối BẢNG THUẬT NGỮ nếu có.
 5. Câu phụ đề ngắn gọn, dễ đọc nhanh; mỗi dòng đầu vào tương ứng đúng MỘT dòng đầu ra, không gộp, không tách, giữ nguyên số thứ tự.
 6. Dòng gốc có thể bị nhận dạng sai vài chữ đồng âm: dựa vào ngữ cảnh để hiểu và dịch đúng ý.
-7. Chỉ trả về JSON hợp lệ dạng {"1": "bản dịch", "2": "bản dịch", ...} không kèm giải thích."""
+7. Chỉ trả về JSON hợp lệ dạng {"1": "bản dịch", "2": "bản dịch", ...} không kèm giải thích.
+8. Dòng có ký hiệu ⟪≤N tiếng⟫ ở cuối là giới hạn độ dài để LỒNG TIẾNG khớp thời gian nhân vật nói: bản dịch KHÔNG được
+   vượt N tiếng (âm tiết). Ưu tiên cách nói gọn, tự nhiên; lược từ đệm, giữ đủ ý chính. KHÔNG chép ký hiệu ⟪⟫ vào bản dịch."""
+
+SYL_PER_SEC = 4.6      # tiếng Việt lồng tiếng tự nhiên ~4–5 tiếng/giây
+BUDGET_RE = re.compile(r"\s*⟪[^⟫]*⟫\s*")
+
+SHORTEN_PROMPT = """Bạn là biên tập viên lồng tiếng phim. Mỗi mục gồm câu gốc tiếng Trung, bản dịch tiếng Việt hiện tại và
+số tiếng (âm tiết) tối đa. Hãy viết lại bản dịch NGẮN HƠN, không vượt số tiếng tối đa, vẫn tự nhiên, giữ đúng ý chính,
+giữ nguyên xưng hô và tên riêng. Chỉ trả về JSON {"1": "câu mới", ...} không kèm giải thích."""
+
+
+def syllables(text: str) -> int:
+    return len([w for w in re.split(r"[\s,.;:!?…\-–—\"'()]+", text or "") if w])
+
+
+def budget_for(duration: float, speedup: float = 1.0) -> int:
+    """Số tiếng tối đa nói vừa trong `duration` giây (cho phép tăng tốc nhẹ `speedup`)."""
+    return max(2, int(duration * SYL_PER_SEC * speedup))
 
 
 def parse_glossary(text: str) -> dict[str, str]:
@@ -186,6 +204,7 @@ class Translator:
         self.cache = cache if cache is not None else {}
         self.batch = max(5, int(settings.get("translate_batch", 40)))
         self.llm = None if self.engine == "google" else LLMClient(settings, self.engine)
+        self.fit_dub = bool(settings.get("dub_fit", True))   # dịch vừa thời lượng để lồng tiếng khớp
         self.fallback_lines = 0   # số câu AI trả lỗi định dạng, phải dùng Google bù
 
     # ------------------------------------------------------------- public
@@ -203,10 +222,32 @@ class Translator:
             except Exception:
                 summary = summary or ""
         texts = [segs[i].text for i in idx]
+        if self.llm and self.fit_dub:
+            # dịch vừa thời lượng: mỗi câu kèm giới hạn số tiếng theo thời gian nhân vật nói
+            texts = [f"{segs[i].text} ⟪≤{budget_for(segs[i].duration, 1.1)} tiếng⟫" for i in idx]
         results = self.translate_lines(texts, progress, cancel, summary=summary)
         for i, t in zip(idx, results):
-            segs[i].trans = t
+            segs[i].trans = BUDGET_RE.sub(" ", t or "").strip()
+            if segs[i].trans:   # nhớ cả theo câu gốc -> dịch lại / dịch câu chọn không tốn API
+                self.cache.setdefault(f"{self.engine}|{self.style}|{segs[i].text}", segs[i].trans)
         return segs
+
+    def shorten(self, items: list[tuple[str, str, int]]) -> list[str]:
+        """Rút gọn bản dịch quá dài so với thời gian nói. items: (câu gốc, bản dịch, số tiếng tối đa)."""
+        if not self.llm or not items:
+            return [vi for _, vi, _ in items]
+        payload = {str(k + 1): {"goc": zh, "dich": vi, "toi_da": f"{n} tiếng"} for k, (zh, vi, n) in enumerate(items)}
+        user = "RÚT GỌN CÁC BẢN DỊCH SAU:\n" + json.dumps(payload, ensure_ascii=False, indent=0)
+        try:
+            d = _extract_json(self.llm.chat(SHORTEN_PROMPT, user))
+        except Exception:  # noqa: BLE001
+            return [vi for _, vi, _ in items]
+        out = []
+        for k, (_, vi, n) in enumerate(items):
+            v = d.get(str(k + 1)) if isinstance(d, dict) else None
+            v = BUDGET_RE.sub(" ", v).strip() if isinstance(v, str) else ""
+            out.append(v if v and syllables(v) < syllables(vi) else vi)
+        return out
 
     def translate_lines(self, lines: list[str], progress: ProgressCB | None = None,
                         cancel: Callable[[], bool] | None = None, summary: str = "") -> list[str]:

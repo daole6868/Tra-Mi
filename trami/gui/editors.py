@@ -172,7 +172,8 @@ class Timeline(QWidget):
         self.segs: list = []
         self.pos = 0.0
         self.mark: float | None = None
-        self.setFixedHeight(54)
+        self.dub: list = []      # [đầu, cuối, câu, độ vừa] của giọng lồng đã xếp -> dải thứ 2
+        self.setFixedHeight(62)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def set_data(self, duration, keep, cuts, segs):
@@ -213,8 +214,12 @@ class Timeline(QWidget):
         for a, b in self.cuts:
             p.drawRect(QRectF(x(a), r.top(), max(2, x(b) - x(a)), r.height()))
         p.setBrush(theme.c(theme.INFO, 200))
-        for s in self.segs:
+        for s in self.segs:   # dải dưới: lời thoại gốc
             p.drawRoundedRect(QRectF(x(s.start), r.bottom() - 9, max(1.5, x(s.end) - x(s.start)), 6), 2, 2)
+        fit_col = {"ok": "#4ADE80", "fast": "#F5B841", "long": "#F87171"}
+        for a, b, _k, fit in self.dub:   # dải trên: giọng lồng (xanh vừa · vàng đọc nhanh · đỏ quá dài)
+            p.setBrush(QColor(fit_col.get(fit, "#4ADE80")))
+            p.drawRoundedRect(QRectF(x(a), r.bottom() - 18, max(1.5, x(b) - x(a)), 6), 2, 2)
         if self.mark is not None:
             p.setPen(QPen(QColor(theme.WARN), 2, Qt.PenStyle.DashLine))
             p.drawLine(QPointF(x(self.mark), r.top()), QPointF(x(self.mark), r.bottom()))

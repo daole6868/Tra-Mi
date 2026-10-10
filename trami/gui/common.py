@@ -91,14 +91,39 @@ _WHEEL_TYPES = (QComboBox, QAbstractSpinBox, QAbstractSlider)
 
 class WheelGuard(QObject):
     """Lăn chuột lướt qua ô chọn / ô số / thanh trượt thì KHÔNG đổi giá trị mà cuộn trang.
-    Chỉ khi đã bấm vào ô đó (ô đang được chọn) thì lăn chuột mới đổi giá trị."""
+    - Ô chọn (combobox): lăn chuột không bao giờ đổi lựa chọn – chỉ đổi khi bấm chọn trong danh sách.
+    - Ô số / thanh trượt: chỉ nhận lăn chuột ngay sau khi vừa bấm vào chính nó; bấm chỗ khác là thôi."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.armed = None   # ô số / thanh trượt vừa được bấm vào
+
+    @staticmethod
+    def _owner(obj):
+        """Ô điều khiển chứa obj (vd. ô gõ số bên trong ô số)."""
+        w = obj
+        while w is not None and hasattr(w, "parentWidget"):
+            if isinstance(w, _WHEEL_TYPES) and not isinstance(w, QScrollBar):
+                return w
+            w = w.parentWidget()
+        return None
 
     def eventFilter(self, obj, ev):
-        if ev.type() == QEvent.Type.Wheel and isinstance(obj, _WHEEL_TYPES) \
-                and not isinstance(obj, QScrollBar):
+        t = ev.type()
+        if t == QEvent.Type.MouseButtonPress:
+            own = self._owner(obj) if hasattr(obj, "parentWidget") else None
+            if own is not None:
+                self.armed = None if isinstance(own, QComboBox) else own
+            elif self.armed is not None and hasattr(obj, "isAncestorOf") and obj.isAncestorOf(self.armed):
+                pass   # cú bấm vừa rồi được chuyển tiếp lên khung chứa ô – vẫn giữ
+            else:
+                self.armed = None
+            return False
+        if t == QEvent.Type.Wheel and isinstance(obj, _WHEEL_TYPES) and not isinstance(obj, QScrollBar):
             if obj.focusPolicy() == Qt.FocusPolicy.WheelFocus:
                 obj.setFocusPolicy(Qt.FocusPolicy.StrongFocus)  # lăn chuột không tự chọn ô
-            if not obj.hasFocus():
+            allowed = (not isinstance(obj, QComboBox)) and obj is self.armed and obj.hasFocus()
+            if not allowed:
                 p = obj.parentWidget()
                 while p is not None and not isinstance(p, QAbstractScrollArea):
                     p = p.parentWidget()

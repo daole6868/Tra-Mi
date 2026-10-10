@@ -130,11 +130,52 @@ def diarize(p: Project, settings: dict | None = None, progress: Prog | None = No
     audio = stems(p).get("vocals") or str(p.source)
     for s in segs:
         s.speaker = ""
+    assign_speakers.splits = 0
     n = assign_speakers(audio, segs, float(settings.get("diarize_threshold", 0.62)),
-                        int(settings.get("diarize_speakers", 0)), progress, cancel)
+                        int(settings.get("diarize_speakers", 0)), progress, cancel,
+                        split_changes=bool(settings.get("split_speaker_changes", True)))
+    p.data["speaker_splits"] = int(getattr(assign_speakers, "splits", 0))
     p.segments = segs
     p.save()
     return n
+
+
+def align_segments(segs, wav: Path, language: str, settings: dict, progress: Prog | None = None, cancel=None):
+    """Tầng 1 khớp thoại: căn mốc từng chữ (fa-zh cho tiếng Trung), không chạy được thì dùng độ to giọng."""
+    from . import align
+    from .asr_funasr import available as fa_available, load_wav16k
+    from .progress_hook import tqdm_progress
+
+    try:
+        audio = load_wav16k(wav)
+        use_fa = language in ("zh", "auto", "yue") and fa_available() and bool(settings.get("align_fa", True))
+        with tqdm_progress(progress, 0.0, 1.0, "Đang căn thời gian từng chữ", cancel,
+                           download="Đang tải mô hình căn thời gian (fa-zh)"):
+            return align.refine(segs, audio, use_fa=use_fa, progress=progress, cancel=cancel)
+    except ff.Cancelled:
+        raise
+    except Exception as e:  # noqa: BLE001 – không để bước phụ làm hỏng cả quy trình
+        if progress:
+            progress(1.0, f"Bỏ qua căn thời gian ({str(e)[:80]})")
+        return segs
+
+
+def realign(p: Project, settings: dict | None = None, progress: Prog | None = None, cancel=None) -> int:
+    """Căn lại thời gian cho phụ đề đã có (dự án cũ). Trả về số câu sau khi căn. Câu bị tách mất bản dịch."""
+    settings = settings or load_settings()
+    segs = p.segments
+    if not segs:
+        raise ValueError("Chưa có phụ đề")
+    st = stems(p)
+    src = st.get("vocals") or str(p.source)
+    wav = p.work / ("asr16k_vocals.wav" if st else "audio16k.wav")
+    if not wav.exists() or wav.stat().st_size < 1000:
+        ff.run(["-i", str(src), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav)],
+               p.data.get("info", {}).get("duration", 0), _sub(progress, 0, 0.1), cancel, "Đang chuẩn bị âm thanh")
+    segs = align_segments(segs, wav, p.data.get("language", "zh"), settings, _sub(progress, 0.1, 1.0), cancel)
+    p.segments = segs
+    p.save()
+    return len(segs)
 
 
 def recognize(p: Project, method: str = "asr", language: str = "zh", region: dict | None = None,
@@ -189,7 +230,8 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
                 args += ["-af", "highpass=f=80,lowpass=f=8000,afftdn=nf=-25,dynaudnorm=f=200"]
             args += ["-c:a", "pcm_s16le", str(wav)]
             ff.run(args, info_dur, _sub(progress, 0.3, 0.33), cancel, "Đang chuẩn bị âm thanh")
-        pr = _sub(progress, 0.33, 0.85 if want_spk else 1.0)
+        asr_end = 0.78 if want_spk else 0.92
+        pr = _sub(progress, 0.33, asr_end)
         if engine in ("sensevoice", "paraformer") and not asr_funasr.available():
             if progress:
                 progress(0.33, "Chưa cài FunASR -> dùng Whisper")
@@ -220,6 +262,10 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
 
             mark_songs(segs)
         p.data["asr_engine_used"] = engine
+        p.data["language"] = language
+        # 2b) căn thời gian từng chữ: mốc câu sát lời thật, cắt câu ở chỗ nghỉ
+        if settings.get("align_words", True) and segs:
+            segs = align_segments(segs, wav, language, settings, _sub(progress, asr_end, asr_end + 0.07), cancel)
     segs = normalize(segs)
     p.segments = segs
     p.data["sub_source"] = method
@@ -232,7 +278,7 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
 
         if dz.available():
             try:
-                diarize(p, settings, _sub(progress, 0.85, 1.0), cancel)
+                diarize(p, settings, _sub(progress, asr_end + 0.07 if method != "ocr" else 0.85, 1.0), cancel)
             except ff.Cancelled:
                 raise
             except Exception as e:
@@ -321,15 +367,50 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     (p.work / "dubs").mkdir(parents=True, exist_ok=True)
     out = p.work / "dubs" / f"dub_{time.strftime('%Y%m%d_%H%M%S')}.wav"
     stats: dict = {}
-    synthesize_dub(segs, out, p.data.get("info", {}).get("duration", 0), p.work / "tts",
-                   default_voice, rate or settings.get("tts_rate", "+0%"),
-                   max_speedup=float(settings.get("tts_max_speedup", 1.6)), progress=progress, cancel=cancel,
-                   voices=voices, ref_audio=ref_audio, settings=settings,
-                   skip_songs=bool(settings.get("dub_skip_songs", True)), stats=stats)
+
+    def run(pr):
+        stats.clear()
+        synthesize_dub(segs, out, p.data.get("info", {}).get("duration", 0), p.work / "tts",
+                       default_voice, rate or settings.get("tts_rate", "+0%"),
+                       max_speedup=float(settings.get("tts_max_speedup", 1.3)), progress=pr, cancel=cancel,
+                       voices=voices, ref_audio=ref_audio, settings=settings,
+                       skip_songs=bool(settings.get("dub_skip_songs", True)), stats=stats)
+
+    run(_sub(progress, 0.0, 0.85))
+    # tầng 3b: câu vẫn quá dài -> AI rút gọn bản dịch rồi đọc lại (chỉ những câu đó, câu khác dùng lại bản đã đọc)
+    long_ = stats.get("too_long") or []
+    shortened = 0
+    if long_ and settings.get("dub_auto_shorten", True) and settings.get("translate_engine", "google") != "google":
+        from .translate import Translator, budget_for, syllables
+
+        if progress:
+            progress(0.86, f"AI đang rút gọn {len(long_)} câu đọc quá dài so với thời gian nhân vật nói…")
+        try:
+            tr = Translator(settings)
+            items = []
+            for k, need, have in long_:
+                cur = segs[k].trans
+                n = min(syllables(cur) - 1, max(2, int(syllables(cur) * max(0.4, have / max(need, 0.1)) * 0.95)))
+                items.append((segs[k].text, cur, max(2, min(n, budget_for(have, 1.25)))))
+            new = tr.shorten(items)
+            for (k, _, _), t in zip(long_, new):
+                if t != segs[k].trans:
+                    segs[k].extra.setdefault("trans_long", segs[k].trans)   # giữ bản dài để người dùng xem lại
+                    segs[k].trans = t
+                    shortened += 1
+        except Exception as e:  # noqa: BLE001 – lỗi AI không làm hỏng bản lồng
+            if progress:
+                progress(0.86, f"Không rút gọn được ({str(e)[:80]})")
+        if shortened:
+            run(_sub(progress, 0.87, 1.0))
+    stats["shortened"] = shortened
+    p.segments = segs            # lưu độ vừa (fit) + bản dịch đã rút gọn
+    layout = stats.pop("layout", [])
+    p.data["dub_layout"] = layout
     p.data["dub_stats"] = stats
     vers = dub_versions(p)
     vers.insert(0, {"wav": str(out), "time": time.strftime("%H:%M %d/%m"), "voices": _voice_summary(voices, default_voice),
-                    "stats": stats})
+                    "stats": stats, "layout": layout})
     p.data["dub_versions"] = vers
     ed = p.edit
     ed["dub"]["enabled"] = True
@@ -378,6 +459,7 @@ def use_dub_version(p: Project, wav: str) -> None:
     ed["dub"]["enabled"] = True
     p.data["edit"] = ed
     p.data["dub_stats"] = v.get("stats") or {}
+    p.data["dub_layout"] = v.get("layout") or []
     p.data["dub_versions"] = dub_versions(p)
 
 
@@ -461,6 +543,12 @@ def dub_summary(p: Project) -> str:
         return "Đã tạo bản lồng tiếng"
     msg = f"Đã lồng tiếng {st.get('placed', 0)}/{st.get('total', 0)} câu"
     extra = []
+    fit = st.get("fit") or {}
+    if fit:
+        extra.append(f"{fit.get('ok', 0)} vừa khít, {fit.get('fast', 0)} đọc nhanh hơn"
+                     + (f", ⚠ {fit['long']} quá dài – sửa ngắn lại ở tab Phụ đề" if fit.get("long") else ""))
+    if st.get("shortened"):
+        extra.append(f"AI đã rút gọn {st['shortened']} câu")
     if st.get("songs"):
         extra.append(f"{st['songs']} câu bài hát giữ nguyên")
     if st.get("empty"):

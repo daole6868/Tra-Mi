@@ -124,9 +124,23 @@ def cluster(embs: np.ndarray, threshold: float = 0.62, n_speakers: int = 0) -> n
     return labels
 
 
+def _emb_fn():
+    import torch
+
+    enc = _encoder()
+
+    def f(wav: np.ndarray) -> np.ndarray:
+        with torch.no_grad():
+            return enc.encode_batch(torch.from_numpy(np.ascontiguousarray(wav)).float().unsqueeze(0)
+                                    ).squeeze().cpu().numpy()
+    return f
+
+
 def assign_speakers(audio_path: str | Path, segs: list[Segment], threshold: float = 0.62, n_speakers: int = 0,
-                    progress: Callable[[float, str], None] | None = None, cancel=None) -> int:
-    """Gán seg.speaker = 'S1', 'S2'… Trả về số người nói tìm được."""
+                    progress: Callable[[float, str], None] | None = None, cancel=None,
+                    split_changes: bool = False) -> int:
+    """Gán seg.speaker = 'S1', 'S2'… Trả về số người nói tìm được.
+    split_changes: trước khi gán, tách các câu dài có 2 người nói liền nhau (sửa thẳng danh sách `segs`)."""
     from .asr_funasr import load_wav16k
 
     if not segs:
@@ -139,6 +153,12 @@ def assign_speakers(audio_path: str | Path, segs: list[Segment], threshold: floa
                        download="Đang tải mô hình nhận diện giọng (ECAPA)"):
         _encoder()
     audio = load_wav16k(audio_path)
+    if split_changes:
+        from .align import split_speaker_changes
+
+        before = len(segs)
+        segs[:] = split_speaker_changes(segs, audio, _emb_fn(), progress=progress, cancel=cancel)
+        assign_speakers.splits = len(segs) - before   # số câu được tách thêm (để báo người dùng)
     idx, embs = embed_segments(audio, segs, progress, cancel)
     if not idx:
         for s in segs:

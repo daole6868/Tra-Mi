@@ -124,6 +124,23 @@ def _decode(path: str | Path, speed: float = 1.0, sr: int = SR) -> np.ndarray:
     return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
 
+def _atempo(a: np.ndarray, speed: float) -> np.ndarray:
+    """Tăng tốc đoạn âm thanh (giữ cao độ) bằng FFmpeg atempo."""
+    if abs(speed - 1) < 0.01 or len(a) == 0:
+        return a
+    raw = (np.clip(a, -1, 1) * 32767).astype(np.int16).tobytes()
+    af = []
+    s = speed
+    while s > 2.0:
+        af.append("atempo=2.0")
+        s /= 2.0
+    af.append(f"atempo={s:.4f}")
+    cmd = [ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-f", "s16le", "-ac", "1", "-ar", str(SR),
+           "-i", "pipe:0", "-af", ",".join(af), "-f", "s16le", "-ac", "1", "-ar", str(SR), "pipe:1"]
+    out = subprocess.run(cmd, input=raw, capture_output=True, creationflags=_NO_WINDOW).stdout
+    return np.frombuffer(out, dtype=np.int16).astype(np.float32) / 32768.0
+
+
 def _trim_silence(a: np.ndarray, thr: float = 0.01) -> np.ndarray:
     idx = np.where(np.abs(a) > thr)[0]
     if len(idx) == 0:
@@ -309,9 +326,9 @@ class VieneuWorker:
                 self._start(progress, cancel)
 
     def synth(self, text: str, out: str | Path, voice: str | None = None, ref_audio: str | None = None,
-              ref_text: str | None = None) -> Path:
+              ref_text: str | None = None, duration: float | None = None) -> Path:
         req = json.dumps({"text": text, "out": str(out), "voice": voice, "ref_audio": ref_audio,
-                          "ref_text": ref_text or ""}, ensure_ascii=False)
+                          "ref_text": ref_text or "", "duration": duration}, ensure_ascii=False)
         with self.lock:
             for attempt in range(2):
                 try:
@@ -446,6 +463,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     edge_items: list[tuple[int, str, Path, str]] = []
     vn_items: list[tuple[int, str, Path, str]] = []
     omni_items: list[tuple[int, str, Path, str]] = []
+    omni_meta: dict[int, tuple[str, str]] = {}   # câu đọc bằng OmniVoice -> (mã giọng, lời) để đọc lại vừa thời lượng
     samples = {}
     if omnivoice_available():
         from . import voices as vlib
@@ -481,6 +499,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         h = hashlib.md5(f"{t}|{spec}|{rate}|{pitch}|{mode}|{extra}".encode()).hexdigest()[:14]
         if spec.startswith(("omni:", "omniclone:")):
             p = work / f"tts_{h}.wav"
+            omni_meta[i] = (spec, t)
             if not (p.exists() and p.stat().st_size > 0):
                 omni_items.append((i, t, p, spec))
         elif spec.startswith("edge:"):
@@ -531,28 +550,33 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             if progress:
                 progress((n + 1) / max(1, total_items) * 0.8, f"VieNeu đang đọc {n + 1}/{total_items}")
 
+    orefs: dict[str, tuple] = {}
+
+    def omni_ref(spec: str) -> tuple:
+        """(file mẫu, lời trong file mẫu) cho mã giọng OmniVoice."""
+        if spec not in orefs:
+            if spec.startswith("omni:"):
+                sm = samples[spec[5:]]
+                orefs[spec] = (str(vlib.path_of(sm)), sm.get("text", ""))
+            else:
+                spk = spec[10:]
+                r = build_reference_text(ref_audio, segs, spk, work / f"omniref_{spk}.wav") if ref_audio else None
+                orefs[spec] = (str(r[0]), r[1]) if r else (None, "")
+        return orefs[spec]
+
     # --- OmniVoice (offline): nhái giọng từ file ghi âm mẫu / từ nhân vật gốc
     if omni_items:
         if progress:
             progress(0.01, "Đang nạp OmniVoice…")
         om = _omni(settings)
         om.ensure_started((lambda x, m: progress(0.01 * x, m)) if progress else None, cancel)
-        orefs: dict[str, tuple] = {}
         speed = _speed_tag(rate)
         base = len(vn_items)
         for n, (i, text, p, spec) in enumerate(omni_items):
             if cancel and cancel():
                 raise Cancelled()
             try:
-                if spec not in orefs:
-                    if spec.startswith("omni:"):
-                        sm = samples[spec[5:]]
-                        orefs[spec] = (str(vlib.path_of(sm)), sm.get("text", ""))
-                    else:
-                        spk = spec[10:]
-                        r = build_reference_text(ref_audio, segs, spk, work / f"omniref_{spk}.wav") if ref_audio else None
-                        orefs[spec] = (str(r[0]), r[1]) if r else (None, "")
-                ref, rtext = orefs[spec]
+                ref, rtext = omni_ref(spec)
                 tmp = p.with_suffix(".raw.wav")
                 om.synth(text, tmp, ref_audio=ref, ref_text=rtext)
                 sr = om.sr
@@ -578,34 +602,87 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             raise RuntimeError("Không tạo được giọng đọc. " + "; ".join(errors[:3]))
         raise RuntimeError(_why_nothing(len(segs), n_song, n_empty, n_nodub))
 
-    # --- ghép theo thời gian
+    # --- xếp giọng theo thời gian (khớp lúc nhân vật nói, không bao giờ để 2 câu đọc chồng lên nhau)
     total = max(total_duration, max((s.end for s in segs), default=0) + 1)
     track = np.zeros(int(total * SR) + SR, dtype=np.float32)
     order = sorted(range(len(segs)), key=lambda k: segs[k].start)
     placed = 0
+    prev_end = 0.0
+    GAP, BORROW, DELAY, FADE = 0.04, 0.15, 0.25, 0.3
+    layout: list[list] = []
+    too_long: list[tuple[int, float, float]] = []   # (câu, thời lượng cần, thời lượng có) -> để AI rút gọn
+    om = None
     for n, k in enumerate(order):
         s = segs[k]
         p = s.extra.pop("_tts", None)
+        s.extra.pop("fit", None)
         if not p or not Path(p).exists():
             continue
         clip = _trim_silence(_decode(p))
         if len(clip) == 0:
             errors.append(f"Câu {k + 1}: giọng đọc tạo ra toàn khoảng lặng")
             continue
-        # khung thời gian cho phép: tới đầu câu kế tiếp (tận dụng khoảng lặng)
-        nxt = next((segs[order[m]].start for m in range(n + 1, len(order))), total)
-        slot = max(0.3, min(nxt, total) - s.start - 0.05)
+        nxt = min(total, next((segs[order[m]].start for m in range(n + 1, len(order))), total))
+        start = max(s.start, prev_end + GAP)
+        slot = max(0.3, nxt - GAP - start)
         need = len(clip) / SR
-        if need > slot:
-            speed = min(max_speedup, need / slot)
-            clip = _trim_silence(_decode(p, speed))
-        st = int(s.start * SR)
+        # mượn khoảng lặng phía trước (tối đa 0,15 s) nếu câu dài hơn chỗ trống
+        if need > slot and start <= s.start + 1e-6:
+            borrow = min(BORROW, need - slot, max(0.0, s.start - (prev_end + GAP)))
+            start -= borrow
+            slot += borrow
+        speed = 1.0
+        if need > slot * 1.03:
+            if k in omni_meta and om is None:
+                om = _omni(settings)
+            if k in omni_meta:
+                # OmniVoice đọc lại vừa đúng thời lượng (tự nhiên hơn tua nhanh file)
+                spec, txt = omni_meta[k]
+                target = max(slot, need / 1.5)
+                fp = Path(p).with_suffix(f".d{int(target * 100)}.wav")
+                try:
+                    if not fp.exists():
+                        ref, rtext = omni_ref(spec)
+                        om.synth(txt, fp, ref_audio=ref, ref_text=rtext, duration=round(target, 2))
+                    c2 = _trim_silence(_decode(fp))
+                    if len(c2):
+                        speed = need / max(0.1, len(c2) / SR)
+                        clip, need = c2, len(c2) / SR
+                except Exception as e:  # noqa: BLE001
+                    errors.append(f"Câu {k + 1}: đọc lại vừa thời lượng lỗi ({e})")
+            if need > slot * 1.03:
+                sp2 = min(max_speedup, need / slot)
+                # OmniVoice: tua tiếp bản vừa đọc lại; bộ đọc khác: tua thẳng từ file gốc (giữ chất lượng)
+                clip = _trim_silence(_atempo(clip, sp2)) if k in omni_meta else _trim_silence(_decode(p, sp2))
+                speed = speed * sp2
+                need = len(clip) / SR
+        fit = "ok" if speed <= 1.06 else "fast"
+        end = start + need
+        hard_end = nxt + DELAY - GAP          # câu sau được lùi tối đa 0,25 s
+        if end > hard_end:
+            # vẫn quá dài: nhỏ dần phần cuối (≤0,3 s) rồi dừng đúng lúc câu sau vào, đánh dấu ⚠ để sửa
+            too_long.append((k, need * speed, hard_end - start))
+            keep = max(int(0.3 * SR), int((hard_end - start) * SR))
+            clip = clip[:keep].copy()
+            f = min(int(FADE * SR), len(clip) // 3)
+            if f > 0:
+                clip[-f:] *= np.linspace(1.0, 0.0, f, dtype=np.float32)
+            fit = "long"
+        st = int(start * SR)
         seg_len = min(len(clip), len(track) - st)
         if seg_len > 0:
             track[st:st + seg_len] += clip[:seg_len]
             placed += 1
+            prev_end = start + seg_len / SR
+            layout.append([round(start, 3), round(prev_end, 3), k, fit])
+        s.extra["fit"] = fit
+        s.extra["fit_speed"] = round(speed, 2)
         if progress and n % 20 == 0:
-            progress(0.8 + 0.2 * n / max(1, len(order)), "Đang ghép giọng đọc theo thời gian")
+            progress(0.8 + 0.2 * n / max(1, len(order)), "Đang xếp giọng đọc khớp thời gian nhân vật nói")
+    stats["layout"] = layout
+    stats["too_long"] = too_long
+    stats["fit"] = {"ok": sum(1 for x in layout if x[3] == "ok"), "fast": sum(1 for x in layout if x[3] == "fast"),
+                    "long": sum(1 for x in layout if x[3] == "long")}
     stats.update({"placed": placed, "total": len(segs), "songs": n_song, "empty": n_empty,
                   "nodub": n_nodub, "errors": len(errors), "error_samples": errors[:3]})
     if placed == 0:

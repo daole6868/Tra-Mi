@@ -9,8 +9,10 @@ from ..subtitle import Segment, parse_time
 from . import theme
 from .player import fmt
 
-COLS = ["#", "Bắt đầu", "Kết thúc", "Người", "Tiếng Trung", "Tiếng Việt", "🎵", "Bỏ lồng"]
-C_N, C_START, C_END, C_SPK, C_ZH, C_VI, C_SONG, C_NODUB = range(8)
+COLS = ["#", "Bắt đầu", "Kết thúc", "Người", "Tiếng Trung", "Tiếng Việt", "🎵", "Bỏ lồng", "Độ vừa"]
+C_N, C_START, C_END, C_SPK, C_ZH, C_VI, C_SONG, C_NODUB, C_FIT = range(9)
+FIT_TEXT = {"ok": "✓", "fast": "⚡", "long": "⚠"}
+FIT_COLOR = {"ok": "#4ADE80", "fast": "#F5B841", "long": "#F87171"}
 SPK_COLORS = ["#FF8A3D", "#5B8CFF", "#3CCB7F", "#C07BFF", "#F5B841", "#FF5FA2", "#3BD1D1", "#B5C44B"]
 
 
@@ -49,7 +51,7 @@ class SubsModel(QAbstractTableModel):
         f = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         if idx.column() in (C_SONG, C_NODUB):
             return f | Qt.ItemFlag.ItemIsUserCheckable
-        if idx.column() != C_N:
+        if idx.column() not in (C_N, C_FIT):
             f |= Qt.ItemFlag.ItemIsEditable
         return f
 
@@ -71,6 +73,9 @@ class SubsModel(QAbstractTableModel):
                 return s.text
             if c == C_VI:
                 return s.trans
+            if c == C_FIT and role == Qt.ItemDataRole.DisplayRole:
+                fit = s.extra.get("fit")
+                return (FIT_TEXT.get(fit, "") + (f" ×{s.extra.get('fit_speed', 1):.2f}" if fit == "fast" else "")) if fit else ""
             return None
         if role == Qt.ItemDataRole.CheckStateRole:
             if c == C_SONG:
@@ -84,6 +89,8 @@ class SubsModel(QAbstractTableModel):
                 return QColor(spk_color(s.speaker))
             if c == C_ZH:
                 return QColor("#C3CAD6")
+            if c == C_FIT:
+                return QColor(FIT_COLOR.get(s.extra.get("fit"), theme.MUTED))
         if role == Qt.ItemDataRole.BackgroundRole:
             if idx.row() == self.active:
                 return QColor("#2B1E22")
@@ -100,7 +107,16 @@ class SubsModel(QAbstractTableModel):
                 return "Câu đang hát – khi lồng tiếng sẽ giữ nguyên giọng hát gốc"
             if c == C_NODUB:
                 return "Không lồng tiếng câu này"
-        if role == Qt.ItemDataRole.TextAlignmentRole and c in (C_N, C_START, C_END, C_SPK):
+            if c == C_FIT:
+                fit = s.extra.get("fit")
+                tip = {"ok": "Giọng lồng vừa khít thời gian nhân vật nói",
+                       "fast": f"Phải đọc nhanh hơn ×{s.extra.get('fit_speed', 1):.2f} cho vừa",
+                       "long": "Quá dài so với thời gian nói – cuối câu bị nhỏ dần/cắt. Sửa bản dịch ngắn lại rồi tạo "
+                               "lại bản lồng tiếng"}.get(fit, "Chưa lồng tiếng")
+                if s.extra.get("trans_long"):
+                    tip += f"\nAI đã rút gọn từ: {s.extra['trans_long']}"
+                return tip
+        if role == Qt.ItemDataRole.TextAlignmentRole and c in (C_N, C_START, C_END, C_SPK, C_FIT):
             return int(Qt.AlignmentFlag.AlignCenter)
         return None
 
@@ -127,6 +143,7 @@ class SubsModel(QAbstractTableModel):
                 s.text = " ".join(v.split())
             elif c == C_VI:
                 s.trans = " ".join(v.split())
+                s.extra.pop("fit", None)   # bản dịch đổi -> cần tạo lại bản lồng để đo lại
         else:
             return False
         self.dataChanged.emit(self.index(idx.row(), 0), self.index(idx.row(), len(COLS) - 1))

@@ -21,6 +21,7 @@ MS_IDS = {
     "paraformer-zh": "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
     "ct-punc": "iic/punc_ct-transformer_cn-en-common-vocab471067-large",
     "cam++": "iic/speech_campplus_sv_zh-cn_16k-common",
+    "fa-zh": "iic/speech_timestamp_prediction-v1-16k-offline",
 }
 VIENEU_REPO = "pnnbao-ump/VieNeu-TTS-v3-Turbo"
 
@@ -44,6 +45,8 @@ MODELS = [
               ("funasr", "modelscope"), "mic"),
     ModelInfo("paraformer", "Nhận dạng – Paraformer + dấu câu + CAM++",
               "Nhận dạng có dấu câu, tự phân người nói", "~1,9 GB", ("funasr", "modelscope"), "mic"),
+    ModelInfo("align", "Căn thời gian từng chữ – FA-zh", "Mốc câu sát lúc nhân vật nói, giúp giọng lồng khớp thoại",
+              "~150 MB", ("funasr", "modelscope"), "clock"),
     ModelInfo("whisper", "Nhận dạng – Whisper large-v3", "Nhận dạng đa ngôn ngữ (Anh, Nhật, Hàn…)", "~3 GB",
               ("faster_whisper",), "globe"),
     ModelInfo("ecapa", "Phân biệt người nói – ECAPA", "Tìm ai đang nói để gán giọng lồng riêng", "~80 MB",
@@ -148,6 +151,8 @@ def is_ready(key: str, settings: dict | None = None) -> bool:
             return f.exists() and f.stat().st_size > 1_000_000 and not (SEP_DIR / (f.name + ".part")).exists()
         if key == "sensevoice":
             return _ms_cached(MS_IDS["sensevoice"]) and _ms_cached(MS_IDS["fsmn-vad"])
+        if key == "align":
+            return _ms_cached(MS_IDS["fa-zh"])
         if key == "paraformer":
             return all(_ms_cached(MS_IDS[k]) for k in ("paraformer-zh", "fsmn-vad", "ct-punc", "cam++"))
         if key == "whisper":
@@ -211,10 +216,11 @@ def download(key: str, progress: Prog | None = None, cancel=None, settings: dict
                 if p.name not in before:
                     p.unlink(missing_ok=True)
             raise
-    elif key in ("sensevoice", "paraformer"):
+    elif key in ("sensevoice", "paraformer", "align"):
         from modelscope.hub.snapshot_download import snapshot_download
 
-        ids = ["sensevoice", "fsmn-vad"] if key == "sensevoice" else ["paraformer-zh", "fsmn-vad", "ct-punc", "cam++"]
+        ids = {"sensevoice": ["sensevoice", "fsmn-vad"], "align": ["fa-zh"]}.get(
+            key, ["paraformer-zh", "fsmn-vad", "ct-punc", "cam++"])
         for n, k in enumerate(ids):
             lo, hi = n / len(ids), (n + 1) / len(ids)
             with tqdm_progress(progress, lo, hi, f"{label} ({n + 1}/{len(ids)})", cancel,

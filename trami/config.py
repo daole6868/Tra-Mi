@@ -65,7 +65,11 @@ DEFAULT_SETTINGS: dict = {
     "tts_engine": "edge",             # edge (Microsoft, cần mạng) / vieneu (AI offline, nhái giọng)
     "tts_voice": "vi-VN-HoaiMyNeural",
     "tts_rate": "+0%",
-    "tts_max_speedup": 1.6,
+    "tts_max_speedup": 1.3,           # tăng tốc giọng lồng tối đa (cao hơn nghe vội, mất tự nhiên)
+    "dub_fit": True,                  # AI dịch vừa thời lượng câu (giới hạn số tiếng)
+    "dub_auto_shorten": True,         # câu đọc vẫn quá dài -> AI rút gọn rồi đọc lại
+    "align_words": True,              # căn thời gian từng chữ sau khi nhận dạng
+    "split_speaker_changes": True,    # tách câu có 2 người nói liền nhau
     "vieneu_mode": "v3turbo",         # v3turbo (đẹp) / v3nano (máy yếu)
     "omnivoice_model": "k2-fsa/OmniVoice",   # hoặc g-group-ai-lab/g-omnivoice (tối ưu tiếng Việt, cần HF token)
     "hf_token": "",                           # token HuggingFace cho mô hình cần đồng ý điều khoản
