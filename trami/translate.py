@@ -234,6 +234,7 @@ class Translator:
         results = self.translate_lines(texts, progress, cancel, summary=summary)
         for i, t in zip(idx, results):
             segs[i].trans = BUDGET_RE.sub(" ", t or "").strip()
+            segs[i].extra.pop("trans_user", None)
             if segs[i].trans and not untranslated(segs[i].trans):   # nhớ theo câu gốc -> dịch lại không tốn API
                 self.cache.setdefault(f"{self.engine}|{self.style}|{segs[i].text}", segs[i].trans)
         return segs

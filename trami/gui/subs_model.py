@@ -9,8 +9,9 @@ from ..subtitle import Segment, parse_time
 from . import theme
 from .player import fmt
 
-COLS = ["#", "Bắt đầu", "Kết thúc", "Người", "Tiếng Trung", "Tiếng Việt", "🎵", "Bỏ lồng", "Độ vừa"]
-C_N, C_START, C_END, C_SPK, C_ZH, C_VI, C_SONG, C_NODUB, C_FIT = range(9)
+COLS = ["#", "Bắt đầu", "Kết thúc", "Người", "Tiếng Trung", "Tiếng Việt", "🎵", "Bỏ lồng", "Độ vừa", "Chọn", "Giọng"]
+C_N, C_START, C_END, C_SPK, C_ZH, C_VI, C_SONG, C_NODUB, C_FIT, C_SEL, C_VOICE = range(11)
+VOICE_DEFAULT = "(Theo người nói)"
 FIT_TEXT = {"ok": "✓", "fast": "⚡", "long": "⚠"}
 FIT_COLOR = {"ok": "#4ADE80", "fast": "#F5B841", "long": "#F87171"}
 SPK_COLORS = ["#FF8A3D", "#5B8CFF", "#3CCB7F", "#C07BFF", "#F5B841", "#FF5FA2", "#3BD1D1", "#B5C44B"]
@@ -25,16 +26,29 @@ def spk_color(spk: str) -> str:
 
 class SubsModel(QAbstractTableModel):
     edited = Signal()
+    picked = Signal()          # đổi các câu được tích chọn (cột "Chọn" ở bảng lồng tiếng)
 
     def __init__(self, segs: list[Segment] | None = None):
         super().__init__()
         self.segs: list[Segment] = segs or []
         self.active = -1
+        self.selected: set[int] = set()        # câu đã tích (chỉ trong phiên làm việc, không lưu)
+        self.voice_names: dict[str, str] = {}  # mã giọng -> tên hiển thị
 
     def set_segments(self, segs: list[Segment]):
         self.beginResetModel()
+        if len(segs) != len(self.segs):       # danh sách câu đổi hẳn -> bỏ tích
+            self.selected = set()
         self.segs = segs
         self.endResetModel()
+        self.picked.emit()
+
+    def set_picked(self, rows, on: bool = True):
+        rows = {r for r in rows if 0 <= r < len(self.segs)}
+        self.selected = (self.selected | rows) if on else (self.selected - rows)
+        if self.segs:
+            self.dataChanged.emit(self.index(0, C_SEL), self.index(len(self.segs) - 1, C_SEL))
+        self.picked.emit()
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self.segs)
@@ -49,7 +63,7 @@ class SubsModel(QAbstractTableModel):
 
     def flags(self, idx):
         f = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        if idx.column() in (C_SONG, C_NODUB):
+        if idx.column() in (C_SONG, C_NODUB, C_SEL):
             return f | Qt.ItemFlag.ItemIsUserCheckable
         if idx.column() not in (C_N, C_FIT):
             f |= Qt.ItemFlag.ItemIsEditable
@@ -73,6 +87,9 @@ class SubsModel(QAbstractTableModel):
                 return s.text
             if c == C_VI:
                 return s.trans
+            if c == C_VOICE:
+                v = s.extra.get("voice", "")
+                return v if role == Qt.ItemDataRole.EditRole else (self.voice_names.get(v, v) if v else VOICE_DEFAULT)
             if c == C_FIT and role == Qt.ItemDataRole.DisplayRole:
                 fit = s.extra.get("fit")
                 return (FIT_TEXT.get(fit, "") + (f" ×{s.extra.get('fit_speed', 1):.2f}" if fit == "fast" else "")) if fit else ""
@@ -82,7 +99,11 @@ class SubsModel(QAbstractTableModel):
                 return Qt.CheckState.Checked if s.extra.get("song") else Qt.CheckState.Unchecked
             if c == C_NODUB:
                 return Qt.CheckState.Checked if s.extra.get("nodub") else Qt.CheckState.Unchecked
+            if c == C_SEL:
+                return Qt.CheckState.Checked if idx.row() in self.selected else Qt.CheckState.Unchecked
         if role == Qt.ItemDataRole.ForegroundRole:
+            if c == C_VOICE:
+                return QColor("#FF8A3D" if s.extra.get("voice") else theme.MUTED)   # cam = câu có giọng riêng
             if c in (C_N, C_START, C_END):
                 return QColor(theme.MUTED)
             if c == C_SPK:
@@ -102,11 +123,16 @@ class SubsModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.ToolTipRole:
             if c == C_VI:
                 cps = len(s.trans) / max(0.05, s.duration)
-                return f"{s.duration:.1f}s · {cps:.0f} ký tự/giây" + (" – hơi nhanh, khó đọc kịp" if cps > 20 else "")
+                return (f"Gốc: {s.text}\n" if s.text else "") + f"{s.duration:.1f}s · {cps:.0f} ký tự/giây" + \
+                    (" – hơi nhanh, khó đọc kịp" if cps > 20 else "")
             if c == C_SONG:
                 return "Câu đang hát – khi lồng tiếng sẽ giữ nguyên giọng hát gốc"
             if c == C_NODUB:
                 return "Không lồng tiếng câu này"
+            if c == C_SEL:
+                return "Tích để đổi giọng / tạo lại giọng riêng câu này"
+            if c == C_VOICE:
+                return "Giọng riêng của câu này (bấm đúp để đổi). Để trống = theo giọng của người nói"
             if c == C_FIT:
                 fit = s.extra.get("fit")
                 tip = {"ok": "Giọng lồng vừa khít thời gian nhân vật nói",
@@ -116,7 +142,7 @@ class SubsModel(QAbstractTableModel):
                 if s.extra.get("trans_long"):
                     tip += f"\nAI đã rút gọn từ: {s.extra['trans_long']}"
                 return tip
-        if role == Qt.ItemDataRole.TextAlignmentRole and c in (C_N, C_START, C_END, C_SPK, C_FIT):
+        if role == Qt.ItemDataRole.TextAlignmentRole and c in (C_N, C_START, C_END, C_SPK, C_FIT, C_SEL):
             return int(Qt.AlignmentFlag.AlignCenter)
         return None
 
@@ -127,6 +153,9 @@ class SubsModel(QAbstractTableModel):
         c = idx.column()
         if role == Qt.ItemDataRole.CheckStateRole:
             on = Qt.CheckState(value) == Qt.CheckState.Checked
+            if c == C_SEL:
+                self.set_picked([idx.row()], on)
+                return True
             s.extra["song" if c == C_SONG else "nodub"] = on
         elif role == Qt.ItemDataRole.EditRole:
             v = str(value)
@@ -144,6 +173,12 @@ class SubsModel(QAbstractTableModel):
             elif c == C_VI:
                 s.trans = " ".join(v.split())
                 s.extra.pop("fit", None)   # bản dịch đổi -> cần tạo lại bản lồng để đo lại
+                s.extra["trans_user"] = True   # người dùng tự sửa: AI không tự rút gọn câu này
+            elif c == C_VOICE:
+                if v.strip():
+                    s.extra["voice"] = v.strip()
+                else:
+                    s.extra.pop("voice", None)
         else:
             return False
         self.dataChanged.emit(self.index(idx.row(), 0), self.index(idx.row(), len(COLS) - 1))
@@ -197,3 +232,28 @@ class SpeakerDelegate(QStyledItemDelegate):
         p.setFont(theme.font(9, QFont.Weight.Bold))
         p.drawText(r, Qt.AlignmentFlag.AlignCenter, spk)
         p.restore()
+
+
+class VoiceDelegate(QStyledItemDelegate):
+    """Ô "Giọng" của từng câu: chọn trong danh sách giọng (mục đầu = theo người nói)."""
+
+    def __init__(self, parent, voices_fn):
+        super().__init__(parent)
+        self.voices_fn = voices_fn   # () -> [(mã giọng, tên)]
+
+    def createEditor(self, parent, opt, idx):
+        from PySide6.QtWidgets import QComboBox
+
+        cb = QComboBox(parent)
+        cb.addItem(VOICE_DEFAULT, "")
+        for vid, name in self.voices_fn():
+            cb.addItem(name, vid)
+        return cb
+
+    def setEditorData(self, ed, idx):
+        i = ed.findData(idx.data(Qt.ItemDataRole.EditRole) or "")
+        ed.setCurrentIndex(max(0, i))
+        ed.showPopup()
+
+    def setModelData(self, ed, model, idx):
+        model.setData(idx, ed.currentData() or "", Qt.ItemDataRole.EditRole)

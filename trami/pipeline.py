@@ -11,6 +11,7 @@ from .project import Project, safe_name
 from .subtitle import normalize, save_subtitles
 
 Prog = Callable[[float, str], None]
+NO_TRANSLATE = "none"   # tuỳ chọn "Không dịch": chỉ nghe + tách câu, xuất SRT gốc để dịch ở phần mềm khác
 
 
 def _sub(progress: Prog | None, a: float, b: float) -> Prog:
@@ -108,6 +109,30 @@ def separate_audio(p: Project, settings: dict | None = None, progress: Prog | No
 
     settings = settings or load_settings()
     v, i = separate(p.source, p.work / "stems", model or settings.get("sep_model"), progress, cancel)
+    p.data["stems"] = {"vocals": str(v), "instrumental": str(i)}
+    p.save()
+    return v, i
+
+
+def import_stems(p: Project, vocals: str | Path, instrumental: str | Path | None = None) -> tuple[Path, Path]:
+    """Nạp giọng nói / nhạc nền đã tách bằng phần mềm khác (CapCut, UVR…). Chỉ có file giọng -> nhạc nền = tiếng gốc
+    trừ giọng (file giọng phải khớp thời gian với video)."""
+    d = p.work / "stems"
+    d.mkdir(parents=True, exist_ok=True)
+    dur = float(p.data.get("info", {}).get("duration", 0)) or ff.probe(p.source).duration
+    fit = ["-af", f"apad=whole_dur={dur:.3f}", "-t", f"{dur:.3f}", "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le"]
+    v, i = d / "vocals.wav", d / "instrumental.wav"
+    tmp_v = d / "_import_vocals.wav"
+    ff.run(["-i", str(vocals), "-vn"] + fit + [str(tmp_v)], dur, None, None, "Đang nạp file giọng")
+    if instrumental:
+        ff.run(["-i", str(instrumental), "-vn"] + fit + [str(i)], dur, None, None, "Đang nạp file nhạc nền")
+    else:
+        ff.run(["-i", str(p.source), "-i", str(tmp_v), "-filter_complex",
+                "[0:a]aresample=44100,aformat=channel_layouts=stereo[m];[m][1:a]amerge=inputs=2,"
+                "pan=stereo|c0=c0-c2|c1=c1-c3[o]", "-map", "[o]", "-t", f"{dur:.3f}", "-c:a", "pcm_s16le", str(i)],
+               dur, None, None, "Đang tính nhạc nền = tiếng gốc − giọng")
+    tmp_v.replace(v)
+    (d / "model.txt").write_text("external", "utf-8")
     p.data["stems"] = {"vocals": str(v), "instrumental": str(i)}
     p.save()
     return v, i
@@ -381,6 +406,9 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
     segs = p.segments
     if not segs:
         raise ValueError("Chưa có phụ đề gốc. Hãy nhận dạng giọng nói/OCR hoặc nhập file phụ đề trước.")
+    if (engine or settings.get("translate_engine")) == NO_TRANSLATE:
+        raise ValueError("Đang chọn 'Không dịch'. Chọn công cụ dịch ở tab Tự động, hoặc nạp file SRT đã dịch "
+                         "ở tab Lồng tiếng / Phụ đề.")
     cache = p.data.setdefault("cache", {})
     tr = Translator(settings, engine, style, parse_glossary(p.data.get("glossary", "")), cache)
 
@@ -431,9 +459,12 @@ def speaker_list(p: Project) -> list[dict]:
 
 
 def dub(p: Project, voice: str | None = None, rate: str | None = None, settings: dict | None = None,
-        progress: Prog | None = None, cancel=None, engine: str | None = None) -> Path:
-    """Lồng tiếng Việt. Mỗi người nói có thể có giọng riêng (p.data['voices'][speaker]):
-       'edge:<voice id>' | 'vieneu:<preset>' | 'clone' (nhái giọng nhân vật gốc bằng VieNeu)."""
+        progress: Prog | None = None, cancel=None, engine: str | None = None, inplace: bool = False,
+        only: list[int] | None = None) -> Path:
+    """Lồng tiếng Việt. Mỗi người nói có thể có giọng riêng (p.data['voices'][speaker]), mỗi câu cũng có thể có giọng
+    riêng (seg.extra['voice']): 'edge:<voice id>' | 'vieneu:<preset>' | 'clone' | 'omni:<id>' | 'omniclone'.
+    Câu đã đọc được lưu đệm theo (lời, giọng, tốc độ, lần đọc) -> chỉ câu mới / đã sửa mới phải đọc lại.
+    inplace: ghi đè bản lồng tiếng đang dùng (sửa vài câu) thay vì thêm bản mới; only: chỉ AI rút gọn các câu này."""
     from .tts import synthesize_dub
 
     settings = settings or load_settings()
@@ -457,11 +488,14 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     ref_audio = st.get("vocals") or str(p.source)
     (p.work / "dubs").mkdir(parents=True, exist_ok=True)
     out = p.work / "dubs" / f"dub_{time.strftime('%Y%m%d_%H%M%S')}.wav"
+    cur = (p.edit.get("dub") or {}).get("wav")
+    target = Path(cur) if inplace and cur and Path(cur).exists() else out
+    tmp_out = target.with_name(target.stem + "_new.wav")
     stats: dict = {}
 
     def run(pr):
         stats.clear()
-        synthesize_dub(segs, out, p.data.get("info", {}).get("duration", 0), p.work / "tts",
+        synthesize_dub(segs, tmp_out, p.data.get("info", {}).get("duration", 0), p.work / "tts",
                        default_voice, rate or settings.get("tts_rate", "+0%"),
                        max_speedup=float(settings.get("tts_max_speedup", 1.3)), progress=pr, cancel=cancel,
                        voices=voices, ref_audio=ref_audio, settings=settings,
@@ -469,7 +503,9 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
 
     run(_sub(progress, 0.0, 0.85))
     # tầng 3b: câu vẫn quá dài -> AI rút gọn bản dịch rồi đọc lại (chỉ những câu đó, câu khác dùng lại bản đã đọc)
-    long_ = stats.get("too_long") or []
+    # câu người dùng tự sửa không bị AI đổi; lồng lại vài câu thì chỉ rút gọn các câu đó
+    long_ = [x for x in (stats.get("too_long") or []) if not segs[x[0]].extra.get("trans_user")
+             and (only is None or x[0] in only)]
     shortened = 0
     if long_ and settings.get("dub_auto_shorten", True) and settings.get("translate_engine", "google") != "google":
         from .translate import Translator, budget_for, syllables
@@ -495,13 +531,23 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
         if shortened:
             run(_sub(progress, 0.87, 1.0))
     stats["shortened"] = shortened
+    try:
+        tmp_out.replace(target)
+        out = target
+    except OSError:   # Windows: file đang được chương trình khác mở -> lưu thành bản mới
+        tmp_out.replace(out)
     p.segments = segs            # lưu độ vừa (fit) + bản dịch đã rút gọn
     layout = stats.pop("layout", [])
     p.data["dub_layout"] = layout
     p.data["dub_stats"] = stats
     vers = dub_versions(p)
-    vers.insert(0, {"wav": str(out), "time": time.strftime("%H:%M %d/%m"), "voices": _voice_summary(voices, default_voice),
-                    "stats": stats, "layout": layout})
+    entry = {"wav": str(out), "time": time.strftime("%H:%M %d/%m"), "voices": _voice_summary(voices, default_voice),
+             "stats": stats, "layout": layout}
+    old_i = next((i for i, v in enumerate(vers) if v["wav"] == str(out)), None)
+    if old_i is None:
+        vers.insert(0, entry)
+    else:
+        vers[old_i] = entry
     p.data["dub_versions"] = vers
     ed = p.edit
     ed["dub"]["enabled"] = True
@@ -514,6 +560,84 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     p.data["edit"] = ed
     p.save()
     return out
+
+
+def redub(p: Project, rows: list[int], rate: str | None = None, settings: dict | None = None,
+          progress: Prog | None = None, cancel=None, engine: str | None = None, new_take: bool = True) -> Path:
+    """Đọc lại riêng các câu đã chọn (lần đọc mới, theo bản dịch + giọng hiện tại của câu) và cập nhật NGAY bản lồng
+    tiếng đang dùng – các câu khác dùng lại giọng đã đọc, trình phát nghe được ngay khi xong."""
+    segs = p.segments
+    rows = sorted({k for k in rows if 0 <= k < len(segs)})
+    if not rows:
+        raise ValueError("Chưa tích chọn câu nào để tạo lại giọng.")
+    if new_take:
+        for k in rows:
+            segs[k].extra["take"] = int(segs[k].extra.get("take", 0) or 0) + 1
+    p.segments = segs
+    p.save()
+    return dub(p, None, rate, settings, progress, cancel, engine, inplace=True, only=rows)
+
+
+def shorten_lines(p: Project, rows: list[int], settings: dict | None = None) -> int:
+    """AI viết lại NGẮN HƠN bản dịch của các câu đã chọn cho vừa thời gian nhân vật nói (giữ bản cũ ở trans_long).
+    Trả về số câu được rút gọn. Cần công cụ dịch AI (không dùng được Google)."""
+    from .translate import Translator, budget_for, syllables
+
+    settings = settings or load_settings()
+    if settings.get("translate_engine", "google") in ("google", NO_TRANSLATE):
+        raise ValueError("Rút gọn câu cần công cụ dịch AI (DeepSeek, Claude, GPT…) – chọn ở Cài đặt → Công cụ dịch.")
+    segs = p.segments
+    items = [(k, (segs[k].text, segs[k].trans, max(2, min(syllables(segs[k].trans) - 1, budget_for(segs[k].duration, 1.15)))))
+             for k in sorted(set(rows)) if 0 <= k < len(segs) and segs[k].trans.strip()]
+    if not items:
+        return 0
+    new = Translator(settings).shorten([x for _, x in items])
+    n = 0
+    for (k, _), t in zip(items, new):
+        if t and t != segs[k].trans:
+            segs[k].extra.setdefault("trans_long", segs[k].trans)
+            segs[k].trans = t
+            segs[k].extra.pop("fit", None)
+            n += 1
+    p.segments = segs
+    p.save()
+    return n
+
+
+def apply_translation(segs: list, cues: list) -> int:
+    """Nạp bản dịch từ file SRT (đã dịch ở phần mềm khác) vào các câu hiện có – giữ nguyên câu gốc, mốc, người nói.
+    Cùng số câu và mốc gần khớp -> ghép theo thứ tự; không thì ghép theo thời gian trùng nhau nhiều nhất.
+    Trả về số câu được nạp bản dịch."""
+    import re
+
+    han = re.compile(r"[㐀-鿿]")
+
+    def vi_text(c) -> str:   # file song ngữ: bỏ dòng tiếng Trung, giữ dòng tiếng Việt
+        lines = [x.strip() for x in (c.text or "").splitlines() if x.strip()]
+        keep = [x for x in lines if not han.search(x)] or lines
+        return " ".join(" ".join(keep).split())
+
+    if not segs or not cues:
+        return 0
+    if len(cues) == len(segs) and all(abs(c.start - s.start) < 1.0 for c, s in zip(cues, segs)):
+        pairs = list(zip(segs, [[c] for c in cues]))
+    else:
+        got: dict[int, list] = {}
+        for c in cues:
+            ov = [(min(c.end, s.end) - max(c.start, s.start), k) for k, s in enumerate(segs)]
+            best, k = max(ov)
+            if best > 0:
+                got.setdefault(k, []).append(c)
+        pairs = [(segs[k], cs) for k, cs in sorted(got.items())]
+    n = 0
+    for s, cs in pairs:
+        t = " ".join(vi_text(c) for c in sorted(cs, key=lambda c: c.start)).strip()
+        if t:
+            s.trans = t
+            s.extra["trans_user"] = True     # bản dịch người dùng đưa vào: AI không tự rút gọn
+            s.extra.pop("fit", None)
+            n += 1
+    return n
 
 
 def _voice_summary(voices: dict, default_voice: str) -> str:
@@ -593,6 +717,8 @@ def dub_preview_audio(p: Project) -> Path | None:
         return out
     for old in p.work.glob("dub_preview_*.m4a"):
         try:
+            if old.name.endswith(".tmp.m4a") and time.time() - old.stat().st_mtime < 3600:
+                continue   # file đang được 1 lần trộn khác ghi
             old.unlink(missing_ok=True)
         except OSError:
             pass  # đang được trình phát mở (Windows khoá file) -> xoá ở lần sau
@@ -621,10 +747,17 @@ def dub_preview_audio(p: Project) -> Path | None:
     mix.append("[d]")
     fc.append("".join(mix) + (f"amix=inputs={len(mix)}:duration=longest:dropout_transition=0:normalize=0,"
                               if len(mix) > 1 else "anull,") + "alimiter=limit=0.95[out]")
-    tmp = out.with_suffix(".tmp.m4a")
+    import uuid
+
+    tmp = out.with_name(f"{out.stem}.{uuid.uuid4().hex[:6]}.tmp.m4a")   # 2 lần trộn cùng lúc không giẫm file của nhau
     ff.run(args + ["-filter_complex", ";".join(fc), "-map", "[out]", "-vn", "-c:a", "aac", "-b:a", "160k",
                    str(tmp)], float(p.data.get("info", {}).get("duration", 0)), None, None, "Đang trộn bản nghe thử")
-    tmp.replace(out)
+    try:
+        tmp.replace(out)
+    except OSError:
+        if not (out.exists() and out.stat().st_size > 0):   # lần trộn kia đã xong trước -> dùng luôn
+            raise
+        tmp.unlink(missing_ok=True)
     return out
 
 
@@ -740,14 +873,17 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
     settings = load_settings()
     if opts.get("engine"):
         settings["translate_engine"] = opts["engine"]
+    no_tr = opts.get("engine") == NO_TRANSLATE or not opts.get("translate", True)
+    if opts.get("engine") == NO_TRANSLATE:
+        settings["translate_engine"] = "google"   # không dùng tới, tránh lỗi ở bước khác
     steps = []
     if opts.get("url") and not p.data.get("source"):
         steps.append("download")
     if not p.segments or opts.get("force_recognize"):
         steps.append("recognize")
-    if opts.get("translate", True):
+    if not no_tr:
         steps.append("translate")
-    if opts.get("dub"):
+    if opts.get("dub") and not no_tr:
         steps.append("dub")
     steps.append("export")
     weights = {"download": 1, "recognize": 4, "translate": 2, "dub": 2, "export": 3}
@@ -797,16 +933,23 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
                 ed["subtitles"]["burn"] = bool(opts["burn"])
             if opts.get("which"):
                 ed["subtitles"]["which"] = opts["which"]
-            if opts.get("dub"):
+            if opts.get("dub") and not no_tr:
                 ed["dub"]["enabled"] = True
             p.data["edit"] = ed
             p.save()
+            if no_tr:   # "Không dịch": chỉ xuất phụ đề gốc đã tách câu, không ghép video
+                srt = export_subs(p, "srt", "source", settings)
+                result["srt"] = str(srt)
+                result["message"] = (f"Đã nghe và tách {len(p.segments)} câu – không dịch. "
+                                     f"Phụ đề gốc: {Path(srt).name}")
+                continue
             srt = export_subs(p, "srt", "trans", settings)
             result["srt"] = str(srt)
             if opts.get("render", True) and p.data.get("info", {}).get("has_video"):
                 result["video"] = str(render(p, settings, pr, cancel))
-    result["message"] = "Hoàn tất! " + (f"Video: {Path(result['video']).name}" if result.get("video") else "")
-    if opts.get("dub"):
+    if not no_tr:
+        result["message"] = "Hoàn tất! " + (f"Video: {Path(result['video']).name}" if result.get("video") else "")
+    if opts.get("dub") and not no_tr:
         result["message"] += "  · " + dub_summary(p)
     for w in ("asr_warning", "translate_warning"):
         if p.data.get(w):

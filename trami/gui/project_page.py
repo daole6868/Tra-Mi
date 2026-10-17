@@ -21,10 +21,14 @@ from . import icons, theme
 from .common import run_async
 from .editors import RegionEditor, Timeline
 from .player import Player, fmt
-from .subs_model import (C_END, C_FIT, C_NODUB, C_SONG, C_SPK, C_START, C_VI, C_ZH, SpeakerDelegate, SubsFilter,
-                         SubsModel)
+from .subs_model import (C_END, C_FIT, C_NODUB, C_SEL, C_SONG, C_SPK, C_START, C_VI, C_VOICE, C_ZH, SpeakerDelegate,
+                         SubsFilter, SubsModel, VoiceDelegate)
 from .widgets import (Card, ColorButton, Form, GradientButton, IconButton, PillTabs, ProgressBar, SectionCard,
                       SliderRow, Switch, button, combo, hbox, label, set_combo, wrap)
+
+
+def safe_stem(p: Project) -> str:
+    return (p.source.stem if p.data.get("source") else p.data.get("name", "video"))[:60]
 
 
 def scroll(w: QWidget) -> QScrollArea:
@@ -127,7 +131,9 @@ class ProjectPage(QWidget):
         self.a_sep = f.row("Tách giọng khỏi nhạc trước", Switch(bool(s.get("sep_before_asr", True))),
                            "Nhận dạng chính xác hơn với video có nhạc nền; cũng dùng để lồng tiếng giữ nhạc gốc")
         self.a_spk = f.row("Phân biệt người nói", Switch(bool(s.get("diarize", True))))
-        self.a_engine = f.row("Công cụ dịch", combo(C.ENGINES, s.get("translate_engine")))
+        self.a_engine = f.row("Công cụ dịch", combo(C.ENGINES + [(pipeline.NO_TRANSLATE, "Không dịch – chỉ nghe & tách câu, "
+                                                                 "xuất SRT gốc (dịch ở phần mềm khác)")],
+                                                    s.get("translate_engine")))
         self.a_style = f.row("Thể loại / văn phong", combo(C.STYLES, s.get("translate_style")))
         self.a_hardsub = f.row("Phụ đề Trung cũ", combo(C.HARDSUB, "none"))
         self.a_which = f.row("Ghép phụ đề vào video", combo(C.WHICH, "trans"))
@@ -198,6 +204,8 @@ class ProjectPage(QWidget):
         tv.setItemDelegateForColumn(C_SPK, SpeakerDelegate(tv))
         tv.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed |
                            QAbstractItemView.EditTrigger.AnyKeyPressed)
+        tv.setColumnHidden(C_SEL, True)      # 2 cột này dùng ở bảng câu của tab Lồng tiếng
+        tv.setColumnHidden(C_VOICE, True)
         tv.clicked.connect(self._row_clicked)
         self.table = tv
         self.search = QLineEdit()
@@ -494,11 +502,21 @@ class ProjectPage(QWidget):
         self.d_sepstatus = label("Chưa tách", "muted")
         sep.add(hbox(self.d_sepmodel, button("Tách ngay", "layers", on_click=self.run_separate)))
         sep.lay.itemAt(sep.lay.count() - 1).layout().setStretch(0, 1)
-        sep.add(hbox(self.d_sepstatus, None, button("Nghe giọng", "volume", flat=True, on_click=lambda: self._open_stem("vocals")),
-                     button("Nghe nhạc nền", "music", flat=True, on_click=lambda: self._open_stem("instrumental"))))
+        sep.add(hbox(self.d_sepstatus, None,
+                     button("Nghe giọng", "volume", flat=True, on_click=lambda: self._open_stem("vocals")),
+                     button("Tải MP3 giọng", "download", "Lưu giọng nói đã tách thành file MP3", flat=True,
+                            on_click=lambda: self._save_stem_mp3("vocals")),
+                     button("Nghe nhạc nền", "music", flat=True, on_click=lambda: self._open_stem("instrumental")),
+                     button("Tải MP3 nhạc nền", "download", "Lưu nhạc nền + hiệu ứng đã tách thành file MP3", flat=True,
+                            on_click=lambda: self._save_stem_mp3("instrumental"))))
+        sep.add(hbox(label("Đã tách ở phần mềm khác (CapCut, UVR…)?", "muted"),
+                     button("Nạp file giọng / nhạc nền…", "upload", "Dùng file giọng nói (và nhạc nền nếu có) tách sẵn "
+                            "bằng phần mềm khác thay cho bản tách của tool", flat=True, on_click=self._import_stems), None))
 
         spk = SectionCard("2. Giọng đọc cho từng người nói", "users",
-                          "Mỗi nhân vật một giọng. 'Nhái giọng' dùng chính giọng nhân vật trong video; OmniVoice nhái theo giọng mẫu ở khung bên dưới.")
+                          "Mỗi nhân vật (S1, S2…) một giọng. Bảng câu bên dưới: bấm đúp ô Tiếng Việt để sửa lời đọc, "
+                          "tích cột Chọn để đổi giọng / tạo lại giọng riêng những câu đó – bản lồng tiếng đang dùng được "
+                          "cập nhật ngay, trình phát bên trái nghe được luôn.")
         self.d_engine = combo(C.TTS_ENGINES, self.settings.get("tts_engine", "edge"))
         self.d_engine.setMinimumContentsLength(14)
         self.d_engine.currentIndexChanged.connect(self._dub_engine_changed)
@@ -519,9 +537,72 @@ class ProjectPage(QWidget):
         self.spk_table.setColumnWidth(0, 90)
         self.spk_table.setColumnWidth(1, 70)
         self.spk_table.setColumnWidth(3, 54)
-        self.spk_table.setMinimumHeight(170)
         self.spk_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         spk.add(self.spk_table)
+
+        # --- bảng từng câu: thời gian nhân vật nói, sửa lời Việt, giọng riêng từng câu
+        self.dub_proxy = SubsFilter()
+        self.dub_proxy.setSourceModel(self.model)
+        dt = QTableView()
+        dt.setModel(self.dub_proxy)
+        dt.setAlternatingRowColors(True)
+        dt.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        dt.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        dt.setWordWrap(True)
+        dt.setTextElideMode(Qt.TextElideMode.ElideNone)
+        dt.verticalHeader().hide()
+        dt.verticalHeader().setDefaultSectionSize(38)
+        dh = dt.horizontalHeader()
+        for c in (C_ZH, C_SONG):
+            dt.setColumnHidden(c, True)
+        for c, w in ((C_SEL, 52), (0, 40), (C_START, 88), (C_END, 88), (C_SPK, 58), (C_VOICE, 170), (C_FIT, 70),
+                     (C_NODUB, 64)):
+            dh.setSectionResizeMode(c, QHeaderView.ResizeMode.Fixed if c != C_VOICE else QHeaderView.ResizeMode.Interactive)
+            dt.setColumnWidth(c, w)
+        dh.setSectionResizeMode(C_VI, QHeaderView.ResizeMode.Stretch)
+        dh.moveSection(dh.visualIndex(C_SEL), 0)                         # Chọn | # | giờ | Người | Giọng | Tiếng Việt…
+        dh.moveSection(dh.visualIndex(C_VOICE), dh.visualIndex(C_SPK) + 1)
+        dt.setItemDelegateForColumn(C_SPK, SpeakerDelegate(dt))
+        dt.setItemDelegateForColumn(C_VOICE, VoiceDelegate(dt, lambda: [(v["id"], v["name"]) for v in self._voices]))
+        dt.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed)
+        dt.setMinimumHeight(480)
+        dt.clicked.connect(self._dub_row_clicked)
+        self.dub_table = dt
+        self._voices: list[dict] = []
+        self.dub_search = QLineEdit()
+        self.dub_search.setPlaceholderText("Lọc câu… (gõ S2 để xem câu của người nói S2)")
+        self.dub_search.textChanged.connect(self.dub_proxy.set_query)
+        self.d_picked = label("Chưa tích câu nào", "muted")
+        self.model.picked.connect(self._update_picked)
+        spk.add(label("Các câu lồng tiếng", "h3"))
+        spk.add(hbox(self.dub_search,
+                     button("Tích các câu đang lọc", "check", "Tích tất cả câu đang hiện trong bảng",
+                            flat=True, on_click=self._pick_visible),
+                     button("Tích câu ⚠ quá dài", "info", "Tích các câu đọc quá dài so với thời gian nhân vật nói",
+                            flat=True, on_click=self._pick_long),
+                     button("Bỏ tích", "x", flat=True, on_click=lambda: self.model.set_picked(range(len(self.model.segs)), False))))
+        spk.add(dt)
+        self.d_line_voice = QComboBox()
+        self.d_line_voice.setMinimumContentsLength(16)
+        spk.add(hbox(self.d_picked, None, label("Giọng cho câu đã tích", "muted"), self.d_line_voice,
+                     button("Đổi giọng", "users", "Đặt giọng riêng cho các câu đã tích (chưa đọc lại)",
+                            on_click=self._set_line_voice),
+                     button("AI rút gọn", "sparkle", "AI viết lại ngắn hơn các câu đã tích cho vừa thời gian nhân vật "
+                            "nói (cần công cụ dịch AI)", on_click=self._shorten_picked),
+                     button("Nghe câu", "play", "Phát câu đang chọn trên trình phát bên trái", on_click=self._play_line)))
+        regen = GradientButton("Tạo lại giọng các câu đã tích", "refresh")
+        regen.setToolTip("Đọc lại riêng các câu đã tích theo lời Việt + giọng hiện tại, cập nhật ngay vào bản lồng "
+                         "tiếng đang dùng (không đọc lại cả video)")
+        regen.clicked.connect(self._redub_picked)
+        spk.add(regen)
+        spk.add(hbox(label("Phụ đề", "muted"),
+                     button("Xuất SRT gốc (chưa dịch)", "upload", "Lấy lời gốc đã tách câu để dịch ở phần mềm khác",
+                            on_click=lambda: self._export_sub("srt", "source")),
+                     button("Xuất SRT đã dịch", "upload", on_click=lambda: self._export_sub("srt", "trans")),
+                     button("Xuất SRT song ngữ", "upload", on_click=lambda: self._export_sub("srt", "both")),
+                     None,
+                     button("Nạp SRT đã dịch…", "download", "Nạp bản dịch làm ở phần mềm khác vào các câu hiện có "
+                            "(giữ nguyên lời gốc, thời gian, người nói)", on_click=self._import_translation)))
 
         mix = SectionCard("3. Tạo bản lồng tiếng & trộn âm thanh", "mic")
         f = Form()
@@ -541,7 +622,9 @@ class ProjectPage(QWidget):
         gen.clicked.connect(self.run_dub)
         self.d_status = label("", "muted")
         mix.add(gen)
-        mix.add(hbox(self.d_status, None, button("Nghe bản lồng", "volume", flat=True, on_click=self._open_dub)))
+        mix.add(hbox(self.d_status, None, button("Nghe bản lồng", "volume", flat=True, on_click=self._open_dub),
+                     button("Tải MP3 bản lồng", "download", "Lưu bản lồng tiếng đã trộn nhạc nền thành MP3", flat=True,
+                            on_click=self._save_dub_mp3)))
 
         hist = SectionCard("4. Các bản lồng tiếng đã tạo", "list",
                            "Mỗi lần bấm 'Tạo bản lồng tiếng' được lưu thành 1 bản. Bản có dấu ✓ đang được dùng "
@@ -688,6 +771,10 @@ class ProjectPage(QWidget):
         def done(path):
             if self.p and self.p.id == pid:
                 self.player.set_alt_audio(str(path) if path else None)
+                row = getattr(self, "_play_after_mix", None)
+                if row is not None and path:
+                    self._play_after_mix = None
+                    self._play_line(row)      # vừa tạo lại giọng -> phát luôn câu đó bằng bản mới
         run_async(lambda: pipeline.dub_preview_audio(Project(pid)), done,
                   lambda m: self.win.toast("Không trộn được bản nghe thử lồng tiếng: " + m, "err"))
 
@@ -873,6 +960,9 @@ class ProjectPage(QWidget):
 
     def job_finished(self, j: dict):
         if self.p and j["project_id"] == self.p.id:
+            self._play_after_mix = getattr(self, "_replay_row", None) if j["kind"] == "redub" and \
+                j.get("status") == "done" else None
+            self._replay_row = None if j["kind"] == "redub" else getattr(self, "_replay_row", None)
             self.reload()
             self._update_player_audio()
             if j["kind"] in ("preview", "download"):
@@ -913,6 +1003,9 @@ class ProjectPage(QWidget):
 
     def run_translate(self, only_empty: bool):
         eng, sty = self.a_engine.currentData(), self.a_style.currentData()
+        if eng == pipeline.NO_TRANSLATE:
+            return self.win.toast("Đang chọn 'Không dịch' ở tab Tự động. Chọn công cụ dịch, hoặc nạp SRT đã dịch "
+                                  "(tab Lồng tiếng → Nạp SRT đã dịch)", "warn")
 
         def fn(j, p):
             n = pipeline.translate(p, eng, sty, only_empty, None, j.update, j.cancelled)
@@ -1017,14 +1110,20 @@ class ProjectPage(QWidget):
 
     # ================================================================== trình phát & phụ đề
     def _on_pos(self, t: float):
+        if getattr(self, "_stop_at", None) is not None and t >= self._stop_at:
+            self._stop_at = None
+            if self.player.playing():
+                self.player.toggle()      # "Nghe câu": phát hết câu thì dừng
         segs = self.model.segs
         idx = next((i for i, s in enumerate(segs) if s.start <= t < s.end), -1)
         if idx != self.model.active:
             self.model.set_active(idx)
-            if idx >= 0 and self.follow.isChecked() and self.player.playing() and self.stack.currentIndex() == 1:
-                pi = self.proxy.mapFromSource(self.model.index(idx, 0))
-                if pi.isValid():
-                    self.table.scrollTo(pi, QAbstractItemView.ScrollHint.PositionAtCenter)
+            if idx >= 0 and self.follow.isChecked() and self.player.playing():
+                table, proxy = {1: (self.table, self.proxy), 5: (self.dub_table, self.dub_proxy)}.get(
+                    self.stack.currentIndex(), (None, None))
+                pi = proxy.mapFromSource(self.model.index(idx, 0)) if proxy else None
+                if pi is not None and pi.isValid():
+                    table.scrollTo(pi, QAbstractItemView.ScrollHint.PositionAtCenter)
         self.timeline.set_pos(t)
 
     def _refresh_overlay(self):
@@ -1094,9 +1193,13 @@ class ProjectPage(QWidget):
             return self.win.toast("Hãy chọn 1 câu", "warn")
         seg = self.model.segs[i]
         eng = self.a_engine.currentData()
+        if eng == pipeline.NO_TRANSLATE:
+            return self.win.toast("Đang chọn 'Không dịch' ở tab Tự động – chọn công cụ dịch trước", "warn")
 
         def done(txt):
             seg.trans = txt
+            seg.extra.pop("trans_user", None)
+            seg.extra.pop("fit", None)
             self.model.dataChanged.emit(self.model.index(i, 0), self.model.index(i, 7))
             self._segs_edited()
         from ..translate import translate_text
@@ -1148,10 +1251,7 @@ class ProjectPage(QWidget):
                 s.trans, s.text = s.text, ""
         elif k == 2 and self.model.segs:
             cur = self.model.segs
-            for c in cur:
-                best = max(segs, key=lambda s: min(s.end, c.end) - max(s.start, c.start))
-                if min(best.end, c.end) - max(best.start, c.start) > 0:
-                    c.trans = best.text
+            pipeline.apply_translation(cur, segs)
             segs = cur
         self.model.set_segments(normalize(segs))
         self._segs_edited()
@@ -1353,7 +1453,16 @@ class ProjectPage(QWidget):
         p = self.p
         spks = pipeline.speaker_list(p)
         voices = tts.list_voices(self.settings)
+        self._voices = voices
+        self.model.voice_names = {v["id"]: v["name"] for v in voices}
+        cur = self.d_line_voice.currentData()
+        self.d_line_voice.clear()
+        self.d_line_voice.addItem("(Theo người nói)", "")
+        for v in voices:
+            self.d_line_voice.addItem(v["name"], v["id"])
+        set_combo(self.d_line_voice, cur or "")
         self.spk_table.setRowCount(len(spks))
+        self.spk_table.setFixedHeight(36 + 44 * max(1, min(len(spks), 6)))
         for r, s in enumerate(spks):
             it = QTableWidgetItem(s["speaker"])
             it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1435,6 +1544,149 @@ class ProjectPage(QWidget):
         run_async(lambda: tts.preview_voice(vid, text, out, self.settings, ref),
                   lambda path: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))),
                   lambda m: self.win.toast("Không tạo được giọng: " + m, "err"))
+
+    # ------------------------------------------------------------------ bảng câu lồng tiếng
+    def _update_picked(self):
+        n = len(self.model.selected)
+        self.d_picked.setText(f"Đã tích {n} câu" if n else "Chưa tích câu nào")
+
+    def _dub_rows_visible(self) -> list[int]:
+        return [self.dub_proxy.mapToSource(self.dub_proxy.index(r, 0)).row() for r in range(self.dub_proxy.rowCount())]
+
+    def _pick_visible(self):
+        self.model.set_picked(self._dub_rows_visible())
+
+    def _pick_long(self):
+        rows = [i for i, s in enumerate(self.model.segs) if s.extra.get("fit") == "long"]
+        if not rows:
+            return self.win.toast("Không có câu nào bị ⚠ quá dài (hoặc chưa tạo bản lồng tiếng)", "ok")
+        self.model.set_picked(rows)
+
+    def _dub_row_clicked(self, pidx):
+        row = self.dub_proxy.mapToSource(pidx).row()
+        if 0 <= row < len(self.model.segs) and pidx.column() in (0, C_START, C_END, C_SPK):
+            self.player.seek(self.model.segs[row].start + 0.01)
+
+    def _dub_current_rows(self) -> list[int]:
+        rows = sorted({self.dub_proxy.mapToSource(i).row() for i in self.dub_table.selectionModel().selectedRows()})
+        return rows or sorted(self.model.selected)
+
+    def _set_line_voice(self):
+        rows = sorted(self.model.selected)
+        if not rows:
+            return self.win.toast("Tích chọn câu cần đổi giọng ở cột Chọn trước", "warn")
+        vid = self.d_line_voice.currentData() or ""
+        for r in rows:
+            self.model.setData(self.model.index(r, C_VOICE), vid)
+        self.win.toast(f"Đã đổi giọng {len(rows)} câu – bấm 'Tạo lại giọng các câu đã tích' để đọc lại", "ok")
+
+    def _play_line(self, row: int | None = None):
+        rows = [row] if row is not None else self._dub_current_rows()
+        if not rows or not (0 <= rows[0] < len(self.model.segs)):
+            return self.win.toast("Chọn 1 câu trong bảng trước", "warn")
+        s = self.model.segs[rows[0]]
+        self._stop_at = s.end + 0.35
+        self.player.seek(max(0.0, s.start - 0.1))
+        if not self.player.playing():
+            self.player.toggle()
+
+    def _redub_picked(self):
+        rows = sorted(self.model.selected)
+        if not rows:
+            return self.win.toast("Tích chọn câu cần tạo lại giọng ở cột Chọn trước", "warn")
+        empty = [r + 1 for r in rows if not self.model.segs[r].trans.strip()]
+        if empty:
+            return self.win.toast(f"Câu {', '.join(map(str, empty[:5]))} chưa có lời tiếng Việt", "warn")
+        eng = self.d_engine.currentData()
+        rate = self.d_rate.currentData()
+        st = dict(load_settings())
+        st["dub_skip_songs"] = self.d_skipsong.isChecked()
+        self._replay_row = rows[0]
+
+        def fn(j, p):
+            pipeline.redub(p, rows, rate, st, j.update, j.cancelled, eng)
+            return {"message": f"Đã tạo lại giọng {len(rows)} câu – trình phát đang dùng bản mới"}
+        self.submit("redub", f"Tạo lại giọng {len(rows)} câu", fn)
+
+    def _shorten_picked(self):
+        rows = sorted(self.model.selected)
+        if not rows:
+            return self.win.toast("Tích chọn câu cần rút gọn ở cột Chọn trước (có thể bấm 'Tích câu ⚠ quá dài')", "warn")
+
+        def fn(j, p):
+            j.update(0.1, f"AI đang rút gọn {len(rows)} câu…")
+            n = pipeline.shorten_lines(p, rows)
+            return {"message": f"AI đã rút gọn {n}/{len(rows)} câu – bấm 'Tạo lại giọng các câu đã tích' để đọc lại"}
+        self.submit("shorten", f"Rút gọn {len(rows)} câu", fn)
+
+    def _import_translation(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Chọn file phụ đề đã dịch", "", "Phụ đề (*.srt *.ass *.ssa *.vtt)")
+        if not path:
+            return
+        cues = load_subtitles(path)
+        if not cues:
+            return self.win.toast("File trống hoặc không đọc được", "err")
+        segs = self.model.segs
+        if not segs:   # dự án chưa có câu nào -> dùng luôn file này làm phụ đề tiếng Việt
+            for c in cues:
+                c.trans, c.text = c.text, ""
+                c.extra["trans_user"] = True
+            self.model.set_segments(normalize(cues))
+            self._segs_edited()
+            return self.win.toast(f"Đã nạp {len(cues)} câu tiếng Việt", "ok")
+        n = pipeline.apply_translation(segs, cues)
+        self.model.set_segments(segs)
+        self._segs_edited()
+        self.win.toast(f"Đã nạp bản dịch cho {n}/{len(segs)} câu" +
+                       (" – các câu còn lại giữ bản cũ" if n < len(segs) else ""), "ok" if n else "warn")
+
+    def _save_mp3(self, src: str | Path | None, default_name: str):
+        if not src or not Path(src).exists():
+            return self.win.toast("Chưa có file âm thanh này", "warn")
+        out, _ = QFileDialog.getSaveFileName(self, "Lưu MP3", str(Path.home() / default_name), "MP3 (*.mp3)")
+        if not out:
+            return
+        if not out.lower().endswith(".mp3"):
+            out += ".mp3"
+        from .. import video
+
+        self.win.toast("Đang lưu MP3…")
+        run_async(lambda: video.extract_audio_file(src, out), lambda o: self.win.toast(f"Đã lưu {Path(o).name}", "ok"),
+                  lambda m: self.win.toast("Không lưu được MP3: " + m, "err"))
+
+    def _import_stems(self):
+        flt = "Âm thanh (*.wav *.mp3 *.m4a *.aac *.flac *.ogg *.opus *.mp4)"
+        voc, _ = QFileDialog.getOpenFileName(self, "Chọn file GIỌNG NÓI đã tách", "", flt)
+        if not voc:
+            return
+        inst, _ = QFileDialog.getOpenFileName(self, "Chọn file NHẠC NỀN đã tách (bấm Huỷ nếu không có – tool tự tính "
+                                                    "= tiếng gốc trừ giọng)", str(Path(voc).parent), flt)
+
+        def fn(j, p):
+            pipeline.import_stems(p, voc, inst or None)
+            return {"message": "Đã nạp giọng / nhạc nền từ phần mềm khác"}
+        self.submit("separate", "Nạp giọng / nhạc nền", fn)
+
+    def _save_stem_mp3(self, which: str):
+        st = pipeline.stems(self.p)
+        if not st:
+            return self.win.toast("Chưa tách giọng / nhạc nền – bấm 'Tách ngay' trước", "warn")
+        stem = safe_stem(self.p)
+        self._save_mp3(st[which], f"{stem}_{'giong' if which == 'vocals' else 'nhacnen'}.mp3")
+
+    def _save_dub_mp3(self):
+        if not (self.p.edit.get("dub") or {}).get("wav"):
+            return self.win.toast("Chưa có bản lồng tiếng", "warn")
+        pid, stem = self.p.id, safe_stem(self.p)
+        self.flush()
+
+        def done(path):
+            if path:
+                self._save_mp3(path, f"{stem}_longtieng.mp3")
+            else:
+                self.win.toast("Bật 'Dùng bản lồng tiếng' ở mục 3 trước", "warn")
+        run_async(lambda: pipeline.dub_preview_audio(Project(pid)), done,
+                  lambda m: self.win.toast("Không trộn được bản lồng tiếng: " + m, "err"))
 
     def _open_stem(self, which: str):
         st = pipeline.stems(self.p)

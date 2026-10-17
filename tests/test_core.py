@@ -645,6 +645,126 @@ def test_dub_versions_use_and_delete(tmp_path, monkeypatch):
     assert not p.edit["dub"]["enabled"] and pipeline.dub_versions(p) == []
 
 
+def test_redub_selected_lines_in_place(monkeypatch, tmp_path):
+    """Sửa / đổi giọng 1–2 câu: chỉ câu đó được đọc lại, bản lồng đang dùng được cập nhật tại chỗ (không thêm bản mới),
+    câu người dùng tự sửa không bị AI rút gọn."""
+    from trami import pipeline, tts
+    from trami.project import Project
+
+    spoken = []
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, p, voice in items:
+            spoken.append((i, text, voice))
+            _fake_audio(p, 0.6, 300 + 100 * i)
+        return []
+
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    p = Project.create("redub")
+    p.data["info"] = {"duration": 8}
+    p.segments = [Segment(0.5, 1.5, "a", "Một", "S1"), Segment(2.5, 3.5, "b", "Hai", "S1"),
+                  Segment(4.5, 5.5, "c", "Ba", "S2")]
+    p.save()
+    st = {"translate_engine": "google", "tts_voice": "vi-VN-HoaiMyNeural"}
+    w1 = pipeline.dub(p, None, settings=st, engine="edge")
+    assert len(spoken) == 3
+    spoken.clear()
+    # người dùng sửa câu 2 + đổi giọng riêng câu 3
+    segs = p.segments
+    segs[1].trans, segs[1].extra["trans_user"] = "Hai sửa", True
+    segs[2].extra["voice"] = "edge:vi-VN-NamMinhNeural"
+    p.segments = segs
+    p.save()
+    mtime = w1.stat().st_mtime_ns
+    w2 = pipeline.redub(p, [1, 2], settings=st, engine="edge")
+    assert w2 == w1 and w1.stat().st_mtime_ns != mtime          # ghi đè bản đang dùng
+    assert len(pipeline.dub_versions(p)) == 1
+    assert sorted(i for i, _, _ in spoken) == [1, 2]                # câu 1 dùng lại giọng đã đọc
+    assert dict((i, v) for i, _, v in spoken)[2] == "vi-VN-NamMinhNeural"
+    assert p.edit["dub"]["wav"] == str(w1) and p.edit["dub"]["enabled"]
+    # tạo lại giọng (không sửa gì) -> vẫn đọc lại đúng câu đã chọn (lần đọc mới)
+    spoken.clear()
+    pipeline.redub(p, [0], settings=st, engine="edge")
+    assert [i for i, _, _ in spoken] == [0] and p.segments[0].extra["take"] == 1
+
+
+def test_shorten_selected_lines(monkeypatch):
+    """AI rút gọn riêng các câu đã chọn, giữ bản dài để xem lại; Google không rút gọn được -> báo rõ."""
+    from trami import pipeline, translate
+    from trami.project import Project
+
+    p = Project.create("shorten")
+    p.segments = [Segment(0, 1.0, "你好", "Xin chào bạn thân mến của tôi ơi"), Segment(2, 3, "走", "Đi thôi")]
+    p.save()
+    with pytest.raises(ValueError, match="AI"):
+        pipeline.shorten_lines(p, [0], {"translate_engine": "google"})
+    monkeypatch.setattr(translate.Translator, "shorten", lambda self, items: ["Chào bạn" for _ in items])
+    n = pipeline.shorten_lines(p, [0], {"translate_engine": "openai", "openai_api_key": "x"})
+    segs = p.segments
+    assert n == 1 and segs[0].trans == "Chào bạn" and segs[0].extra["trans_long"].startswith("Xin chào")
+    assert segs[1].trans == "Đi thôi"
+
+
+def test_import_stems_from_other_app(tmp_path):
+    """Nạp giọng tách bằng phần mềm khác: thiếu nhạc nền -> nhạc nền = tiếng gốc − giọng; độ dài khớp video."""
+    from trami import pipeline
+    from trami.project import Project
+
+    src, voc = tmp_path / "v.wav", tmp_path / "voc.wav"
+    subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=300:duration=4",
+                    "-f", "lavfi", "-i", "sine=frequency=900:duration=4", "-filter_complex", "amix=inputs=2:normalize=0",
+                    "-ac", "2", str(src)], check=True)
+    subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=900:duration=3.5",
+                    "-ac", "2", str(voc)], check=True)
+    p = Project.create("stems")
+    pipeline.attach_source(p, src)
+    v, i = pipeline.import_stems(p, voc)
+    assert pipeline.stems(p) == {"vocals": str(v), "instrumental": str(i)}
+    assert abs(ff.probe(v).duration - 4.0) < 0.1 and abs(ff.probe(i).duration - 4.0) < 0.1
+    import wave
+
+    with wave.open(str(i)) as w:
+        a = np.frombuffer(w.readframes(w.getnframes()), np.int16).reshape(-1, 2)[:, 0].astype(np.float32)
+    a = a[44100:44100 * 3]
+    sp = np.abs(np.fft.rfft(a))
+    f = np.fft.rfftfreq(len(a), 1 / 44100)
+    assert sp[np.abs(f - 300) < 5].max() > 10 * sp[np.abs(f - 900) < 5].max()   # giọng (900 Hz) đã bị trừ đi
+
+
+def test_apply_translation_from_srt():
+    """Nạp SRT đã dịch ở phần mềm khác: giữ câu gốc + mốc; cùng số câu -> theo thứ tự; khác -> theo thời gian."""
+    from trami import pipeline
+
+    segs = [Segment(1.0, 2.0, "你好", ""), Segment(2.5, 4.0, "我们走吧", ""), Segment(5.0, 6.0, "不要啊", "")]
+    cues = [Segment(1.05, 2.0, "Xin chào"), Segment(2.5, 4.0, "我们走吧\nChúng ta đi thôi"), Segment(5.0, 6.1, "Đừng mà")]
+    assert pipeline.apply_translation(segs, cues) == 3
+    assert [s.trans for s in segs] == ["Xin chào", "Chúng ta đi thôi", "Đừng mà"]
+    assert [s.text for s in segs] == ["你好", "我们走吧", "不要啊"] and segs[0].extra["trans_user"]
+    # phần mềm khác gộp / tách câu -> ghép theo thời gian
+    segs2 = [Segment(1.0, 2.0, "你好", ""), Segment(2.5, 4.0, "我们走吧", "")]
+    cues2 = [Segment(0.9, 2.1, "Xin chào"), Segment(2.4, 3.2, "Chúng ta"), Segment(3.2, 4.1, "đi thôi")]
+    assert pipeline.apply_translation(segs2, cues2) == 2
+    assert [s.trans for s in segs2] == ["Xin chào", "Chúng ta đi thôi"]
+
+
+def test_auto_no_translate_exports_source_srt(monkeypatch):
+    """Công cụ dịch 'Không dịch': chỉ nghe + tách câu, xuất SRT gốc, không dịch / không ghép video."""
+    from trami import pipeline
+    from trami.project import Project
+
+    p = Project.create("notr")
+    p.data["info"] = {"duration": 5, "has_video": True}
+    p.segments = [Segment(0.5, 2.0, "你好", "")]
+    p.save()
+    with pytest.raises(ValueError, match="Không dịch"):   # bấm "Dịch" khi đang chọn Không dịch -> báo rõ
+        pipeline.translate(p, pipeline.NO_TRANSLATE)
+    monkeypatch.setattr(pipeline, "translate", lambda *a, **k: (_ for _ in ()).throw(AssertionError("không được dịch")))
+    monkeypatch.setattr(pipeline, "render", lambda *a, **k: (_ for _ in ()).throw(AssertionError("không ghép video")))
+    res = pipeline.auto(p, {"engine": pipeline.NO_TRANSLATE, "dub": True})
+    assert res["srt"].endswith(".zh.srt") and "你好" in Path(res["srt"]).read_text("utf-8")
+    assert "không dịch" in res["message"]
+
+
 def test_omnivoice_samples_and_dub(monkeypatch, tmp_path):
     """Giọng mẫu OmniVoice: thêm file ghi âm (cắt còn ≤10 giây), đọc theo giọng mẫu kèm lời mẫu; nhái nhân vật gốc."""
     from trami import tts, voices

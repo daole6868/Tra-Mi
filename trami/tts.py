@@ -141,6 +141,23 @@ def _atempo(a: np.ndarray, speed: float) -> np.ndarray:
     return np.frombuffer(out, dtype=np.int16).astype(np.float32) / 32768.0
 
 
+def _decode_cached(path: str | Path) -> np.ndarray:
+    """Giải mã câu đã đọc (24 kHz) có lưu đệm .npy bên cạnh -> lồng lại vài câu không phải giải mã lại cả video."""
+    p = Path(path)
+    c = p.with_name(p.name + ".npy")
+    try:
+        if c.exists() and c.stat().st_mtime >= p.stat().st_mtime:
+            return np.load(c).astype(np.float32) / 32768.0
+    except Exception:  # noqa: BLE001 – file đệm hỏng -> giải mã lại
+        pass
+    a = _decode(p)
+    try:
+        np.save(c, (np.clip(a, -1, 1) * 32767).astype(np.int16))
+    except OSError:
+        pass
+    return a
+
+
 def _trim_silence(a: np.ndarray, thr: float = 0.01) -> np.ndarray:
     idx = np.where(np.abs(a) > thr)[0]
     if len(idx) == 0:
@@ -481,7 +498,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         if skip_songs and s.extra.get("song"):
             n_song += 1
             continue
-        spec = voices.get(s.speaker or "S1") or voice
+        spec = s.extra.get("voice") or voices.get(s.speaker or "S1") or voice   # giọng riêng của câu (nếu có)
         if spec in (CLONE,) or spec.startswith("vieneu:"):
             if not vieneu_available():
                 spec = "edge:vi-VN-HoaiMyNeural"
@@ -496,7 +513,9 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         if spec.startswith("omni:"):   # sửa lời / file mẫu thì đọc lại
             sm = samples[spec[5:]]
             extra = f"{sm.get('text', '')}|{sm.get('file')}|{settings.get('omnivoice_model', '')}"
-        h = hashlib.md5(f"{t}|{spec}|{rate}|{pitch}|{mode}|{extra}".encode()).hexdigest()[:14]
+        take = int(s.extra.get("take", 0) or 0)   # "Tạo lại giọng": lần đọc mới của cùng câu
+        h = hashlib.md5((f"{t}|{spec}|{rate}|{pitch}|{mode}|{extra}" + (f"|take{take}" if take else "")).encode()
+                        ).hexdigest()[:14]
         if spec.startswith(("omni:", "omniclone:")):
             p = work / f"tts_{h}.wav"
             omni_meta[i] = (spec, t)
@@ -618,7 +637,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         s.extra.pop("fit", None)
         if not p or not Path(p).exists():
             continue
-        clip = _trim_silence(_decode(p))
+        clip = _trim_silence(_decode_cached(p))
         if len(clip) == 0:
             errors.append(f"Câu {k + 1}: giọng đọc tạo ra toàn khoảng lặng")
             continue
