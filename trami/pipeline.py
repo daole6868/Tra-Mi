@@ -546,8 +546,12 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
              "stats": stats, "layout": layout}
     old_i = next((i for i, v in enumerate(vers) if v["wav"] == str(out)), None)
     if old_i is None:
+        entry["created"] = entry["time"]
         vers.insert(0, entry)
-    else:
+    else:   # sửa thẳng vào bản đang dùng ("Tạo lại giọng các câu đã tích") -> đếm số lần sửa
+        prev = vers[old_i]
+        entry["created"] = prev.get("created") or prev.get("time", "")
+        entry["edits"] = int(prev.get("edits", 0)) + 1
         vers[old_i] = entry
     p.data["dub_versions"] = vers
     ed = p.edit

@@ -201,6 +201,10 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (`stats["kept_old"]`, `["redone"]`), bản lồng vẫn được cập nhật. Bấm "Tạo bản lồng tiếng" (đầy đủ) mới đọc mọi câu đổi lời.
   (3) `apply_translation` trả về chỉ số câu ĐỔI lời; GUI tích sẵn các câu đó sau khi nạp SRT.
 
+- 2.0.27: người dùng hỏi "sửa câu có hiện bản mới ở mục 4 không?" – không: "Tạo lại giọng các câu đã tích" sửa THẲNG vào
+  bản đang dùng. Mục 4 giờ ghi rõ "tạo <giờ> · đã sửa N lần, lần cuối <giờ>" (`dub_versions` thêm `created`, `edits`),
+  tooltip báo số câu chưa có giọng; mô tả mục 4 nói rõ 2 nút khác nhau.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.

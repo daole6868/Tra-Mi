@@ -678,7 +678,8 @@ def test_redub_selected_lines_in_place(monkeypatch, tmp_path):
     mtime = w1.stat().st_mtime_ns
     w2 = pipeline.redub(p, [1, 2], settings=st, engine="edge")
     assert w2 == w1 and w1.stat().st_mtime_ns != mtime          # ghi đè bản đang dùng
-    assert len(pipeline.dub_versions(p)) == 1
+    vers = pipeline.dub_versions(p)
+    assert len(vers) == 1 and vers[0]["edits"] == 1 and vers[0]["created"]   # sửa thẳng, đếm số lần sửa
     assert sorted(i for i, _, _ in spoken) == [1, 2]                # câu 1 dùng lại giọng đã đọc
     assert dict((i, v) for i, _, v in spoken)[2] == "vi-VN-NamMinhNeural"
     assert p.edit["dub"]["wav"] == str(w1) and p.edit["dub"]["enabled"]

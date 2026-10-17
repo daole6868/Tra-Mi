@@ -627,8 +627,8 @@ class ProjectPage(QWidget):
                             on_click=self._save_dub_mp3)))
 
         hist = SectionCard("4. Các bản lồng tiếng đã tạo", "list",
-                           "Mỗi lần bấm 'Tạo bản lồng tiếng' được lưu thành 1 bản. Bản có dấu ✓ đang được dùng "
-                           "cho trình phát và khi xuất video.")
+                           "Mỗi lần bấm 'Tạo bản lồng tiếng' = 1 bản MỚI. 'Tạo lại giọng các câu đã tích' sửa THẲNG vào "
+                           "bản đang dùng (dấu ✓), không tạo bản mới. Bản có dấu ✓ được dùng cho trình phát và khi xuất video.")
         self.d_versions_box = QWidget()
         self.d_versions = QVBoxLayout(self.d_versions_box)
         self.d_versions.setContentsMargins(0, 0, 0, 0)
@@ -1729,9 +1729,13 @@ class ProjectPage(QWidget):
             cnt = f" · {st.get('placed', 0)}/{st.get('total', 0)} câu" if st.get("total") else ""
             active = v["wav"] == cur
             mark = ("✓ " if on else "◦ ") if active else "    "
-            text = f"{mark}Bản {n - k} · {v.get('time', '')}{cnt}" + (f" · {v['voices']}" if v.get("voices") else "")
+            when = f"tạo {v.get('created') or v.get('time', '')}"
+            if v.get("edits"):
+                when += f" · đã sửa {v['edits']} lần, lần cuối {v.get('time', '')}"
+            text = f"{mark}Bản {n - k} · {when}{cnt}" + (f" · {v['voices']}" if v.get("voices") else "")
             lb = label(text, "" if active else "muted")
-            lb.setToolTip(v["wav"])
+            miss = st.get("total", 0) - st.get("placed", 0)
+            lb.setToolTip(v["wav"] + (f"\n{miss} câu chưa có giọng (chưa dịch / bỏ lồng / bài hát / đọc lỗi)" if miss > 0 else ""))
             wav = v["wav"]
             row = QWidget()
             row.setLayout(hbox(lb, None,
