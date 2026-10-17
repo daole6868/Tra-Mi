@@ -731,19 +731,78 @@ def test_import_stems_from_other_app(tmp_path):
     assert sp[np.abs(f - 300) < 5].max() > 10 * sp[np.abs(f - 900) < 5].max()   # giọng (900 Hz) đã bị trừ đi
 
 
+def test_redub_after_srt_import_with_edge_403(monkeypatch):
+    """Tình huống người dùng: nạp SRT mới (mọi câu đổi lời), tích 2 câu, bấm Tạo lại giọng nhưng Edge trả 403.
+    -> Chỉ 2 câu đã tích được đọc lại; đọc lỗi thì giữ giọng cũ, KHÔNG làm hỏng cả bản lồng; báo lệnh cập nhật edge-tts."""
+    import edge_tts
+
+    from trami import pipeline, tts
+    from trami.project import Project
+
+    calls = []
+
+    class Comm:
+        ok = True
+
+        def __init__(self, text, voice, rate="+0%", pitch="+0Hz"):
+            self.text = text
+
+        async def save(self, out):
+            calls.append(self.text)
+            if not Comm.ok:
+                raise RuntimeError("403, message='Invalid response status', url='wss://speech.platform.bing.com'")
+            _fake_audio(out, 0.6, 400)
+
+    monkeypatch.setattr(edge_tts, "Communicate", Comm)
+    monkeypatch.setattr(tts.asyncio, "sleep", lambda *_a, **_k: _noop())
+    p = Project.create("srt403")
+    p.data["info"] = {"duration": 8}
+    p.segments = [Segment(0.5 + 2 * i, 1.5 + 2 * i, "x", f"Câu cũ {i}", "S1") for i in range(4)]
+    p.save()
+    st = {"translate_engine": "google", "tts_voice": "vi-VN-HoaiMyNeural"}
+    wav = pipeline.dub(p, None, settings=st, engine="edge")
+    segs = p.segments
+    changed = pipeline.apply_translation(segs, [Segment(0.5 + 2 * i, 1.5 + 2 * i, f"Câu mới {i}") for i in range(4)])
+    assert changed == [0, 1, 2, 3]
+    p.segments = segs
+    p.save()
+    # Edge hỏng (403)
+    calls.clear()
+    Comm.ok = False
+    out = pipeline.redub(p, [1, 2], settings=st, engine="edge")
+    assert out == wav and set(calls) <= {"Câu mới 1", "Câu mới 2"}          # không đọc lại câu không tích
+    sts = p.data["dub_stats"]
+    assert sts["placed"] == 4 and sts["kept_old"] == 2 and sts["redone"] == 0
+    assert "edge-tts>=7.3.1" in sts["error_samples"][0]
+    # Edge chạy lại được -> chỉ 2 câu đã tích được đọc lời mới
+    calls.clear()
+    Comm.ok = True
+    pipeline.redub(p, [1, 2], settings=st, engine="edge")
+    assert sorted(calls) == ["Câu mới 1", "Câu mới 2"] and p.data["dub_stats"]["redone"] == 2
+    # bản lồng đầy đủ thì đọc nốt các câu đổi lời còn lại
+    calls.clear()
+    pipeline.dub(p, None, settings=st, engine="edge")
+    assert sorted(calls) == ["Câu mới 0", "Câu mới 3"]
+
+
+async def _noop():
+    return None
+
+
 def test_apply_translation_from_srt():
     """Nạp SRT đã dịch ở phần mềm khác: giữ câu gốc + mốc; cùng số câu -> theo thứ tự; khác -> theo thời gian."""
     from trami import pipeline
 
     segs = [Segment(1.0, 2.0, "你好", ""), Segment(2.5, 4.0, "我们走吧", ""), Segment(5.0, 6.0, "不要啊", "")]
     cues = [Segment(1.05, 2.0, "Xin chào"), Segment(2.5, 4.0, "我们走吧\nChúng ta đi thôi"), Segment(5.0, 6.1, "Đừng mà")]
-    assert pipeline.apply_translation(segs, cues) == 3
+    assert pipeline.apply_translation(segs, cues) == [0, 1, 2]
     assert [s.trans for s in segs] == ["Xin chào", "Chúng ta đi thôi", "Đừng mà"]
     assert [s.text for s in segs] == ["你好", "我们走吧", "不要啊"] and segs[0].extra["trans_user"]
     # phần mềm khác gộp / tách câu -> ghép theo thời gian
     segs2 = [Segment(1.0, 2.0, "你好", ""), Segment(2.5, 4.0, "我们走吧", "")]
     cues2 = [Segment(0.9, 2.1, "Xin chào"), Segment(2.4, 3.2, "Chúng ta"), Segment(3.2, 4.1, "đi thôi")]
-    assert pipeline.apply_translation(segs2, cues2) == 2
+    assert pipeline.apply_translation(segs2, cues2) == [0, 1]
+    assert pipeline.apply_translation(segs2, cues2) == []      # nạp lại y hệt -> không câu nào đổi
     assert [s.trans for s in segs2] == ["Xin chào", "Chúng ta đi thôi"]
 
 

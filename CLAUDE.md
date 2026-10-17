@@ -28,7 +28,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `translate.py` (`LLMClient` gọi HTTP: anthropic / OpenAI-compatible / gemini / deepseek / ollama; Google gtx).
 - `trami/jobs.py` – hàng đợi 1 luồng cho tác vụ dài; `trami/gui/*` – giao diện (QPainter), `common.run_async`,
   `WheelGuard` (lăn chuột không đổi ô chọn khi chưa bấm vào).
-- `tests/test_core.py` – `python -m pytest -q tests` (52 test; 1 test cần gói AI).
+- `tests/test_core.py` – `python -m pytest -q tests` (53 test; 1 test cần gói AI).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -192,6 +192,15 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     không dịch/lồng/xuất video; bấm Dịch khi đang chọn -> báo. `dub_preview_audio` dùng file tạm riêng mỗi lần trộn (2 lần
     trộn cùng lúc từng làm FileNotFoundError).
 
+- 2.0.26: "nạp SRT mới, tạo lại câu đã tích nhưng không áp dụng vào video": job lỗi "Bản lồng tiếng tạo ra không có tiếng
+  nào. Câu 6: 403 … Sec-MS-GEC-Version=1-143…". (1) Microsoft đổi xác thực Edge TTS sang Sec-MS-GEC v2 – edge-tts 7.3.0
+  (13/10/2026) thêm v2; bản cũ bị 403 mọi câu -> requirements `edge-tts>=7.3.1`, `tts.EDGE_403` / `EDGE_UPGRADE` báo lệnh cập
+  nhật, gặp 403 thì ngừng thử các câu còn lại. (Sandbox bị chặn speech.platform.bing.com nên không gọi thử được.)
+  (2) Nạp SRT làm đổi lời MỌI câu -> redub đọc lại cả video (hash đổi). Giờ `synthesize_dub(only=)`: câu không tích dùng
+  `extra["tts_file"]` (giọng đang có, lưu sau mỗi lần xếp) dù lời đã đổi; câu tích đọc lỗi -> giữ giọng cũ
+  (`stats["kept_old"]`, `["redone"]`), bản lồng vẫn được cập nhật. Bấm "Tạo bản lồng tiếng" (đầy đủ) mới đọc mọi câu đổi lời.
+  (3) `apply_translation` trả về chỉ số câu ĐỔI lời; GUI tích sẵn các câu đó sau khi nạp SRT.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -199,3 +208,4 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - Đề xuất chưa làm: tải SenseVoice từ HuggingFace trước ModelScope; Bandit v2 (lời thoại/nhạc/tiếng động).
 - 2.0.23/2.0.24: chờ người dùng chạy lại "1. Nghe & tách câu" xác nhận câu trọn vẹn, không sót; Mel-RoFormer Kim, fa-zh, ECAPA (gộp người nói ảo) chưa chạy thật (sandbox không có torch/ModelScope).
 - 2.0.25: chờ người dùng thử bảng câu lồng tiếng + Tạo lại giọng các câu đã tích trên máy thật (VieNeu/OmniVoice).
+- 2.0.26: chờ người dùng cập nhật edge-tts>=7.3.1 và xác nhận Edge hết 403.

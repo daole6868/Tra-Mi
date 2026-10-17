@@ -1605,7 +1605,11 @@ class ProjectPage(QWidget):
 
         def fn(j, p):
             pipeline.redub(p, rows, rate, st, j.update, j.cancelled, eng)
-            return {"message": f"Đã tạo lại giọng {len(rows)} câu – trình phát đang dùng bản mới"}
+            sts = p.data.get("dub_stats") or {}
+            msg = f"Đã tạo lại giọng {sts.get('redone', len(rows))}/{len(rows)} câu – trình phát đang dùng bản mới"
+            if sts.get("kept_old"):
+                msg += f". ⚠ {sts['kept_old']} câu đọc lỗi nên giữ giọng cũ: " + "; ".join(sts.get("error_samples") or [])
+            return {"message": msg}
         self.submit("redub", f"Tạo lại giọng {len(rows)} câu", fn)
 
     def _shorten_picked(self):
@@ -1634,11 +1638,15 @@ class ProjectPage(QWidget):
             self.model.set_segments(normalize(cues))
             self._segs_edited()
             return self.win.toast(f"Đã nạp {len(cues)} câu tiếng Việt", "ok")
-        n = pipeline.apply_translation(segs, cues)
+        changed = pipeline.apply_translation(segs, cues)
         self.model.set_segments(segs)
         self._segs_edited()
-        self.win.toast(f"Đã nạp bản dịch cho {n}/{len(segs)} câu" +
-                       (" – các câu còn lại giữ bản cũ" if n < len(segs) else ""), "ok" if n else "warn")
+        if not changed:
+            return self.win.toast("File này không làm đổi câu nào (lời Việt giống hệt bản đang có)", "warn")
+        self.model.set_picked(range(len(segs)), False)
+        self.model.set_picked(changed)       # tích sẵn các câu đổi lời -> bấm "Tạo lại giọng…" là đọc lại đúng các câu này
+        self.win.toast(f"Đã nạp bản dịch: {len(changed)}/{len(segs)} câu đổi lời và đã được tích sẵn – bấm "
+                       "'Tạo lại giọng các câu đã tích' để đọc lại và cập nhật vào video", "ok")
 
     def _save_mp3(self, src: str | Path | None, default_name: str):
         if not src or not Path(src).exists():

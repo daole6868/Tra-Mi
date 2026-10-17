@@ -499,7 +499,8 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
                        default_voice, rate or settings.get("tts_rate", "+0%"),
                        max_speedup=float(settings.get("tts_max_speedup", 1.3)), progress=pr, cancel=cancel,
                        voices=voices, ref_audio=ref_audio, settings=settings,
-                       skip_songs=bool(settings.get("dub_skip_songs", True)), stats=stats)
+                       skip_songs=bool(settings.get("dub_skip_songs", True)), stats=stats,
+                       only=set(only) if only is not None else None)
 
     run(_sub(progress, 0.0, 0.85))
     # tầng 3b: câu vẫn quá dài -> AI rút gọn bản dịch rồi đọc lại (chỉ những câu đó, câu khác dùng lại bản đã đọc)
@@ -604,10 +605,10 @@ def shorten_lines(p: Project, rows: list[int], settings: dict | None = None) -> 
     return n
 
 
-def apply_translation(segs: list, cues: list) -> int:
+def apply_translation(segs: list, cues: list) -> list[int]:
     """Nạp bản dịch từ file SRT (đã dịch ở phần mềm khác) vào các câu hiện có – giữ nguyên câu gốc, mốc, người nói.
     Cùng số câu và mốc gần khớp -> ghép theo thứ tự; không thì ghép theo thời gian trùng nhau nhiều nhất.
-    Trả về số câu được nạp bản dịch."""
+    Trả về chỉ số các câu có lời Việt THAY ĐỔI (để tích sẵn, chỉ đọc lại những câu này)."""
     import re
 
     han = re.compile(r"[㐀-鿿]")
@@ -629,15 +630,16 @@ def apply_translation(segs: list, cues: list) -> int:
             if best > 0:
                 got.setdefault(k, []).append(c)
         pairs = [(segs[k], cs) for k, cs in sorted(got.items())]
-    n = 0
+    index = {id(s): k for k, s in enumerate(segs)}
+    changed = []
     for s, cs in pairs:
         t = " ".join(vi_text(c) for c in sorted(cs, key=lambda c: c.start)).strip()
-        if t:
+        if t and t != s.trans:
             s.trans = t
             s.extra["trans_user"] = True     # bản dịch người dùng đưa vào: AI không tự rút gọn
             s.extra.pop("fit", None)
-            n += 1
-    return n
+            changed.append(index[id(s)])
+    return changed
 
 
 def _voice_summary(voices: dict, default_voice: str) -> str:

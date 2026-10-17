@@ -244,6 +244,11 @@ def build_reference_text(ref_audio: str | Path, segs: list[Segment], speaker: st
 
 # ------------------------------------------------------------------ bộ đọc
 
+EDGE_UPGRADE = '.venv\\Scripts\\python -m pip install -U "edge-tts>=7.3.1"'
+EDGE_403 = ("Microsoft Edge từ chối đọc (lỗi 403): bản edge-tts trên máy đã cũ (Microsoft đổi mã xác thực Sec-MS-GEC v2, "
+            "10/2026). Tắt tool rồi chạy lệnh: " + EDGE_UPGRADE)
+
+
 async def _edge_all(items: list[tuple[int, str, Path, str]], rate: str, pitch: str, progress, cancel,
                     total: int, done0: int, concurrency: int = 6):
     import edge_tts
@@ -251,19 +256,26 @@ async def _edge_all(items: list[tuple[int, str, Path, str]], rate: str, pitch: s
     sem = asyncio.Semaphore(concurrency)
     done = done0
     errors: list[str] = []
+    blocked = False   # Edge trả 403 -> các câu sau cũng sẽ bị từ chối, không thử nữa
 
     async def one(i: int, text: str, out: Path, voice: str):
-        nonlocal done
+        nonlocal done, blocked
         async with sem:
             if cancel and cancel():
                 return
             for attempt in range(4):
+                if blocked:
+                    errors.append(f"Câu {i + 1}: bỏ qua (Edge từ chối 403)")
+                    break
                 try:
                     comm = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
                     await comm.save(str(out))
                     if out.exists() and out.stat().st_size > 0:
                         break
                 except Exception as e:  # mạng chập chờn -> thử lại
+                    if "403" in str(e) and attempt >= 1:
+                        blocked = True
+                        continue
                     if attempt == 3:
                         errors.append(f"Câu {i + 1}: {e}")
                     await asyncio.sleep(1.5 * (attempt + 1))
@@ -272,6 +284,8 @@ async def _edge_all(items: list[tuple[int, str, Path, str]], rate: str, pitch: s
                 progress(done / max(1, total) * 0.8, f"Đang tạo giọng đọc {done}/{total}")
 
     await asyncio.gather(*(one(*it) for it in items))
+    if blocked:
+        errors.insert(0, EDGE_403)
     return errors
 
 
@@ -466,7 +480,9 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                    max_speedup: float = 1.6, progress: Callable[[float, str], None] | None = None,
                    cancel: Callable[[], bool] | None = None, voices: dict | None = None,
                    ref_audio: str | Path | None = None, settings: dict | None = None,
-                   skip_songs: bool = True, stats: dict | None = None) -> Path:
+                   skip_songs: bool = True, stats: dict | None = None, only: set[int] | None = None) -> Path:
+    """only: chỉ đọc (lại) các câu này; câu khác dùng giọng đã đọc ở bản trước (extra["tts_file"]) dù lời đã đổi.
+    Câu đọc lại bị lỗi mà có giọng cũ -> giữ giọng cũ (báo lỗi), không làm hỏng cả bản lồng tiếng."""
     settings = settings or {}
     stats = stats if stats is not None else {}
     n_song = n_empty = n_nodub = 0
@@ -497,6 +513,11 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             continue
         if skip_songs and s.extra.get("song"):
             n_song += 1
+            continue
+        if only is not None and i not in only:
+            old = s.extra.get("tts_file")
+            if old and Path(old).exists():
+                s.extra["_tts"] = old      # câu không chọn: giữ nguyên giọng đang có trong bản lồng
             continue
         spec = s.extra.get("voice") or voices.get(s.speaker or "S1") or voice   # giọng riêng của câu (nếu có)
         if spec in (CLONE,) or spec.startswith("vieneu:"):
@@ -615,6 +636,15 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                                         len(vn_items) + len(omni_items)))
     if cancel and cancel():
         raise Cancelled()
+    redone = kept_old = 0
+    for i, s in enumerate(segs):   # câu đọc (lại) bị lỗi nhưng đã có giọng ở bản trước -> dùng giọng cũ
+        p = s.extra.get("_tts")
+        if p and only is not None and i in only:
+            if Path(p).exists():
+                redone += 1
+            elif s.extra.get("tts_file") and Path(s.extra["tts_file"]).exists():
+                s.extra["_tts"] = s.extra["tts_file"]
+                kept_old += 1
     ok = sum(1 for s in segs if s.extra.get("_tts") and Path(s.extra["_tts"]).exists())
     if ok == 0:
         if total_items:
@@ -694,6 +724,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             placed += 1
             prev_end = start + seg_len / SR
             layout.append([round(start, 3), round(prev_end, 3), k, fit])
+            s.extra["tts_file"] = str(p)   # giọng đang dùng của câu này (để lần sau chỉ đọc lại câu được chọn)
         s.extra["fit"] = fit
         s.extra["fit_speed"] = round(speed, 2)
         if progress and n % 20 == 0:
@@ -703,7 +734,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     stats["fit"] = {"ok": sum(1 for x in layout if x[3] == "ok"), "fast": sum(1 for x in layout if x[3] == "fast"),
                     "long": sum(1 for x in layout if x[3] == "long")}
     stats.update({"placed": placed, "total": len(segs), "songs": n_song, "empty": n_empty,
-                  "nodub": n_nodub, "errors": len(errors), "error_samples": errors[:3]})
+                  "nodub": n_nodub, "errors": len(errors), "error_samples": errors[:3],
+                  "redone": redone, "kept_old": kept_old})
     if placed == 0:
         raise RuntimeError("Bản lồng tiếng tạo ra không có tiếng nào. " + "; ".join(errors[:3]))
     peak = float(np.max(np.abs(track))) if len(track) else 0
