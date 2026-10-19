@@ -102,6 +102,28 @@ def _hf_cached(repo: str) -> bool:
     return snaps.is_dir() and any(any(d.iterdir()) for d in snaps.iterdir() if d.is_dir())
 
 
+# file cần để nạp mô hình bằng transformers from_pretrained (bỏ file thừa như ảnh minh hoạ, bản trọng số khác định dạng)
+HF_FILES = ["*.json", "*.safetensors", "*.txt", "*.jinja", "*.model", "*.tiktoken"]
+
+
+def _hf_complete(repo: str) -> bool:
+    """Mô hình HuggingFace đã tải ĐỦ (có config + mọi file trọng số mà file chỉ mục liệt kê) – tải dở thì báo chưa có."""
+    import json
+
+    snap = _hf_snapshot(repo)
+    if not snap or not (snap / "config.json").is_file():
+        return False
+    idx = snap / "model.safetensors.index.json"
+    try:
+        if idx.is_file():
+            need = set(json.loads(idx.read_text(encoding="utf-8")).get("weight_map", {}).values())
+            return bool(need) and all((snap / f).is_file() and (snap / f).stat().st_size > 0 for f in need)
+        # HuggingFace chỉ đặt file vào snapshots khi đã tải xong (đang tải nằm ở blobs/*.incomplete)
+        return any(f.stat().st_size > 0 for f in snap.glob("*.safetensors"))
+    except (OSError, ValueError):
+        return False
+
+
 _WEIGHTS = (".pt", ".pth", ".onnx", ".bin", ".safetensors", ".ckpt")
 
 
@@ -182,11 +204,11 @@ def is_ready(key: str, settings: dict | None = None) -> bool:
             f = SEP_DIR / _sep_file(key)
             return f.exists() and f.stat().st_size > 1_000_000 and not (SEP_DIR / (f.name + ".part")).exists()
         if key == "qwen_asr":
-            return _hf_cached(qwen_repo(settings))
+            return _hf_complete(qwen_repo(settings))
         if key == "qwen_align":
             from .asr_qwen import ALIGNER
 
-            return _hf_cached(ALIGNER)
+            return _hf_complete(ALIGNER)
         if key == "sensevoice":
             return _ms_cached(MS_IDS["sensevoice"]) and _ms_cached(MS_IDS["fsmn-vad"])
         if key == "align":
@@ -313,7 +335,10 @@ def download(key: str, progress: Prog | None = None, cancel=None, settings: dict
 
         repo = qwen_repo(settings) if key == "qwen_asr" else ALIGNER
         with tqdm_progress(progress, 0.0, 1.0, label, cancel, download=label):
-            snapshot_download(repo, token=(settings or {}).get("hf_token") or None)
+            # tải vào kho HuggingFace trên máy – đúng chỗ tiến trình Qwen3-ASR nạp, nên khi dịch không tải lại
+            snapshot_download(repo, token=(settings or {}).get("hf_token") or None, allow_patterns=HF_FILES)
+        if not _hf_complete(repo):
+            raise RuntimeError("Tải chưa đủ file mô hình (mạng bị ngắt?) – bấm Tải về lần nữa để tải tiếp phần còn thiếu.")
     elif key == "vieneu":
         from .tts import _vieneu
 

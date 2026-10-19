@@ -262,6 +262,13 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `minimumSizeHint`. Sidebar thu gọn: icon xếp sát nhau (`_filler`), không rải khắp chiều cao.
   Kiểm tra lại ở 1920×1080 / 1600×1000 / 1366×768: mọi khung cùng mép trên/dưới/phải, khe 10 px.
 
+- 2.0.31: người dùng hỏi "2 mục Qwen3 ở tab Tài liệu tải xong rồi dịch có phải tải lại không?". Cùng kho: tab Tài liệu
+  `snapshot_download(repo, allow_patterns=models.HF_FILES)` -> kho HuggingFace (`HF_HUB_CACHE`), tiến trình Qwen3 nạp theo
+  tên repo -> cùng kho. Lỗi tìm ra (dựng kho giả + mô hình tí hon, mạng HF bị chặn): `from_pretrained(repo)` luôn hỏi mạng
+  trước -> mạng chặn / chập chờn là LỖI dù đã tải. Sửa `qwen_asr_worker._load`: thử `local_files_only=True` trước, thiếu mới
+  tải. `models._hf_complete`: có config.json + đủ file trọng số theo `model.safetensors.index.json` (tải dở -> "Chưa tải");
+  tải xong mà thiếu file -> báo bấm Tải về lần nữa. Đổi mô hình 1.7B/0.6B ở Cài đặt thì phải tải bản kia.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.

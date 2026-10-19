@@ -31,6 +31,15 @@ def _load_wav(path: str):
     return a
 
 
+def _load(cls, repo: str, **kw):
+    """Đã tải ở tab Tài liệu -> nạp thẳng từ máy, KHÔNG hỏi mạng (mạng chập chờn / bị chặn vẫn chạy, không tải lại).
+    Chưa có / thiếu file -> tải (lần đầu) từ HuggingFace vào đúng kho đó."""
+    try:
+        return cls.from_pretrained(repo, local_files_only=True, **kw)
+    except Exception:  # noqa: BLE001
+        return cls.from_pretrained(repo, **kw)
+
+
 def main(repo: str = "Qwen/Qwen3-ASR-1.7B-hf") -> None:
     proto = sys.stdout
     if sys.stderr is None:
@@ -57,8 +66,8 @@ def main(repo: str = "Qwen/Qwen3-ASR-1.7B-hf") -> None:
         else:
             dev, dtype = "cpu", torch.float32
         with tqdm_progress(prog, 0.0, 1.0, "Đang nạp Qwen3-ASR", download="Đang tải Qwen3-ASR"):
-            proc = AutoProcessor.from_pretrained(repo)
-            model = Qwen3ASRForConditionalGeneration.from_pretrained(repo, dtype=dtype, device_map=dev)
+            proc = _load(AutoProcessor, repo)
+            model = _load(Qwen3ASRForConditionalGeneration, repo, dtype=dtype, device_map=dev)
         model.eval()
     except Exception as e:  # noqa: BLE001
         _reply(proto, {"error": f"Không nạp được Qwen3-ASR: {type(e).__name__}: {e}"})
@@ -71,9 +80,8 @@ def main(repo: str = "Qwen/Qwen3-ASR-1.7B-hf") -> None:
         if not aligner:
             with tqdm_progress(prog, 0.0, 1.0, "Đang nạp bộ căn thời gian Qwen3",
                                download="Đang tải bộ căn thời gian Qwen3-ForcedAligner"):
-                aligner["proc"] = AutoProcessor.from_pretrained(ALIGNER)
-                aligner["model"] = Qwen3ASRForTokenClassification.from_pretrained(ALIGNER, dtype=dtype,
-                                                                                  device_map=dev).eval()
+                aligner["proc"] = _load(AutoProcessor, ALIGNER)
+                aligner["model"] = _load(Qwen3ASRForTokenClassification, ALIGNER, dtype=dtype, device_map=dev).eval()
         return aligner["proc"], aligner["model"]
 
     def batches(n: int, size: int):
