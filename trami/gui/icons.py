@@ -183,6 +183,20 @@ def _plus(p: QPainter):
     p.drawLine(QPointF(5, 12), QPointF(19, 12))
 
 
+def _minus(p: QPainter):
+    p.drawLine(QPointF(5, 12), QPointF(19, 12))
+
+
+def _fit(p: QPainter):   # mũi tên 2 chiều trong khung: vừa khung
+    p.drawLine(QPointF(4, 12), QPointF(20, 12))
+    for a, b in ((4, 12), (20, 12)):
+        d = 4 if a == 4 else -4
+        p.drawLine(QPointF(a, b), QPointF(a + d, b - 4))
+        p.drawLine(QPointF(a, b), QPointF(a + d, b + 4))
+    p.drawLine(QPointF(2, 6), QPointF(2, 18))
+    p.drawLine(QPointF(22, 6), QPointF(22, 18))
+
+
 def _x(p: QPainter):
     p.drawLine(QPointF(6, 6), QPointF(18, 18))
     p.drawLine(QPointF(18, 6), QPointF(6, 18))
@@ -440,7 +454,7 @@ ICONS = {
     "users": _users, "music": _music, "wand": _wand, "search": _search, "refresh": _refresh, "clock": _clock,
     "eye": _eye, "image": _image, "text": _text, "volume": _volume, "crop": _crop, "list": _list,
     "split": _split, "merge": _merge, "sparkle": _sparkle, "stack": _stack, "chev_left": _chev_left,
-    "chev_right": _chev_right, "chev_down": _chev_down, "info": _info, "cpu": _cpu,
+    "chev_right": _chev_right, "chev_down": _chev_down, "info": _info, "cpu": _cpu, "minus": _minus, "fit": _fit,
 }
 
 

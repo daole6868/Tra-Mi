@@ -23,8 +23,8 @@ from .editors import RegionEditor, Timeline
 from .player import Player, fmt
 from .subs_model import (C_END, C_FIT, C_NODUB, C_SEL, C_SONG, C_SPK, C_START, C_VI, C_VOICE, C_ZH, SpeakerDelegate,
                          SubsFilter, SubsModel, VoiceDelegate)
-from .widgets import (Card, ColorButton, Form, GradientButton, IconButton, PillTabs, ProgressBar, SectionCard,
-                      SliderRow, Switch, button, combo, hbox, label, set_combo, wrap)
+from .widgets import (Card, ColorButton, Form, GradientButton, IconButton, IconTabs, PillTabs, ProgressBar,
+                      SectionCard, SliderRow, Switch, button, combo, hbox, label, set_combo, wrap)
 
 
 def safe_stem(p: Project) -> str:
@@ -53,17 +53,21 @@ class ProjectPage(QWidget):
         self._live_timer = QTimer(self, singleShot=True, interval=40, timeout=self._apply_live)
         self._save_segs_timer = QTimer(self, singleShot=True, interval=800, timeout=self._save_segs_now)
 
-        # ---------------- đầu trang
+        # ---------------- thanh trên cùng: tên dự án · trạng thái lưu · Xuất (như trình dựng phim)
         self.name = QLineEdit()
-        self.name.setFont(theme.font(15, QFont.Weight.ExtraBold))
+        self.name.setFont(theme.font(14, QFont.Weight.ExtraBold))
         self.name.setStyleSheet("background: transparent; border: 1px solid transparent; padding: 2px 6px;")
         self.name.editingFinished.connect(self._rename)
-        self.info = label("", "muted")
-        head = hbox(self.name, self.info, None,
-                    button("Mở thư mục", "folder", on_click=self._open_dir),
-                    button("Xoá dự án", "trash", danger=True, on_click=self._delete))
+        self.saved = label("", "muted")
+        export_btn = GradientButton("Xuất video", "export")
+        export_btn.clicked.connect(lambda: self.tabs.set_current(7))
+        b_dir = IconButton("folder", "Mở thư mục dự án", 34)
+        b_dir.clicked.connect(self._open_dir)
+        b_del = IconButton("trash", "Xoá dự án", 34)
+        b_del.clicked.connect(self._delete)
+        head = hbox(self.name, self.saved, None, b_dir, b_del, export_btn)
 
-        # ---------------- cột trái: trình phát + thanh tiến độ tác vụ
+        # ---------------- giữa: khung xem trước (trình phát) + tiến độ tác vụ
         self.player = Player()
         self.player.positionChanged.connect(self._on_pos)
         self.player.mediaError.connect(self._media_error)
@@ -71,9 +75,11 @@ class ProjectPage(QWidget):
         self.ov_which.currentIndexChanged.connect(self._refresh_overlay)
         self.ov_show = Switch(True)
         self.ov_show.toggledOn.connect(self._refresh_overlay)
-        left_card = Card(padding=12)
-        left_card.add(self.player)
-        left_card.add(hbox(label("Hiện phụ đề", "muted"), self.ov_show, self.ov_which, None))
+        self.info = label("", "muted")
+        center = Card(padding=12)
+        center.add(hbox(label("Xem trước", "h3"), None, self.info))
+        center.add(self.player)
+        center.add(hbox(label("Hiện phụ đề", "muted"), self.ov_show, self.ov_which, None))
         self.job_box = Card(padding=12)
         self.job_title = label("", "h3")
         self.job_msg = label("", "muted", wrap=True)
@@ -85,13 +91,13 @@ class ProjectPage(QWidget):
         self.job_box.hide()
         self._cur_job = None
         self.job_cancel.clicked.connect(lambda: manager.cancel(self._cur_job) if self._cur_job else None)
-        lcol = QVBoxLayout()
-        lcol.setSpacing(12)
-        lcol.addWidget(left_card, 1)
-        lcol.addWidget(self.job_box)
+        ccol = QVBoxLayout()
+        ccol.setSpacing(10)
+        ccol.addWidget(center, 1)
+        ccol.addWidget(self.job_box)
 
-        # ---------------- cột phải: tab
-        self.tabs = PillTabs([("Tự động", "bolt"), ("Phụ đề", "subtitles"), ("Xoá phụ đề", "eraser"),
+        # ---------------- trái: thanh công cụ dạng icon + nội dung từng bước
+        self.tabs = IconTabs([("Tự động", "bolt"), ("Phụ đề", "subtitles"), ("Xoá phụ đề", "eraser"),
                               ("Chỉnh sửa", "scissors"), ("Kiểu chữ", "palette"), ("Lồng tiếng", "mic"),
                               ("Tài liệu", "download"), ("Xuất", "export")])
         self.stack = QStackedWidget()
@@ -99,26 +105,75 @@ class ProjectPage(QWidget):
                       self._tab_dub, self._tab_models, self._tab_export):
             self.stack.addWidget(build())
         self.tabs.changed.connect(self._tab_changed)
-        rcol = QVBoxLayout()
-        rcol.setSpacing(10)
-        rcol.addWidget(self.tabs)
-        rcol.addWidget(self.stack, 1)
+        tools = Card(padding=8)
+        tools.add(self.tabs)
+        tools.add(self.stack)
+        tools.lay.setStretch(1, 1)
 
-        split = QSplitter(Qt.Orientation.Horizontal)
-        split.addWidget(wrap(lcol))
-        split.addWidget(wrap(rcol))
-        split.setStretchFactor(0, 5)
-        split.setStretchFactor(1, 6)
-        split.setChildrenCollapsible(False)
+        # ---------------- phải: thuộc tính câu đang chọn
+        from .inspector import LineInspector
+
+        self._sel_row = -1
+        self.inspector = LineInspector(self.model, lambda: [(v["id"], v["name"]) for v in self._voices])
+        self.inspector.navigate.connect(lambda r: self._select_line(r, seek=True))
+        self.inspector.action.connect(self._line_action)
+        self.inspector.setMinimumWidth(260)
+
+        top = QSplitter(Qt.Orientation.Horizontal)
+        top.addWidget(tools)
+        top.addWidget(wrap(ccol))
+        insp = scroll(self.inspector)
+        insp.setMinimumWidth(270)
+        top.addWidget(insp)
+        top.setStretchFactor(0, 9)
+        top.setStretchFactor(1, 8)
+        top.setStretchFactor(2, 4)
+        top.setChildrenCollapsible(False)
+        top.setCollapsible(2, True)    # màn hình nhỏ: kéo vách ngăn sang phải để ẩn / hiện khung Câu đang chọn
+        self.top_split = top
+
+        # ---------------- dưới: timeline nhiều track trải ngang
+        from .timeline import TrackTimeline
+
+        self.tracks = TrackTimeline()
+        self.tracks.seekRequested.connect(self.player.seek)
+        self.tracks.lineClicked.connect(lambda r: self._select_line(r, seek=True))
+        self.tracks.lineActivated.connect(lambda r: (self._select_line(r), self._play_line(r)))
+        self.tracks.actionRequested.connect(self._timeline_action)
+        bottom = Card(padding=6)
+        bottom.add(self.tracks)
+        bottom.setMinimumHeight(150)
+
+        vsplit = QSplitter(Qt.Orientation.Vertical)
+        vsplit.addWidget(top)
+        vsplit.addWidget(bottom)
+        vsplit.setStretchFactor(0, 7)
+        vsplit.setStretchFactor(1, 3)
+        vsplit.setChildrenCollapsible(False)
+        self.v_split = vsplit
+        self._sized = False
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(22, 16, 22, 16)
-        lay.setSpacing(12)
+        lay.setContentsMargins(16, 10, 16, 12)
+        lay.setSpacing(10)
         lay.addLayout(head)
-        lay.addWidget(split, 1)
+        lay.addWidget(vsplit, 1)
 
         QShortcut(QKeySequence("Ctrl+S"), self, activated=lambda: (self._save_segs_now(), self._save_edit_now(),
                                                                    self.win.toast("Đã lưu", "ok")))
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if not self._sized and self.width() > 400:
+            # chia chỗ lần đầu theo cỡ màn hình: timeline ~28% chiều cao; màn hẹp thì thu khung "Câu đang chọn"
+            self._sized = True
+            W, H = self.width(), self.height()
+            bottom = int(min(300, max(240, H * 0.3)))
+            self.v_split.setSizes([max(300, H - bottom), bottom])
+            if W < 1600:
+                self.top_split.setSizes([int(W * 0.55), int(W * 0.45), 0])
+            else:
+                self.top_split.setSizes([int(W * 0.44), int(W * 0.38), max(300, int(W * 0.18))])
 
     # ================================================================== TAB: Tự động
     def _tab_auto(self):
@@ -725,6 +780,9 @@ class ProjectPage(QWidget):
                               f"{i.get('fps', 0):.2f} fps" if i.get("duration") else "Đang chờ video…")
             if reload_media:
                 self._load_media()
+                self._sel_row = -1
+                self.tracks.set_thumbs(None, 0, 0)
+                self.tracks.set_wave(None, 0.05)
             self.model.set_segments(p.segments)
             self._fit_rows()
             self._update_count()
@@ -735,9 +793,29 @@ class ProjectPage(QWidget):
             self._update_summary()
             self._update_timeline()
             self._refresh_overlay()
+            self.inspector.set_row(self._sel_row)
+            self.tracks.set_selected(self._sel_row)
         finally:
             self.loading = False
         self._apply_live()
+        self._load_timeline_assets()
+
+    def _load_timeline_assets(self):
+        """Ảnh thu nhỏ + sóng âm cho timeline (tạo 1 lần ở nền, có sẵn thì nạp ngay)."""
+        if not self.p or not self.p.data.get("source"):
+            return
+        pid = self.p.id
+
+        def done(a):
+            if not a or not self.p or self.p.id != pid:
+                return
+            if a.get("thumbs"):
+                self.tracks.set_thumbs(QPixmap(a["thumbs"]), a["step"], a["count"])
+            if a.get("wave"):
+                import numpy as np
+
+                self.tracks.set_wave(np.load(a["wave"]), a["hop"])
+        run_async(lambda: pipeline.timeline_assets(Project(pid)), done, lambda m: None)
 
     def _load_media(self):
         p = self.p
@@ -914,6 +992,8 @@ class ProjectPage(QWidget):
         self._save_segs_timer.start()
         self._update_count()
         self._refresh_overlay()
+        self.saved.setText("● đang sửa…")
+        self.tracks.canvas.update()
 
     def _save_segs_now(self):
         if not self.p:
@@ -921,6 +1001,7 @@ class ProjectPage(QWidget):
         self.p.reload()
         self.p.segments = self.model.segs
         self.p.save()
+        self.saved.setText("✓ đã lưu " + time.strftime("%H:%M"))
 
     def flush(self):
         if self._save_segs_timer.isActive():
@@ -1124,7 +1205,9 @@ class ProjectPage(QWidget):
                 pi = proxy.mapFromSource(self.model.index(idx, 0)) if proxy else None
                 if pi is not None and pi.isValid():
                     table.scrollTo(pi, QAbstractItemView.ScrollHint.PositionAtCenter)
+            self.tracks.set_active(idx)
         self.timeline.set_pos(t)
+        self.tracks.set_pos(t, follow=self.player.playing())
 
     def _refresh_overlay(self):
         if not self.p:
@@ -1145,13 +1228,49 @@ class ProjectPage(QWidget):
 
     def _row_clicked(self, pidx):
         row = self.proxy.mapToSource(pidx).row()
-        if 0 <= row < len(self.model.segs) and pidx.column() not in (C_SONG, C_NODUB, C_FIT):
-            if pidx.column() in (0, C_START, C_END, C_SPK):
-                self.player.seek(self.model.segs[row].start + 0.01)
+        if 0 <= row < len(self.model.segs):
+            self._select_line(row, seek=pidx.column() in (0, C_START, C_END, C_SPK), source="subs")
 
     def _selected_row(self) -> int:
+        if 0 <= self._sel_row < len(self.model.segs):
+            return self._sel_row
         idx = self.table.currentIndex()
         return self.proxy.mapToSource(idx).row() if idx.isValid() else -1
+
+    # ------------------------------------------------------------------ câu đang chọn (đồng bộ mọi khung)
+    def _select_line(self, row: int, seek: bool = False, source: str = ""):
+        segs = self.model.segs
+        if not (0 <= row < len(segs)):
+            return
+        self._sel_row = row
+        self.inspector.set_row(row)
+        self.tracks.set_selected(row)
+        for name, table, proxy in (("subs", self.table, self.proxy), ("dub", self.dub_table, self.dub_proxy)):
+            if name != source:
+                pi = proxy.mapFromSource(self.model.index(row, 0))
+                if pi.isValid():
+                    table.selectRow(pi.row())
+                    table.scrollTo(pi, QAbstractItemView.ScrollHint.EnsureVisible)
+        if seek:
+            self.player.seek(segs[row].start + 0.01)
+
+    def _line_action(self, name: str, row: int):
+        if name == "play":
+            self._play_line(row)
+        elif name == "retranslate":
+            self._retranslate_one(row)
+        elif name == "shorten":
+            self._shorten_rows([row])
+        elif name == "redub":
+            self._redub_rows([row])
+
+    def _timeline_action(self, name: str):
+        row = self._selected_row()
+        if name in ("insert", "split", "merge", "delete"):
+            return self._seg_op(name)
+        if row < 0:
+            return self.win.toast("Bấm chọn 1 câu trên timeline trước", "warn")
+        self._line_action(name, row)
 
     def _fit_rows(self):
         if len(self.model.segs) <= 3000:  # bảng quá dài thì bỏ qua cho nhanh
@@ -1184,11 +1303,12 @@ class ProjectPage(QWidget):
         self.model.set_segments(segs)
         self._fit_rows()
         self._segs_edited()
+        self._sel_row = -1
         if 0 <= i < len(segs):
-            self.table.selectRow(self.proxy.mapFromSource(self.model.index(i, 0)).row())
+            self._select_line(min(i, len(segs) - 1))
 
-    def _retranslate_one(self):
-        i = self._selected_row()
+    def _retranslate_one(self, row: int | None = None):
+        i = self._selected_row() if row is None else row
         if i < 0:
             return self.win.toast("Hãy chọn 1 câu", "warn")
         seg = self.model.segs[i]
@@ -1364,7 +1484,10 @@ class ProjectPage(QWidget):
         e = self.p.edit
         d = self.p.data.get("info", {}).get("duration", 0)
         self.timeline.dub = (self.p.data.get("dub_layout") or []) if (e.get("dub") or {}).get("enabled") else []
-        self.timeline.set_data(d, (e["trim"].get("start") or 0, e["trim"].get("end") or 0), e.get("cuts", []), self.model.segs)
+        keep = (e["trim"].get("start") or 0, e["trim"].get("end") or 0)
+        self.timeline.set_data(d, keep, e.get("cuts", []), self.model.segs)
+        self.tracks.mark = self.timeline.mark
+        self.tracks.set_data(d, self.model.segs, self.p.data.get("dub_layout") or [], keep, e.get("cuts", []))
 
     def _crop_dialog(self):
         from PySide6.QtWidgets import QDialog, QDialogButtonBox
@@ -1461,6 +1584,7 @@ class ProjectPage(QWidget):
         for v in voices:
             self.d_line_voice.addItem(v["name"], v["id"])
         set_combo(self.d_line_voice, cur or "")
+        self.inspector.refresh_voices()
         self.spk_table.setRowCount(len(spks))
         self.spk_table.setFixedHeight(36 + 44 * max(1, min(len(spks), 6)))
         for r, s in enumerate(spks):
@@ -1564,8 +1688,8 @@ class ProjectPage(QWidget):
 
     def _dub_row_clicked(self, pidx):
         row = self.dub_proxy.mapToSource(pidx).row()
-        if 0 <= row < len(self.model.segs) and pidx.column() in (0, C_START, C_END, C_SPK):
-            self.player.seek(self.model.segs[row].start + 0.01)
+        if 0 <= row < len(self.model.segs):
+            self._select_line(row, seek=pidx.column() in (0, C_START, C_END, C_SPK), source="dub")
 
     def _dub_current_rows(self) -> list[int]:
         rows = sorted({self.dub_proxy.mapToSource(i).row() for i in self.dub_table.selectionModel().selectedRows()})
@@ -1594,6 +1718,10 @@ class ProjectPage(QWidget):
         rows = sorted(self.model.selected)
         if not rows:
             return self.win.toast("Tích chọn câu cần tạo lại giọng ở cột Chọn trước", "warn")
+        self._redub_rows(rows)
+
+    def _redub_rows(self, rows: list[int]):
+        self.inspector._flush()
         empty = [r + 1 for r in rows if not self.model.segs[r].trans.strip()]
         if empty:
             return self.win.toast(f"Câu {', '.join(map(str, empty[:5]))} chưa có lời tiếng Việt", "warn")
@@ -1616,6 +1744,10 @@ class ProjectPage(QWidget):
         rows = sorted(self.model.selected)
         if not rows:
             return self.win.toast("Tích chọn câu cần rút gọn ở cột Chọn trước (có thể bấm 'Tích câu ⚠ quá dài')", "warn")
+        self._shorten_rows(rows)
+
+    def _shorten_rows(self, rows: list[int]):
+        self.inspector._flush()
 
         def fn(j, p):
             j.update(0.1, f"AI đang rút gọn {len(rows)} câu…")

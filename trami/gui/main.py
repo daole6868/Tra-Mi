@@ -20,7 +20,7 @@ from . import common as C
 from . import icons, theme
 from .common import run_async
 from .project_page import ProjectPage, scroll
-from .widgets import (DropZone, Form, GradientButton, IconBadge, NavButton, ProgressBar, SectionCard,
+from .widgets import (DropZone, Form, GradientButton, IconBadge, IconButton, NavButton, ProgressBar, SectionCard,
                       Switch, Toast, button, combo, hbox, label, set_combo, shadow)
 
 VIDEO_FILTER = "Video (*.mp4 *.mkv *.mov *.avi *.flv *.webm *.ts *.m4v *.wmv *.mpg *.3gp);;Tất cả (*.*)"
@@ -68,6 +68,11 @@ class Sidebar(QFrame):
         new = GradientButton("Dự án mới", "plus")
         new.clicked.connect(win.go_home)
         lay.addWidget(new)
+        self.new_small = IconButton("plus", "Dự án mới", 40)
+        self.new_small.clicked.connect(win.go_home)
+        self.new_small.hide()
+        lay.addWidget(self.new_small, 0, Qt.AlignmentFlag.AlignHCenter)
+        self._full = [new, tb.itemAt(0).widget(), tb.itemAt(1).widget()]
         lay.addSpacing(12)
         self.group = QButtonGroup(self)
         self.nav: dict[str, NavButton] = {}
@@ -80,7 +85,8 @@ class Sidebar(QFrame):
             self.nav[key] = b
             lay.addWidget(b)
         lay.addSpacing(14)
-        lay.addWidget(label("DỰ ÁN GẦN ĐÂY", "muted"))
+        recent_lb = label("DỰ ÁN GẦN ĐÂY", "muted")
+        lay.addWidget(recent_lb)
         self.recent = QVBoxLayout()
         self.recent.setSpacing(2)
         rw = QWidget()
@@ -90,6 +96,25 @@ class Sidebar(QFrame):
         self.sys = label("", "muted", wrap=True)
         self.sys.setFont(theme.font(8.5))
         lay.addWidget(self.sys)
+        self._full += [recent_lb, sa, self.sys]
+        self._lay = lay
+        self.compact = False
+
+    def set_compact(self, on: bool):
+        """Thu gọn còn cột icon (khi đang mở dự án) để trang dự án rộng như trình dựng phim."""
+        if on == self.compact:
+            return
+        self.compact = on
+        self.setFixedWidth(68 if on else 250)
+        self._lay.setContentsMargins(10 if on else 14, 18, 10 if on else 14, 14)
+        for w in self._full:
+            w.setVisible(not on)
+        self.new_small.setVisible(on)
+        for b in self.nav.values():
+            b.compact = on
+            b.setToolTip(b.text() if on else "")
+            b.update()
+        self.update()
 
     def paintEvent(self, e):
         p = QPainter(self)
@@ -833,6 +858,7 @@ class MainWindow(QMainWindow):
             self.refresh_projects()
         self.pages.setCurrentWidget(self.page_keys[key])
         self.sidebar.nav[key].setChecked(True)
+        self.sidebar.set_compact(key == "project")   # trang dự án: thanh bên chỉ còn icon, rộng chỗ cho timeline
 
     def go_home(self):
         self.show_page("home")

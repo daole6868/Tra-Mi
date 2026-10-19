@@ -242,6 +242,7 @@ class NavButton(QAbstractButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(42)
         self._hov = False
+        self.compact = False
         self.setFont(theme.font(10.2, QFont.Weight.DemiBold))
 
     def enterEvent(self, e):
@@ -266,6 +267,10 @@ class NavButton(QAbstractButton):
             p.setBrush(theme.accent_gradient(0, bar.top(), 0, bar.bottom()))
             p.drawRoundedRect(bar, 2, 2)
         col = theme.TEXT if on else ("#C9D0DC" if self._hov else theme.MUTED)
+        if self.compact:   # thanh bên thu gọn: chỉ icon ở giữa
+            icons.paint_icon(p, self.icon_name, QRectF(r.center().x() - 10, r.center().y() - 10, 20, 20),
+                             theme.ACCENT2 if on else col, 1.9)
+            return
         icons.paint_icon(p, self.icon_name, QRectF(r.left() + 14, r.center().y() - 10, 20, 20),
                          theme.ACCENT2 if on else col, 1.9)
         p.setPen(QColor(col))
@@ -409,6 +414,93 @@ class PillTabs(QWidget):
             icons.paint_icon(p, ic, QRectF(r.left() + 12, r.center().y() - 8.5, 17, 17), col, 2.0)
             p.setPen(QColor(col))
             p.drawText(r.adjusted(34, 0, -8, 0), Qt.AlignmentFlag.AlignVCenter, text)
+
+
+class IconTabs(QWidget):
+    """Thanh tab kiểu trình dựng phim (Concat/CapCut): icon trên, chữ dưới, chia đều chiều ngang;
+    hẹp quá thì tự xuống 2 hàng. Cùng API với PillTabs (changed, set_current, cur)."""
+    changed = Signal(int)
+    MIN_CELL = 74
+
+    def __init__(self, items: list[tuple[str, str]], parent=None):
+        super().__init__(parent)
+        self.items = items
+        self.cur = 0
+        self._hov = -1
+        self.setMouseTracking(True)
+        self.setFont(theme.font(8.6, QFont.Weight.DemiBold))
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._rows = 1
+
+    def set_current(self, i: int, emit: bool = True):
+        if 0 <= i < len(self.items):
+            self.cur = i
+            self.update()
+            if emit:
+                self.changed.emit(i)
+
+    def _per_row(self, w: int) -> int:
+        n = len(self.items)
+        return n if w - 8 >= n * self.MIN_CELL else (n + 1) // 2
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, w: int) -> int:
+        rows = -(-len(self.items) // max(1, self._per_row(w)))
+        return 8 + rows * 54
+
+    def sizeHint(self):
+        return QSize(len(self.items) * self.MIN_CELL + 8, self.heightForWidth(len(self.items) * self.MIN_CELL + 8))
+
+    def minimumSizeHint(self):
+        return QSize(4 * self.MIN_CELL, 62)
+
+    def resizeEvent(self, e):
+        h = self.heightForWidth(self.width())
+        if self.height() != h:
+            self.setFixedHeight(h)
+        super().resizeEvent(e)
+
+    def _rects(self) -> list[QRectF]:
+        per = max(1, self._per_row(self.width()))
+        cw = (self.width() - 8) / per
+        return [QRectF(4 + (i % per) * cw + 2, 4 + (i // per) * 54 + 2, cw - 4, 50) for i in range(len(self.items))]
+
+    def mouseMoveEvent(self, e):
+        h = next((i for i, r in enumerate(self._rects()) if r.contains(e.position())), -1)
+        if h != self._hov:
+            self._hov = h
+            self.update()
+
+    def leaveEvent(self, e):
+        self._hov = -1
+        self.update()
+
+    def mousePressEvent(self, e):
+        for i, r in enumerate(self._rects()):
+            if r.contains(e.position()):
+                self.set_current(i)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setFont(self.font())
+        fm = p.fontMetrics()
+        for i, ((text, ic), r) in enumerate(zip(self.items, self._rects())):
+            on, hov = i == self.cur, i == self._hov
+            if on or hov:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(theme.CARD3 if on else theme.CARD2))
+                p.drawRoundedRect(r, 9, 9)
+            if on:   # vạch nhấn dưới tab đang chọn
+                p.setBrush(theme.accent_gradient(r.left(), 0, r.right(), 0))
+                p.drawRoundedRect(QRectF(r.center().x() - 12, r.bottom() - 3, 24, 3), 1.5, 1.5)
+            col = theme.ACCENT2 if on else (theme.TEXT if hov else theme.MUTED)
+            icons.paint_icon(p, ic, QRectF(r.center().x() - 9, r.top() + 7, 18, 18), col, 1.9)
+            p.setPen(QColor(theme.TEXT if on else (theme.TEXT if hov else theme.MUTED)))
+            p.drawText(QRectF(r.left() + 2, r.top() + 28, r.width() - 4, 18), Qt.AlignmentFlag.AlignCenter,
+                       fm.elidedText(text, Qt.TextElideMode.ElideRight, int(r.width() - 4)))
 
 
 # ====================================================================== Thanh tiến độ

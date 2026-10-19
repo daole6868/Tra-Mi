@@ -27,7 +27,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `separate.py` (audio-separator BS-RoFormer), `lama.py` + `inpaint.py` (xoá chữ), `ocr.py` (RapidOCR),
   `translate.py` (`LLMClient` gọi HTTP: anthropic / OpenAI-compatible / gemini / deepseek / ollama; Google gtx).
 - `trami/jobs.py` – hàng đợi 1 luồng cho tác vụ dài; `trami/gui/*` – giao diện (QPainter), `common.run_async`,
-  `WheelGuard` (lăn chuột không đổi ô chọn khi chưa bấm vào).
+  `WheelGuard` (lăn chuột không đổi ô chọn khi chưa bấm vào). Trang dự án bố cục kiểu trình dựng phim (từ 2.0.28):
+  trái `IconTabs` + 8 tab, giữa trình phát, phải `gui/inspector.LineInspector` (câu đang chọn), dưới `gui/timeline.TrackTimeline`.
 - `tests/test_core.py` – `python -m pytest -q tests` (53 test; 1 test cần gói AI).
 
 ## Cài đặt trên Windows (bài học)
@@ -205,6 +206,19 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   bản đang dùng. Mục 4 giờ ghi rõ "tạo <giờ> · đã sửa N lần, lần cuối <giờ>" (`dub_versions` thêm `created`, `edits`),
   tooltip báo số câu chưa có giọng; mô tả mục 4 nói rõ 2 nút khác nhau.
 
+- 2.0.28: giao diện kiểu Concat (github.com/jub0t/concat – trình dựng video Rust, AGPL; chỉ học bố cục, không lấy mã).
+  Trang dự án: thanh trên (tên · "✓ đã lưu HH:MM" · thư mục · xoá · nút "Xuất video" -> tab Xuất); QSplitter ngang 3 khung:
+  TRÁI `widgets.IconTabs` (icon trên chữ, chia đều, hẹp thì 2 hàng – thay PillTabs vốn co hình mà không co vùng bấm) + stack
+  8 tab cũ; GIỮA "Xem trước" (trình phát + thông số + hộp tiến độ); PHẢI `inspector.LineInspector` (trong scroll, thu gọn
+  được): giờ, người nói, Trung, Việt (ghi qua SubsModel sau 0,7 s), giọng riêng, bỏ lồng, độ vừa, Nghe câu / Dịch lại /
+  AI rút gọn / Tạo lại giọng câu này, ◀ ▶. DƯỚI (QSplitter dọc) `timeline.TrackTimeline`: track Phụ đề (khối màu người
+  nói, chữ Việt), Giọng lồng (màu độ vừa), Video (dải ảnh đúng tỉ lệ), Tiếng gốc (sóng âm); bấm khối = chọn câu, bấm đúp =
+  nghe, Ctrl+lăn = phóng, lăn = cuộn; thanh công cụ Thêm/Tách/Gộp/Xoá/Nghe/Tạo lại giọng, −/+/vừa khung; mở video dài
+  hiện ~90 s đầu. `pipeline.timeline_assets` tạo `work/tl_thumbs_<n>.jpg` (≤160 ảnh, tile 1 hàng) + `work/tl_wave.npy`
+  (sóng âm 0,05 s từ giọng đã tách). Câu chọn đồng bộ mọi nơi qua `project_page._select_line` (`_sel_row`; `_selected_row`
+  ưu tiên nó). `main.Sidebar.set_compact` (chỉ icon, rộng 68) khi ở trang dự án. Màn <1600 px: khung phải mở đầu thu gọn,
+  timeline ~30% chiều cao (`showEvent`). Icon mới `minus`, `fit`. Đã chạy thử offscreen 1920×1080 + 1366×768.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -213,3 +227,4 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.23/2.0.24: chờ người dùng chạy lại "1. Nghe & tách câu" xác nhận câu trọn vẹn, không sót; Mel-RoFormer Kim, fa-zh, ECAPA (gộp người nói ảo) chưa chạy thật (sandbox không có torch/ModelScope).
 - 2.0.25: chờ người dùng thử bảng câu lồng tiếng + Tạo lại giọng các câu đã tích trên máy thật (VieNeu/OmniVoice).
 - 2.0.26: chờ người dùng cập nhật edge-tts>=7.3.1 và xác nhận Edge hết 403.
+- 2.0.28: chờ người dùng xem giao diện mới trên máy thật (độ rộng các khung, cỡ chữ, timeline).

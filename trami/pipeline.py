@@ -114,6 +114,44 @@ def separate_audio(p: Project, settings: dict | None = None, progress: Prog | No
     return v, i
 
 
+def timeline_assets(p: Project) -> dict:
+    """Dải ảnh thu nhỏ + đường sóng âm cho timeline (tạo 1 lần, lưu trong work/). Video dài vẫn ≤ 160 ảnh."""
+    import math
+    import subprocess
+
+    import numpy as np
+
+    info = p.data.get("info", {})
+    dur = float(info.get("duration") or 0)
+    if not dur or not p.data.get("source"):
+        return {}
+    out: dict = {}
+    if info.get("has_video", True):
+        step = max(1.0, dur / 160)
+        n = max(1, math.ceil(dur / step))
+        strip = p.work / f"tl_thumbs_{n}.jpg"
+        if not (strip.exists() and strip.stat().st_size > 0):
+            tmp = strip.with_name(strip.stem + ".tmp.jpg")
+            ff.run(["-i", str(p.source), "-an", "-vf", f"fps=1/{step:.4f},scale=-2:54,tile={n}x1",
+                    "-frames:v", "1", "-q:v", "6", str(tmp)], dur, None, None, "Đang tạo ảnh thu nhỏ")
+            tmp.replace(strip)
+        out.update({"thumbs": str(strip), "step": step, "count": n})
+    src = stems(p).get("vocals") or str(p.source)
+    wave = p.work / "tl_wave.npy"
+    if not wave.exists() or wave.stat().st_mtime < Path(src).stat().st_mtime:
+        raw = subprocess.run([ff.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-i", str(src), "-vn", "-ac", "1",
+                              "-ar", "4000", "-f", "s16le", "pipe:1"], capture_output=True,
+                             creationflags=ff._NO_WINDOW).stdout
+        a = np.abs(np.frombuffer(raw, np.int16).astype(np.float32) / 32768.0)
+        hop = 200   # 0,05 s
+        env = a[: len(a) // hop * hop].reshape(-1, hop).max(axis=1) if len(a) >= hop else np.zeros(0, np.float32)
+        if len(env):
+            env = np.minimum(1.0, env / max(1e-4, float(np.percentile(env, 99))))
+        np.save(wave, env.astype(np.float32))
+    out.update({"wave": str(wave), "hop": 0.05})
+    return out
+
+
 def import_stems(p: Project, vocals: str | Path, instrumental: str | Path | None = None) -> tuple[Path, Path]:
     """Nạp giọng nói / nhạc nền đã tách bằng phần mềm khác (CapCut, UVR…). Chỉ có file giọng -> nhạc nền = tiếng gốc
     trừ giọng (file giọng phải khớp thời gian với video)."""
