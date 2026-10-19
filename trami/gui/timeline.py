@@ -34,12 +34,14 @@ class _Canvas(QWidget):
     RULER = 24
     TRACKS = [("subs", "Phụ đề", "subtitles", 38), ("dub", "Lồng tiếng", "mic", 38),
               ("video", "Video", "film", 44), ("audio", "Tiếng gốc", "volume", 30)]
+    MIN_SCALE, MAX_SCALE = 0.7, 1.3   # các dòng co / giãn theo chiều cao khung: không bị cắt, không thừa chỗ trống
 
     def __init__(self, tl: "TrackTimeline"):
         super().__init__(tl)
         self.tl = tl
         self.setMouseTracking(True)
-        self.setMinimumHeight(self.RULER + sum(h + 6 for *_, h in self.TRACKS) + 6)
+        # màn thấp: các dòng tự co (tối đa còn 70 %) thay vì bị cắt mất dòng dưới cùng; màn cao: giãn ra
+        self.setMinimumHeight(self.RULER + 4 + sum(round(h * self.MIN_SCALE) + 6 for *_, h in self.TRACKS))
         self._drag = False
         self._hover = None
         self._dpress = None    # (câu, x lúc bấm, đầu, cuối) – đang bấm giữ 1 đoạn giọng lồng
@@ -52,9 +54,14 @@ class _Canvas(QWidget):
     def t(self, x: float) -> float:
         return max(0.0, min(self.tl.duration, self.tl.t0 + (x - self.HEAD) / self.tl.pps))
 
+    def _scale(self) -> float:
+        room = self.height() - self.RULER - 4 - 6 * len(self.TRACKS)
+        return max(self.MIN_SCALE, min(self.MAX_SCALE, room / sum(h for *_, h in self.TRACKS)))
+
     def track_rect(self, key: str) -> QRectF:
-        y = self.RULER + 4
+        y, sc = self.RULER + 4, self._scale()
         for k, _, _, h in self.TRACKS:
+            h = round(h * sc)
             if k == key:
                 return QRectF(self.HEAD, y, self.width() - self.HEAD, h)
             y += h + 6
@@ -401,8 +408,8 @@ class TrackTimeline(QWidget):
             b.clicked.connect(fn)
             tb.addWidget(b)
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 4, 0, 0)
-        lay.setSpacing(2)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
         lay.addLayout(tb)
         lay.addWidget(self.canvas, 1)
         lay.addWidget(self.bar)

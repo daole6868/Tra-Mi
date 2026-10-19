@@ -24,7 +24,7 @@ from .player import Player, fmt
 from .subs_model import (C_END, C_FIT, C_NODUB, C_SEL, C_SONG, C_SPK, C_START, C_VI, C_VOICE, C_ZH, SpeakerDelegate,
                          SubsFilter, SubsModel, VoiceDelegate)
 from .widgets import (Card, ColorButton, Form, GradientButton, IconButton, IconTabs, PillTabs, ProgressBar,
-                      SectionCard, SliderRow, Switch, button, combo, hbox, label, set_combo, wrap)
+                      SectionCard, SliderRow, Switch, button, combo, flow, hbox, label, set_combo, wrap)
 
 
 def safe_stem(p: Project) -> str:
@@ -65,7 +65,10 @@ class ProjectPage(QWidget):
         b_dir.clicked.connect(self._open_dir)
         b_del = IconButton("trash", "Xoá dự án", 34)
         b_del.clicked.connect(self._delete)
-        head = hbox(self.name, self.saved, None, b_dir, b_del, export_btn)
+        self.insp_btn = IconButton("panel_right", "Ẩn / hiện khung \"Câu đang chọn\" bên phải", 34)
+        self.insp_btn.clicked.connect(lambda: self._show_inspector(not self.insp_box.isVisible()))
+        head = hbox(self.name, self.saved, None, self.insp_btn, b_dir, b_del, export_btn)
+        head.setSpacing(8)
 
         # ---------------- giữa: khung xem trước (trình phát) + tiến độ tác vụ
         self.player = Player()
@@ -76,11 +79,11 @@ class ProjectPage(QWidget):
         self.ov_show = Switch(True)
         self.ov_show.toggledOn.connect(self._refresh_overlay)
         self.info = label("", "muted")
-        center = Card(padding=12)
+        center = Card(padding=theme.PANEL_PAD)
         center.add(hbox(label("Xem trước", "h3"), None, self.info))
         center.add(self.player)
         center.add(hbox(label("Hiện phụ đề", "muted"), self.ov_show, self.ov_which, None))
-        self.job_box = Card(padding=12)
+        self.job_box = Card(padding=theme.PANEL_PAD)
         self.job_title = label("", "h3")
         self.job_msg = label("", "muted", wrap=True)
         self.job_bar = ProgressBar()
@@ -92,7 +95,8 @@ class ProjectPage(QWidget):
         self._cur_job = None
         self.job_cancel.clicked.connect(lambda: manager.cancel(self._cur_job) if self._cur_job else None)
         ccol = QVBoxLayout()
-        ccol.setSpacing(10)
+        ccol.setContentsMargins(0, 0, 0, 0)   # không thụt vào: mép khung Xem trước thẳng hàng với các khung bên cạnh
+        ccol.setSpacing(theme.GAP)
         ccol.addWidget(center, 1)
         ccol.addWidget(self.job_box)
 
@@ -105,10 +109,11 @@ class ProjectPage(QWidget):
                       self._tab_dub, self._tab_models, self._tab_export):
             self.stack.addWidget(build())
         self.tabs.changed.connect(self._tab_changed)
-        tools = Card(padding=8)
+        tools = Card(padding=theme.PANEL_PAD)
         tools.add(self.tabs)
         tools.add(self.stack)
         tools.lay.setStretch(1, 1)
+        tools.setMinimumWidth(700)   # kéo vách ngăn không làm nội dung các tab bị cắt (tab rộng nhất ~670 px)
 
         # ---------------- phải: thuộc tính câu đang chọn
         from .inspector import LineInspector
@@ -119,17 +124,19 @@ class ProjectPage(QWidget):
         self.inspector.action.connect(self._line_action)
         self.inspector.setMinimumWidth(260)
 
+        # khe giữa các khung = vách ngăn kéo được, cùng 1 cỡ theo cả 2 chiều (theme.GAP)
         top = QSplitter(Qt.Orientation.Horizontal)
+        top.setHandleWidth(theme.GAP)
         top.addWidget(tools)
         top.addWidget(wrap(ccol))
-        insp = scroll(self.inspector)
-        insp.setMinimumWidth(270)
-        top.addWidget(insp)
+        self.insp_box = scroll(self.inspector)
+        self.insp_box.setMinimumWidth(270)
+        top.addWidget(self.insp_box)
         top.setStretchFactor(0, 9)
         top.setStretchFactor(1, 8)
         top.setStretchFactor(2, 4)
+        # ẩn khung bên phải bằng nút trên thanh đầu (ẩn hẳn -> vách ngăn cũng ẩn, mép phải các khung thẳng hàng)
         top.setChildrenCollapsible(False)
-        top.setCollapsible(2, True)    # màn hình nhỏ: kéo vách ngăn sang phải để ẩn / hiện khung Câu đang chọn
         self.top_split = top
 
         # ---------------- dưới: timeline nhiều track trải ngang
@@ -142,11 +149,12 @@ class ProjectPage(QWidget):
         self.tracks.actionRequested.connect(self._timeline_action)
         self.tracks.dubMoved.connect(self._dub_moved)
         self.tracks.dubReset.connect(lambda r: self._dub_moved(r, None))
-        bottom = Card(padding=6)
+        bottom = Card(padding=theme.PANEL_PAD)
         bottom.add(self.tracks)
-        bottom.setMinimumHeight(150)
+        self.tl_card = bottom
 
         vsplit = QSplitter(Qt.Orientation.Vertical)
+        vsplit.setHandleWidth(theme.GAP)
         vsplit.addWidget(top)
         vsplit.addWidget(bottom)
         vsplit.setStretchFactor(0, 7)
@@ -156,8 +164,8 @@ class ProjectPage(QWidget):
         self._sized = False
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 10, 16, 12)
-        lay.setSpacing(10)
+        lay.setContentsMargins(16, 10, 16, 14)
+        lay.setSpacing(theme.GAP)
         lay.addLayout(head)
         lay.addWidget(vsplit, 1)
 
@@ -170,12 +178,19 @@ class ProjectPage(QWidget):
             # chia chỗ lần đầu theo cỡ màn hình: timeline ~28% chiều cao; màn hẹp thì thu khung "Câu đang chọn"
             self._sized = True
             W, H = self.width(), self.height()
-            bottom = int(min(300, max(240, H * 0.3)))
+            need = self.tl_card.minimumSizeHint().height()   # đủ chỗ cho cả 4 dòng timeline, không bị cắt
+            bottom = max(need, int(min(320, H * 0.32)))
             self.v_split.setSizes([max(300, H - bottom), bottom])
-            if W < 1600:
-                self.top_split.setSizes([int(W * 0.55), int(W * 0.45), 0])
-            else:
-                self.top_split.setSizes([int(W * 0.44), int(W * 0.38), max(300, int(W * 0.18))])
+            self._show_inspector(W >= 1600)
+
+    def _show_inspector(self, on: bool):
+        """Hiện / ẩn khung "Câu đang chọn" và chia lại chiều ngang (màn hẹp mở đầu ẩn)."""
+        self.insp_box.setVisible(on)
+        W = max(600, self.top_split.width() or self.width())
+        if on:
+            self.top_split.setSizes([int(W * 0.44), int(W * 0.38), max(290, int(W * 0.18))])
+        else:
+            self.top_split.setSizes([int(W * 0.55), int(W * 0.45), 0])
 
     # ================================================================== TAB: Tự động
     def _tab_auto(self):
@@ -231,7 +246,8 @@ class ProjectPage(QWidget):
         steps.add(grid)
         w = QWidget()
         v = QVBoxLayout(w)
-        v.setContentsMargins(0, 0, 6, 0)
+        v.setContentsMargins(0, 0, 2, 0)
+        v.setSpacing(theme.GAP)
         v.addWidget(card)
         v.addWidget(steps)
         v.addStretch(1)
@@ -270,21 +286,19 @@ class ProjectPage(QWidget):
         self.search.textChanged.connect(self.proxy.set_query)
         self.follow = Switch(True)
         self.seg_count = label("", "muted")
-        bar1 = hbox(button("Dịch dòng trống", "globe", on_click=lambda: self.run_translate(True)),
+        bar1 = flow(button("Dịch dòng trống", "globe", on_click=lambda: self.run_translate(True)),
                     button("Dịch lại tất cả", "refresh", on_click=lambda: self.run_translate(False)),
                     button("Dịch câu chọn", "sparkle", on_click=self._retranslate_one),
                     button("Nhập SRT", "download", "Nhập file phụ đề SRT/ASS/VTT", on_click=self._import_subs),
-                    button("Lưu", "save", on_click=lambda: (self._save_segs_now(), self.win.toast("Đã lưu phụ đề", "ok"))),
-                    None)
-        bar2 = hbox(button("Thêm", "plus", "Thêm câu tại vị trí đang phát", on_click=lambda: self._seg_op("insert")),
+                    button("Lưu", "save", on_click=lambda: (self._save_segs_now(), self.win.toast("Đã lưu phụ đề", "ok"))))
+        bar2 = flow(button("Thêm", "plus", "Thêm câu tại vị trí đang phát", on_click=lambda: self._seg_op("insert")),
                     button("Gộp", "merge", "Gộp câu đang chọn với câu sau", on_click=lambda: self._seg_op("merge")),
                     button("Tách", "split", "Tách câu tại vị trí đang phát", on_click=lambda: self._seg_op("split")),
                     button("Xoá", "trash", "Xoá câu đang chọn", danger=True, on_click=lambda: self._seg_op("delete")),
                     button("Dời giờ", "clock", on_click=self._shift),
                     button("Căn khớp thoại", "wand", "Căn mốc từng câu sát lời thoại thật, tách câu ở chỗ nghỉ "
                            "(dùng cho phụ đề đã nhận dạng từ bản cũ)", on_click=self.run_realign),
-                    button("Tìm && thay", "search", on_click=self._replace),
-                    None)
+                    button("Tìm && thay", "search", on_click=self._replace))
         self.glossary = QPlainTextEdit()
         self.glossary.setPlaceholderText("Mỗi dòng: 中文=Tiếng Việt   (VD: 李逍遥=Lý Tiêu Dao). AI tự điền khi dịch.")
         self.glossary.setFixedHeight(90)
@@ -295,8 +309,8 @@ class ProjectPage(QWidget):
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(8)
-        v.addLayout(bar1)
-        v.addLayout(bar2)
+        v.addWidget(bar1)
+        v.addWidget(bar2)
         v.addLayout(hbox(self.search, self.seg_count, label("Tự cuộn", "muted"), self.follow))
         v.addWidget(tv, 1)
         v.addWidget(gl)
@@ -367,8 +381,8 @@ class ProjectPage(QWidget):
         self.hs_mode.setParent(w)
         self.hs_mode.hide()
         v = QVBoxLayout(w)
-        v.setContentsMargins(0, 0, 6, 0)
-        v.setSpacing(12)
+        v.setContentsMargins(0, 0, 2, 0)
+        v.setSpacing(theme.GAP)
         v.addWidget(area)
         v.addWidget(how)
         v.addWidget(chk)
@@ -493,8 +507,8 @@ class ProjectPage(QWidget):
 
         w = QWidget()
         v = QVBoxLayout(w)
-        v.setContentsMargins(0, 0, 6, 0)
-        v.setSpacing(12)
+        v.setContentsMargins(0, 0, 2, 0)
+        v.setSpacing(theme.GAP)
         for c in (cut, frame, color, audio, brand, fx):
             v.addWidget(c)
         v.addStretch(1)
@@ -542,7 +556,8 @@ class ProjectPage(QWidget):
                          button("TikTok to rõ", on_click=lambda: self._style_preset("tiktok")), None))
         w = QWidget()
         v = QVBoxLayout(w)
-        v.setContentsMargins(0, 0, 6, 0)
+        v.setContentsMargins(0, 0, 2, 0)
+        v.setSpacing(theme.GAP)
         v.addWidget(card)
         v.addWidget(presets)
         v.addStretch(1)
@@ -559,7 +574,7 @@ class ProjectPage(QWidget):
         self.d_sepstatus = label("Chưa tách", "muted")
         sep.add(hbox(self.d_sepmodel, button("Tách ngay", "layers", on_click=self.run_separate)))
         sep.lay.itemAt(sep.lay.count() - 1).layout().setStretch(0, 1)
-        sep.add(hbox(self.d_sepstatus, None,
+        sep.add(flow(self.d_sepstatus,
                      button("Nghe giọng", "volume", flat=True, on_click=lambda: self._open_stem("vocals")),
                      button("Tải MP3 giọng", "download", "Lưu giọng nói đã tách thành file MP3", flat=True,
                             on_click=lambda: self._save_stem_mp3("vocals")),
@@ -641,7 +656,7 @@ class ProjectPage(QWidget):
         spk.add(dt)
         self.d_line_voice = QComboBox()
         self.d_line_voice.setMinimumContentsLength(16)
-        spk.add(hbox(self.d_picked, None, label("Giọng cho câu đã tích", "muted"), self.d_line_voice,
+        spk.add(flow(self.d_picked, hbox(label("Giọng cho câu đã tích", "muted"), self.d_line_voice),
                      button("Đổi giọng", "users", "Đặt giọng riêng cho các câu đã tích (chưa đọc lại)",
                             on_click=self._set_line_voice),
                      button("AI rút gọn", "sparkle", "AI viết lại ngắn hơn các câu đã tích cho vừa thời gian nhân vật "
@@ -652,12 +667,11 @@ class ProjectPage(QWidget):
                          "tiếng đang dùng (không đọc lại cả video)")
         regen.clicked.connect(self._redub_picked)
         spk.add(regen)
-        spk.add(hbox(label("Phụ đề", "muted"),
+        spk.add(flow(label("Phụ đề", "muted"),
                      button("Xuất SRT gốc (chưa dịch)", "upload", "Lấy lời gốc đã tách câu để dịch ở phần mềm khác",
                             on_click=lambda: self._export_sub("srt", "source")),
                      button("Xuất SRT đã dịch", "upload", on_click=lambda: self._export_sub("srt", "trans")),
                      button("Xuất SRT song ngữ", "upload", on_click=lambda: self._export_sub("srt", "both")),
-                     None,
                      button("Nạp SRT đã dịch…", "download", "Nạp bản dịch làm ở phần mềm khác vào các câu hiện có "
                             "(giữ nguyên lời gốc, thời gian, người nói)", on_click=self._import_translation)))
 
@@ -679,9 +693,10 @@ class ProjectPage(QWidget):
         mix.add(f)
         gen = GradientButton("Tạo bản lồng tiếng", "mic", big=True)
         gen.clicked.connect(self.run_dub)
-        self.d_status = label("", "muted")
+        self.d_status = label("", "muted", wrap=True)   # dòng thống kê dài tự xuống dòng, không đẩy thẻ rộng ra
         mix.add(gen)
-        mix.add(hbox(self.d_status, None, button("Nghe bản lồng", "volume", flat=True, on_click=self._open_dub),
+        mix.add(self.d_status)
+        mix.add(flow(button("Nghe bản lồng", "volume", flat=True, on_click=self._open_dub),
                      button("Tải MP3 bản lồng", "download", "Lưu bản lồng tiếng đã trộn nhạc nền thành MP3", flat=True,
                             on_click=self._save_dub_mp3)))
 
@@ -695,8 +710,8 @@ class ProjectPage(QWidget):
         hist.add(self.d_versions_box)
         w = QWidget()
         v = QVBoxLayout(w)
-        v.setContentsMargins(0, 0, 6, 0)
-        v.setSpacing(12)
+        v.setContentsMargins(0, 0, 2, 0)
+        v.setSpacing(theme.GAP)
         from .voice_samples import VoiceSamplesCard
 
         self.voice_samples = VoiceSamplesCard(self)
@@ -752,8 +767,8 @@ class ProjectPage(QWidget):
         outs.add(self.outs)
         w = QWidget()
         v = QVBoxLayout(w)
-        v.setContentsMargins(0, 0, 6, 0)
-        v.setSpacing(12)
+        v.setContentsMargins(0, 0, 2, 0)
+        v.setSpacing(theme.GAP)
         for c in (card, subs, tools, outs):
             v.addWidget(c)
         v.addStretch(1)
@@ -1918,18 +1933,19 @@ class ProjectPage(QWidget):
             if v.get("edits"):
                 when += f" · đã sửa {v['edits']} lần, lần cuối {v.get('time', '')}"
             text = f"{mark}Bản {n - k} · {when}{cnt}" + (f" · {v['voices']}" if v.get("voices") else "")
-            lb = label(text, "" if active else "muted")
+            lb = label(text, "" if active else "muted", wrap=True)   # dòng dài tự xuống dòng, không đẩy khung rộng ra
             miss = st.get("total", 0) - st.get("placed", 0)
             lb.setToolTip(v["wav"] + (f"\n{miss} câu chưa có giọng (chưa dịch / bỏ lồng / bài hát / đọc lỗi)" if miss > 0 else ""))
             wav = v["wav"]
             row = QWidget()
-            row.setLayout(hbox(lb, None,
+            row.setLayout(hbox(lb,
                                button("Nghe", "volume", flat=True, on_click=lambda _=False, w=wav: QDesktopServices.openUrl(
                                    QUrl.fromLocalFile(w))),
                                button("Dùng bản này" if not (active and on) else "Đang dùng", "check", flat=True,
                                       on_click=lambda _=False, w=wav: self._use_dub(w)),
                                button("", "trash", "Xoá bản này", danger=True, flat=True,
                                       on_click=lambda _=False, w=wav: self._delete_dub(w))))
+            row.layout().setStretch(0, 1)
             lay.addWidget(row)
 
     def _use_dub(self, wav: str):

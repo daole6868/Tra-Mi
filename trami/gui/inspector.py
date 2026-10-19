@@ -3,13 +3,22 @@ giọng riêng, bỏ lồng của 1 câu; nút Nghe câu, Dịch lại, AI rút 
 Mọi chỉnh sửa đi qua SubsModel (cùng bảng ở tab Phụ đề / Lồng tiếng) nên tự lưu và đồng bộ."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtWidgets import QComboBox, QLineEdit, QPlainTextEdit, QVBoxLayout, QWidget
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
+from PySide6.QtWidgets import QComboBox, QGridLayout, QLineEdit, QPlainTextEdit, QSizePolicy, QVBoxLayout, QWidget
 
+from . import theme
 from .player import fmt
 from .subs_model import (C_END, C_NODUB, C_SPK, C_START, C_VI, C_VOICE, C_ZH, FIT_TEXT, VOICE_DEFAULT, SubsModel,
                          spk_color)
 from .widgets import Card, GradientButton, IconButton, Switch, button, hbox, label
+
+
+class _TextBox(QPlainTextEdit):
+    """Ô chữ chỉ "xin" chiều cao tối thiểu (mặc định Qt xin ~190 px làm khung tràn, hiện thanh cuộn); còn chỗ thì
+    vẫn giãn ra lấp đầy khung."""
+
+    def sizeHint(self) -> QSize:
+        return QSize(200, self.minimumHeight())
 
 
 class LineInspector(Card):
@@ -17,7 +26,7 @@ class LineInspector(Card):
     navigate = Signal(int)        # chuyển sang câu khác
 
     def __init__(self, model: SubsModel, voices_fn, parent=None):
-        super().__init__(parent, padding=14)
+        super().__init__(parent, padding=theme.PANEL_PAD)
         self.model = model
         self.voices_fn = voices_fn
         self.row = -1
@@ -53,7 +62,7 @@ class LineInspector(Card):
         self.zh.setFixedHeight(58)
         v.addWidget(self.zh)
         v.addWidget(label("Tiếng Việt (lời đọc + phụ đề)", "muted"))
-        self.vi = QPlainTextEdit()
+        self.vi = _TextBox()
         self.vi.setMinimumHeight(84)
         v.addWidget(self.vi, 1)
         self._vi_timer = QTimer(self, singleShot=True, interval=700, timeout=lambda: self._set(C_VI, self.vi.toPlainText()))
@@ -69,16 +78,24 @@ class LineInspector(Card):
         self.fit = label("", "muted", wrap=True)
         v.addLayout(hbox(label("Không lồng câu này", "muted"), self.nodub, None))
         v.addWidget(self.fit)
-        v.addLayout(hbox(button("Nghe câu", "play", "Phát câu này trên khung xem trước",
-                                on_click=lambda: self._act("play")),
-                         button("Dịch lại", "globe", "Dịch lại riêng câu này", on_click=lambda: self._act("retranslate")),
-                         button("AI rút gọn", "sparkle", "AI viết lại ngắn hơn cho vừa thời gian nói",
-                                on_click=lambda: self._act("shorten"))))
+        # lưới 2 cột cố định: nút đều nhau, khung hẹp cũng không bị cắt chữ
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(6)
+        btns = (button("Nghe câu", "play", "Phát câu này trên khung xem trước", on_click=lambda: self._act("play")),
+                button("Dịch lại", "globe", "Dịch lại riêng câu này", on_click=lambda: self._act("retranslate")),
+                button("AI rút gọn", "sparkle", "AI viết lại ngắn hơn cho vừa thời gian nói",
+                       on_click=lambda: self._act("shorten")))
+        for k, b in enumerate(btns):
+            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            grid.addWidget(b, k // 2, k % 2, 1, 2 if k == 2 else 1)
+        v.addLayout(grid)
         regen = GradientButton("Tạo lại giọng câu này", "refresh")
         regen.clicked.connect(lambda: self._act("redub"))
         v.addWidget(regen)
         self.add(self.body)
-        self.lay.addStretch(1)
+        self.lay.setStretchFactor(self.body, 1)   # ô Tiếng Việt giãn ra lấp đầy chiều cao còn lại của khung
+        self.empty.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.body.hide()
         model.dataChanged.connect(self._model_changed)
         model.modelReset.connect(lambda: self.set_row(self.row if self.row < len(self.model.segs) else -1))

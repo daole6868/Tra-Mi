@@ -20,6 +20,8 @@ WARN = "#F5B841"
 ERR = "#F0525A"
 INFO = "#5B8CFF"
 RADIUS = 12
+GAP = 10          # khe giữa các khung (ngang = dọc) trên trang dự án
+PANEL_PAD = 10    # lề trong của mọi khung lớn (công cụ, xem trước, câu đang chọn, timeline)
 
 FONT_FAMILY = "Be Vietnam Pro"
 
@@ -116,7 +118,7 @@ QTableView::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; i
 QHeaderView::section {{ background: {CARD2}; color: {MUTED}; border: none; padding: 7px 6px; font-weight: 600; }}
 QTableCornerButton::section {{ background: {CARD2}; border: none; }}
 
-QSplitter::handle {{ background: transparent; width: 8px; }}
+QSplitter::handle {{ background: transparent; }}
 QMenu {{ background: {CARD2}; border: 1px solid {BORDER}; border-radius: 8px; padding: 5px; }}
 QMenu::item {{ padding: 6px 18px; border-radius: 6px; }}
 QMenu::item:selected {{ background: {CARD3}; }}

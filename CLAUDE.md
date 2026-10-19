@@ -30,6 +30,9 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - `trami/jobs.py` – hàng đợi 1 luồng cho tác vụ dài; `trami/gui/*` – giao diện (QPainter), `common.run_async`,
   `WheelGuard` (lăn chuột không đổi ô chọn khi chưa bấm vào). Trang dự án bố cục kiểu trình dựng phim (từ 2.0.28):
   trái `IconTabs` + 8 tab, giữa trình phát, phải `gui/inspector.LineInspector` (câu đang chọn), dưới `gui/timeline.TrackTimeline`.
+  Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
+  Chụp ảnh kiểm tra giao diện phải nạp theme như `run()`: `theme.load_fonts(); app.setFont(theme.font(10));
+  app.setStyleSheet(theme.stylesheet())`.
 - `tests/test_core.py` – `python -m pytest -q tests` (56 test; 1 test cần gói AI).
 
 ## Cài đặt trên Windows (bài học)
@@ -246,6 +249,19 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     không đọc lại câu nào) -> trộn lại bản nghe thử + phát câu đó. Chuột phải: Nghe / Đặt lại vị trí / Tạo lại giọng.
     `synthesize_dub` xếp theo `want = start + dub_shift`; câu `keep` chưa có `tts_file` (bản trước 2.0.26) dùng file hash.
 
+- 2.0.30: "căn chỉnh lại khung bo và khoảng cách giữa các khung, nhìn không đều". Đo toạ độ khung (offscreen, CÓ
+  stylesheet + font như `run()` – ảnh chụp thiếu theme làm ô chọn/nút trắng): khung Xem trước thụt 9 px (lề mặc định của
+  `wrap(ccol)`), timeline dính sát hàng trên (stylesheet chỉ đặt `width` cho handle), khung phải thu gọn bằng kích thước 0
+  vẫn để lại vách 8 px -> lệch mép phải; lề trong các khung 6/8/12/14 px. Sửa: `theme.GAP = 10` (khe ngang = dọc,
+  `setHandleWidth`), `theme.PANEL_PAD = 10` cho mọi khung lớn, `ccol` lề 0, nút `panel_right` trên thanh đầu ẩn/hiện
+  hẳn khung "Câu đang chọn" (`_show_inspector`; màn < 1600 mở đầu ẩn). `widgets.FlowLayout` / `flow()`: hàng nút tự
+  xuống dòng (tab Phụ đề 2 hàng, tab Lồng tiếng: trạng thái tách, đổi giọng câu tích, SRT, nghe/tải bản lồng);
+  dòng thống kê `d_status` và nhãn bản lồng `wrap=True` (trước đẩy thẻ rộng 1040 px, mất viền phải). Khung công cụ
+  min 700 px. Inspector: 3 nút lưới 2 cột, ô Tiếng Việt `_TextBox` (sizeHint nhỏ -> không tràn thanh cuộn, giãn lấp
+  khung). Timeline: các dòng co 0,7–giãn 1,3 theo chiều cao (`_Canvas._scale`), khung timeline không nhỏ hơn
+  `minimumSizeHint`. Sidebar thu gọn: icon xếp sát nhau (`_filler`), không rải khắp chiều cao.
+  Kiểm tra lại ở 1920×1080 / 1600×1000 / 1366×768: mọi khung cùng mép trên/dưới/phải, khe 10 px.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -255,5 +271,6 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.25: chờ người dùng thử bảng câu lồng tiếng + Tạo lại giọng các câu đã tích trên máy thật (VieNeu/OmniVoice).
 - 2.0.26: chờ người dùng cập nhật edge-tts>=7.3.1 và xác nhận Edge hết 403.
 - 2.0.28: chờ người dùng xem giao diện mới trên máy thật (độ rộng các khung, cỡ chữ, timeline).
+- 2.0.30: chờ người dùng xem bố cục mới trên máy thật.
 - 2.0.29: chờ người dùng cài `transformers>=5.13 accelerate`, tải Qwen3-ASR (tab Tài liệu) và chạy lại "1. Nghe & tách câu";
   VRAM: 1.7B bf16 ~4 GB + bộ căn 0.6B; lỗi thiếu bộ nhớ -> chọn 0.6B. Chưa làm: AI chấm câu / sửa lời trước khi tách.

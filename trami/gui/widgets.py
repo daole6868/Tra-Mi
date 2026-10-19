@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PySide6.QtCore import (QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, QTimer, Signal,
+from PySide6.QtCore import (QEasingCurve, QPoint, QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, Signal,
                             Property)
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QAbstractButton, QComboBox, QDoubleSpinBox, QFormLayout, QFrame, QGraphicsDropShadowEffect,
-                               QHBoxLayout, QLabel, QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget)
+                               QHBoxLayout, QLabel, QLayout, QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget)
 
 from . import icons, theme
 
@@ -742,6 +742,76 @@ def hbox(*ws, spacing: int = 8, stretch_last: bool = False) -> QHBoxLayout:
     if stretch_last:
         lay.addStretch(1)
     return lay
+
+
+class FlowLayout(QLayout):
+    """Hàng nút tự xuống dòng khi khung hẹp – không đẩy khung rộng ra rồi bị cắt mất viền / cắt chữ."""
+
+    def __init__(self, parent=None, spacing: int = 8):
+        super().__init__(parent)
+        self._items: list = []
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(spacing)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, i: int):
+        return self._items[i] if 0 <= i < len(self._items) else None
+
+    def takeAt(self, i: int):
+        return self._items.pop(i) if 0 <= i < len(self._items) else None
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, w: int) -> int:
+        return self._place(QRect(0, 0, w, 0), dry=True)
+
+    def setGeometry(self, rect: QRect):
+        super().setGeometry(rect)
+        self._place(rect, dry=False)
+
+    def sizeHint(self) -> QSize:
+        vis = [it for it in self._items if not it.isEmpty()]
+        if not vis:
+            return QSize(0, 0)
+        return QSize(sum(it.sizeHint().width() for it in vis) + self.spacing() * (len(vis) - 1),
+                     max(it.sizeHint().height() for it in vis))
+
+    def minimumSize(self) -> QSize:
+        s = QSize(0, 0)
+        for it in self._items:
+            if not it.isEmpty():
+                s = s.expandedTo(it.minimumSize())
+        return s
+
+    def _place(self, rect: QRect, dry: bool) -> int:
+        x, y, line, sp = rect.x(), rect.y(), 0, self.spacing()
+        for it in self._items:
+            if it.isEmpty():
+                continue
+            hint = it.sizeHint()
+            if x > rect.x() and x + hint.width() > rect.right() + 1:
+                x, y, line = rect.x(), y + line + sp, 0
+            if not dry:
+                it.setGeometry(QRect(QPoint(x, y), hint))
+            x += hint.width() + sp
+            line = max(line, hint.height())
+        return y + line - rect.y()
+
+
+def flow(*ws, spacing: int = 8) -> QWidget:
+    """Như hbox nhưng tự xuống dòng khi hẹp (None bị bỏ qua; layout con được gói thành 1 khối không tách)."""
+    box = QWidget()
+    lay = FlowLayout(box, spacing)
+    for w in ws:
+        if w is not None:
+            lay.addWidget(w if isinstance(w, QWidget) else wrap(w))
+    return box
 
 
 def wrap(layout) -> QWidget:

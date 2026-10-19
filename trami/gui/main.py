@@ -84,6 +84,10 @@ class Sidebar(QFrame):
             self.group.addButton(b)
             self.nav[key] = b
             lay.addWidget(b)
+        # thu gọn (chỉ icon): danh sách dự án gần đây ẩn đi -> khoảng trống dồn xuống dưới, các icon xếp sát nhau đều
+        self._filler = QWidget()
+        self._filler.hide()
+        lay.addWidget(self._filler, 1)
         lay.addSpacing(14)
         recent_lb = label("DỰ ÁN GẦN ĐÂY", "muted")
         lay.addWidget(recent_lb)
@@ -110,6 +114,8 @@ class Sidebar(QFrame):
         for w in self._full:
             w.setVisible(not on)
         self.new_small.setVisible(on)
+        self._filler.setVisible(on)
+        self._lay.setSpacing(8 if on else 4)
         for b in self.nav.values():
             b.compact = on
             b.setToolTip(b.text() if on else "")

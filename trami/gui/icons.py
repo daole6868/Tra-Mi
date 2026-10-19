@@ -379,6 +379,11 @@ def _list(p: QPainter):
         p.drawEllipse(QPointF(5, y), 0.8, 0.8)
 
 
+def _panel_right(p: QPainter):   # khung có cột bên phải: ẩn / hiện khung "Câu đang chọn"
+    p.drawRoundedRect(QRectF(3, 5, 18, 14), 2.5, 2.5)
+    p.drawLine(QPointF(15, 5), QPointF(15, 19))
+
+
 def _split(p: QPainter):
     p.drawLine(QPointF(12, 3.5), QPointF(12, 20.5))
     p.drawRoundedRect(QRectF(3, 7, 6, 10), 1.5, 1.5)
@@ -455,6 +460,7 @@ ICONS = {
     "eye": _eye, "image": _image, "text": _text, "volume": _volume, "crop": _crop, "list": _list,
     "split": _split, "merge": _merge, "sparkle": _sparkle, "stack": _stack, "chev_left": _chev_left,
     "chev_right": _chev_right, "chev_down": _chev_down, "info": _info, "cpu": _cpu, "minus": _minus, "fit": _fit,
+    "panel_right": _panel_right,
 }
 
 

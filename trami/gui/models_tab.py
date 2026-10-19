@@ -108,7 +108,7 @@ class ModelsTab(QWidget):
         card.add(label("Dịch bằng Google / AI và giọng đọc Microsoft Edge chạy qua mạng nên không cần tải mô hình.",
                        "muted", wrap=True))
         v = QVBoxLayout(self)
-        v.setContentsMargins(0, 0, 6, 0)
+        v.setContentsMargins(0, 0, 2, 0)
         v.addWidget(card)
         v.addStretch(1)
         self.timer = QTimer(self, interval=400, timeout=self._poll)
