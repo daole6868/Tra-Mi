@@ -53,7 +53,14 @@ class ModelRow(Card):
             self.status.setStyleSheet("color: #F59E0B;")
             self.btn.setText("Tải về")
             self.btn.setEnabled(False)
-            self.btn.setToolTip("Chạy CaiDat_AI_NangCao.bat để cài gói AI trước")
+            if "transformers>=" in st:
+                from ..asr_qwen import UPGRADE_CMD
+
+                self.status.setText("Cần cập nhật gói transformers (≥ 5.13)")
+                self.btn.setToolTip("Mở cửa sổ đen trong thư mục TraMi và chạy:\n" + UPGRADE_CMD)
+                self.status.setToolTip(self.btn.toolTip())
+            else:
+                self.btn.setToolTip("Chạy CaiDat_AI_NangCao.bat để cài gói AI trước")
         else:
             self.status.setText("Chưa tải")
             self.status.setStyleSheet("color: #F87171;")

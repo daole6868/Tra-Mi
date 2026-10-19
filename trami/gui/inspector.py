@@ -152,7 +152,10 @@ class LineInspector(Card):
             fit = s.extra.get("fit")
             tip = {"ok": "giọng lồng vừa khít", "fast": f"đọc nhanh ×{s.extra.get('fit_speed', 1):.2f} cho vừa",
                    "long": "quá dài so với thời gian nói – sửa ngắn lại hoặc bấm AI rút gọn"}.get(fit, "chưa lồng tiếng")
-            self.fit.setText(f"Độ vừa: {FIT_TEXT.get(fit, '–')} {tip}")
+            shift = float(s.extra.get("dub_shift", 0) or 0)
+            self.fit.setText(f"Độ vừa: {FIT_TEXT.get(fit, '–')} {tip}"
+                             + (f" · giọng đã dời {shift:+.2f} s (chuột phải đoạn giọng trên timeline để đặt lại)"
+                                if shift else ""))
         finally:
             self._filling = False
 

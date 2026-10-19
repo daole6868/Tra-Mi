@@ -514,11 +514,12 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         if skip_songs and s.extra.get("song"):
             n_song += 1
             continue
-        if only is not None and i not in only:
+        keep = only is not None and i not in only   # câu không chọn: giữ nguyên giọng đang có trong bản lồng
+        if keep:
             old = s.extra.get("tts_file")
             if old and Path(old).exists():
-                s.extra["_tts"] = old      # câu không chọn: giữ nguyên giọng đang có trong bản lồng
-            continue
+                s.extra["_tts"] = old
+                continue
         spec = s.extra.get("voice") or voices.get(s.speaker or "S1") or voice   # giọng riêng của câu (nếu có)
         if spec in (CLONE,) or spec.startswith("vieneu:"):
             if not vieneu_available():
@@ -537,19 +538,21 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         take = int(s.extra.get("take", 0) or 0)   # "Tạo lại giọng": lần đọc mới của cùng câu
         h = hashlib.md5((f"{t}|{spec}|{rate}|{pitch}|{mode}|{extra}" + (f"|take{take}" if take else "")).encode()
                         ).hexdigest()[:14]
+        p = work / (f"tts_{h}.mp3" if spec.startswith("edge:") else f"tts_{h}.wav")
+        have = p.exists() and p.stat().st_size > 0
+        if keep:   # bản lồng cũ (trước 2.0.26) chưa ghi tts_file: dùng file đã đọc nếu còn, không đọc mới
+            if have:
+                s.extra["_tts"] = str(p)
+            continue
         if spec.startswith(("omni:", "omniclone:")):
-            p = work / f"tts_{h}.wav"
             omni_meta[i] = (spec, t)
-            if not (p.exists() and p.stat().st_size > 0):
+            if not have:
                 omni_items.append((i, t, p, spec))
         elif spec.startswith("edge:"):
-            p = work / f"tts_{h}.mp3"
-            if not (p.exists() and p.stat().st_size > 0):
+            if not have:
                 edge_items.append((i, t, p, spec[5:]))
-        else:
-            p = work / f"tts_{h}.wav"
-            if not (p.exists() and p.stat().st_size > 0):
-                vn_items.append((i, t, p, spec))
+        elif not have:
+            vn_items.append((i, t, p, spec))
         s.extra["_tts"] = str(p)
     total_items = len(edge_items) + len(vn_items) + len(omni_items)
     if progress:
@@ -651,10 +654,15 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             raise RuntimeError("Không tạo được giọng đọc. " + "; ".join(errors[:3]))
         raise RuntimeError(_why_nothing(len(segs), n_song, n_empty, n_nodub))
 
-    # --- xếp giọng theo thời gian (khớp lúc nhân vật nói, không bao giờ để 2 câu đọc chồng lên nhau)
+    # --- xếp giọng theo thời gian: mỗi câu là 1 đoạn giọng riêng, đặt đúng lúc nhân vật nói (hoặc chỗ người dùng kéo
+    # tới trên timeline: extra["dub_shift"]), không bao giờ để 2 câu đọc chồng lên nhau
     total = max(total_duration, max((s.end for s in segs), default=0) + 1)
     track = np.zeros(int(total * SR) + SR, dtype=np.float32)
-    order = sorted(range(len(segs)), key=lambda k: segs[k].start)
+
+    def want(k: int) -> float:
+        return max(0.0, segs[k].start + float(segs[k].extra.get("dub_shift", 0) or 0))
+
+    order = sorted(range(len(segs)), key=want)
     placed = 0
     prev_end = 0.0
     GAP, BORROW, DELAY, FADE = 0.04, 0.15, 0.25, 0.3
@@ -671,13 +679,14 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         if len(clip) == 0:
             errors.append(f"Câu {k + 1}: giọng đọc tạo ra toàn khoảng lặng")
             continue
-        nxt = min(total, next((segs[order[m]].start for m in range(n + 1, len(order))), total))
-        start = max(s.start, prev_end + GAP)
+        nxt = min(total, next((want(order[m]) for m in range(n + 1, len(order))), total))
+        ws = want(k)
+        start = max(ws, prev_end + GAP)
         slot = max(0.3, nxt - GAP - start)
         need = len(clip) / SR
-        # mượn khoảng lặng phía trước (tối đa 0,15 s) nếu câu dài hơn chỗ trống
-        if need > slot and start <= s.start + 1e-6:
-            borrow = min(BORROW, need - slot, max(0.0, s.start - (prev_end + GAP)))
+        # mượn khoảng lặng phía trước (tối đa 0,15 s) nếu câu dài hơn chỗ trống (trừ khi người dùng đã tự đặt vị trí)
+        if need > slot and start <= ws + 1e-6 and not s.extra.get("dub_shift"):
+            borrow = min(BORROW, need - slot, max(0.0, ws - (prev_end + GAP)))
             start -= borrow
             slot += borrow
         speed = 1.0
@@ -742,12 +751,23 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     if peak > 0.98:
         track *= 0.98 / peak
     write_wav(out_wav, track[: int(total * SR)])
+    stats["wave"] = wave_envelope(track[: int(total * SR)], SR)
     if progress:
         msg = "Đã tạo xong bản lồng tiếng"
         if errors:
             msg += f" ({len(errors)} câu lỗi, đã bỏ qua)"
         progress(1.0, msg)
     return Path(out_wav)
+
+
+def wave_envelope(a: np.ndarray, sr: int, hop: float = 0.05) -> np.ndarray:
+    """Sóng âm rút gọn (đỉnh mỗi 0,05 s, 0..1) để vẽ trên timeline."""
+    n = max(1, int(sr * hop))
+    if len(a) < n:
+        return np.zeros(0, np.float16)
+    env = np.abs(a[: len(a) // n * n].reshape(-1, n)).max(axis=1)
+    top = float(np.percentile(env, 99.5)) if len(env) else 0.0
+    return np.clip(env / max(top, 1e-4), 0, 1).astype(np.float16)
 
 
 def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,

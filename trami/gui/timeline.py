@@ -1,21 +1,24 @@
 """Timeline nhiều track kiểu trình dựng phim (Concat / CapCut), đặt ngang dưới cùng trang dự án.
 
-Track: Phụ đề (khối từng câu, màu theo người nói) · Giọng lồng (khối giọng đã xếp, màu theo độ vừa) ·
-Video (dải ảnh thu nhỏ) · Tiếng gốc (đường sóng âm). Bấm khối = chọn câu, bấm đúp = nghe câu,
-bấm thước / chỗ trống = tua; Ctrl + lăn chuột = phóng to/thu nhỏ, lăn chuột = cuộn ngang.
+Track: Phụ đề (khối từng câu, màu theo người nói) · Lồng tiếng (mỗi câu 1 đoạn giọng riêng có sóng âm, màu theo độ
+vừa; câu chưa có giọng: khung nét đứt) · Video (dải ảnh thu nhỏ) · Tiếng gốc (đường sóng âm).
+Bấm khối = chọn câu, bấm đúp = nghe câu, kéo đoạn giọng lồng sang trái / phải = dời đúng chỗ (xếp lại ngay),
+chuột phải đoạn giọng = nghe / đặt lại vị trí / tạo lại giọng; bấm thước / chỗ trống = tua;
+Ctrl + lăn chuột = phóng to/thu nhỏ, lăn chuột = cuộn ngang.
 """
 from __future__ import annotations
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import QHBoxLayout, QScrollBar, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QMenu, QScrollBar, QVBoxLayout, QWidget
 
 from . import icons, theme
 from .subs_model import spk_color
 from .widgets import IconButton, label
 
 FIT_COL = {"ok": "#4ADE80", "fast": "#F5B841", "long": "#F87171"}
+FIT_TIP = {"ok": "vừa khít", "fast": "đọc nhanh hơn cho vừa", "long": "quá dài – nên sửa ngắn lại / AI rút gọn"}
 TICKS = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200]
 
 
@@ -29,7 +32,7 @@ def _tc(t: float, step: float) -> str:
 class _Canvas(QWidget):
     HEAD = 118      # cột tên track bên trái
     RULER = 24
-    TRACKS = [("subs", "Phụ đề", "subtitles", 38), ("dub", "Giọng lồng", "mic", 22),
+    TRACKS = [("subs", "Phụ đề", "subtitles", 38), ("dub", "Lồng tiếng", "mic", 38),
               ("video", "Video", "film", 44), ("audio", "Tiếng gốc", "volume", 30)]
 
     def __init__(self, tl: "TrackTimeline"):
@@ -39,6 +42,8 @@ class _Canvas(QWidget):
         self.setMinimumHeight(self.RULER + sum(h + 6 for *_, h in self.TRACKS) + 6)
         self._drag = False
         self._hover = None
+        self._dpress = None    # (câu, x lúc bấm, đầu, cuối) – đang bấm giữ 1 đoạn giọng lồng
+        self._ghost = None     # (câu, đầu mới, cuối mới) – đang kéo đoạn giọng lồng
 
     # ------------------------------------------------------------------ toạ độ
     def x(self, t: float) -> float:
@@ -55,21 +60,36 @@ class _Canvas(QWidget):
             y += h + 6
         return QRectF()
 
+    def _dub_at(self, pos: QPointF):
+        """Đoạn giọng lồng dưới con trỏ: (câu, đầu, cuối, độ vừa) hoặc None."""
+        if pos.x() < self.HEAD or not self.track_rect("dub").contains(pos):
+            return None
+        t = self.t(pos.x())
+        tol = 3 / max(self.tl.pps, 1e-6)
+        return next(((int(k), a, b, f) for a, b, k, f in self.tl.dub if a - tol <= t <= b + tol), None)
+
     def _hit(self, pos: QPointF) -> int | None:
-        """Câu nằm dưới con trỏ (track Phụ đề hoặc Giọng lồng)."""
+        """Câu nằm dưới con trỏ (track Phụ đề hoặc Lồng tiếng – cả khung nét đứt của câu chưa có giọng)."""
         if pos.x() < self.HEAD:
             return None
         t = self.t(pos.x())
         if self.track_rect("subs").contains(pos):
             return next((i for i, s in enumerate(self.tl.segs) if s.start <= t <= s.end), None)
         if self.track_rect("dub").contains(pos):
-            return next((int(k) for a, b, k, _f in self.tl.dub if a <= t <= b), None)
+            d = self._dub_at(pos)
+            if d:
+                return d[0]
+            placed = {int(k) for *_x, k, _f in self.tl.dub}
+            return next((i for i, s in enumerate(self.tl.segs) if s.start <= t <= s.end and i not in placed), None)
         return None
 
     # ------------------------------------------------------------------ chuột
     def mousePressEvent(self, e):
         if not self.tl.duration or e.button() != Qt.MouseButton.LeftButton or e.position().x() < self.HEAD:
             return
+        d = self._dub_at(e.position())
+        if d:
+            self._dpress = (d[0], e.position().x(), d[1], d[2])
         row = self._hit(e.position())
         if row is not None:
             self.tl.lineClicked.emit(row)
@@ -78,6 +98,7 @@ class _Canvas(QWidget):
         self.tl.seekRequested.emit(self.t(e.position().x()))
 
     def mouseDoubleClickEvent(self, e):
+        self._dpress = self._ghost = None
         row = self._hit(e.position())
         if row is not None:
             self.tl.lineActivated.emit(row)
@@ -86,16 +107,60 @@ class _Canvas(QWidget):
         if self._drag and self.tl.duration:
             self.tl.seekRequested.emit(self.t(e.position().x()))
             return
+        if self._dpress and e.buttons() & Qt.MouseButton.LeftButton:
+            row, x0, a, b = self._dpress
+            dx = e.position().x() - x0
+            if self._ghost or abs(dx) > 4:   # kéo đoạn giọng lồng sang chỗ mới
+                d = max(-a, dx / self.tl.pps)
+                self._ghost = (row, a + d, b + d)
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+                self.update()
+            return
         row = self._hit(e.position())
         if row != self._hover:
             self._hover = row
             s = self.tl.segs[row] if row is not None and row < len(self.tl.segs) else None
-            self.setToolTip(f"#{row + 1} {s.speaker or ''}\n{s.trans or s.text}" if s else "")
+            d = self._dub_at(e.position())
+            if s and d:
+                shift = float(s.extra.get("dub_shift", 0) or 0)
+                tip = (f"#{row + 1} · giọng lồng {d[2] - d[1]:.1f} giây · {FIT_TIP.get(d[3], '')}"
+                       + (f" · đã dời {shift:+.2f} s" if shift else "")
+                       + f"\n{s.trans}\nKéo sang trái / phải để dời · bấm đúp để nghe · chuột phải: thêm lựa chọn")
+            elif s and self.track_rect("dub").contains(e.position()):
+                why = ("chưa có lời tiếng Việt" if not (s.trans or "").strip() else "đã tắt lồng câu này"
+                       if s.extra.get("nodub") else "đang hát – giữ giọng gốc" if s.extra.get("song")
+                       else "chưa có giọng lồng – bấm Tạo lại giọng câu này")
+                tip = f"#{row + 1} {why}\n{s.trans or s.text}"
+            else:
+                tip = f"#{row + 1} {s.speaker or ''}\n{s.trans or s.text}" if s else ""
+            self.setToolTip(tip)
             self.setCursor(Qt.CursorShape.PointingHandCursor if row is not None else Qt.CursorShape.ArrowCursor)
             self.update()
 
     def mouseReleaseEvent(self, e):
         self._drag = False
+        g, pr = self._ghost, self._dpress
+        self._dpress = self._ghost = None
+        if g and pr:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            delta = round(g[1] - pr[2], 3)
+            if abs(delta) >= 0.02:
+                self.tl.dubMoved.emit(g[0], delta)
+            self.update()
+
+    def contextMenuEvent(self, e):
+        d = self._dub_at(QPointF(e.pos()))
+        if not d:
+            return
+        row = d[0]
+        s = self.tl.segs[row] if row < len(self.tl.segs) else None
+        self.tl.lineClicked.emit(row)
+        m = QMenu(self)
+        m.addAction(f"Nghe câu #{row + 1}", lambda: self.tl.lineActivated.emit(row))
+        act = m.addAction("Đặt lại đúng lúc nhân vật nói", lambda: self.tl.dubReset.emit(row))
+        act.setEnabled(bool(s and s.extra.get("dub_shift")))
+        m.addAction("Tạo lại giọng câu này", lambda: self.tl.actionRequested.emit("redub"))
+        m.exec(e.globalPos())
 
     def wheelEvent(self, e):
         if not self.tl.duration:
@@ -169,17 +234,34 @@ class _Canvas(QWidget):
                 if v > 0.004:
                     p.drawLine(QPointF(px, mid - v * half), QPointF(px, mid + v * half))
                 px += 1
-        # giọng lồng
+        # lồng tiếng: mỗi câu 1 đoạn giọng riêng (sóng âm thật), đặt đúng chỗ đã xếp; câu chưa có giọng: nét đứt
         rd = self.track_rect("dub")
+        placed = {int(k) for *_x, k, _f in tl.dub}
+        if tl.dub:
+            p.setFont(theme.font(7.6))
+            for i, s in enumerate(tl.segs):
+                if i in placed or s.end < t_lo or s.start > t_hi:
+                    continue
+                r = QRectF(self.x(s.start), rd.top() + 4, max(2.0, (s.end - s.start) * tl.pps - 1), rd.height() - 8)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(QColor(theme.MUTED), 1, Qt.PenStyle.DashLine))
+                p.drawRoundedRect(r, 4, 4)
+                why = ("chưa dịch" if not (s.trans or "").strip() else "bỏ lồng" if s.extra.get("nodub")
+                       else "🎵 đang hát" if s.extra.get("song") else "chưa có giọng")
+                if r.width() > 34:
+                    p.setPen(QColor(theme.MUTED))
+                    p.drawText(r.adjusted(4, 0, -2, 0), Qt.AlignmentFlag.AlignVCenter,
+                               p.fontMetrics().elidedText(why, Qt.TextElideMode.ElideRight, int(r.width() - 6)))
+        p.setFont(theme.font(7.6, QFont.Weight.DemiBold))
+        ghost_row = self._ghost[0] if self._ghost else None
         for a, b, k, fit in tl.dub:
             if b < t_lo or a > t_hi:
                 continue
-            r = QRectF(self.x(a), rd.top() + 3, max(2.0, (b - a) * tl.pps), rd.height() - 6)
-            col = QColor(FIT_COL.get(fit, "#4ADE80"))
-            col.setAlpha(255 if int(k) == tl.selected else 170)
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(col)
-            p.drawRoundedRect(r, 4, 4)
+            self._paint_clip(p, rd, a, b, int(k), fit, faded=int(k) == ghost_row)
+        if self._ghost:
+            row, a, b = self._ghost
+            fit = next((f for *_x, k, f in tl.dub if int(k) == row), "ok")
+            self._paint_clip(p, rd, a, b, row, fit, ghost=True)
         # phụ đề: khối từng câu
         rs = self.track_rect("subs")
         p.setFont(theme.font(8.4, QFont.Weight.Medium))
@@ -228,11 +310,46 @@ class _Canvas(QWidget):
         p.drawPath(tri)
 
 
+    def _paint_clip(self, p: QPainter, rd: QRectF, a: float, b: float, k: int, fit: str, faded: bool = False,
+                    ghost: bool = False):
+        tl = self.tl
+        r = QRectF(self.x(a), rd.top() + 2, max(3.0, (b - a) * tl.pps - 1), rd.height() - 4)
+        col = QColor(FIT_COL.get(fit, "#4ADE80"))
+        sel = k == tl.selected
+        fill = QColor(col)
+        fill.setAlpha(40 if faded else (120 if sel or ghost else 70))
+        p.setBrush(fill)
+        p.setPen(QPen(QColor("#FFFFFF") if ghost else col, 2 if sel or ghost else 1,
+                      Qt.PenStyle.DashLine if ghost else Qt.PenStyle.SolidLine))
+        p.drawRoundedRect(r, 4, 4)
+        env = tl.dub_wave
+        if env is not None and len(env) and not ghost and r.width() > 4:
+            # sóng âm của chính đoạn giọng này (lấy từ bản lồng đã ghép, đúng vị trí đã xếp)
+            mid, half = r.center().y() + 3, r.height() / 2 - 6
+            wc = QColor(col)
+            wc.setAlpha(110 if faded else 230)
+            p.setPen(QPen(wc, 1))
+            px, end = int(r.left()) + 2, int(r.right()) - 1
+            while px < end:
+                t0, t1 = self.t(px), self.t(px + 1)
+                ia = int(t0 / tl.dub_hop)
+                ib = max(ia + 1, int(t1 / tl.dub_hop))
+                v = float(env[ia:ib].max()) if ia < len(env) else 0.0
+                if v > 0.02:
+                    p.drawLine(QPointF(px, mid - v * half), QPointF(px, mid + v * half))
+                px += 1
+        if r.width() > 24:
+            p.setPen(QColor("#FFFFFF"))
+            p.drawText(r.adjusted(5, 1, -3, 0), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft, f"#{k + 1}")
+
+
 class TrackTimeline(QWidget):
     seekRequested = Signal(float)
     lineClicked = Signal(int)       # bấm 1 câu -> chọn câu đó
     lineActivated = Signal(int)     # bấm đúp -> nghe câu
     actionRequested = Signal(str)   # nút trên thanh công cụ: insert / split / merge / delete / play / redub
+    dubMoved = Signal(int, float)   # kéo đoạn giọng lồng của câu: (câu, số giây dời thêm)
+    dubReset = Signal(int)          # đặt đoạn giọng lồng về đúng lúc nhân vật nói
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -250,6 +367,8 @@ class TrackTimeline(QWidget):
         self.thumb_count = 0
         self.wave: np.ndarray | None = None
         self.wave_hop = 0.05
+        self.dub_wave: np.ndarray | None = None   # sóng âm bản lồng tiếng đang dùng
+        self.dub_hop = 0.05
         self.t0 = 0.0          # giây ở mép trái vùng track
         self.pps = 20.0        # điểm ảnh / giây
         self._fitted = False
@@ -272,7 +391,8 @@ class TrackTimeline(QWidget):
             b.clicked.connect(lambda _=False, n=name: self.actionRequested.emit(n))
             tb.addWidget(b)
         tb.addSpacing(12)
-        self.hint = label("Bấm câu để chọn · bấm đúp để nghe · Ctrl + lăn chuột để phóng to", "muted")
+        self.hint = label("Bấm câu để chọn · bấm đúp để nghe · kéo đoạn giọng lồng để dời · Ctrl + lăn chuột để phóng to",
+                          "muted")
         tb.addWidget(self.hint)
         tb.addStretch(1)
         for ic, tip, fn in (("minus", "Thu nhỏ", lambda: self.zoom(0.7)), ("plus", "Phóng to", lambda: self.zoom(1.4)),
@@ -305,6 +425,10 @@ class TrackTimeline(QWidget):
 
     def set_wave(self, env: np.ndarray | None, hop: float):
         self.wave, self.wave_hop = env, hop
+        self.canvas.update()
+
+    def set_dub_wave(self, env: np.ndarray | None, hop: float = 0.05):
+        self.dub_wave, self.dub_hop = env, hop
         self.canvas.update()
 
     def set_pos(self, t: float, follow: bool = False):

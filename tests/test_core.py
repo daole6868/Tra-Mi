@@ -689,6 +689,93 @@ def test_redub_selected_lines_in_place(monkeypatch, tmp_path):
     assert [i for i, _, _ in spoken] == [0] and p.segments[0].extra["take"] == 1
 
 
+def test_dub_clip_moved_on_timeline(monkeypatch):
+    """Mỗi câu là 1 đoạn giọng riêng: kéo đoạn giọng trên timeline -> xếp lại bản lồng đúng chỗ mới, KHÔNG đọc lại câu
+    nào; đặt lại -> về đúng lúc nhân vật nói; có sóng âm cho timeline."""
+    from trami import pipeline, tts
+    from trami.project import Project
+
+    spoken = []
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, p, voice in items:
+            spoken.append(i)
+            _fake_audio(p, 0.6, 300 + 100 * i)
+        return []
+
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    p = Project.create("dubmove")
+    p.data["info"] = {"duration": 8}
+    p.segments = [Segment(0.5, 1.5, "a", "Một", "S1"), Segment(2.5, 3.5, "b", "Hai", "S1"),
+                  Segment(5.0, 6.0, "c", "Ba", "S2")]
+    p.save()
+    st = {"translate_engine": "google", "tts_voice": "vi-VN-HoaiMyNeural"}
+    wav = pipeline.dub(p, None, settings=st, engine="edge")
+    lay = {int(k): a for a, b, k, f in p.data["dub_layout"]}
+    assert abs(lay[1] - 2.5) < 0.2 and len(spoken) == 3
+    env, hop = pipeline.dub_wave(p)
+    assert Path(env).exists() and hop == 0.05 and len(np.load(env)) > 100
+    spoken.clear()
+    segs = p.segments
+    segs[1].extra["dub_shift"] = 0.8
+    p.segments = segs
+    p.save()
+    assert pipeline.relayout(p, st) == wav
+    lay = {int(k): a for a, b, k, f in p.data["dub_layout"]}
+    assert abs(lay[1] - 3.3) < 0.05 and abs(lay[0] - 0.5) < 0.2 and spoken == []
+    segs = p.segments
+    segs[1].extra.pop("dub_shift")
+    p.segments = segs
+    p.save()
+    pipeline.relayout(p, st)
+    assert abs({int(k): a for a, b, k, f in p.data["dub_layout"]}[1] - 2.5) < 0.2 and spoken == []
+    assert "wave" not in (p.data.get("dub_stats") or {})
+
+
+def test_qwen3_asr_fallback_and_helpers(sample_video, monkeypatch):
+    """Qwen3-ASR: chưa cài transformers đủ mới -> tự dùng SenseVoice + báo cách cài; lỗi khi chạy -> SenseVoice;
+    chạy được -> khúc có mốc từng chữ, refine tách câu trọn nghĩa; bảng thuật ngữ -> gợi ý từ cho bộ nghe."""
+    from trami import asr_funasr, asr_qwen, pipeline
+    from trami.project import Project
+
+    monkeypatch.setattr("trami.config.installed", lambda *a: True)
+    monkeypatch.setattr(asr_qwen, "transformers_version", lambda: (4, 57, 6))
+    assert not asr_qwen.available() and "5.13" in asr_qwen.why_unavailable()
+    monkeypatch.setattr(asr_funasr, "available", lambda: True)
+    monkeypatch.setattr(asr_funasr, "transcribe_sensevoice", lambda *a, **k: [Segment(0.5, 2.0, "你好。")])
+    p = Project.create("qwen")
+    pipeline.attach_source(p, sample_video)
+    st = {"asr_engine": "qwen3", "sep_before_asr": False, "diarize": False, "align_words": False}
+    pipeline.recognize(Project(p.id), "asr", "zh", settings=st)
+    pr = Project(p.id)
+    assert pr.data["asr_engine_used"] == "sensevoice" and "transformers" in pr.data["asr_warning"]
+    # đủ điều kiện nhưng tiến trình lỗi (VD hết bộ nhớ GPU) -> SenseVoice, không dừng
+    monkeypatch.setattr(asr_qwen, "transformers_version", lambda: (5, 20, 1))
+
+    def boom(*a, **k):
+        raise RuntimeError("CUDA out of memory")
+    monkeypatch.setattr(asr_qwen, "transcribe_qwen", boom)
+    pipeline.recognize(Project(p.id), "asr", "zh", settings=st)
+    pr = Project(p.id)
+    assert pr.data["asr_engine_used"] == "sensevoice" and "out of memory" in pr.data["asr_warning"]
+    # chạy được: 1 khúc có mốc từng chữ -> tách thành câu trọn nghĩa, không còn cảnh báo
+    text = "好了，不要闹了。待会儿变回来，把你打成猫饼。"
+    chars = [c for c in text if "\u4e00" <= c <= "\u9fff"]
+    words = [[c, 0.3 * k, 0.3 * k + 0.25] for k, c in enumerate(chars)]
+    seg = asr_qwen._segment(1.0, 6.0, {"text": text, "words": words}, True)
+    assert seg and len(seg.extra["ct"]) == len(chars) and seg.start >= 1.0
+    monkeypatch.setattr(asr_qwen, "transcribe_qwen", lambda *a, **k: [seg])
+    st["align_words"] = True
+    monkeypatch.setattr(pipeline, "use_qwen_align", lambda *a: False)
+    pipeline.recognize(Project(p.id), "asr", "zh", settings=dict(st, align_fa=False))
+    pr = Project(p.id)
+    assert pr.data["asr_engine_used"] == "qwen3" and not pr.data.get("asr_warning")
+    assert [s.text for s in pr.segments] == ["好了，不要闹了。", "待会儿变回来，把你打成猫饼。"]
+    assert all("ct" not in s.extra and "chunked" not in s.extra for s in pr.segments)
+    assert asr_qwen.hotwords({"glossary": "林动=Lâm Động\nabc=xyz\n青檀=Thanh Đàn"}) == "热词：林动、青檀"
+    p.delete()
+
+
 def test_shorten_selected_lines(monkeypatch):
     """AI rút gọn riêng các câu đã chọn, giữ bản dài để xem lại; Google không rút gọn được -> báo rõ."""
     from trami import pipeline, translate
@@ -920,20 +1007,29 @@ def test_align_split_at_pause_and_speaker_change():
 
 
 def test_plan_cuts_sentences():
-    """Tách câu: ở dấu câu, gộp mẩu ngắn, câu dài không dấu câu cắt ở ranh giới từ – không cắt đôi từ / số."""
+    """Tách câu trọn nghĩa: cắt ở cuối câu (。！？) / chỗ nghỉ thật; dấu phẩy nói liền KHÔNG cắt (lỗi "câu cụt"),
+    phẩy + nghỉ ≥ 0,45 s thì cắt; câu quá dài chia ở dấu phẩy gần giữa; không cắt đôi từ / số."""
     from trami import align
 
-    def run(text, exact=False, gaps=None, max_chars=22):
+    def run(text, exact=False, gaps=None, max_chars=22, per=0.2):
         pos = align._char_positions(text)
         t, times = 0.0, []
         for k in range(len(pos)):
-            times.append((t, t + 0.2))
-            t += 0.2 + ((gaps or {}).get(k, 0.0))
+            times.append((t, t + per))
+            t += per + ((gaps or {}).get(k, 0.0))
         cuts = align.plan_cuts(text, pos, times, max_chars, exact)
         return align._split_text(text, pos, cuts) if cuts else [text]
 
-    # số đi theo phần sau, không dính vào câu trước ("6" | "块钱" là lỗi cũ)
-    assert run("爸最好了，6块钱可以干啥，你根本不懂。") == ["爸最好了，", "6块钱可以干啥，", "你根本不懂。"]
+    # phẩy nói liền: 1 câu trọn vẹn (trước đây bị cắt vụn thành 3 dòng)
+    assert run("爸最好了，6块钱可以干啥，你根本不懂。") == ["爸最好了，6块钱可以干啥，你根本不懂。"]
+    # phẩy + nghỉ 0,6 s (hết câu / đổi lượt nói) -> tách; số đi theo phần sau ("6" | "块钱" là lỗi cũ)
+    assert run("爸最好了，6块钱可以干啥，你根本不懂。", gaps={3: 0.6}) == ["爸最好了，", "6块钱可以干啥，你根本不懂。"]
+    # cuối câu luôn tách
+    assert run("你去哪里了？我在家等你。") == ["你去哪里了？", "我在家等你。"]
+    # câu quá dài: chia ở dấu phẩy gần giữa, không ở chỗ bất kỳ
+    assert run("我们今天去公园玩，然后去吃饭，最后回家睡觉。", max_chars=12) == ["我们今天去公园玩，", "然后去吃饭，最后回家睡觉。"]
+    # nói chậm quá 8 giây: chia ở dấu phẩy dù chưa quá số chữ
+    assert run("我们今天去公园玩，然后去吃饭了。", max_chars=28, per=0.6) == ["我们今天去公园玩，", "然后去吃饭了。"]
     # mẩu ngắn "哇，" gộp vào câu sau; câu dài không dấu câu cắt ở ranh giới từ
     out = run("哇，这个形态的GPT好可爱啊")
     assert out == ["哇，这个形态的GPT好可爱啊"]
@@ -945,6 +1041,29 @@ def test_plan_cuts_sentences():
     assert run("快想办法给我变回去估计额度用完了", exact=True, gaps={8: 0.2}) == ["快想办法给我变回去估计额度用完了"]
     # chỗ nghỉ có chữ Latin xen giữa (GPT đang được nói) -> không cắt
     assert run("这个形态的GPT好可爱啊", exact=True, gaps={4: 0.9}) == ["这个形态的GPT好可爱啊"]
+
+
+def test_chunks_and_word_times():
+    """Gộp đoạn có tiếng sát nhau thành khúc ≤ 25 s (nghe trọn câu), cắt khúc dài ở chỗ nghỉ dài nhất; mốc từng chữ từ
+    kết quả có mốc thời gian (từ nhiều chữ chia đều, dấu câu / số bỏ qua)."""
+    from trami import align
+
+    a = np.zeros(16000 * 60, np.float32)
+    assert align.chunk_spans([(0, 3), (3.5, 6), (8, 10)], a) == [(0, 6), (8, 10)]
+    out = align.chunk_spans([(0, 9), (9.5, 18), (19.5, 27), (27.3, 33)], a, max_len=25)
+    assert out == [(0, 18), (19.5, 33)]          # cắt ở chỗ nghỉ 1,5 s, không ở chỗ nghỉ 0,3 s
+    assert all(b - x <= 25 for x, b in align.chunk_spans([(0, 40)], a))   # VAD cắt cứng -> cắt ở chỗ lặng nhất
+    ct = align.times_from_words("快看，我爸给6块！", [("快", 0, .2), ("看", .2, .4), ("，", .4, .5), ("我爸", .6, 1.0),
+                                                   ("给", 1, 1.2), ("6", 1.2, 1.4), ("块", 1.4, 1.6)], 10)
+    assert ct == [(10.0, 10.2), (10.2, 10.4), (10.6, 10.8), (10.8, 11.0), (11.0, 11.2), (11.4, 11.6)]
+    assert align.times_from_words("快看我", [("快", 0, .2)]) is None   # lời đã đổi -> không dùng mốc sai
+    # đoạn có mốc đo sẵn (extra["ct"]): refine tách câu theo mốc đó, không đoán lại
+    seg = Segment(10, 14, "好了，不要闹了。待会儿变回来")
+    pos = align._char_positions(seg.text)
+    seg.extra["ct"] = [[10 + 0.25 * k, 10 + 0.25 * k + 0.2] for k in range(len(pos))]
+    out = align.refine([seg], np.zeros(16000 * 20, np.float32), use_fa=False)
+    assert [s.text for s in out] == ["好了，不要闹了。", "待会儿变回来"]
+    assert abs(out[1].start - (10 + 0.25 * 6)) < 0.06 and "ct" in out[1].extra
 
 
 def test_rescue_missed_speech():

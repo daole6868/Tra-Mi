@@ -1,0 +1,224 @@
+"""Nhận dạng tiếng Trung bằng Qwen3-ASR (Alibaba Qwen, 1/2026) + mốc từng chữ bằng Qwen3-ForcedAligner.
+
+Vì sao: nghe chuẩn hơn SenseVoice / Whisper rõ rệt (WenetSpeech net/meeting: 4,97 / 5,88 % lỗi chữ so với 9,86 / 19,11
+của Whisper large-v3), đặt dấu câu theo nghĩa (mô hình ngôn ngữ), nghe được cả lúc có nhạc / đang hát; bộ căn thời gian
+lệch trung bình ~33 ms với tiếng Trung (fa-zh của FunASR ~161 ms) -> tách câu đúng chỗ nghỉ thật, giọng lồng khớp miệng.
+
+Chạy trong tiến trình riêng (trami/qwen_asr_worker.py), dùng thư viện transformers ≥ 5.13 (có sẵn Qwen3-ASR, chung bản
+với OmniVoice). Mô hình tải từ HuggingFace vào ~/.cache/huggingface/hub ở lần chạy đầu.
+"""
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from typing import Callable
+
+import numpy as np
+
+from .subtitle import Segment
+from .tts import VieneuWorker
+
+Prog = Callable[[float, str], None]
+MODELS = [("Qwen/Qwen3-ASR-1.7B-hf", "1.7B – chính xác nhất (GPU ≥ 6 GB, khuyên dùng)"),
+          ("Qwen/Qwen3-ASR-0.6B-hf", "0.6B – nhẹ, nhanh (GPU yếu / chỉ có CPU)")]
+ALIGNER = "Qwen/Qwen3-ForcedAligner-0.6B-hf"
+MIN_TRANSFORMERS = (5, 13)
+UPGRADE_CMD = '.venv\\Scripts\\python -m pip install -U "transformers>=5.13" accelerate'
+SR = 16000
+
+
+def transformers_version() -> tuple[int, ...] | None:
+    try:
+        from importlib.metadata import version
+
+        return tuple(int(x) for x in re.findall(r"\d+", version("transformers"))[:3])
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def available() -> bool:
+    """Đã cài torch + transformers đủ mới (KHÔNG import – import transformers mất vài giây)."""
+    from .config import installed
+
+    v = transformers_version()
+    return installed("torch", "transformers") and v is not None and v[:2] >= MIN_TRANSFORMERS
+
+
+def why_unavailable() -> str:
+    from .config import installed
+
+    if not installed("torch"):
+        return "chưa cài PyTorch"
+    v = transformers_version()
+    if v is None:
+        return "chưa cài transformers – chạy: " + UPGRADE_CMD
+    return f"transformers {'.'.join(map(str, v))} quá cũ (cần ≥ 5.13) – chạy: " + UPGRADE_CMD
+
+
+class QwenAsrWorker(VieneuWorker):
+    """Tiến trình riêng chạy Qwen3-ASR; mode = tên mô hình trên HuggingFace."""
+    title = "Qwen3-ASR"
+    flag = "--qwen-asr-worker"
+    log_name = "qwen_asr.txt"
+
+    def __init__(self, repo: str, token: str = ""):
+        super().__init__(repo)
+        self.token = token
+
+    def _extra_env(self) -> dict:
+        return {"HF_TOKEN": self.token} if self.token else {}
+
+    def call(self, req: dict, progress: Prog | None = None, cancel=None) -> dict:
+        with self.lock:
+            if not self.proc or self.proc.poll() is not None:
+                self._start(progress, cancel)
+            assert self.proc and self.proc.stdin
+            self.proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
+            self.proc.stdin.flush()
+            r = self._read(progress, cancel)
+        if "error" in r:
+            raise RuntimeError(r["error"])
+        return r
+
+
+_worker: QwenAsrWorker | None = None
+
+
+def worker(settings: dict | None = None) -> QwenAsrWorker:
+    global _worker
+    st = settings or {}
+    repo = st.get("qwen_asr_model") or MODELS[0][0]
+    if _worker is None or _worker.mode != repo:
+        release()
+        _worker = QwenAsrWorker(repo, st.get("hf_token", ""))
+        import atexit
+
+        atexit.register(release)
+    return _worker
+
+
+def release() -> None:
+    """Tắt tiến trình Qwen3-ASR – trả bộ nhớ GPU cho các bước sau (phân biệt người nói, lồng tiếng)."""
+    global _worker
+    if _worker is not None:
+        _worker.stop()
+        _worker = None
+
+
+def hotwords(settings: dict) -> str:
+    """Tên riêng / thuật ngữ tiếng Trung trong bảng thuật ngữ (Cài đặt) -> gợi ý cho Qwen3-ASR nghe đúng."""
+    terms = []
+    for line in (settings.get("glossary") or "").splitlines():
+        zh = line.split("=", 1)[0].strip()
+        if zh and re.search(r"[㐀-鿿]", zh) and zh not in terms:
+            terms.append(zh)
+    return ("热词：" + "、".join(terms[:80])) if terms else ""
+
+
+def _wav_path(wav: str | Path) -> str:
+    """Tiến trình nghe đọc thẳng file wav 16 kHz mono (đúng định dạng TraMi tạo ở bước chuẩn bị âm thanh)."""
+    return str(Path(wav).resolve())
+
+
+def _spans(audio: np.ndarray, settings: dict) -> list[tuple[float, float]]:
+    """Đoạn có tiếng nói: bộ chia đoạn VAD của FunASR nếu có, không thì theo độ to giọng."""
+    from . import asr_funasr
+    from .align import speech_spans
+
+    if asr_funasr.available():
+        try:
+            return asr_funasr.vad_segments(audio, asr_funasr._device(settings.get("asr_device", "auto")))
+        except Exception:  # noqa: BLE001 – VAD lỗi thì dùng độ to
+            pass
+    return speech_spans(audio)
+
+
+def _segment(s: float, e: float, item: dict, simplify: bool) -> Segment | None:
+    from .align import times_from_words
+    from .asr import is_hallucination, to_simplified
+
+    raw = (item.get("text") or "").strip()
+    text = to_simplified(raw) if simplify else raw
+    if len(text) != len(raw):
+        text = raw    # đổi phồn -> giản làm lệch số chữ: giữ nguyên để mốc từng chữ còn đúng
+    if not text or is_hallucination(text):
+        return None
+    seg = Segment(round(s, 3), round(e, 3), text)
+    ct = times_from_words(text, item.get("words") or [], s)
+    if ct:
+        seg.extra["ct"] = [[a, b] for a, b in ct]
+        seg.start, seg.end = round(max(s, ct[0][0] - 0.05), 3), round(min(e, ct[-1][1] + 0.05), 3)
+    return seg
+
+
+def transcribe_qwen(wav: str | Path, settings: dict, language: str = "zh", progress: Prog | None = None,
+                    cancel=None) -> list[Segment]:
+    """Nghe cả video: chia đoạn có tiếng -> gộp thành khúc ≤ 28 s (nghe trọn câu) -> Qwen3-ASR + mốc từng chữ.
+    Mỗi khúc trả về 1 Segment có extra["ct"]; bước căn thời gian (align.refine) tách câu theo dấu câu + chỗ nghỉ."""
+    from .align import chunk_spans
+    from .asr_funasr import load_wav16k
+
+    if progress:
+        progress(0.0, "Đang chia đoạn giọng nói…")
+    audio = load_wav16k(wav)
+    chunks = chunk_spans(_spans(audio, settings), audio, max_gap=1.0, max_len=28.0)
+    if not chunks:
+        return []
+    r = worker(settings).call({"cmd": "asr", "wav": _wav_path(wav), "spans": [list(c) for c in chunks],
+                               "language": language, "prompt": hotwords(settings),
+                               "align": bool(settings.get("align_words", True))}, progress, cancel)
+    simplify = language in ("zh", "yue", "auto")
+    segs = [x for (s, e), it in zip(chunks, r.get("items") or []) if (x := _segment(s, e, it, simplify))]
+    if r.get("align_error") and progress:
+        progress(1.0, "Không căn được thời gian bằng Qwen3 (" + r["align_error"][:80] + ") – dùng cách dự phòng")
+    return segs
+
+
+def qwen_decoder(settings: dict, language: str, work: Path) -> Callable[[np.ndarray], tuple[str, list[str]]]:
+    """Hàm nghe 1 đoạn ngắn bằng Qwen3-ASR – dùng để nghe lại các đoạn bị bộ chia đoạn bỏ sót."""
+    from .tts import write_wav
+
+    w = worker(settings)
+    tmp = Path(work) / "qwen_clip.wav"
+
+    def decode(clip: np.ndarray) -> tuple[str, list[str]]:
+        if len(clip) < SR * 0.2:
+            return "", []
+        write_wav(tmp, clip.astype(np.float32), SR)
+        r = w.call({"cmd": "asr", "wav": _wav_path(tmp), "spans": [[0.0, len(clip) / SR]], "language": language,
+                    "prompt": hotwords(settings), "align": False})
+        items = r.get("items") or [{}]
+        from .asr import to_simplified
+
+        text = (items[0].get("text") or "").strip()
+        return (to_simplified(text) if language in ("zh", "yue", "auto") else text), []
+    return decode
+
+
+def align_qwen(segs: list[Segment], wav: str | Path, language: str, settings: dict, progress: Prog | None = None,
+               cancel=None) -> int:
+    """Đo mốc từng chữ (extra["ct"]) cho các câu chưa có – câu từ bộ nhận dạng khác, câu nghe lại, câu đã sửa lời.
+    Trả về số câu đo được."""
+    from .align import CJK, _char_positions, times_from_words
+
+    todo = [k for k, s in enumerate(segs) if CJK.search(s.text or "")
+            and len(s.extra.get("ct") or []) != len(_char_positions(s.text))]
+    if not todo:
+        return 0
+    items = []
+    for k in todo:
+        s = segs[k]
+        a = max(0.0, s.start - 0.3)
+        items.append([a, s.end + 0.3, s.text])
+    r = worker(settings).call({"cmd": "align", "wav": _wav_path(wav), "items": items, "language": language},
+                              progress, cancel)
+    if r.get("align_error"):
+        raise RuntimeError(r["align_error"])
+    n = 0
+    for k, (a, _b, _t), it in zip(todo, items, r.get("items") or []):
+        ct = times_from_words(segs[k].text, it.get("words") or [], a)
+        if ct:
+            segs[k].extra["ct"] = [[x, y] for x, y in ct]
+            n += 1
+    return n

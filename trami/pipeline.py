@@ -206,16 +206,39 @@ def diarize(p: Project, settings: dict | None = None, progress: Prog | None = No
     return n
 
 
-def align_segments(segs, wav: Path, language: str, settings: dict, progress: Prog | None = None, cancel=None):
-    """Tầng 1 khớp thoại: căn mốc từng chữ (fa-zh cho tiếng Trung), không chạy được thì dùng độ to giọng."""
+def use_qwen_align(engine: str, settings: dict) -> bool:
+    """Căn mốc từng chữ bằng Qwen3-ForcedAligner (lệch ~0,03 s): khi đang nghe bằng Qwen3-ASR hoặc đã tải bộ căn."""
+    from . import asr_qwen, models
+
+    if not settings.get("align_words", True) or not asr_qwen.available():
+        return False
+    return engine == "qwen3" or models.is_ready("qwen_align", settings)
+
+
+def align_segments(segs, wav: Path, language: str, settings: dict, progress: Prog | None = None, cancel=None,
+                   engine: str = ""):
+    """Tầng 1 khớp thoại: mốc từng chữ (đo sẵn bởi bộ nhận dạng / Qwen3-ForcedAligner / fa-zh), không đo được thì
+    dùng độ to giọng; rồi tách câu trọn nghĩa theo dấu câu cuối câu + chỗ nghỉ thật (align.plan_cuts)."""
     from . import align
     from .asr_funasr import available as fa_available, load_wav16k
     from .progress_hook import tqdm_progress
 
-    max_chars = int(settings.get("asr_max_chars", 22))
+    max_chars = int(settings.get("asr_max_chars", 28))
     try:
         audio = load_wav16k(wav)
-        use_fa = language in ("zh", "auto", "yue") and fa_available() and bool(settings.get("align_fa", True))
+        zh = language in ("zh", "auto", "yue")
+        if zh and use_qwen_align(engine, settings):
+            from . import asr_qwen
+
+            try:
+                asr_qwen.align_qwen(segs, wav, language, settings, _sub(progress, 0.0, 0.7), cancel)
+            except ff.Cancelled:
+                raise
+            except Exception as e:  # noqa: BLE001 – dùng fa-zh / độ to thay thế
+                log_error("Căn thời gian Qwen3")
+                if progress:
+                    progress(0.7, f"Bộ căn thời gian Qwen3 lỗi ({str(e)[:60]}) – dùng cách dự phòng")
+        use_fa = zh and fa_available() and bool(settings.get("align_fa", True))
         with tqdm_progress(progress, 0.0, 1.0, "Đang căn thời gian từng chữ", cancel,
                            download="Đang tải mô hình căn thời gian (fa-zh)"):
             return align.refine(segs, audio, use_fa=use_fa, progress=progress, cancel=cancel, max_chars=max_chars)
@@ -228,7 +251,7 @@ def align_segments(segs, wav: Path, language: str, settings: dict, progress: Pro
         return split_lines(segs, max_chars)
 
 
-def split_lines(segs, max_chars: int = 22):
+def split_lines(segs, max_chars: int = 28):
     """Chia dòng dài theo dấu câu / số chữ (cách cũ, khi không căn được thời gian từng chữ)."""
     from .asr_funasr import split_long
     from .subtitle import Segment
@@ -254,6 +277,10 @@ def rescue_segments(segs, wav: Path, engine: str, language: str, settings: dict,
             from .asr import whisper_decoder
 
             decode = whisper_decoder(settings, language)
+        elif engine == "qwen3":
+            from .asr_qwen import qwen_decoder
+
+            decode = qwen_decoder(settings, language, Path(wav).parent)
         else:
             from . import models
             from .asr_funasr import sensevoice_decoder
@@ -261,7 +288,7 @@ def rescue_segments(segs, wav: Path, engine: str, language: str, settings: dict,
             if engine == "paraformer" and not models.is_ready("sensevoice"):
                 return segs, 0
             decode = sensevoice_decoder(settings, language)
-        new = align.rescue_missed(segs, load_wav16k(wav), decode, int(settings.get("asr_max_chars", 22)),
+        new = align.rescue_missed(segs, load_wav16k(wav), decode, int(settings.get("asr_max_chars", 28)),
                                   progress, cancel)
     except ff.Cancelled:
         raise
@@ -291,8 +318,16 @@ def realign(p: Project, settings: dict | None = None, progress: Prog | None = No
     if not wav.exists() or wav.stat().st_size < 1000:
         ff.run(["-i", str(src), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav)],
                p.data.get("info", {}).get("duration", 0), _sub(progress, 0, 0.1), cancel, "Đang chuẩn bị âm thanh")
-    segs = align_segments(segs, wav, p.data.get("language", "zh"), settings, _sub(progress, 0.1, 1.0), cancel)
     from .align import drop_char_times
+
+    drop_char_times(segs)   # đo lại từ đầu theo lời hiện tại (người dùng có thể đã sửa chữ)
+    try:
+        segs = align_segments(segs, wav, p.data.get("language", "zh"), settings, _sub(progress, 0.1, 1.0), cancel,
+                              engine=p.data.get("asr_engine_used", ""))
+    finally:
+        from .asr_qwen import release
+
+        release()
 
     drop_char_times(segs)
     p.segments = segs
@@ -304,10 +339,10 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
               ocr_fps: float = 4.0, settings: dict | None = None, progress: Prog | None = None, cancel=None,
               denoise: bool = False, engine: str | None = None) -> int:
     """Lấy phụ đề gốc.  method: asr (giọng nói) | ocr (chữ trên video).
-    engine (asr): sensevoice | paraformer | whisper."""
+    engine (asr): qwen3 | sensevoice | paraformer | whisper."""
     settings = settings or load_settings()
     src = p.source
-    engine = engine or settings.get("asr_engine", "sensevoice")
+    engine = engine or settings.get("asr_engine", "qwen3")
     want_spk = bool(settings.get("diarize", True))
     if method == "ocr":
         from .ocr import detect_subtitle_region, extract_hardsubs
@@ -354,6 +389,27 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
             ff.run(args, info_dur, _sub(progress, 0.3, 0.33), cancel, "Đang chuẩn bị âm thanh")
         asr_end = 0.78 if want_spk else 0.92
         pr = _sub(progress, 0.33, asr_end)
+        segs = None
+        p.data.pop("asr_warning", None)
+        if engine == "qwen3":
+            from . import asr_qwen
+
+            if not asr_qwen.available():
+                p.data["asr_warning"] = f"Chưa dùng được Qwen3-ASR ({asr_qwen.why_unavailable()}) – đã dùng SenseVoice."
+                engine = "sensevoice"
+            else:
+                try:
+                    segs = asr_qwen.transcribe_qwen(wav, settings, language, pr, cancel)
+                except ff.Cancelled:
+                    asr_qwen.release()
+                    raise
+                except Exception as e:  # noqa: BLE001 – lỗi tải / thiếu bộ nhớ GPU… -> SenseVoice, không dừng quy trình
+                    log_error("Qwen3-ASR")
+                    asr_qwen.release()
+                    p.data["asr_warning"] = f"Qwen3-ASR lỗi ({str(e)[:160]}) – đã dùng SenseVoice thay thế."
+                    if progress:
+                        progress(0.33, "Qwen3-ASR lỗi → chuyển sang SenseVoice")
+                    engine = "sensevoice"
         if engine in ("sensevoice", "paraformer") and not asr_funasr.available():
             if progress:
                 progress(0.33, "Chưa cài FunASR -> dùng Whisper")
@@ -361,7 +417,6 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         if engine == "sensevoice" and language not in ("zh", "yue", "auto", "en", "ja", "ko"):
             engine = "whisper"
         spk_from_asr = False
-        segs = None
         if engine in ("sensevoice", "paraformer"):
             try:
                 if engine == "sensevoice":
@@ -393,9 +448,19 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         if settings.get("asr_rescue", True) and segs is not None and audio_in != Path(src):
             segs, p.data["asr_rescued"] = rescue_segments(segs, wav, engine, language, settings, spk_from_asr,
                                                           _sub(progress, asr_end - 0.03, asr_end), cancel)
-        # 2b) căn thời gian từng chữ: mốc câu sát lời thật, cắt câu ở chỗ nghỉ
-        if settings.get("align_words", True) and segs:
-            segs = align_segments(segs, wav, language, settings, _sub(progress, asr_end, asr_end + 0.07), cancel)
+        # 2b) căn thời gian từng chữ + tách câu trọn nghĩa (cuối câu / chỗ nghỉ thật, phẩy nói liền không tách)
+        try:
+            if settings.get("align_words", True) and segs:
+                segs = align_segments(segs, wav, language, settings, _sub(progress, asr_end, asr_end + 0.07),
+                                      cancel, engine=engine)
+        finally:
+            from .asr_qwen import release
+
+            release()   # trả bộ nhớ GPU trước bước phân biệt người nói
+        if engine in ("sensevoice", "qwen3"):
+            from .asr_funasr import mark_songs
+
+            mark_songs(segs)
     segs = normalize(segs)
     want_dz = want_spk and not spk_from_asr and bool(segs)
     if not want_dz:
@@ -404,7 +469,7 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         drop_char_times(segs)
     p.segments = segs
     p.data["sub_source"] = method
-    if method != "ocr" and engine != "whisper":
+    if method == "ocr":
         p.data.pop("asr_warning", None)
     p.save()
     # 3) phân biệt người nói
@@ -428,7 +493,7 @@ def _drop_char_times(p: Project) -> None:
     from .align import drop_char_times
 
     segs = p.segments
-    if any("ct" in s.extra for s in segs):
+    if any("ct" in s.extra or "chunked" in s.extra for s in segs):
         drop_char_times(segs)
         p.segments = segs
         p.save()
@@ -575,6 +640,11 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
         out = target
     except OSError:   # Windows: file đang được chương trình khác mở -> lưu thành bản mới
         tmp_out.replace(out)
+    env = stats.pop("wave", None)
+    if env is not None:
+        import numpy as np
+
+        np.save(dub_env_path(out), env)   # sóng âm từng đoạn giọng lồng cho timeline
     p.segments = segs            # lưu độ vừa (fit) + bản dịch đã rút gọn
     layout = stats.pop("layout", [])
     p.data["dub_layout"] = layout
@@ -603,6 +673,40 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     p.data["edit"] = ed
     p.save()
     return out
+
+
+def relayout(p: Project, settings: dict | None = None, progress: Prog | None = None, cancel=None) -> Path:
+    """Xếp lại các đoạn giọng lồng đã có theo vị trí mới (người dùng kéo đoạn giọng trên timeline) – không đọc lại câu
+    nào, chỉ ghép lại bản lồng đang dùng (vài giây)."""
+    if not any(s.extra.get("tts_file") for s in p.segments):
+        raise ValueError("Chưa có giọng lồng – bấm Tạo bản lồng tiếng trước.")
+    return dub(p, None, None, settings, progress, cancel, inplace=True, only=[])
+
+
+def dub_env_path(wav: str | Path) -> Path:
+    return Path(wav).with_suffix(".env.npy")
+
+
+def dub_wave(p: Project) -> tuple[str, float] | None:
+    """(file sóng âm, bước giây) của bản lồng đang dùng – bản cũ chưa có thì tạo (chạy ở luồng nền)."""
+    wav = (p.edit.get("dub") or {}).get("wav")
+    if not wav or not Path(wav).exists():
+        return None
+    env = dub_env_path(wav)
+    if not env.exists() or env.stat().st_mtime < Path(wav).stat().st_mtime:
+        import wave as _wave
+
+        import numpy as np
+
+        from .tts import wave_envelope
+
+        with _wave.open(str(wav)) as w:
+            sr = w.getframerate()
+            a = np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32) / 32768.0
+            if w.getnchannels() > 1:
+                a = a.reshape(-1, w.getnchannels()).mean(axis=1)
+        np.save(env, wave_envelope(a, sr))
+    return str(env), 0.05
 
 
 def redub(p: Project, rows: list[int], rate: str | None = None, settings: dict | None = None,
@@ -726,6 +830,7 @@ def delete_dub_version(p: Project, wav: str) -> None:
     vers = [v for v in dub_versions(p) if v["wav"] != wav]
     try:
         Path(wav).unlink(missing_ok=True)
+        dub_env_path(wav).unlink(missing_ok=True)
     except OSError:
         pass  # file đang được mở ở chương trình khác -> để lại, chỉ bỏ khỏi danh sách
     p.data["dub_versions"] = vers

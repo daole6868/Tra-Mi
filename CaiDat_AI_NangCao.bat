@@ -9,7 +9,7 @@ if not exist ".venv\Scripts\python.exe" (
 )
 set "VPY=.venv\Scripts\python.exe"
 echo ============================================================
-echo   Cai AI nang cao: PyTorch + tach giong + SenseVoice +
+echo   Cai AI nang cao: PyTorch + tach giong + Qwen3-ASR + SenseVoice +
 echo   phan biet nguoi noi + VieNeu-TTS + LaMa
 echo ============================================================
 
@@ -57,7 +57,7 @@ if defined TORCH_OK (
 echo.
 echo ---------------- KIEM TRA ----------------
 "%VPY%" -c "import torch;print('PyTorch', torch.__version__, '| GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'KHONG (chay CPU)')"
-"%VPY%" -c "import trami.separate as a, trami.asr_funasr as b, trami.diarize as c, trami.tts as d, trami.lama as e; print('Tach giong:', a.available(), '| SenseVoice:', b.available(), '| Phan nguoi noi:', c.available(), '| VieNeu-TTS:', d.vieneu_available(), '| LaMa:', e.available())"
+"%VPY%" -c "import trami.separate as a, trami.asr_funasr as b, trami.diarize as c, trami.tts as d, trami.lama as e, trami.asr_qwen as q; print('Tach giong:', a.available(), '| Qwen3-ASR:', q.available(), '| SenseVoice:', b.available(), '| Phan nguoi noi:', c.available(), '| VieNeu-TTS:', d.vieneu_available(), '| LaMa:', e.available())"
 echo.
 echo Cac mo hinh AI se tu tai ve o lan dung dau tien (tong khoang 3-5 GB).
 if not "%1"=="nopause" pause

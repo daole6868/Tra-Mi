@@ -88,10 +88,13 @@ Muốn dịch nhanh không cần mở giao diện, kéo thả video vào `DichNh
 | **Xoá phụ đề** | Khoanh vùng chữ bằng chuột, được nhiều vùng. Tự dò vùng phụ đề. Có 4 cách: **AI LaMa** (vẽ lại nền sau chữ), làm mờ, che dải màu, delogo. Xem trước trên 1 khung hình trước khi xuất |
 | **Chỉnh sửa** | Cắt đầu/cuối và xoá nhiều đoạn giữa, xem trên thanh thời gian. Crop, xoay, lật gương, zoom, tốc độ 0.5–2×. Đổi khung 9:16 / 16:9 / 1:1 / 4:5 với nền mờ. Độ phân giải tới 4K. Chỉnh màu, làm nét, khử nhiễu. Âm lượng, đổi cao độ giọng gốc, thêm nhạc nền, logo, chữ tĩnh hoặc chữ chạy, mờ dần đầu/cuối |
 | **Kiểu chữ** | Font, cỡ, màu, viền, bóng, nền hộp, vị trí, VIẾT HOA, song ngữ. Xem trước trực tiếp trên video. Có sẵn 4 mẫu nhanh |
-| **Lồng tiếng** | ① **Tách giọng / nhạc nền** (Mel-RoFormer Kim, BS-RoFormer hoặc kết hợp cả hai): giữ nguyên nhạc và hiệu ứng gốc, chỉ thay lời thoại. ② **Mỗi người nói một giọng**: 25 giọng Việt của VieNeu, 2 giọng Microsoft, hoặc **nhái giọng nhân vật gốc**. Nghe thử từng giọng. ③ Tự khớp thời gian từng câu; bài hát trong phim được giữ nguyên |
+| **Lồng tiếng** | ① **Tách giọng / nhạc nền** (Mel-RoFormer Kim, BS-RoFormer hoặc kết hợp cả hai): giữ nguyên nhạc và hiệu ứng gốc, chỉ thay lời thoại. ② **Mỗi người nói một giọng**: 25 giọng Việt của VieNeu, 2 giọng Microsoft, hoặc **nhái giọng nhân vật gốc**. Nghe thử từng giọng. ③ Mỗi câu phụ đề là 1 đoạn giọng riêng, ghép đúng lúc nhân vật nói, hiện trên dòng *Lồng tiếng* của timeline (kéo để dời, bấm đúp để nghe); bài hát trong phim được giữ nguyên |
 | **Xuất** | MP4 (H.264 CPU / NVIDIA NVENC / H.265), tất cả trong 1 lần encode. Phụ đề SRT (Việt / Trung / song ngữ), ASS, VTT, TXT. Chia video dài thành nhiều phần, tách MP3 |
 
 **Bộ nhận dạng giọng nói** (chọn ở tab Tự động hoặc trang Cài đặt):
+- **Qwen3-ASR** (mặc định): nghe tiếng Trung chuẩn nhất, tự đặt dấu câu theo nghĩa, kèm bộ căn giờ từng chữ (lệch ~0,03 s)
+  để tách câu đúng chỗ nghỉ. Cần `transformers` ≥ 5.13: `.venv\Scripts\python -m pip install -U "transformers>=5.13" accelerate`.
+  GPU dưới 6 GB chọn bản 0.6B ở Cài đặt. Chưa cài thì tool tự dùng SenseVoice.
 - **SenseVoice**: nhanh, giỏi tiếng Phổ thông và Quảng Đông, tự nhận biết đoạn đang hát.
 - **Paraformer**: có dấu câu và tự phân biệt người nói ngay trong lúc nhận dạng.
 - **Whisper large-v3**: đa ngôn ngữ, dùng cho tiếng Anh, Nhật, Hàn.
@@ -100,7 +103,8 @@ Muốn dịch nhanh không cần mở giao diện, kéo thả video vào `DichNh
 
 ## 4. Gợi ý để có bản dịch chuẩn nhất
 - Video đã có chữ Trung in sẵn: dùng **OCR**, cho chữ và thời gian gần như tuyệt đối chính xác.
-- Video chỉ có tiếng: bật **Tách giọng khỏi nhạc trước**, rồi dùng **SenseVoice**. Có tách giọng thì tool còn **nghe lại các đoạn có tiếng bị bộ chia đoạn bỏ sót**, nên không còn câu bị bỏ không dịch.
+- Video chỉ có tiếng: bật **Tách giọng khỏi nhạc trước**, rồi dùng **Qwen3-ASR** (hoặc SenseVoice). Mỗi dòng phụ đề là
+  1 câu trọn nghĩa: chỉ tách ở cuối câu (。！？) hoặc chỗ nghỉ thật; dấu phẩy nói liền không bị tách. Có tách giọng thì tool còn **nghe lại các đoạn có tiếng bị bộ chia đoạn bỏ sót**, nên không còn câu bị bỏ không dịch.
 - Dùng **AI dịch** và chọn đúng **thể loại**. Sau lần dịch đầu, sửa bảng tên riêng nếu cần rồi bấm **Dịch lại tất cả**. Bản dịch cũ được lưu sẵn, nên dịch lại không tốn thêm tiền cho những câu không đổi.
 - Lồng tiếng tự nhiên nhất: **Tách giọng → Phân biệt người nói → Tự gán giọng**, hoặc chọn *Nhái giọng*.
 
@@ -126,7 +130,7 @@ TraMi/
 
 ## 7. Bản quyền các mô hình
 - Bộ tách giọng (UVR / audio-separator – github.com/nomadkaraoke/python-audio-separator): MIT. Cập nhật để có Mel-RoFormer Kim và chế độ kết hợp: `.venv\Scripts\python -m pip install -U "audio-separator>=0.44" -c torch-constraints.txt`
-- FunASR / SenseVoice, LaMa: Apache-2.0.
+- Qwen3-ASR, Qwen3-ForcedAligner (github.com/QwenLM/Qwen3-ASR), FunASR / SenseVoice, LaMa: Apache-2.0.
 - VieNeu-TTS: Apache-2.0, kèm watermark âm thanh chống lạm dụng.
 - SpeechBrain: Apache-2.0.
 

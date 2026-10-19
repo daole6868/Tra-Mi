@@ -23,13 +23,14 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Lệnh FFmpeg cuối: `data/projects/<id>/work/render/last_ffmpeg_cmd.txt`.
 - `trami/tts.py` – `synthesize_dub` (giọng mỗi người nói: `edge:<id>` / `vieneu:<preset>` / `clone`), `clean_tts_text`,
   `preview_voice`. VieNeu API: `Vieneu(mode="v3turbo").infer(text, voice="<tên preset>" | ref_audio=...)` → numpy 48 kHz.
-- `trami/asr.py` (faster-whisper), `asr_funasr.py` (SenseVoice/Paraformer, `mark_songs`), `diarize.py` (ECAPA),
+- `trami/asr_qwen.py` + `qwen_asr_worker.py` (Qwen3-ASR + Qwen3-ForcedAligner, tiến trình riêng `--qwen-asr-worker`,
+  transformers ≥ 5.13, mặc định từ 2.0.29), `trami/asr.py` (faster-whisper), `asr_funasr.py` (SenseVoice/Paraformer, `mark_songs`), `diarize.py` (ECAPA),
   `separate.py` (audio-separator BS-RoFormer), `lama.py` + `inpaint.py` (xoá chữ), `ocr.py` (RapidOCR),
   `translate.py` (`LLMClient` gọi HTTP: anthropic / OpenAI-compatible / gemini / deepseek / ollama; Google gtx).
 - `trami/jobs.py` – hàng đợi 1 luồng cho tác vụ dài; `trami/gui/*` – giao diện (QPainter), `common.run_async`,
   `WheelGuard` (lăn chuột không đổi ô chọn khi chưa bấm vào). Trang dự án bố cục kiểu trình dựng phim (từ 2.0.28):
   trái `IconTabs` + 8 tab, giữa trình phát, phải `gui/inspector.LineInspector` (câu đang chọn), dưới `gui/timeline.TrackTimeline`.
-- `tests/test_core.py` – `python -m pytest -q tests` (53 test; 1 test cần gói AI).
+- `tests/test_core.py` – `python -m pytest -q tests` (56 test; 1 test cần gói AI).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -219,6 +220,32 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   ưu tiên nó). `main.Sidebar.set_compact` (chỉ icon, rộng 68) khi ở trang dự án. Màn <1600 px: khung phải mở đầu thu gọn,
   timeline ~30% chiều cao (`showEvent`). Icon mới `minus`, `fit`. Đã chạy thử offscreen 1920×1080 + 1366×768.
 
+- 2.0.29: người dùng: "phải có công nghệ nghe và tách đúng để làm phụ đề" + "lồng tiếng chia theo câu phụ đề, ghép
+  đúng vị trí, hiện dưới phụ đề trên bố cục mới".
+  * **Qwen3-ASR** (Alibaba, 1/2026, Apache-2.0; WenetSpeech net/meeting 4,97/5,88 % so với Whisper-v3 9,86/19,11) + **Qwen3-
+    ForcedAligner-0.6B** (mốc từng chữ lệch ~33 ms, fa-zh ~161 ms). Dùng bản `-hf` có sẵn trong transformers ≥ 5.13
+    (`Qwen3ASRForConditionalGeneration`, `apply_transcription_request(audio=[np 16k], language=, prompt=)`,
+    `decode(return_format="parsed")`; bộ căn `Qwen3ASRForTokenClassification`, `prepare_forced_aligner_inputs`,
+    `decode_forced_alignment`). KHÔNG dùng gói `qwen-asr` (ghim transformers==4.57.6, xung đột OmniVoice ≥ 5.3).
+    `asr_qwen.transcribe_qwen`: VAD (fsmn nếu có, không thì `align.speech_spans`) -> `align.chunk_spans` (gộp đoạn nghỉ ≤ 1 s
+    thành khúc ≤ 28 s để nghe trọn câu; khúc dài cắt ở chỗ nghỉ dài nhất / chỗ lặng nhất) -> worker {"cmd":"asr", align}
+    -> mỗi khúc 1 Segment có `extra["ct"]`. `align_qwen` đo mốc cho câu chưa có (SenseVoice cũ, câu nghe lại, nút Căn
+    khớp thoại); `qwen_decoder` cho nghe lại đoạn sót; `hotwords` lấy chữ Trung trong bảng thuật ngữ làm gợi ý.
+    Lỗi / chưa cài -> SenseVoice + `asr_warning` (hiện sau khi lấy phụ đề). `release()` tắt tiến trình sau khi căn xong.
+    Đã chạy thật trên sandbox bằng mô hình tí hon trọng số ngẫu nhiên (transformers 5.19) – đúng API; mô hình thật chưa chạy.
+  * SenseVoice: FunASR `output_timestamp=True` (CTC forced align, `_timestamps_ok` thử trước) -> cũng gộp khúc + `ct`.
+  * **Tách câu mới** `align.plan_cuts`: luôn tách ở 。！？, ở dấu phẩy CHỈ khi sau nó nghỉ ≥ `PAUSE_COMMA` 0,45 s (hết câu /
+    đổi lượt), chỗ nghỉ ≥ `PAUSE_HARD` 0,8 s (có mốc thật); câu > `asr_max_chars` (mặc định 22 -> 28) hoặc > `MAX_DUR` 8 s
+    chia ở phẩy / chỗ nghỉ gần giữa (`best_cut`), không thì ranh giới từ jieba. `split_timed`, `fix_overlaps`,
+    `times_from_words` (token nhiều chữ chia đều) + `plausible_times` (bỏ mốc vô lý > 12 chữ/s hoặc dồn 1 chỗ).
+    Video mẫu (SenseVoice ONNX có mốc): câu gốc OCR bị cắt vụn 8 -> 2, 44 -> 39 dòng. `mark_songs` chạy sau khi tách
+    (nhãn Sing của cả khúc: câu > 3,2 chữ/s không coi là hát; cờ `chunked` xoá trước khi lưu).
+  * **Lồng tiếng từng đoạn**: (vốn đã đọc từng câu rồi xếp) giờ hiện rõ: timeline track "Lồng tiếng" cao 38, mỗi câu 1 khối có
+    sóng âm thật (`tts.wave_envelope` -> `<dub>.env.npy`, `pipeline.dub_wave` tạo cho bản cũ), màu độ vừa, `#n`; câu không
+    có giọng: khung nét đứt + lý do. Kéo khối -> `extra["dub_shift"]` -> `pipeline.relayout` (= `dub(inplace, only=[])`,
+    không đọc lại câu nào) -> trộn lại bản nghe thử + phát câu đó. Chuột phải: Nghe / Đặt lại vị trí / Tạo lại giọng.
+    `synthesize_dub` xếp theo `want = start + dub_shift`; câu `keep` chưa có `tts_file` (bản trước 2.0.26) dùng file hash.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -228,3 +255,5 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.25: chờ người dùng thử bảng câu lồng tiếng + Tạo lại giọng các câu đã tích trên máy thật (VieNeu/OmniVoice).
 - 2.0.26: chờ người dùng cập nhật edge-tts>=7.3.1 và xác nhận Edge hết 403.
 - 2.0.28: chờ người dùng xem giao diện mới trên máy thật (độ rộng các khung, cỡ chữ, timeline).
+- 2.0.29: chờ người dùng cài `transformers>=5.13 accelerate`, tải Qwen3-ASR (tab Tài liệu) và chạy lại "1. Nghe & tách câu";
+  VRAM: 1.7B bf16 ~4 GB + bộ căn 0.6B; lỗi thiếu bộ nhớ -> chọn 0.6B. Chưa làm: AI chấm câu / sửa lời trước khi tách.

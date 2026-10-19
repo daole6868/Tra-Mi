@@ -1,6 +1,8 @@
 # ===== AI nâng cao (cài bằng CaiDat_AI_NangCao.bat – cần cài PyTorch trước) =====
 audio-separator>=0.44       # tách giọng / nhạc nền (Mel-RoFormer Kim, BS-RoFormer, MDX, Demucs, kết hợp 2 mô hình)
-funasr>=1.1                 # SenseVoice, Paraformer + phân người nói CAM++
+transformers>=5.13          # Qwen3-ASR + Qwen3-ForcedAligner (nghe tiếng Trung chuẩn nhất, mốc từng chữ)
+accelerate
+funasr>=1.2                 # SenseVoice (có mốc từng chữ), VAD, Paraformer + phân người nói CAM++
 modelscope>=1.15
 speechbrain>=1.0            # nhận diện giọng (phân biệt người nói)
 vieneu>=3.0                 # VieNeu-TTS: 25 giọng Việt + nhái giọng

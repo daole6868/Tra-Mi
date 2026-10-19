@@ -17,7 +17,10 @@ from .subtitle import Segment
 SR = 16000
 CJK = re.compile(r"[㐀-鿿]")
 GAP_SPLIT = 0.35     # (dự phòng theo độ to) cụm tiếng cách nhau hơn mức này là 2 vế
-LONG_PAUSE = 0.6     # có mốc từng chữ thật: nghỉ dài hơn mức này giữa 2 chữ (không dấu câu) cũng là hết câu
+PAUSE_HARD = 0.8     # có mốc từng chữ thật: nghỉ dài hơn mức này giữa 2 chữ cũng là hết câu
+PAUSE_COMMA = 0.45   # dấu phẩy + nghỉ ≥ mức này = hết câu / đổi lượt nói (phẩy nói liền thì không tách)
+MAX_DUR = 8.0        # câu nói dài hơn mức này (giây) thì chia ở dấu phẩy / chỗ nghỉ gần giữa
+MIN_PIECE = 3        # chia câu dài: mỗi phần ít nhất 3 chữ
 SHORT_PIECE = 2      # mẩu ≤ 2 chữ ("哇，", "嘿嘿，") gộp vào câu sát bên nếu nói liền
 STRONG = "。！？!?…"
 WEAK = "，,；;：:"
@@ -203,7 +206,13 @@ def _boundary(text: str, pos: list[int], k: int) -> str:
 def _word_cut(text: str, pos: list[int], cand: list[int]) -> int:
     """Chỗ cắt (chỉ số chữ Hán, cắt SAU chữ đó) trong `cand` gần giữa nhất mà không cắt đôi 1 từ."""
     mid = (cand[0] + cand[-1]) / 2
-    ok = list(cand)
+    ends = _word_ends(text)
+    ok = [k for k in cand if ends is None or pos[k] in ends or pos[k + 1] - pos[k] > 1] or list(cand)
+    return min(ok, key=lambda k: abs(k - mid))
+
+
+def _word_ends(text: str) -> set[int] | None:
+    """Vị trí ký tự cuối của mỗi từ (jieba) – để không bao giờ cắt đôi 1 từ; None nếu chưa cài jieba."""
     try:
         import jieba
 
@@ -211,25 +220,27 @@ def _word_cut(text: str, pos: list[int], cand: list[int]) -> int:
         ends, i = set(), 0
         for w in jieba.cut(text):
             i += len(w)
-            ends.add(i - 1)                       # vị trí ký tự cuối của mỗi từ
-        ok = [k for k in ok if pos[k] in ends or pos[k + 1] - pos[k] > 1] or ok
-    except Exception:  # noqa: BLE001 – không có jieba: cắt gần giữa
-        pass
-    return min(ok, key=lambda k: abs(k - mid))
+            ends.add(i - 1)
+        return ends
+    except Exception:  # noqa: BLE001
+        return None
 
 
-def plan_cuts(text: str, pos: list[int], times: list[tuple[float, float]], max_chars: int = 22,
-              exact: bool = False) -> list[int]:
-    """Chỗ tách câu (cắt SAU chữ Hán thứ k). Chỉ tách ở dấu câu, ở chỗ nghỉ dài thật (khi có mốc từng chữ) và khi
-    câu quá dài – không bao giờ cắt giữa 1 từ; mẩu quá ngắn được gộp lại vào câu sát bên."""
+def plan_cuts(text: str, pos: list[int], times: list[tuple[float, float]], max_chars: int = 28,
+              exact: bool = False, max_dur: float = MAX_DUR) -> list[int]:
+    """Chỗ tách câu (cắt SAU chữ Hán thứ k) – mỗi dòng là 1 CÂU TRỌN NGHĨA để dịch và lồng tiếng:
+      * luôn tách ở cuối câu (。！？) và ở chỗ nghỉ thật ≥ PAUSE_HARD giây (chỉ khi có mốc từng chữ thật);
+      * dấu phẩy (，；：) chỉ tách khi sau nó có nghỉ ≥ PAUSE_COMMA (hết câu / đổi lượt nói); phẩy nói liền là
+        chỗ chia ưu tiên khi câu dài quá `max_chars` chữ / `max_dur` giây;
+      * mẩu ≤ 2 chữ nói liền với câu bên cạnh được gộp lại; không bao giờ cắt đôi 1 từ hay dính số sang câu trước."""
     n = len(pos)
     if n < 2:
         return []
     kind = [_boundary(text, pos, k) for k in range(n - 1)]
-    gap = [max(0.0, times[k + 1][0] - times[k][1]) for k in range(n - 1)]
-    cuts = {k for k in range(n - 1) if kind[k] in ("strong", "weak")}
+    gap = [max(0.0, round(times[k + 1][0] - times[k][1], 3)) for k in range(n - 1)]
+    cuts = {k for k in range(n - 1) if kind[k] == "strong" or (kind[k] == "weak" and gap[k] >= PAUSE_COMMA)}
     if exact:
-        cuts |= {k for k in range(n - 1) if not kind[k] and gap[k] >= LONG_PAUSE and k >= 1 and n - k - 1 >= 2}
+        cuts |= {k for k in range(n - 1) if kind[k] != "word" and gap[k] >= PAUSE_HARD}
     cuts = sorted(cuts)
     while True:   # gộp mẩu ngắn vào câu kề, ưu tiên phía nghỉ ngắn hơn
         bounds = [-1] + cuts + [n - 1]
@@ -247,28 +258,52 @@ def plan_cuts(text: str, pos: list[int], times: list[tuple[float, float]], max_c
         if best is None:
             break
         cuts.remove(best[1])
-    # vế quá dài, không dấu câu: cắt ở chỗ nghỉ dài nhất (có mốc thật) hoặc ranh giới từ gần giữa
+    # câu quá dài (số chữ / thời lượng): chia ở dấu phẩy hoặc chỗ nghỉ gần giữa nhất, không thì ở ranh giới từ
+    ends = _word_ends(text)
+
+    def too_long(x: int, y: int) -> bool:
+        if y - x > max_chars:
+            return True
+        return y - x >= 8 and times[y][1] - times[x + 1][0] > max_dur
+
+    def best_cut(x: int, y: int) -> int | None:
+        size = y - x
+        by_len = size > max_chars
+        cand = []
+        for k in range(x + 1, y):
+            left, right = k - x, y - k
+            if min(left, right) < MIN_PIECE or kind[k] == "word":
+                continue
+            score = {"weak": 3.0, "strong": 3.0}.get(kind[k], 0.0)
+            if exact:
+                score += min(gap[k], 1.0) * 3
+            if score <= 0:
+                if not by_len:
+                    continue     # câu chỉ dài về thời gian: chỉ chia ở dấu câu / chỗ nghỉ thật
+                if ends is not None and not (pos[k] in ends or pos[k + 1] - pos[k] > 1):
+                    continue     # giữa 1 từ
+            cand.append((score - 2.5 * abs(left - right) / size, k))
+        if not cand and by_len:
+            lo, hi = x + 1 + size // 4, y - size // 4
+            cand = [(0.0, _word_cut(text, pos, [k for k in range(lo, hi) if kind[k] != "word"] or list(range(lo, hi))))]
+        return max(cand)[1] if cand else None
+
     out: list[int] = []
     bounds = [-1] + cuts + [n - 1]
     for a, b in zip(bounds, bounds[1:]):
         pieces = [(a, b)]
         while pieces:
             x, y = pieces.pop()
-            if y - x <= max_chars or y - x < 4:
+            c = best_cut(x, y) if too_long(x, y) and y - x >= 4 else None
+            if c is None:
                 out.append(y)
                 continue
-            lo, hi = x + 1 + (y - x) // 4, y - (y - x) // 4
-            cand = [k for k in range(lo, hi) if kind[k] != "word"] or list(range(lo, hi))
-            if exact and max(gap[k] for k in cand) >= 0.12:
-                c = max(cand, key=lambda k: gap[k])
-            else:
-                c = _word_cut(text, pos, cand)
             pieces += [(c, y), (x, c)]
     return sorted(set(out) - {n - 1})
 
 
 def refine(segs: list[Segment], audio: np.ndarray, use_fa: bool = True, progress: Prog | None = None,
-           cancel=None, duration: float = 0.0, max_chars: int = 22) -> list[Segment]:
+           cancel=None, duration: float = 0.0, max_chars: int = 28) -> list[Segment]:
     """Trả về danh sách câu mới: mốc sát lời thật, mỗi dòng là 1 câu / vế câu trọn vẹn (`plan_cuts`).
     Câu không phải tiếng Trung giữ nguyên mốc (chỉ thu theo độ to). Có mốc từng chữ thật thì lưu vào extra["ct"]
     (để tách khi đổi người nói đúng chỗ nghỉ; xoá trước khi lưu dự án)."""
@@ -277,10 +312,17 @@ def refine(segs: list[Segment], audio: np.ndarray, use_fa: bool = True, progress
     total = duration or len(audio) / SR
     out: list[Segment] = []
     # nạp mô hình căn thời gian đúng 1 lần cho cả video (lỗi -> cả video dùng cách dự phòng)
-    fa_ok = use_fa and any(CJK.search(s.text) for s in segs) and fa_usable()
+    def has_ct(s: Segment) -> bool:   # bộ nhận dạng đã đo sẵn mốc từng chữ (Qwen3-ASR, SenseVoice có mốc)
+        ct = s.extra.get("ct")
+        return bool(ct) and len(ct) == len(_char_positions(s.text))
+
+    fa_ok = use_fa and any(CJK.search(s.text) and not has_ct(s) for s in segs) and fa_usable()
     for k, s in enumerate(segs):
         if cancel and cancel():
             raise Cancelled()
+        if has_ct(s):
+            out += split_timed(s, [(float(a), float(b)) for a, b in s.extra["ct"]], True, max_chars, total)
+            continue
         a0 = max(0.0, s.start - 0.3)
         a1 = min(total, s.end + 0.3)
         clip = audio[int(a0 * SR):int(a1 * SR)]
@@ -313,22 +355,38 @@ def refine(segs: list[Segment], audio: np.ndarray, use_fa: bool = True, progress
                 continue
             out.append(s)
             continue
-        times = [(a0 + a, a0 + b) for a, b in times]
-        cuts = plan_cuts(s.text, pos, times, max_chars, exact)
-        texts = _split_text(s.text, pos, cuts) if cuts else [s.text]
-        bounds = [0] + [c + 1 for c in cuts] + [len(times)]
-        for j, t in enumerate(texts):
-            ta, tb = times[bounds[j]], times[bounds[j + 1] - 1]
-            ns = Segment(round(max(0.0, ta[0] - PAD), 3), round(min(total, tb[1] + PAD), 3), t,
-                         s.trans if not cuts else "", s.speaker, dict(s.extra))
-            if ns.end - ns.start < 0.2:
-                ns.end = round(ns.start + 0.2, 3)
-            if exact:
-                ns.extra["ct"] = [[round(x, 3), round(y, 3)] for x, y in times[bounds[j]:bounds[j + 1]]]
-            out.append(ns)
+        out += split_timed(s, [(a0 + a, a0 + b) for a, b in times], exact, max_chars, total)
         if progress and k % 10 == 0:
             progress(k / max(1, len(segs)), f"Đang căn thời gian và tách câu {k}/{len(segs)}")
-    # không để câu chồng lên nhau sau khi nới mốc
+    return fix_overlaps(out)
+
+
+def split_timed(s: Segment, times: list[tuple[float, float]], exact: bool, max_chars: int = 28,
+                total: float = 0.0) -> list[Segment]:
+    """1 đoạn lời + mốc (giây, tính từ đầu video) của từng chữ Hán -> các câu trọn nghĩa (`plan_cuts`), mốc mỗi câu
+    sát chữ đầu / chữ cuối. exact: mốc đo thật (lưu extra["ct"] để tách khi đổi người nói đúng chỗ nghỉ)."""
+    pos = _char_positions(s.text)
+    if not pos or len(times) != len(pos):
+        return [s]
+    cuts = plan_cuts(s.text, pos, times, max_chars, exact)
+    texts = _split_text(s.text, pos, cuts) if cuts else [s.text]
+    bounds = [0] + [c + 1 for c in cuts] + [len(times)]
+    out = []
+    for j, t in enumerate(texts):
+        ta, tb = times[bounds[j]], times[bounds[j + 1] - 1]
+        end = tb[1] + PAD
+        ns = Segment(round(max(0.0, ta[0] - PAD), 3), round(min(total, end) if total else end, 3), t,
+                     s.trans if not cuts else "", s.speaker, dict(s.extra))
+        if ns.end - ns.start < 0.2:
+            ns.end = round(ns.start + 0.2, 3)
+        if exact:
+            ns.extra["ct"] = [[round(x, 3), round(y, 3)] for x, y in times[bounds[j]:bounds[j + 1]]]
+        out.append(ns)
+    return out
+
+
+def fix_overlaps(out: list[Segment]) -> list[Segment]:
+    """Không để câu chồng lên nhau sau khi nới mốc."""
     out.sort(key=lambda x: x.start)
     for a, b in zip(out, out[1:]):
         if a.end > b.start:
@@ -338,9 +396,100 @@ def refine(segs: list[Segment], audio: np.ndarray, use_fa: bool = True, progress
     return out
 
 
+def times_from_words(text: str, words: list, offset: float = 0.0) -> list[tuple[float, float]] | None:
+    """Mốc từng chữ Hán của `text` từ kết quả có mốc thời gian của bộ nhận dạng / bộ căn thời gian:
+    words = [(chữ hoặc từ, đầu, cuối)] (giây, tính từ đầu đoạn); từ nhiều chữ chia đều thời gian cho từng chữ.
+    Dấu câu, chữ Latin, số được bỏ qua. None nếu số chữ Hán không khớp -> người gọi dùng cách dự phòng."""
+    cjk: list[tuple[float, float]] = []
+    for w, a, b in words:
+        w, a, b = str(w), float(a), float(b)
+        n = len(w)
+        for i, ch in enumerate(w):
+            if CJK.match(ch):
+                cjk.append((a + (b - a) * i / n, a + (b - a) * (i + 1) / n))
+    if not cjk or len(cjk) != len(_char_positions(text)):
+        return None
+    out, last = [], 0.0
+    for a, b in cjk:
+        a = max(a, last)
+        b = max(b, a + 0.02)
+        out.append((round(offset + a, 3), round(offset + b, 3)))
+        last = a
+    return out if plausible_times(out) else None
+
+
+def plausible_times(times: list[tuple[float, float]]) -> bool:
+    """Mốc từng chữ có hợp lý không: người nói nhanh nhất ~9 chữ/giây; bộ căn lỗi (lời không khớp tiếng, sửa chữ)
+    thường dồn nhiều chữ vào cùng 1 chỗ -> bỏ, dùng cách dự phòng thay vì co câu còn 0,2 giây."""
+    n = len(times)
+    if n <= 2:
+        return True
+    dur = times[-1][1] - times[0][0]
+    if n / max(dur, 0.01) > 12:
+        return False
+    same = sum(1 for x, y in zip(times, times[1:]) if y[0] - x[0] < 0.01)
+    return same <= n // 3
+
+
+def speech_spans(audio: np.ndarray, min_len: float = 0.3) -> list[tuple[float, float]]:
+    """Các đoạn có tiếng nói theo độ to (khi không có bộ chia đoạn VAD của FunASR)."""
+    m, hop = voiced_mask(audio)
+    if not len(m):
+        return []
+    m = _close(m, int(0.5 / hop))
+    return [(round(i * hop, 3), round(j * hop, 3)) for i, j in _runs(m, True) if (j - i) * hop >= min_len]
+
+
+def _quietest(audio: np.ndarray, lo: float, hi: float) -> float:
+    """Thời điểm lặng nhất (cửa sổ 0,2 s) trong [lo, hi] – chỗ cắt ít hại nhất khi phải cắt 1 đoạn nói liền."""
+    n = int(SR * 0.02)
+    a = audio[int(lo * SR):int(hi * SR)]
+    if len(a) < n * 12:
+        return (lo + hi) / 2
+    fr = a[: len(a) // n * n].reshape(-1, n)
+    rms = np.sqrt((fr.astype(np.float32) ** 2).mean(axis=1) + 1e-12)
+    sm = np.convolve(rms, np.ones(10) / 10, mode="same")
+    return lo + (int(np.argmin(sm[5:-5])) + 5) * 0.02
+
+
+def chunk_spans(spans: list[tuple[float, float]], audio: np.ndarray | None = None, max_gap: float = 1.0,
+                max_len: float = 25.0, min_len: float = 8.0) -> list[tuple[float, float]]:
+    """Gộp các đoạn có tiếng nói sát nhau (nghỉ ≤ max_gap giây) thành khúc ≤ max_len giây để bộ nhận dạng nghe trọn
+    câu (đặt dấu câu đúng hơn, không cắt đôi câu). Khúc quá dài: cắt ở chỗ nghỉ dài nhất giữa 2 đoạn; đoạn nói liền
+    quá dài (VAD cắt cứng) thì cắt ở chỗ lặng nhất, không cắt giữa chữ."""
+    groups: list[list[tuple[float, float]]] = []
+    for a, b in sorted(spans):
+        if b <= a:
+            continue
+        if groups and a - groups[-1][-1][1] <= max_gap:
+            groups[-1].append((a, b))
+        else:
+            groups.append([(a, b)])
+    out: list[tuple[float, float]] = []
+    while groups:
+        g = groups.pop(0)
+        a, b = g[0][0], g[-1][1]
+        if b - a <= max_len:
+            out.append((round(a, 3), round(b, 3)))
+            continue
+        lo, hi = a + min_len, a + max_len
+        gaps = [(g[i + 1][0] - g[i][1], i) for i in range(len(g) - 1) if lo <= g[i][1] <= hi]
+        if gaps:
+            i = max(gaps)[1]
+            groups[:0] = [g[:i + 1], g[i + 1:]]
+            continue
+        t = _quietest(audio, lo, hi) if audio is not None else hi
+        left = [(x, min(y, t)) for x, y in g if x < t]
+        right = [(max(x, t), y) for x, y in g if y > t]
+        groups[:0] = [left, right] if left and right else [[(a, t)], [(t, b)]]
+    return out
+
+
 def drop_char_times(segs: list[Segment]) -> None:
+    """Xoá dữ liệu tạm của bước nhận dạng (mốc từng chữ, cờ khúc) trước khi lưu dự án."""
     for s in segs:
         s.extra.pop("ct", None)
+        s.extra.pop("chunked", None)
 
 
 # ------------------------------------------------------------------ nghe lại câu bị sót

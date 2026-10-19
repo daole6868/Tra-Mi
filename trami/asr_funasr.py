@@ -104,11 +104,31 @@ def vad_segments(audio: np.ndarray, device: str) -> list[tuple[float, float]]:
     return [(a / 1000.0, b / 1000.0) for a, b in spans if b > a]
 
 
+def _timestamps_ok(model, audio: np.ndarray, spans, lang: str) -> bool:
+    """Bản FunASR đang cài có trả mốc từng chữ cho SenseVoice không (output_timestamp, FunASR ≥ 1.2)."""
+    if not spans:
+        return False
+    s, e = spans[0]
+    try:
+        res = model.generate(input=[audio[int(s * SR):int(min(e, s + 8) * SR)]], language=lang, use_itn=True,
+                             batch_size=1, output_timestamp=True)
+        return bool(res) and "timestamp" in res[0] and "words" in res[0]
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def sensevoice_words(r: dict) -> list[tuple[str, float, float]]:
+    """Kết quả SenseVoice có mốc -> [(chữ/từ, đầu, cuối)] (giây, tính từ đầu đoạn)."""
+    return [(str(w), a / 1000.0, b / 1000.0) for w, (a, b) in zip(r.get("words") or [], r.get("timestamp") or [])]
+
+
 def transcribe_sensevoice(audio_path: str | Path, settings: dict, language: str = "zh",
                           progress: Callable[[float, str], None] | None = None, cancel=None,
                           split: bool = True) -> list[Segment]:
-    """split=False: giữ nguyên mỗi đoạn giọng nói 1 dòng – bước căn thời gian sẽ tách câu theo mốc từng chữ
-    (đúng chỗ dấu câu / chỗ nghỉ), thay vì chia theo tỉ lệ số chữ (hay cắt đôi câu)."""
+    """split=False: không chia câu ở đây – các đoạn giọng nói sát nhau được gộp thành khúc ≤ 25 s để SenseVoice nghe
+    trọn câu, lấy luôn mốc từng chữ (FunASR có output_timestamp) vào extra["ct"]; bước căn thời gian tách câu theo
+    dấu câu cuối câu + chỗ nghỉ thật (không chia theo tỉ lệ số chữ – hay cắt đôi câu)."""
+    from .align import chunk_spans, times_from_words
     from .asr import is_hallucination, to_simplified
 
     dev = _device(settings.get("asr_device", "auto"))
@@ -121,28 +141,46 @@ def transcribe_sensevoice(audio_path: str | Path, settings: dict, language: str 
         spans = vad_segments(audio, dev)
         model = _model("sensevoice", model="iic/SenseVoiceSmall", device=dev)
     lang = {"zh": "zh", "yue": "yue", "en": "en", "ja": "ja", "ko": "ko"}.get(language, "auto")
-    max_chars = int(settings.get("asr_max_chars", 22))
+    max_chars = int(settings.get("asr_max_chars", 28))
+    timed = not split and _timestamps_ok(model, audio, spans, lang)
+    if timed:
+        spans = chunk_spans(spans, audio, max_gap=1.0, max_len=25.0)
+    kw = {"output_timestamp": True} if timed else {}
     segs: list[Segment] = []
-    batch = 16
+    batch = 16 if not timed else 8
     for b in range(0, len(spans), batch):
         if cancel and cancel():
             raise Cancelled()
         chunk = spans[b:b + batch]
         wavs = [audio[int(s * SR):int(e * SR)] for s, e in chunk]
-        res = model.generate(input=wavs, language=lang, use_itn=True, batch_size=len(wavs))
+        res = model.generate(input=wavs, language=lang, use_itn=True, batch_size=len(wavs), **kw)
         for (s, e), r in zip(chunk, res):
-            text, tags = parse_sensevoice(r.get("text", ""))
-            text = to_simplified(text) if lang in ("zh", "auto", "yue") else text
+            raw, tags = parse_sensevoice(r.get("text", ""))
+            text = to_simplified(raw) if lang in ("zh", "auto", "yue") else raw
+            if len(text) != len(raw):
+                text = raw   # đổi phồn -> giản làm lệch số chữ: giữ nguyên để mốc từng chữ còn đúng
             if not text or is_hallucination(text):
+                continue
+            tags = [x for x in tags if x not in ("withitn", "woitn")]
+            if timed:
+                seg = Segment(round(s, 3), round(e, 3), text)
+                ct = times_from_words(text, sensevoice_words(r), s)
+                if ct:
+                    seg.extra["ct"] = [[a, z] for a, z in ct]
+                    seg.start, seg.end = round(max(s, ct[0][0] - 0.05), 3), round(min(e, ct[-1][1] + 0.05), 3)
+                seg.extra["tags"] = tags
+                seg.extra["chunked"] = True   # nhãn sự kiện (Sing, BGM) là của cả khúc, không riêng câu này
+                segs.append(seg)
                 continue
             for a, z, t in (split_long(s, e, text, max_chars) if split else [(s, e, text)]):
                 seg = Segment(round(a, 3), round(z, 3), t)
-                seg.extra["tags"] = [x for x in tags if x not in ("withitn", "woitn")]
+                seg.extra["tags"] = tags
                 segs.append(seg)
         if progress:
             progress(0.05 + 0.949 * min(1.0, (b + len(chunk)) / max(1, len(spans))),
                      f"SenseVoice đang nhận dạng {b + len(chunk)}/{len(spans)} đoạn")
-    mark_songs(segs)
+    if not timed:
+        mark_songs(segs)   # khúc có mốc: đánh dấu bài hát sau khi đã tách câu (pipeline.recognize)
     return segs
 
 
@@ -207,7 +245,9 @@ def mark_songs(segs: list[Segment]) -> None:
         n = max(1, len(re.sub(r"[^㐀-鿿]", "", s.text)))
         slow = s.duration >= 3.0 and n / max(0.1, s.duration) < 1.6
         if "Sing" in tags:
-            s.extra["song"] = True
+            # nhãn của cả khúc (hát rồi nói liền): câu nói nhanh như lời thoại (> 3,2 chữ/giây) không phải đang hát
+            if not (s.extra.get("chunked") and n / max(0.1, s.duration) > 3.2):
+                s.extra["song"] = True
         elif "BGM" in tags and slow:
             guess.append(s)
     # video có nhạc nền suốt (review phim, TikTok…) -> đoán theo nhạc nền dễ nhầm lời thoại thành bài hát

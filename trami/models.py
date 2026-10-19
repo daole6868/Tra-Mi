@@ -43,8 +43,12 @@ MODELS = [
               "\"Kết hợp\" (chính xác nhất)", "639 MB", ("audio_separator",), "layers"),
     ModelInfo("sep_mdx", "Tách giọng – MDX-Net Voc FT", "Tách giọng nhanh, hợp máy chỉ có CPU", "67 MB",
               ("audio_separator",), "layers"),
-    ModelInfo("sensevoice", "Nhận dạng – SenseVoice + VAD", "Nghe tiếng Trung thành chữ (mặc định, nhanh)", "~900 MB",
-              ("funasr", "modelscope"), "mic"),
+    ModelInfo("qwen_asr", "Nhận dạng – Qwen3-ASR", "Nghe tiếng Trung chuẩn nhất, tự đặt dấu câu (mặc định; chọn bản "
+              "1.7B / 0.6B ở Cài đặt)", "~4,7 GB / 1,9 GB", ("transformers", "torch"), "mic"),
+    ModelInfo("qwen_align", "Căn thời gian từng chữ – Qwen3", "Giờ từng chữ lệch ~0,03 s: tách câu đúng chỗ nghỉ, giọng "
+              "lồng khớp miệng", "~1,8 GB", ("transformers", "torch"), "clock"),
+    ModelInfo("sensevoice", "Nhận dạng – SenseVoice + VAD", "Nghe tiếng Trung nhanh, nhẹ; VAD dùng chung cho Qwen3-ASR",
+              "~900 MB", ("funasr", "modelscope"), "mic"),
     ModelInfo("paraformer", "Nhận dạng – Paraformer + dấu câu + CAM++",
               "Nhận dạng có dấu câu, tự phân người nói", "~1,9 GB", ("funasr", "modelscope"), "mic"),
     ModelInfo("align", "Căn thời gian từng chữ – FA-zh", "Mốc câu sát lúc nhân vật nói, giúp giọng lồng khớp thoại",
@@ -155,7 +159,19 @@ def _ms_cached(model_id: str) -> bool:
 
 
 def missing_packages(key: str) -> list[str]:
-    return [p for p in BY_KEY[key].packages if not installed(p)]
+    miss = [p for p in BY_KEY[key].packages if not installed(p)]
+    if key in ("qwen_asr", "qwen_align") and not miss:
+        from .asr_qwen import available
+
+        if not available():
+            miss.append("transformers>=5.13")
+    return miss
+
+
+def qwen_repo(settings: dict | None = None) -> str:
+    from .asr_qwen import MODELS as QM
+
+    return (settings or {}).get("qwen_asr_model") or QM[0][0]
 
 
 def is_ready(key: str, settings: dict | None = None) -> bool:
@@ -165,6 +181,12 @@ def is_ready(key: str, settings: dict | None = None) -> bool:
 
             f = SEP_DIR / _sep_file(key)
             return f.exists() and f.stat().st_size > 1_000_000 and not (SEP_DIR / (f.name + ".part")).exists()
+        if key == "qwen_asr":
+            return _hf_cached(qwen_repo(settings))
+        if key == "qwen_align":
+            from .asr_qwen import ALIGNER
+
+            return _hf_cached(ALIGNER)
         if key == "sensevoice":
             return _ms_cached(MS_IDS["sensevoice"]) and _ms_cached(MS_IDS["fsmn-vad"])
         if key == "align":
@@ -284,6 +306,14 @@ def download(key: str, progress: Prog | None = None, cancel=None, settings: dict
                                    f"{repo}, bấm đồng ý, rồi dán token (huggingface.co/settings/tokens) vào "
                                    "Cài đặt → HuggingFace token.") from None
             raise
+    elif key in ("qwen_asr", "qwen_align"):
+        from huggingface_hub import snapshot_download
+
+        from .asr_qwen import ALIGNER
+
+        repo = qwen_repo(settings) if key == "qwen_asr" else ALIGNER
+        with tqdm_progress(progress, 0.0, 1.0, label, cancel, download=label):
+            snapshot_download(repo, token=(settings or {}).get("hf_token") or None)
     elif key == "vieneu":
         from .tts import _vieneu
 

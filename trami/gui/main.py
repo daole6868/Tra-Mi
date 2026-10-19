@@ -495,7 +495,8 @@ class ConcatPage(QWidget):
 
 class SettingsPage(QWidget):
     KEYS = [  # (widget attr, setting key, kiểu)
-        ("asr_engine", "asr_engine", "c"), ("asr_model", "asr_model", "c"), ("asr_device", "asr_device", "c"),
+        ("asr_engine", "asr_engine", "c"), ("qwen_model", "qwen_asr_model", "c"), ("asr_model", "asr_model", "c"),
+        ("asr_device", "asr_device", "c"),
         ("asr_max", "asr_max_chars", "i"), ("asr_beam", "asr_beam_size", "i"), ("asr_vad", "asr_vad", "b"),
         ("sep_model", "sep_model", "c"), ("sep_before", "sep_before_asr", "b"), ("diarize", "diarize", "b"),
         ("spk_n", "diarize_speakers", "i"), ("spk_thr", "diarize_threshold", "f"),
@@ -550,11 +551,16 @@ class SettingsPage(QWidget):
         a = SectionCard("Nhận dạng giọng nói", "mic")
         f = Form()
         self.asr_engine = f.row("Bộ nhận dạng mặc định", combo(C.ASR_ENGINES))
+        from ..asr_qwen import MODELS as QWEN_MODELS
+
+        self.qwen_model = f.row("Mô hình Qwen3-ASR", combo(QWEN_MODELS),
+                                "Bản 1.7B nghe chuẩn nhất; GPU dưới 6 GB hoặc chỉ có CPU thì chọn 0.6B")
         self.asr_model = f.row("Mô hình Whisper", combo([("large-v3", "large-v3 – chính xác nhất"),
                                                          ("large-v3-turbo", "large-v3-turbo – nhanh"),
                                                          ("medium", "medium"), ("small", "small – máy yếu")]))
         self.asr_device = f.row("Thiết bị", combo([("auto", "Tự động (ưu tiên GPU)"), ("cuda", "GPU NVIDIA"), ("cpu", "CPU")]))
-        self.asr_max = f.row("Số chữ Hán tối đa / câu", spin(8, 40))
+        self.asr_max = f.row("Số chữ Hán tối đa / câu", spin(8, 60),
+                             "Câu dài hơn mới chia đôi (ở dấu phẩy / chỗ nghỉ gần giữa); dấu phẩy nói liền không tách")
         self.asr_beam = f.row("Beam size (Whisper)", spin(1, 10))
         self.asr_vad = f.row("Lọc đoạn không có tiếng nói", Switch())
         a.add(f)
@@ -681,9 +687,12 @@ class SettingsPage(QWidget):
 
         def ok(b):
             return "✓" if b else "✗ (chưa cài)"
+        from ..asr_qwen import available as qwen_ok
+
         self.status.setText(
             f"Phiên bản {__version__} · Thiết bị: {'GPU NVIDIA ✓' if dev == 'cuda' else 'CPU'} · "
-            f"Tách giọng {ok(sep_ok)} · SenseVoice/Paraformer {ok(fa_ok)} · "
+            f"Tách giọng {ok(sep_ok)} · Qwen3-ASR {'✓' if qwen_ok() else '✗ (cần transformers ≥ 5.13)'} · "
+            f"SenseVoice/Paraformer {ok(fa_ok)} · "
             f"Phân người nói {ok(dz_ok)} · VieNeu-TTS {ok(vn_ok)} · "
             f"LaMa {ok(lama_ok)}   →  Thiếu gói nào hãy chạy CaiDat_AI_NangCao.bat"
             f"\nPyTorch (tách giọng, LaMa, VieNeu, phân người nói): {torch_info}"

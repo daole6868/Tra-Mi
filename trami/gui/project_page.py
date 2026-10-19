@@ -140,6 +140,8 @@ class ProjectPage(QWidget):
         self.tracks.lineClicked.connect(lambda r: self._select_line(r, seek=True))
         self.tracks.lineActivated.connect(lambda r: (self._select_line(r), self._play_line(r)))
         self.tracks.actionRequested.connect(self._timeline_action)
+        self.tracks.dubMoved.connect(self._dub_moved)
+        self.tracks.dubReset.connect(lambda r: self._dub_moved(r, None))
         bottom = Card(padding=6)
         bottom.add(self.tracks)
         bottom.setMinimumHeight(150)
@@ -659,7 +661,9 @@ class ProjectPage(QWidget):
                      button("Nạp SRT đã dịch…", "download", "Nạp bản dịch làm ở phần mềm khác vào các câu hiện có "
                             "(giữ nguyên lời gốc, thời gian, người nói)", on_click=self._import_translation)))
 
-        mix = SectionCard("3. Tạo bản lồng tiếng & trộn âm thanh", "mic")
+        mix = SectionCard("3. Tạo bản lồng tiếng & trộn âm thanh", "mic",
+                          "Mỗi câu phụ đề được đọc thành 1 đoạn giọng riêng và ghép đúng lúc nhân vật nói – xem từng đoạn "
+                          "ở dòng \"Lồng tiếng\" trên timeline phía dưới: bấm đúp để nghe, kéo sang trái / phải để dời.")
         f = Form()
         self.d_rate = f.row("Tốc độ đọc", combo([("-10%", "Chậm"), ("+0%", "Bình thường"), ("+10%", "Nhanh"), ("+20%", "Rất nhanh")], "+0%"))
         self.d_skipsong = f.row("Giữ nguyên bài hát (không lồng câu 🎵)", Switch(bool(self.settings.get("dub_skip_songs", True))))
@@ -841,6 +845,7 @@ class ProjectPage(QWidget):
         if key == getattr(self, "_dub_key", None):
             return
         self._dub_key = key
+        self._load_dub_wave()   # sóng âm từng đoạn giọng lồng trên timeline
         if not on:
             self.player.set_alt_audio(None)
             return
@@ -1079,7 +1084,14 @@ class ProjectPage(QWidget):
         def fn(j, p):
             n = pipeline.recognize(p, o["method"], o["language"], region, 4.0, st, j.update, j.cancelled, o["denoise"])
             r = p.data.get("asr_rescued", 0)
-            return {"message": f"Đã lấy {n} câu phụ đề" + (f" (nghe lại được thêm {r} câu bị sót)" if r else "")}
+            msg = f"Đã lấy {n} câu phụ đề" + (f" (nghe lại được thêm {r} câu bị sót)" if r else "")
+            used = {"qwen3": "Qwen3-ASR", "sensevoice": "SenseVoice", "paraformer": "Paraformer",
+                    "whisper": "Whisper"}.get(p.data.get("asr_engine_used", ""), "")
+            if o["method"] != "ocr" and used:
+                msg += f" · nghe bằng {used}"
+            if o["method"] != "ocr" and p.data.get("asr_warning"):
+                msg += "  ⚠ " + p.data["asr_warning"]
+            return {"message": msg}
         self.submit("recognize", "Lấy phụ đề", fn)
 
     def run_translate(self, only_empty: bool):
@@ -1263,6 +1275,47 @@ class ProjectPage(QWidget):
             self._shorten_rows([row])
         elif name == "redub":
             self._redub_rows([row])
+
+    def _dub_moved(self, row: int, delta: float | None):
+        """Kéo đoạn giọng lồng của 1 câu trên timeline (delta giây) / đặt lại (None) -> xếp lại bản lồng (không đọc lại)."""
+        if not self.p or not (0 <= row < len(self.model.segs)):
+            return
+        s = self.model.segs[row]
+        old = float(s.extra.get("dub_shift", 0) or 0)
+        shift = 0.0 if delta is None else round(old + delta, 3)
+        if abs(shift) < 0.02:
+            s.extra.pop("dub_shift", None)
+        else:
+            s.extra["dub_shift"] = shift
+        if abs(shift - old) < 0.005:
+            return
+        # hiện ngay vị trí mới trên timeline trong lúc xếp lại ở nền
+        self.tracks.dub = [[a + shift - old, b + shift - old, k, f] if int(k) == row else [a, b, k, f]
+                           for a, b, k, f in self.tracks.dub]
+        self.tracks.canvas.update()
+        self._save_segs_now()
+        self._replay_row = row
+
+        def fn(j, p):
+            pipeline.relayout(p, None, j.update, j.cancelled)
+            where = "đúng lúc nhân vật nói" if not shift else f"dời {shift:+.2f} giây so với lúc nhân vật nói"
+            return {"message": f"Đã đặt giọng câu {row + 1} {where} – trình phát đang dùng bản mới"}
+        self.submit("redub", f"Xếp lại giọng câu {row + 1}", fn)
+
+    def _load_dub_wave(self):
+        if not self.p:
+            return
+        pid = self.p.id
+
+        def done(r):
+            if self.p and self.p.id == pid:
+                if r:
+                    import numpy as np
+
+                    self.tracks.set_dub_wave(np.load(r[0]), r[1])
+                else:
+                    self.tracks.set_dub_wave(None)
+        run_async(lambda: pipeline.dub_wave(Project(pid)), done, lambda m: None)
 
     def _timeline_action(self, name: str):
         row = self._selected_row()

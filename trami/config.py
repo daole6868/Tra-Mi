@@ -41,13 +41,14 @@ DEFAULT_SETTINGS: dict = {
     "diarize_speakers": 0,            # 0 = tự đoán số người nói
     "diarize_threshold": 0.62,        # độ giống nhau để coi là cùng 1 người (0..1)
     # Nhận dạng giọng nói
-    "asr_engine": "sensevoice",       # sensevoice / paraformer / whisper
+    "asr_engine": "qwen3",            # qwen3 / sensevoice / paraformer / whisper (qwen3 chưa cài -> sensevoice)
+    "qwen_asr_model": "Qwen/Qwen3-ASR-1.7B-hf",   # hoặc Qwen/Qwen3-ASR-0.6B-hf (GPU yếu)
     "asr_model": "large-v3",          # (Whisper) tiny/base/small/medium/large-v3/large-v3-turbo
     "asr_device": "auto",             # auto/cuda/cpu
     "asr_compute_type": "auto",       # auto/float16/int8_float16/int8
     "asr_beam_size": 5,
     "asr_vad": True,
-    "asr_max_chars": 22,              # số chữ Hán tối đa mỗi dòng phụ đề
+    "asr_max_chars": 28,              # câu dài hơn số chữ Hán này mới chia đôi (ở dấu phẩy / chỗ nghỉ gần giữa)
     # Dịch
     "translate_engine": "google",     # google / openai / anthropic / gemini / deepseek / ollama / offline(none)
     "translate_style": "auto",        # auto/co_trang/hien_dai/review/phim_hoat_hinh/tai_lieu

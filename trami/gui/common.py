@@ -14,7 +14,8 @@ ENGINES = [("google", "Google Dịch (miễn phí)"), ("deepseek", "DeepSeek AI 
 STYLES = [("auto", "Tự nhận biết"), ("co_trang", "Cổ trang / tiên hiệp / kiếm hiệp"),
           ("hien_dai", "Hiện đại / ngôn tình / đô thị"), ("review", "Review / tóm tắt phim"),
           ("hoat_hinh", "Hoạt hình / donghua"), ("tai_lieu", "Tài liệu / hướng dẫn / bán hàng")]
-ASR_ENGINES = [("sensevoice", "SenseVoice – nhanh, giỏi tiếng Trung (khuyên dùng)"),
+ASR_ENGINES = [("qwen3", "Qwen3-ASR – nghe chuẩn nhất, căn giờ từng chữ (khuyên dùng, cần GPU)"),
+               ("sensevoice", "SenseVoice – nhanh, nhẹ"),
                ("paraformer", "Paraformer – có dấu câu + tự phân người nói"),
                ("whisper", "Whisper large-v3 – đa ngôn ngữ")]
 LANGS = [("zh", "Tiếng Trung (Phổ thông)"), ("yue", "Tiếng Quảng Đông"), ("auto", "Tự nhận diện"),
