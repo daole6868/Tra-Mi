@@ -769,7 +769,8 @@ def plan_layout(items: list[dict], total: float, mode: str = "smart", max_speedu
                                     else "fast")
         out[int(x["k"])] = {"start": start[i], "end": end[i], "speed": speed[i], "keep": keep[i], "fit": fit,
                             "shift": start[i] - want[i], "over": over[i], "mode": modes[i],
-                            "have": max(0.3, nxt[i] - GAP - start[i])}
+                            "have": max(0.3, nxt[i] - GAP - start[i]),
+                            "slot": max(0.3, nxt[i] - GAP - want[i])}   # chỗ trống của chính câu (không tính bị đẩy)
     return out
 
 
@@ -1008,7 +1009,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     for k in order:
         s = segs[k]
         p = s.extra.pop("_tts", None)
-        for key in ("fit", "fit_shift", "fit_over", "dub_at"):
+        for key in ("fit", "fit_shift", "fit_over", "fit_need", "fit_have", "dub_at"):
             s.extra.pop(key, None)
         if not p or not Path(p).exists():
             continue
@@ -1022,6 +1023,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         items.append({"k": k, "want": want(k), "dur": len(clip) / SR, "user": float(s.extra.get("speed") or 0),
                       "fixed": bool(s.extra.get("dub_shift")), "mode": s.extra.get("overflow") or ""})
     durs = {it["k"]: it["dur"] for it in items}
+    user_min = {it["k"]: it["user"] for it in items if it["user"]}
     plan = plan_layout(items, total, settings.get("dub_overflow", "smart"), max_speedup,
                        float(settings.get("dub_lead_max", 1.0)), float(settings.get("dub_max_lag", 2.0)))
     end_t = max([total] + [x["end"] + 0.5 for x in plan.values()])
@@ -1046,8 +1048,9 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             f = min(int(FADE * SR), len(clip) // 3)
             if f > 0:
                 clip[-f:] *= np.linspace(1.0, 0.0, f, dtype=np.float32)
-        if x["fit"] == "long":
-            too_long.append((k, durs[k], x["have"]))
+        if x["fit"] == "long" and durs[k] / max(user_min.get(k, 1.0), 1.0) > x["slot"] * 1.15:
+            # chỉ câu có LỜI dài hơn chỗ của chính nó (câu chỉ bị câu trước đẩy trễ thì không cần rút gọn)
+            too_long.append((k, durs[k], x["slot"]))
         st = int(x["start"] * SR)
         seg_len = min(len(clip), len(track) - st)
         if seg_len > 0:
@@ -1063,6 +1066,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                 s.extra["fit_over"] = round(x["over"], 2)
         s.extra["fit"] = x["fit"]
         s.extra["fit_speed"] = round(speed, 2)
+        s.extra["fit_need"] = round(durs[k], 2)     # giọng ở ×1 cần bao lâu / chỗ trống của chính câu -> AI rút gọn
+        s.extra["fit_have"] = round(x["slot"], 2)
         if progress and n % 20 == 0:
             progress(0.8 + 0.2 * n / max(1, len(plan)), "Đang xếp giọng đọc khớp thời gian nhân vật nói")
     stats["layout"] = layout

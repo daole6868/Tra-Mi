@@ -794,15 +794,42 @@ def test_shorten_selected_lines(monkeypatch):
     from trami.project import Project
 
     p = Project.create("shorten")
-    p.segments = [Segment(0, 1.0, "你好", "Xin chào bạn thân mến của tôi ơi"), Segment(2, 3, "走", "Đi thôi")]
+    p.segments = [Segment(0, 1.0, "你好", "Xin chào bạn thân mến của tôi ơi"), Segment(1.2, 2.2, "走", "Đi thôi")]
     p.save()
     with pytest.raises(ValueError, match="AI"):
         pipeline.shorten_lines(p, [0], {"translate_engine": "google"})
-    monkeypatch.setattr(translate.Translator, "shorten", lambda self, items: ["Chào bạn" for _ in items])
-    n = pipeline.shorten_lines(p, [0], {"translate_engine": "openai", "openai_api_key": "x"})
+    asked = []
+    monkeypatch.setattr(translate.Translator, "shorten",
+                        lambda self, items: asked.extend(items) or ["Chào bạn" for _ in items])
+    r = pipeline.shorten_lines(p, [0, 1], {"translate_engine": "openai", "openai_api_key": "x"})
     segs = p.segments
-    assert n == 1 and segs[0].trans == "Chào bạn" and segs[0].extra["trans_long"].startswith("Xin chào")
-    assert segs[1].trans == "Đi thôi"
+    assert r["changed"] == [0] and segs[0].trans == "Chào bạn" and segs[0].extra["trans_long"].startswith("Xin chào")
+    assert r["fit"] == [1] and segs[1].trans == "Đi thôi" and len(asked) == 1     # câu ngắn đã vừa: không gửi AI
+    assert pipeline.unshorten_lines(p, [0, 1]) == [0]
+    assert p.segments[0].trans.startswith("Xin chào") and "trans_long" not in p.segments[0].extra
+
+
+def test_shorten_only_lines_that_do_not_fit():
+    """Đã lồng tiếng: chỉ rút gọn câu ⚠ đỏ / ⚡ phải đọc nhanh hơn ×1,15; số tiếng mục tiêu theo giọng đọc thật."""
+    from trami import pipeline
+
+    ok = Segment(0, 2, "a", "một hai ba bốn năm sáu", extra={"fit": "ok", "fit_speed": 1.0})
+    fast_ok = Segment(0, 2, "a", "một hai ba bốn năm sáu", extra={"fit": "fast", "fit_speed": 1.12})
+    fast = Segment(0, 2, "a", "một hai ba bốn năm sáu bảy tám chín mười",
+                   extra={"fit": "fast", "fit_speed": 1.3, "fit_need": 2.6, "fit_have": 2.0})
+    long_ = Segment(0, 2, "a", "một hai ba bốn năm sáu bảy tám chín mười",
+                    extra={"fit": "long", "fit_speed": 1.3, "fit_need": 4.0, "fit_have": 2.0})
+    assert pipeline.shorten_target(ok, 2.0) is None and pipeline.shorten_target(fast_ok, 2.0) is None
+    assert pipeline.shorten_target(fast, 2.0) == 8          # 10 tiếng × 2,0×1,1/2,6 × 0,95
+    assert pipeline.shorten_target(long_, 2.0) == 5         # 10 tiếng × 2,0×1,1/4,0 × 0,95
+    pushed = Segment(0, 2, "a", "một hai ba", extra={"fit": "long", "fit_speed": 1.3, "fit_need": 0.8,
+                                                      "fit_have": 2.0})   # chỉ bị câu trước đẩy trễ
+    early_ok = Segment(0, 2, "a", "một hai ba bốn năm sáu bảy tám chín mười",
+                       extra={"fit": "ok", "fit_speed": 1.0, "fit_need": 3.0, "fit_have": 2.0})   # đọc sớm mà vừa
+    assert pipeline.shorten_target(pushed, 2.0) is None and pipeline.shorten_target(early_ok, 2.0) is None
+    assert pipeline.needs_shorten(long_) and not pipeline.needs_shorten(pushed)
+    fresh = Segment(0, 1, "a", "một hai ba bốn năm sáu bảy tám chín mười")   # chưa lồng: ước theo chỗ trống
+    assert pipeline.shorten_target(fresh, 1.0) is not None and pipeline.shorten_target(fresh, 4.0) is None
 
 
 def test_import_stems_from_other_app(tmp_path):

@@ -39,7 +39,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
   Chụp ảnh kiểm tra giao diện phải nạp theme như `run()`: `theme.load_fonts(); app.setFont(theme.font(10));
   app.setStyleSheet(theme.stylesheet())`.
-- `tests/test_core.py` – `python -m pytest -q tests` (77 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (78 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -511,6 +511,20 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   "Tìm lại video gốc…" (`relink_btn`, `_relink_source`, QFileDialog) trên thanh đầu; `_media_error`, `_grab_frame`,
   `_load_timeline_assets` bỏ qua khi mất video. `ff.run`: `-i` là đường dẫn tuyệt đối không tồn tại -> FFmpegError
   "Không tìm thấy file … bấm 'Tìm lại video gốc…'" (mọi tác vụ: tách giọng, nghe, xuất…).
+
+- 2.0.45: "AI rút gọn là gì, sao rút gọn cả câu đã vừa, rút gọn xong phải làm gì để tạo lại giọng". AI = công cụ dịch AI
+  ở Cài đặt (DeepSeek / Claude / GPT / Gemini / Ollama qua `Translator.shorten`, `SHORTEN_PROMPT`; Google / Hy-MT2 không
+  viết lại được). Lỗi cũ: `shorten_lines` rút gọn MỌI câu đã tích (đích = min(số tiếng − 1, theo thời lượng phụ đề)) và
+  không đọc lại giọng. Sửa:
+  * `synthesize_dub` ghi `fit_need` (giọng ở ×1) + `fit_have` (= `plan_layout` "slot": chỗ trống của CHÍNH câu từ lúc
+    nhân vật nói tới câu sau, không tính bị đẩy). `pipeline.shorten_target(s, slot)` / `needs_shorten(s)`: ✓ xanh (kể cả
+    đọc sớm mà vừa) và ⚡ ≤ ×1,15 (`SHORTEN_FROM`) -> không; ⚠ / ⚡ > ×1,15 -> rút gọn trừ khi need/slot ≤ max(1,15, tốc độ
+    đặt tay) (chỉ bị câu trước đẩy); đích = số tiếng × slot × 1,1 (`SHORTEN_SPEED`) / need × 0,95. Chưa lồng: ước theo số
+    tiếng vs `budget_for(chỗ tới câu sau, 1,1)`. `too_long` (AI tự rút gọn khi tạo bản lồng) cũng bỏ câu chỉ bị đẩy.
+  * `shorten_lines` -> {"changed", "fit", "same"}; `unshorten_lines` (về `trans_long`, đặt `trans_user` để AI tự rút gọn
+    không làm lại). GUI `_shorten_rows`: rút gọn rồi `redub` ĐÚNG các câu đổi lời (đã có bản lồng), job kind "redub",
+    kết quả `pick` -> `job_finished` tích sẵn các câu đó; nút "Bỏ rút gọn" (`_unshorten_rows`); "Tích câu ⚠ quá dài" dùng
+    `needs_shorten`. Thử GUI (AI + Edge giả): tích 5 câu -> rút gọn + đọc lại đúng 2 câu dài, câu bị đẩy giữ nguyên.
 
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.

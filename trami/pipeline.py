@@ -284,7 +284,7 @@ def diarize(p: Project, settings: dict | None = None, progress: Prog | None = No
     return n
 
 
-DUB_MARKS = ("dub_at", "fit", "fit_speed", "fit_shift", "fit_over")
+DUB_MARKS = ("dub_at", "fit", "fit_speed", "fit_shift", "fit_over", "fit_need", "fit_have")
 
 
 def forget_stale_voice(old_texts: set, segs: list, moved: bool) -> int:
@@ -929,31 +929,101 @@ def redub(p: Project, rows: list[int], rate: str | None = None, settings: dict |
     return dub(p, None, rate, settings, progress, cancel, engine, inplace=True, only=rows)
 
 
-def shorten_lines(p: Project, rows: list[int], settings: dict | None = None) -> int:
-    """AI viết lại NGẮN HƠN bản dịch của các câu đã chọn cho vừa thời gian nhân vật nói (giữ bản cũ ở trans_long).
-    Trả về số câu được rút gọn. Cần công cụ dịch AI (không dùng được Google)."""
-    from .translate import Translator, budget_for, syllables
+SHORTEN_FROM = 1.15    # câu ⚡ phải đọc nhanh hơn ×1,15 mới cần rút gọn (nhanh hơn nữa nghe vội)
+SHORTEN_SPEED = 1.1    # bản rút gọn nhắm đọc vừa chỗ ở tốc độ ≤ ×1,1
+
+
+def shorten_target(s, slot: float) -> int | None:
+    """Số tiếng (âm tiết) tối đa nên rút gọn còn; None = KHÔNG cần rút gọn.
+    Đã lồng tiếng (theo đúng màu cột Độ vừa): ✓ xanh (kể cả câu đọc sớm mà vừa) và ⚡ đọc nhanh ≤ ×1,15 -> giữ nguyên;
+    ⚠ đỏ / ⚡ nhanh hơn ×1,15 -> rút gọn, TRỪ KHI lời của chính câu vừa chỗ của nó (giọng ở ×1 `fit_need` so với chỗ
+    trống từ lúc nhân vật nói tới câu sau `fit_have`) – tức câu chỉ bị câu trước đẩy trễ. Tốc độ người dùng tự đặt cho
+    câu tính là chấp nhận được. Chưa lồng: ước theo số tiếng so với chỗ trống tới câu sau."""
+    from .translate import budget_for, syllables
+
+    syl = syllables(s.trans)
+    ex = s.extra
+    fit = ex.get("fit")
+    if fit:
+        sp = float(ex.get("fit_speed", 1) or 1)
+        if fit == "ok" or (fit == "fast" and sp <= SHORTEN_FROM):
+            return None
+        need, have = float(ex.get("fit_need") or 0), float(ex.get("fit_have") or 0)
+        if need > 0 and have > 0:
+            if need / have <= max(SHORTEN_FROM, float(ex.get("speed") or 0)):
+                return None      # lời vừa chỗ của nó – chỉ bị câu trước đẩy trễ
+            ratio = have * SHORTEN_SPEED / need
+        elif fit == "fast":
+            ratio = SHORTEN_SPEED / sp
+        else:
+            ratio = budget_for(slot, SHORTEN_SPEED) / max(1, syl)
+    else:
+        if syl <= budget_for(slot, SHORTEN_SPEED):
+            return None
+        ratio = budget_for(slot, SHORTEN_SPEED) / max(1, syl)
+    return max(2, min(syl - 1, int(syl * min(1.0, ratio) * 0.95)))
+
+
+def needs_shorten(s) -> bool:
+    """Câu đã lồng tiếng có cần AI rút gọn không (nút "Tích câu ⚠ quá dài")."""
+    return bool(s.extra.get("fit")) and bool((s.trans or "").strip()) and shorten_target(s, s.duration) is not None
+
+
+def shorten_lines(p: Project, rows: list[int], settings: dict | None = None) -> dict:
+    """AI viết lại NGẮN HƠN bản dịch của các câu QUÁ DÀI trong các câu đã chọn (câu đã vừa giữ nguyên), giữ bản cũ ở
+    trans_long. Trả về {"changed": câu đã rút gọn, "fit": câu đã vừa (bỏ qua), "same": câu AI không rút ngắn được}.
+    Cần công cụ dịch AI (không dùng được Google / Hy-MT2)."""
+    from .translate import Translator
 
     settings = settings or load_settings()
     if settings.get("translate_engine", "google") in ("google", "hymt", NO_TRANSLATE):
         raise ValueError("Rút gọn câu cần công cụ dịch AI hội thoại (DeepSeek, Claude, GPT…) – Google và Hy-MT2 chỉ "
                          "dịch được, không viết lại câu. Chọn ở Cài đặt → Công cụ dịch.")
     segs = p.segments
-    items = [(k, (segs[k].text, segs[k].trans, max(2, min(syllables(segs[k].trans) - 1, budget_for(segs[k].duration, 1.15)))))
-             for k in sorted(set(rows)) if 0 <= k < len(segs) and segs[k].trans.strip()]
+    total = float(p.data.get("info", {}).get("duration", 0) or 0)
+    starts = sorted(x.start for x in segs)
+    items, fits = [], []
+    for k in sorted(set(rows)):
+        if not (0 <= k < len(segs)) or not segs[k].trans.strip():
+            continue
+        s = segs[k]
+        nxt = next((t for t in starts if t > s.start + 0.01), max(total, s.end))
+        n = shorten_target(s, max(s.duration, nxt - s.start))
+        if n is None:
+            fits.append(k)
+        else:
+            items.append((k, (s.text, s.trans, n)))
+    res = {"changed": [], "fit": fits, "same": []}
     if not items:
-        return 0
+        return res
     new = Translator(settings).shorten([x for _, x in items])
-    n = 0
     for (k, _), t in zip(items, new):
         if t and t != segs[k].trans:
             segs[k].extra.setdefault("trans_long", segs[k].trans)
             segs[k].trans = t
             segs[k].extra.pop("fit", None)
-            n += 1
+            res["changed"].append(k)
+        else:
+            res["same"].append(k)
     p.segments = segs
     p.save()
-    return n
+    return res
+
+
+def unshorten_lines(p: Project, rows: list[int]) -> list[int]:
+    """Bỏ bản AI rút gọn: các câu đã chọn quay về lời dịch trước khi rút gọn. Trả về các câu đã đổi lại."""
+    segs = p.segments
+    back = []
+    for k in sorted(set(rows)):
+        if 0 <= k < len(segs) and segs[k].extra.get("trans_long"):
+            segs[k].trans = segs[k].extra.pop("trans_long")
+            segs[k].extra.pop("fit", None)
+            segs[k].extra["trans_user"] = True   # người dùng chọn giữ lời dài: "AI tự rút gọn" khi lồng không đụng vào
+            back.append(k)
+    if back:
+        p.segments = segs
+        p.save()
+    return back
 
 
 def apply_translation(segs: list, cues: list) -> list[int]:
