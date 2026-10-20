@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDoubleSpinBox, QFi
 from .. import pipeline
 from ..config import _deep_merge, load_settings
 from ..jobs import manager
+from ..karaoke import DEFAULT_COLOR as KARA_COLOR, MODES as KARA_MODES
 from ..project import Project
 from ..subtitle import Segment, load_subtitles, normalize, save_subtitles
 from . import common as C
@@ -558,6 +559,8 @@ class ProjectPage(QWidget):
             return
         self._save_edit_timer.start()
         self._apply_audio_now()
+        if self.st_kara.isChecked():
+            self._live_timer.start()     # karaoke theo giọng lồng: bật / tắt lồng tiếng thì đổi nhịp chữ
 
     def _apply_audio_now(self):
         mix = self.player.live.mix
@@ -585,8 +588,11 @@ class ProjectPage(QWidget):
         f = Form()
         self.st_burn = f.row("Ghép phụ đề vào video", Switch(True))
         self.st_which = f.row("Hiển thị", combo(C.WHICH[:3], "trans"))
-        self.st_font = f.row("Font chữ", combo([(x, x) for x in ("Be Vietnam Pro", "Arial", "Roboto", "Tahoma",
-                                                                  "Segoe UI", "Times New Roman")], "Be Vietnam Pro"))
+        self.st_font = f.row("Font chữ", combo([("Be Vietnam Pro", "Be Vietnam Pro – gọn, rõ (mặc định)"),
+                                                 ("Bangers", "Bangers – kiểu truyện tranh, chữ hoa nghiêng"),
+                                                 ("Arial", "Arial"), ("Roboto", "Roboto"), ("Tahoma", "Tahoma"),
+                                                 ("Segoe UI", "Segoe UI"), ("Times New Roman", "Times New Roman")],
+                                                "Be Vietnam Pro"))
         self.st_size = f.row("Cỡ chữ (0 = tự động)", QSpinBox())
         self.st_size.setRange(0, 200)
         self.st_pos = f.row("Vị trí", combo([("auto", "Tự động – đúng chỗ phụ đề cũ"), ("bottom", "Dưới"),
@@ -602,6 +608,12 @@ class ProjectPage(QWidget):
                                                      "Đặt lại phụ đề đúng chỗ phụ đề Trung cũ", flat=True,
                                                      on_click=lambda: set_combo(self.st_pos, "auto")), None)))
         self.st_color = f.row("Màu chữ", ColorButton("#FFFFFF"))
+        self.st_kara = f.row("Karaoke – chữ đổi màu theo lời", Switch(False),
+                             "Từng từ đổi màu đúng lúc được đọc (dùng được với mọi font). Đang dùng bản lồng tiếng thì "
+                             "chạy theo giọng Việt, không thì theo thời gian hiện câu")
+        self.st_kcolor = f.row("Màu karaoke", ColorButton(KARA_COLOR))
+        self.st_kmode = f.row("Kiểu karaoke", combo(list(KARA_MODES), "sweep"),
+                              "Quét mượt: màu chạy dần qua từng chữ · Từng từ: cả từ đổi màu khi tới lượt")
         self.st_ocolor = f.row("Màu viền", ColorButton("#000000"))
         self.st_outline = f.row("Độ dày viền", SliderRow(0, 8, 0.5, 2.5, 1))
         self.st_shadow = f.row("Bóng đổ", SliderRow(0, 5, 0.5, 1, 1))
@@ -620,11 +632,11 @@ class ProjectPage(QWidget):
         self.st_bcolor = f.row("Màu nền hộp", ColorButton("#000000"))
         self.st_bop = f.row("Độ đục nền hộp", SliderRow(0.1, 1, 0.05, 0.55))
         self.st_form = f
-        for w in (self.st_which, self.st_font, self.st_pos, self.st_bfixed):
+        for w in (self.st_which, self.st_font, self.st_pos, self.st_bfixed, self.st_kmode):
             w.currentIndexChanged.connect(sv)
         for w in (self.st_size, self.st_margin):
             w.valueChanged.connect(sv)
-        for w in (self.st_color, self.st_ocolor, self.st_bcolor):
+        for w in (self.st_color, self.st_ocolor, self.st_bcolor, self.st_kcolor):
             w.changed.connect(sv)
         for w in (self.st_outline, self.st_shadow, self.st_bop, self.st_posx, self.st_posy, self.st_bpadx,
                   self.st_bpady, self.st_bw, self.st_bh):
@@ -632,15 +644,18 @@ class ProjectPage(QWidget):
         self.st_pos.currentIndexChanged.connect(self._style_rows)
         self.st_bfixed.currentIndexChanged.connect(self._style_rows)
         self.st_box.toggledOn.connect(lambda *_: self._style_rows())
-        for w in (self.st_burn, self.st_bold, self.st_upper, self.st_box):
+        self.st_kara.toggledOn.connect(lambda *_: self._style_rows())
+        for w in (self.st_burn, self.st_bold, self.st_upper, self.st_box, self.st_kara):
             w.toggledOn.connect(sv)
         card.add(f)
         self._style_rows()
         presets = SectionCard("Mẫu nhanh", "sparkle")
-        presets.add(hbox(button("Trắng viền đen", on_click=lambda: self._style_preset("classic")),
+        presets.add(flow(button("Karaoke vàng", "sparkle", "Font Bangers, chữ trắng viền đen dày, từng từ chuyển vàng "
+                                "theo lời đọc", on_click=lambda: self._style_preset("karaoke")),
+                         button("Trắng viền đen", on_click=lambda: self._style_preset("classic")),
                          button("Vàng nổi bật", on_click=lambda: self._style_preset("yellow")),
                          button("Nền hộp đen", on_click=lambda: self._style_preset("box")),
-                         button("TikTok to rõ", on_click=lambda: self._style_preset("tiktok")), None))
+                         button("TikTok to rõ", on_click=lambda: self._style_preset("tiktok"))))
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 2, 0)
@@ -655,7 +670,9 @@ class ProjectPage(QWidget):
         custom = self.st_pos.currentData() == "custom"
         box, fixed = self.st_box.isChecked(), self.st_bfixed.currentData() == "fixed"
         f = self.st_form
+        kara = self.st_kara.isChecked()
         for w, on in ((self.st_margin, not custom and self.st_pos.currentData() != "middle"),
+                      (self.st_kcolor, kara), (self.st_kmode, kara),
                       (self.st_posx, custom), (self.st_posy, custom), (self.st_posauto, custom),
                       (self.st_bfixed, box), (self.st_bpadx, box and not fixed), (self.st_bpady, box and not fixed),
                       (self.st_bw, box and fixed), (self.st_bh, box and fixed), (self.st_bcolor, box),
@@ -1122,27 +1139,7 @@ class ProjectPage(QWidget):
         # kiểu chữ
         self.st_burn.setChecked(bool(e["subtitles"].get("burn", True)))
         set_combo(self.st_which, e["subtitles"].get("which", "trans"))
-        set_combo(self.st_font, st.get("font", "Be Vietnam Pro"))
-        self.st_size.setValue(int(st.get("size") or 0))
-        set_combo(self.st_pos, st.get("position", "auto"))
-        self.st_margin.setValue(int(st.get("margin_v") or 0))
-        self.st_color.set(st.get("color", "#FFFFFF"))
-        self.st_ocolor.set(st.get("outline_color", "#000000"))
-        self.st_outline.set(st.get("outline", 2.5))
-        self.st_shadow.set(st.get("shadow", 1))
-        self.st_bold.setChecked(bool(st.get("bold", True)))
-        self.st_upper.setChecked(bool(st.get("uppercase", False)))
-        self.st_box.setChecked(bool(st.get("box", False)))
-        self.st_bcolor.set(st.get("box_color", "#000000"))
-        self.st_bop.set(st.get("box_opacity", 0.55))
-        self.st_posx.set(float(st.get("pos_x", 0.5)) * 100)
-        self.st_posy.set(float(st.get("pos_y", 0.9)) * 100)
-        set_combo(self.st_bfixed, "fixed" if st.get("box_fixed") else "text")
-        self.st_bpadx.set(float(st.get("box_pad_x", 0.18)))
-        self.st_bpady.set(float(st.get("box_pad_y", 0.18)))
-        self.st_bw.set(float(st.get("box_w", 0.8)) * 100)
-        self.st_bh.set(float(st.get("box_h", 0.12)) * 100)
-        self._style_rows()
+        self._set_style_widgets(st)
         # lồng tiếng
         d = e["dub"]
         set_combo(self.d_engine, self.p.data.get("tts_engine") or self.settings.get("tts_engine", "edge"))
@@ -1190,8 +1187,36 @@ class ProjectPage(QWidget):
                 "box_opacity": self.hs_opacity.value(), "use_ocr_boxes": self.hs_useocr.isChecked(),
                 "patch_from": self.hs_patch.currentData()}
 
+    def _set_style_widgets(self, st: dict):
+        set_combo(self.st_font, st.get("font", "Be Vietnam Pro"))
+        self.st_size.setValue(int(st.get("size") or 0))
+        set_combo(self.st_pos, st.get("position", "auto"))
+        self.st_margin.setValue(int(st.get("margin_v") or 0))
+        self.st_color.set(st.get("color", "#FFFFFF"))
+        self.st_kara.setChecked(bool(st.get("karaoke", False)))
+        self.st_kcolor.set(st.get("karaoke_color") or KARA_COLOR)
+        set_combo(self.st_kmode, st.get("karaoke_mode", "sweep"))
+        self.st_ocolor.set(st.get("outline_color", "#000000"))
+        self.st_outline.set(st.get("outline", 2.5))
+        self.st_shadow.set(st.get("shadow", 1))
+        self.st_bold.setChecked(bool(st.get("bold", True)))
+        self.st_upper.setChecked(bool(st.get("uppercase", False)))
+        self.st_box.setChecked(bool(st.get("box", False)))
+        self.st_bcolor.set(st.get("box_color", "#000000"))
+        self.st_bop.set(st.get("box_opacity", 0.55))
+        self.st_posx.set(float(st.get("pos_x", 0.5)) * 100)
+        self.st_posy.set(float(st.get("pos_y", 0.9)) * 100)
+        set_combo(self.st_bfixed, "fixed" if st.get("box_fixed") else "text")
+        self.st_bpadx.set(float(st.get("box_pad_x", 0.18)))
+        self.st_bpady.set(float(st.get("box_pad_y", 0.18)))
+        self.st_bw.set(float(st.get("box_w", 0.8)) * 100)
+        self.st_bh.set(float(st.get("box_h", 0.12)) * 100)
+        self._style_rows()
+
     def current_style(self) -> dict:
         return {"font": self.st_font.currentData(), "size": self.st_size.value(), "position": self.st_pos.currentData(),
+                "karaoke": self.st_kara.isChecked(), "karaoke_color": self.st_kcolor.color,
+                "karaoke_mode": self.st_kmode.currentData(),
                 "margin_v": self.st_margin.value(), "color": self.st_color.color, "outline_color": self.st_ocolor.color,
                 "outline": self.st_outline.value(), "shadow": self.st_shadow.value(), "bold": self.st_bold.isChecked(),
                 "uppercase": self.st_upper.isChecked(), "box": self.st_box.isChecked(),
@@ -1464,7 +1489,40 @@ class ProjectPage(QWidget):
         st = pipeline.effective_style(self.p, self.current_style())
         if st.get("margin_v_rel") is not None:
             st["margin_v"] = st["margin_v_rel"] * self.player.view.out_h
-        self.player.set_subtitles(self.model.segs, st, which)
+        self.player.set_subtitles(self.model.segs, st, which, self._karaoke_spans() if st.get("karaoke") else {})
+
+    def _karaoke_spans(self) -> dict:
+        """Đoạn giọng lồng từng câu cho karaoke xem trước (tính ở luồng nền, nhớ theo bản lồng + bật/tắt lồng tiếng)."""
+        try:
+            ed = self.collect_edit()
+        except Exception:  # noqa: BLE001
+            return {}
+        d = ed.get("dub") or {}
+        wav = d.get("wav") or ""
+        a = ed.get("audio") or {}
+        on = bool(d.get("enabled")) and "dub" not in (a.get("mute") or []) and float(a.get("dub", 1.0)) > 0
+        try:
+            mt = Path(wav).stat().st_mtime if on and wav else 0
+        except OSError:
+            mt = 0
+        key = (self.p.id, wav if on else "", mt, len(self.p.data.get("dub_layout") or []))
+        cache = getattr(self, "_kara", None)
+        if cache and cache[0] == key:
+            return cache[1]
+        if not on or not mt:
+            self._kara = (key, {})
+            return {}
+        if getattr(self, "_kara_busy", None) != key:
+            self._kara_busy = key
+            pid = self.p.id
+
+            def done(spans):
+                self._kara_busy = None
+                if self.p and self.p.id == pid:
+                    self._kara = (key, spans or {})
+                    self._refresh_overlay()
+            run_async(lambda: pipeline.karaoke_spans(Project(pid), ed), done, lambda m: setattr(self, "_kara_busy", None))
+        return cache[1] if cache else {}
 
     def _media_error(self, msg: str):
         if not self.p or (self.p.work / "preview.mp4").exists():
@@ -1842,24 +1900,23 @@ class ProjectPage(QWidget):
 
     def _style_preset(self, name: str):
         presets = {
-            "classic": dict(color="#FFFFFF", outline_color="#000000", outline=2.5, box=False, bold=True),
-            "yellow": dict(color="#FFE14D", outline_color="#000000", outline=3, box=False, bold=True),
-            "box": dict(color="#FFFFFF", box=True, box_color="#000000", box_opacity=0.6, bold=True),
+            # giống phụ đề HaizFlow: Bangers, viền đen dày ~9 % cỡ chữ, từng từ trắng -> vàng theo lời đọc
+            "karaoke": dict(font="Bangers", color="#FFFFFF", karaoke=True, karaoke_color=KARA_COLOR,
+                            karaoke_mode="sweep", outline_color="#000000", outline=4.5, shadow=1.5, box=False,
+                            bold=False, uppercase=False),
+            "classic": dict(color="#FFFFFF", outline_color="#000000", outline=2.5, box=False, bold=True,
+                            karaoke=False),
+            "yellow": dict(color="#FFE14D", outline_color="#000000", outline=3, box=False, bold=True, karaoke=False),
+            "box": dict(color="#FFFFFF", box=True, box_color="#000000", box_opacity=0.6, bold=True, karaoke=False),
             "tiktok": dict(color="#FFFFFF", outline_color="#000000", outline=4, box=False, bold=True, size=0,
-                           position="middle", uppercase=False),
+                           position="middle", uppercase=False, karaoke=False),
         }[name]
         st = self.current_style()
         st.update(presets)
+        if name != "karaoke" and st.get("font") == "Bangers":
+            st["font"] = "Be Vietnam Pro"
         self.loading = True
-        self.st_color.set(st["color"])
-        self.st_ocolor.set(st.get("outline_color", "#000000"))
-        self.st_outline.set(st.get("outline", 2.5))
-        self.st_box.setChecked(bool(st.get("box")))
-        self.st_bcolor.set(st.get("box_color", "#000000"))
-        self.st_bop.set(st.get("box_opacity", 0.55))
-        self.st_bold.setChecked(bool(st.get("bold", True)))
-        set_combo(self.st_pos, st.get("position", "bottom"))
-        self._style_rows()
+        self._set_style_widgets(st)
         self.loading = False
         self._save_edit_now()
         self._refresh_overlay()

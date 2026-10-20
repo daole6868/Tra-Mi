@@ -1,6 +1,8 @@
 """Trình phát video (QtMultimedia) có lớp phụ đề xem trước vẽ bằng QPainter."""
 from __future__ import annotations
 
+import time
+
 from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt, QUrl, Signal, QTimer
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QImage, QPainter, QPainterPath, QPen,
                            QTransform)
@@ -72,6 +74,7 @@ class SubtitleItem(QGraphicsItem):
         self._hover = ""
         self._snap = False
         self._geo = None
+        self.kara: list[float] | None = None   # karaoke: mỗi từ của câu đã đổi màu bao nhiêu (0..1)
         self.setAcceptHoverEvents(True)
         self.set_editable(False)
 
@@ -92,9 +95,10 @@ class SubtitleItem(QGraphicsItem):
         w, h = self.box.width(), self.box.height()   # rộng ra: chữ kéo sát mép vẫn vẽ trọn
         return self.box.adjusted(-w / 2, -h / 2, w / 2, h / 2)
 
-    def set(self, parts: list, box: QRectF, style: dict, video_h: int):
+    def set(self, parts: list, box: QRectF, style: dict, video_h: int, kara: list[float] | None = None):
         self.prepareGeometryChange()
         self.parts, self.box, self.style, self.video_h = parts, box, style, max(16, video_h or 1080)
+        self.kara = kara
         self._geo = None
         self.update()
 
@@ -115,26 +119,44 @@ class SubtitleItem(QGraphicsItem):
         size = sub_size(st, int(W), int(H))
         max_chars = int(W / (size * 0.55)) if size else 42
         bold = bool(st.get("bold", True))
+        kara = self.kara if st.get("karaoke") and self.parts else None
         rows = []
         for text, kind in parts:
             if kind == "vi":
                 t = wrap_line(text.strip(), max_chars)
                 rows += [(ln.upper() if st.get("uppercase") else ln, st.get("font") or theme.FONT_FAMILY, size,
-                          st.get("color", "#FFFFFF")) for ln in t.split("\n")]
+                          st.get("color", "#FFFFFF"), kara is not None) for ln in t.split("\n")]
             else:   # song ngữ: dòng Trung nhỏ, màu vàng (kiểu "Source" khi xuất)
                 fs, col = (int(size * SOURCE_SCALE), st.get("secondary_color", "#FFE14D")) if kind == "zh" else \
                     (size, st.get("color", "#FFFFFF"))
-                rows += [(ln, cjk_font_name(st), fs, col) for ln in text.strip().split("\n")]
+                rows += [(ln, cjk_font_name(st), fs, col, kind == "src" and kara is not None)
+                         for ln in text.strip().split("\n")]
         block_h = sum(r[2] for r in rows)
         cx, bottom = block_anchor(st, W, H, block_h)
         X, top = fr.left() + cx * sc, fr.top() + (bottom - block_h) * sc
-        lines, y, maxw = [], top, 1.0
-        for text, fam, fs, col in rows:
+        lines, y, maxw, word_i = [], top, 1.0, 0
+        for text, fam, fs, col, is_kara in rows:
             f, k, asc = ass_font(fam, bold)
             fac = fs * sc * k / REF_PX
-            w = QFontMetricsF(f).horizontalAdvance(text) * fac
+            fm = QFontMetricsF(f)
+            w = fm.horizontalAdvance(text) * fac
             lh = fs * sc
-            lines.append((text, f, fac, X - w / 2, y, w, lh, y + lh * asc, col))
+            split = None
+            if is_kara:    # karaoke: chữ bên trái điểm này đã đổi màu (giống libass quét \kf từng từ)
+                from ..karaoke import tokens
+
+                toks = tokens(text)
+                done, split = "", w
+                for j, (word, join) in enumerate(toks):
+                    pr = kara[word_i + j] if word_i + j < len(kara) else 0.0
+                    if pr >= 1.0:
+                        done += word + (" " if join == " " else "")
+                        continue
+                    a = fm.horizontalAdvance(done) * fac
+                    split = a + pr * (fm.horizontalAdvance(done + word) * fac - a)
+                    break
+                word_i += len(toks)
+            lines.append((text, f, fac, X - w / 2, y, w, lh, y + lh * asc, col, split))
             maxw = max(maxw, w)
             y += lh
         block = QRectF(X - maxw / 2, top, maxw, block_h * sc)
@@ -185,7 +207,8 @@ class SubtitleItem(QGraphicsItem):
         outline = float(st.get("outline", 2.5)) / 48 * size_s
         shadow = float(st.get("shadow", 1)) / 48 * size_s
         shadow_c = QColor(0, 0, 0, 153)          # BackColour khi xuất: đen, trong suốt 40 %
-        for text, f, fac, x, _y, _w, _lh, base, col in g["lines"]:
+        kcol = QColor(st.get("karaoke_color") or "#FFEF00")
+        for text, f, fac, x, _y, _w, _lh, base, col, split in g["lines"]:
             if not text:
                 continue
             path = QPainterPath()
@@ -205,7 +228,16 @@ class SubtitleItem(QGraphicsItem):
                 pen = QPen(QColor(st.get("outline_color", "#000000")), outline * 2)
                 pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
                 p.strokePath(path, pen)
-            p.fillPath(path, QColor(col))
+            if split is None:
+                p.fillPath(path, QColor(col))
+                continue
+            big = 1e5
+            for clip, c in ((QRectF(-big, -big, x + split + big, 2 * big), kcol),
+                            (QRectF(x + split, -big, 2 * big, 2 * big), QColor(col))):
+                p.save()
+                p.setClipRect(clip)
+                p.fillPath(path, c)
+                p.restore()
         p.setOpacity(1.0)
         if self.editable and (self.show_frame or self._hover or self._drag):
             pen = QPen(QColor(theme.ACCENT), 1.5, Qt.PenStyle.DashLine)
@@ -823,6 +855,11 @@ class Player(QWidget):
         self.show_subs = True
         self.video_h = 1080
         self._dur = 0.0
+        # karaoke: đoạn giọng lồng từng câu (số câu -> [[giây, giây]]) + đồng hồ nội suy để chữ quét mượt khi phát
+        self.kara_spans: dict = {}
+        self._kara_cache: dict = {}
+        self._clock = (0.0, 0.0)
+        self._kara_timer = QTimer(self, interval=33, timeout=self._kara_tick)
 
         self.btn_play = IconButton("play", "Phát / dừng (phím Space)", 40, accent=True)
         self.btn_back = IconButton("chev_left", "Lùi 1 khung hình", 32)
@@ -942,6 +979,12 @@ class Player(QWidget):
             self.live.start(self.position())
         else:
             self.live.stop()
+        self._clock = (self.position(), time.monotonic())
+        if self.playing() and self.style.get("karaoke"):
+            self._kara_timer.start()
+        else:
+            self._kara_timer.stop()
+            self.update_sub(self.position())
 
     def set_edit(self, edit: dict, src_w: int = 0, src_h: int = 0, duration: float = 0.0):
         """Áp các chỉnh sửa (khung hình, màu, tốc độ, đoạn cắt) lên trình phát để xem ngay."""
@@ -980,6 +1023,7 @@ class Player(QWidget):
 
     def _pos(self, ms: int):
         t = ms / 1000
+        self._clock = (t, time.monotonic())
         if self._skip_cut(t):
             return
         if self.playing() and self.live.ok():
@@ -993,16 +1037,42 @@ class Player(QWidget):
         self.positionChanged.emit(t)
 
     # ------------------------------------------------------------ phụ đề
-    def set_subtitles(self, segments: list, style: dict, which: str = "trans"):
+    def set_subtitles(self, segments: list, style: dict, which: str = "trans", kara_spans: dict | None = None):
         self.segments, self.style, self.which = segments, style, which
+        if kara_spans is not None:
+            self.kara_spans = kara_spans
+        self._kara_cache = {}
         self.view.sub.clear_override()
+        if self.playing() and style.get("karaoke"):
+            self._kara_timer.start()
+        elif not style.get("karaoke"):
+            self._kara_timer.stop()
         self.update_sub(self.position())
+
+    def _kara_tick(self):
+        """Khi phát: vẽ lại phụ đề ~30 lần/giây theo đồng hồ nội suy (vị trí video chỉ báo vài lần/giây)."""
+        if not self.playing():
+            self._kara_timer.stop()
+            return
+        t0, at = self._clock
+        self.update_sub(t0 + min(0.5, time.monotonic() - at) * self.mp.playbackRate())
+
+    def _karaoke(self, i: int, s, t: float) -> list[float] | None:
+        from ..karaoke import progress, word_times
+
+        text = s.text if self.which == "source" else s.trans
+        key = (i, text, s.start, s.end)
+        times = self._kara_cache.get(key)
+        if times is None:
+            times = self._kara_cache[key] = word_times(" ".join((text or "").split()) if self.which != "source"
+                                                       else text, s.start, s.end, self.kara_spans.get(i))
+        return progress(times, t, self.style.get("karaoke_mode", "sweep"))
 
     def update_sub(self, t: float | None = None):
         t = self.position() if t is None else t
-        parts = []
+        parts, kara = [], None
         if self.show_subs:
-            for s in self.segments:
+            for i, s in enumerate(self.segments):
                 if s.start <= t < s.end:
                     if self.which == "source":
                         parts = [(s.text, "src")]
@@ -1010,6 +1080,8 @@ class Player(QWidget):
                         parts = [(s.trans, "vi"), (s.text, "zh")]
                     else:
                         parts = [(s.trans, "vi")]
+                    if self.style.get("karaoke"):
+                        kara = self._karaoke(i, s, t)
                     break
         parts = [(x, k) for x, k in parts if (x or "").strip()]
-        self.view.sub.set(parts, self.view.video_rect(), self.style, self.view.out_h)
+        self.view.sub.set(parts, self.view.video_rect(), self.style, self.view.out_h, kara)

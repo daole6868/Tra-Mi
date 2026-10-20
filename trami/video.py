@@ -333,10 +333,11 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
 
     # thư mục font cục bộ để libass/drawtext dùng đường dẫn tương đối (tránh lỗi escape trên Windows)
     fonts_local = work / "fonts"
-    if not fonts_local.exists():
-        fonts_local.mkdir(parents=True, exist_ok=True)
-        for f in FONTS_DIR.glob("*.[ot]tf"):
-            shutil.copy2(f, fonts_local / f.name)
+    fonts_local.mkdir(parents=True, exist_ok=True)
+    for f in FONTS_DIR.glob("*.[ot]tf"):          # chép cả font mới thêm vào bản cập nhật (vd. Bangers)
+        dst = fonts_local / f.name
+        if not dst.exists() or dst.stat().st_size != f.stat().st_size:
+            shutil.copy2(f, dst)
 
     # ---- 10. chữ chạy / chữ tĩnh (vẽ bằng ASS -> không cần drawtext, chạy với mọi bản FFmpeg có libass)
     tx = spec.get("text") or {}
@@ -348,7 +349,8 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
     # ---- 11. phụ đề mới
     sub = spec.get("subtitles") or {}
     if sub.get("burn") and segments:
-        segs = [Segment(s.start, s.end, s.text, s.trans) for s in segments]
+        segs = [Segment(s.start, s.end, s.text, s.trans, extra={"kv": s.extra["kv"]} if s.extra.get("kv") else {})
+                for s in segments]
         if not full:
             segs = remap_after_cut(segs, keep)
         segs = scale_time(segs, speed)

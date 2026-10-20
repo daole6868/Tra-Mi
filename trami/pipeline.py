@@ -741,6 +741,39 @@ def dub_wave(p: Project) -> tuple[str, float] | None:
     return str(env), 0.05
 
 
+
+def karaoke_spans(p: Project, edit: dict | None = None) -> dict[int, list]:
+    """{số câu: [[giây bắt đầu, giây kết thúc] các đoạn có tiếng]} của giọng lồng từng câu – karaoke chạy theo giọng
+    đọc. Không dùng bản lồng tiếng (tắt / tắt lớp / âm lượng 0) -> {} (karaoke theo thời gian hiện câu)."""
+    from .audiomix import audio_settings
+    from .karaoke import voiced
+
+    ed = edit or p.edit
+    d = ed.get("dub") or {}
+    a = audio_settings(ed)
+    if not d.get("enabled") or "dub" in a["mute"] or float(a.get("dub", 1.0)) <= 0:
+        return {}
+    w = dub_wave(p)
+    layout = p.data.get("dub_layout") or []
+    if not w or not layout:
+        return {}
+    import numpy as np
+
+    try:
+        env = np.load(w[0]).astype(np.float32)
+    except (OSError, ValueError):
+        return {}
+    segs = p.segments
+    out: dict[int, list] = {}
+    for item in layout:
+        a0, a1, k = float(item[0]), float(item[1]), int(item[2])
+        if not 0 <= k < len(segs) or a1 <= segs[k].start - 1.0 or a0 >= segs[k].end + 1.0:
+            continue        # câu đã sửa / thêm bớt sau khi lồng tiếng
+        sp = voiced(env, w[1], a0, a1)
+        if sp:
+            out[k] = sp
+    return out
+
 def redub(p: Project, rows: list[int], rate: str | None = None, settings: dict | None = None,
           progress: Prog | None = None, cancel=None, engine: str | None = None, new_take: bool = True) -> Path:
     """Đọc lại riêng các câu đã chọn (lần đọc mới, theo bản dịch + giọng hiện tại của câu) và cập nhật NGAY bản lồng
@@ -1132,7 +1165,11 @@ def render(p: Project, settings: dict | None = None, progress: Prog | None = Non
     out = p.output_dir / f"{safe_name(name)}.mp4"
     if out.exists():
         out = p.output_dir / f"{safe_name(name)}_{time.strftime('%H%M%S')}.mp4"
-    build_and_render(p.source, out, edit, settings, p.work / "render", p.segments, progress, cancel)
+    segs = p.segments
+    if edit["subtitles"]["style"].get("karaoke"):
+        for k, sp in karaoke_spans(p, edit).items():
+            segs[k].extra["kv"] = sp
+    build_and_render(p.source, out, edit, settings, p.work / "render", segs, progress, cancel)
     p.add_output(out, "video")
     return out
 

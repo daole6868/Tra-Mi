@@ -273,6 +273,16 @@ def to_ass(segs: list[Segment], style: dict, width: int = 1920, height: int = 10
     fixed = box and bool(st.get("box_fixed"))
     primary = _hex_to_ass(st.get("color", "#FFFFFF"))
     secondary = _hex_to_ass(st.get("secondary_color", "#FFE14D"))
+    src_col = secondary
+    kara = bool(st.get("karaoke"))
+    kara_mode = st.get("karaoke_mode", "sweep")
+    main_second = secondary
+    if kara:
+        # karaoke ASS: chữ chưa tới lượt = SecondaryColour, đã đọc = PrimaryColour
+        from .karaoke import DEFAULT_COLOR, ass_text as kara_text
+
+        main_second = primary
+        primary = _hex_to_ass(st.get("karaoke_color") or DEFAULT_COLOR)
     bord = ""
     if box and not fixed:
         # nền hộp ôm từng dòng: libass vẽ hộp = chữ + \xbord (trái/phải) + \ybord (trên/dưới)
@@ -301,6 +311,15 @@ def to_ass(segs: list[Segment], style: dict, width: int = 1920, height: int = 10
     max_chars = int(width / (size * 0.55)) if size else 42
     src_size = int(size * SOURCE_SCALE)
 
+    # karaoke + nền ôm chữ: libass vẽ nền riêng cho TỪNG TỪ (chồng lên nhau thành sọc tối) -> nền vẽ ở lớp 0 từ câu
+    # không có thẻ karaoke (chữ trong suốt), chữ karaoke vẽ ở lớp 1 bằng kiểu không nền
+    kara_box = kara and box and not fixed
+    kara_styles = ""
+    if kara_box:
+        kara_styles = (f"Style: Kara,{font},{size},{primary},{main_second},{outline_c},{back},{bold},0,0,0,100,100,0,0,"
+                       f"1,0,0,{align},{margin_h},{margin_h},{margin_v},1\n"
+                       f"Style: KaraSrc,{cjk_font},{src_size},{src_col},{src_col},{outline_c},{back},{bold},0,0,0,100,"
+                       f"100,0,0,1,0,0,{align},{margin_h},{margin_h},{margin_v},1\n")
     head = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
@@ -311,19 +330,28 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font},{size},{primary},{secondary},{outline_c},{back},{bold},0,0,0,100,100,0,0,{border_style},{outline_v:.1f},{0 if box else shadow:.1f},{align},{margin_h},{margin_h},{margin_v},1
-Style: Source,{cjk_font},{src_size},{secondary},{secondary},{outline_c},{back},{bold},0,0,0,100,100,0,0,{border_style},{outline_v:.1f},{0 if box else shadow:.1f},{align},{margin_h},{margin_h},{margin_v},1
-
+Style: Default,{font},{size},{primary},{main_second},{outline_c},{back},{bold},0,0,0,100,100,0,0,{border_style},{outline_v:.1f},{0 if box else shadow:.1f},{align},{margin_h},{margin_h},{margin_v},1
+Style: Source,{cjk_font},{src_size},{src_col},{src_col},{outline_c},{back},{bold},0,0,0,100,100,0,0,{border_style},{outline_v:.1f},{0 if box else shadow:.1f},{align},{margin_h},{margin_h},{margin_v},1
+{kara_styles}
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     lines = [head]
-    tag = (f"\\an2\\pos({float(st['pos_x']) * width:.0f},{float(st['pos_y']) * height:.0f})" if custom else "") + bord
+    pos_tag = f"\\an2\\pos({float(st['pos_x']) * width:.0f},{float(st['pos_y']) * height:.0f})" if custom else ""
+    tag = pos_tag + bord
     pre = "{" + tag + "}" if tag else ""
     layer = 1 if fixed else 0
 
-    def emit(s: Segment, txt: str, n_main: int, n_src: int):
+    def emit(s: Segment, txt: str, n_main: int, n_src: int, plain: str = "", zh: str = ""):
         t0, t1 = fmt_ass_time(s.start), fmt_ass_time(s.end)
+        if kara_box:
+            hide = "{\\1a&HFF&\\2a&HFF&}"
+            back_txt = (hide + plain if plain else "") + ("\\N" if plain and zh else "") + \
+                ("{\\rSource" + bord + "}" + _ass_escape(zh) if zh else "")
+            lines.append(f"Dialogue: 0,{t0},{t1},Default,,0,0,0,,{pre}{back_txt}\n")
+            front = "{\\rKara" + pos_tag + "}" + txt + ("\\N{\\rKaraSrc\\1a&HFF&}" + _ass_escape(zh) if zh else "")
+            lines.append(f"Dialogue: 1,{t0},{t1},Default,,0,0,0,,{front}\n")
+            return
         if fixed:
             block_h = n_main * size + n_src * src_size
             cx, bottom = block_anchor(st, width, height, block_h)
@@ -342,7 +370,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 vi = vi.upper()
             if not vi and not zh:
                 continue
-            txt = _ass_escape(vi)
+            txt = kara_text(vi, s.start, s.end, s.extra.get("kv"), kara_mode) if kara else _ass_escape(vi)
+            if kara_box and vi:
+                emit(s, txt, 0, 0, _ass_escape(vi), zh)
+                continue
             if zh:
                 txt += "\\N{\\rSource" + bord + "}" + _ass_escape(zh)
             emit(s, txt, vi.count("\n") + 1 if vi else 0, zh.count("\n") + 1 if zh else 0)
@@ -353,7 +384,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             body = wrap_line(body, max_chars)
         if st.get("uppercase"):
             body = body.upper()
-        emit(s, _ass_escape(body), body.count("\n") + 1, 0)
+        txt = kara_text(body, s.start, s.end, s.extra.get("kv"), kara_mode) if kara else _ass_escape(body)
+        emit(s, txt, body.count("\n") + 1, 0, _ass_escape(body))
     return "".join(lines)
 
 
@@ -428,7 +460,15 @@ def remap_after_cut(segs: list[Segment], keep: list[tuple[float, float]]) -> lis
         for s in segs:
             a, b = max(s.start, ks), min(s.end, ke)
             if b - a > 0.15:
-                out.append(Segment(a - ks + offset_base, b - ks + offset_base, s.text, s.trans, s.speaker, dict(s.extra)))
+                ex = dict(s.extra)
+                if ex.get("kv"):   # đoạn giọng lồng của câu (karaoke) dời theo
+                    kv = [[max(x, ks) - ks + offset_base, min(y, ke) - ks + offset_base]
+                          for x, y in ex["kv"] if min(y, ke) > max(x, ks)]
+                    if kv:
+                        ex["kv"] = kv
+                    else:
+                        ex.pop("kv")
+                out.append(Segment(a - ks + offset_base, b - ks + offset_base, s.text, s.trans, s.speaker, ex))
         offset_base += ke - ks
     return out
 
@@ -438,4 +478,6 @@ def scale_time(segs: list[Segment], speed: float) -> list[Segment]:
         for s in segs:
             s.start /= speed
             s.end /= speed
+            if s.extra.get("kv"):
+                s.extra["kv"] = [[x / speed, y / speed] for x, y in s.extra["kv"]]
     return segs

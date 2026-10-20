@@ -28,7 +28,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `separate.py` (audio-separator BS-RoFormer), `lama.py` + `inpaint.py` (xoá chữ), `ocr.py` (RapidOCR),
   `translate.py` (`LLMClient` gọi HTTP: anthropic / OpenAI-compatible / gemini / deepseek / ollama; Google gtx;
   Hy-MT2 trên máy qua `hymt_worker.py`), `voicefix.py` (đọc số, phát hiện giọng AI hỏng, cân âm lượng),
-  `gender.py` (đoán giọng nam/nữ mỗi người nói).
+  `gender.py` (đoán giọng nam/nữ mỗi người nói), `karaoke.py` (thời điểm từng từ cho phụ đề karaoke).
 - `trami/audiomix.py` – quy tắc trộn âm thanh dùng chung cho xuất video (`video.build_and_render`) và bộ trộn trực tiếp
   `LiveMix` của trình phát (`player.LiveAudio`, QAudioSink); cài đặt ở `edit["audio"]`, tab `gui/audio_tab.py`.
 - `trami/jobs.py` – hàng đợi 1 luồng cho tác vụ dài; `trami/gui/*` – giao diện (QPainter), `common.run_async`,
@@ -37,7 +37,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
   Chụp ảnh kiểm tra giao diện phải nạp theme như `run()`: `theme.load_fonts(); app.setFont(theme.font(10));
   app.setStyleSheet(theme.stylesheet())`.
-- `tests/test_core.py` – `python -m pytest -q tests` (66 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (67 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -372,6 +372,26 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   * Lồng tiếng lần đầu khi chưa tách mà tiếng gốc > 50 % -> tự hạ tiếng gốc 15 % (như mặc định cũ).
   * `widgets.FlowLayout`: các ô trong 1 hàng căn giữa theo chiều dọc. Chữ hướng dẫn "video bên trái" -> "bên phải".
 
+- 2.0.36: người dùng thích font phụ đề của HaizFlow -> đó là **Bangers** (Vernon Adams, OFL, Google Fonts; HaizFlow khoá cứng
+  font này + karaoke trắng -> vàng #FFEF00, viền đen ~9 % cỡ chữ). Tải bản gốc từ google/fonts (md5 trùng bản HaizFlow) vào
+  `fonts/` + `fonts/Bangers-OFL.txt`. Bangers chỉ có chữ gốc + dấu rời (không có à, ế…), HarfBuzz (libass và Qt) tự ghép
+  dấu -> tiếng Việt hiện đúng cả khi xuất lẫn xem trước (đã chụp so sánh). Font chỉ có kiểu chữ hoa.
+  * `trami/karaoke.py` (dùng chung xuất + xem trước): `tokens` (từ + phần nối; chữ Hán mỗi chữ 1 đơn vị), `word_times`
+    (trọng số 1 + 0,12·chữ cái + 0,9·chữ số; nghỉ ở dấu câu `PAUSE`; có đoạn giọng lồng -> số chỗ ngắt hơi ≥ 0,18 s = số vế
+    câu thì mỗi vế chạy trong đúng đoạn giọng của nó, không thì rải trên phần có tiếng; giọng dài hơn câu -> co lại),
+    `progress` (\\kf quét dần / \\k đổi khi tới từ), `ass_text` (chờ bằng `{\\k n}` rỗng), `voiced` (đoạn có tiếng từ
+    sóng âm 0,05 s). `pipeline.karaoke_spans` = đoạn giọng mỗi câu từ `dub_layout` + `dub_wave` (chỉ khi lồng tiếng bật,
+    không tắt lớp, âm lượng > 0); `render` gắn `extra["kv"]`, `video` giữ lại, `remap_after_cut` / `scale_time` dời theo.
+  * `subtitle.to_ass`: karaoke -> Default Primary = màu karaoke, Secondary = màu chữ. Nền ôm chữ + karaoke: libass vẽ nền
+    riêng từng từ (chồng thành sọc tối) -> lớp 0 nền + chữ ẩn (`\\1a&HFF&`), lớp 1 kiểu `Kara`/`KaraSrc` (không nền).
+    `video.py` chép font mới vào `work/render/fonts` mỗi lần xuất (trước chỉ chép khi thư mục chưa có).
+  * Xem trước: `SubtitleItem.kara` (tiến độ từng từ) -> điểm cắt mỗi dòng theo bề rộng chữ, tô 2 màu bằng clip;
+    `Player._kara_timer` 33 ms + đồng hồ nội suy khi phát; `project_page._karaoke_spans` tính ở luồng nền (nhớ theo bản
+    lồng + bật/tắt). Đo: khung xem trước và video xuất cùng chỗ, cùng đoạn đã đổi màu.
+  * Tab Kiểu chữ: font "Bangers – kiểu truyện tranh", "Karaoke – chữ đổi màu theo lời", Màu karaoke, Kiểu karaoke
+    (Quét mượt / Đổi màu từng từ), mẫu nhanh "Karaoke vàng" (Bangers, viền 4,5, bóng 1,5, không đậm); mẫu khác tắt karaoke
+    + bỏ Bangers. `_set_style_widgets` dùng chung khi mở dự án và mẫu nhanh. Cài đặt: `karaoke`, `karaoke_color`, `karaoke_mode`.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -391,3 +411,4 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   VRAM: 1.7B bf16 ~4 GB + bộ căn 0.6B; lỗi thiếu bộ nhớ -> chọn 0.6B. Chưa làm: AI chấm câu / sửa lời trước khi tách.
 - 2.0.35: chờ người dùng thử tab Âm thanh trên máy thật (loa Windows: kéo thanh khi đang phát nghe đổi ngay, không
   rè / lệch tiếng với hình; video xuất trộn đúng như nghe).
+- 2.0.36: chờ người dùng thử karaoke trên máy thật (nhịp chữ theo giọng VieNeu/Edge thật, chữ quét mượt khi phát).

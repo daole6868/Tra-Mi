@@ -1438,3 +1438,51 @@ def test_audio_settings_and_live_mix():
     mix.fade, mix.rate = (0.0, 0.0), 2.0
     out, adv = mix.render(0, 1000)
     assert adv == 2000 and out.shape == (1000, 2)
+
+
+def test_karaoke_timing_and_ass():
+    from trami import karaoke as K
+
+    assert K.tokens("Xin chào,\ncác bạn!") == [("Xin", " "), ("chào,", "\n"), ("các", " "), ("bạn!", "")]
+    assert [t for t, _ in K.tokens("你好，世界。")] == ["你", "好，", "世", "界。"]
+    text = "Xin chào các bạn, hôm nay trời đẹp quá!"
+    # không có giọng lồng: rải trong thời gian câu, nghỉ sau dấu phẩy
+    tt = K.word_times(text, 1.0, 4.0)
+    assert len(tt) == 9 and tt[0][0] == 1.0 and abs(tt[-1][1] - 4.0) < 1e-6
+    assert all(a <= b for a, b in tt) and all(tt[i][1] <= tt[i + 1][0] + 1e-9 for i in range(8))
+    assert tt[4][0] - tt[3][1] > 0.05                       # chờ ở dấu phẩy
+    # giọng lồng ngắt 2 lần đúng 2 vế -> mỗi vế nằm trong đoạn giọng của nó
+    tt = K.word_times(text, 1.0, 4.0, [[1.2, 2.0], [2.4, 3.6]])
+    assert tt[0][0] == 1.2 and abs(tt[3][1] - 2.0) < 1e-6 and tt[4][0] == 2.4 and abs(tt[-1][1] - 3.6) < 1e-6
+    # giọng dài quá thời gian câu -> co lại cho chạy hết trước khi câu tắt
+    tt = K.word_times("một hai ba", 1.0, 2.0, [[1.0, 3.0]])
+    assert abs(tt[-1][1] - 2.0) < 1e-6
+    assert K.progress([(1.0, 2.0)], 1.5) == [0.5] and K.progress([(1.0, 2.0)], 1.5, "word") == [1.0]
+    a = K.ass_text(text, 1.0, 4.0, [[1.2, 2.0], [2.4, 3.6]])
+    assert a.startswith("{\\k20}{\\kf20}Xin ") and a.count("\\kf") == 9 and "{\\k40}{\\kf" in a
+    assert sum(int(x) for x in re.findall(r"\\kf?(\d+)", a)) <= 300
+    assert K.ass_text("a b", 0, 1, mode="word").count("{\\k") == 2
+    # đoạn có tiếng đo từ sóng âm rút gọn
+    env = np.zeros(80)
+    env[24:40] = 0.8
+    env[48:72] = 0.6
+    assert K.voiced(env, 0.05, 1.0, 3.8) == [[1.2, 2.0], [2.4, 3.6]]
+    # ASS: chữ chưa đọc = màu chữ (Secondary), đã đọc = màu karaoke (Primary)
+    segs = [Segment(1.0, 4.0, "你好", text, extra={"kv": [[1.2, 2.0], [2.4, 3.6]]})]
+    ass = st.to_ass(segs, {"karaoke": True, "karaoke_color": "#FFEF00", "color": "#FFFFFF", "font": "Bangers"},
+                    1280, 720)
+    sty = next(ln for ln in ass.splitlines() if ln.startswith("Style: Default")).split(",")
+    assert sty[1] == "Bangers" and sty[3] == "&H0000EFFF" and sty[4] == "&H00FFFFFF"
+    assert "{\\k20}{\\kf20}Xin" in ass
+    # nền ôm chữ + karaoke: nền ở lớp 0 (chữ ẩn), chữ karaoke lớp 1 không nền -> không sọc giữa các từ
+    ass = st.to_ass(segs, {"karaoke": True, "box": True}, 1280, 720, which="both")
+    ev = [ln for ln in ass.splitlines() if ln.startswith("Dialogue")]
+    assert "Style: Kara," in ass and len(ev) == 2
+    assert ev[0].startswith("Dialogue: 0,") and "\\1a&HFF&" in ev[0] and "\\kf" not in ev[0]
+    assert ev[1].startswith("Dialogue: 1,") and "{\\rKara}" in ev[1] and "\\kf" in ev[1] and "{\\rKaraSrc" in ev[1]
+    assert "\\kf" not in st.to_ass(segs, {"karaoke": False}, 1280, 720)
+    # cắt video / đổi tốc độ: đoạn giọng của câu dời theo
+    out = st.remap_after_cut([Segment(5.0, 8.0, "", "x", extra={"kv": [[5.2, 6.0], [6.5, 7.5]]})], [(0, 2), (5, 10)])
+    assert out[0].start == 2.0 and out[0].extra["kv"] == [[2.2, 3.0], [3.5, 4.5]]
+    out = st.scale_time(out, 2.0)
+    assert out[0].extra["kv"] == [[1.1, 1.5], [1.75, 2.25]]

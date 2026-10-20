@@ -96,6 +96,9 @@ DEFAULT_SETTINGS: dict = {
         "box": False,                 # nền hộp mờ sau chữ
         "box_color": "#000000",
         "box_opacity": 0.55,
+        "karaoke": False,             # chữ đổi màu lần lượt theo lời đọc
+        "karaoke_color": "#FFEF00",
+        "karaoke_mode": "sweep",      # sweep: quét mượt từng chữ / word: đổi màu từng từ
         "position": "auto",           # auto (đúng chỗ phụ đề cũ) / bottom / top / middle
         "margin_v": 0,                # 0 = tự động
         "uppercase": False,
