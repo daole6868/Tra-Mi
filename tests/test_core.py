@@ -1650,3 +1650,87 @@ def test_no_console_streams_keep_progress_bars_working(tmp_path, monkeypatch):
     assert seen and seen[-1].endswith("5/5")
     fix_std_streams(tmp_path / "khac.txt")                   # gọi lại không tạo file mới
     assert not (tmp_path / "khac.txt").exists()
+
+
+def test_dub_overflow_modes_single_long_line():
+    """1 câu đọc dài hơn chỗ trống (3,2 s cho 2 s) – mỗi cách xếp xử lý đúng như mô tả."""
+    from trami.tts import plan_layout
+
+    items = [dict(k=0, want=0.5, dur=1.0), dict(k=1, want=4.0, dur=3.2), dict(k=2, want=6.0, dur=1.2),
+             dict(k=3, want=9.0, dur=1.0)]
+
+    def run(mode, **kw):
+        return plan_layout(items, 12, mode=mode, max_speedup=1.3, **kw)
+
+    r = run("smart")                       # tăng tốc nhẹ ×1,15 + đọc sớm phần còn thiếu, câu sau đúng giờ
+    assert abs(r[1]["speed"] - 1.15) < 0.01 and -1.0 <= r[1]["shift"] < -0.3 and r[2]["shift"] == 0
+    assert r[1]["end"] <= 6.0 and r[1]["fit"] == "fast"
+    r = run("push")                        # tăng tốc tối đa rồi câu sau lùi lại, không chồng
+    assert r[1]["speed"] == 1.3 and r[1]["shift"] == 0 and r[2]["shift"] > 0.4 and r[2]["start"] >= r[1]["end"]
+    assert r[1]["fit"] == "long" and r[1]["over"] == 0
+    r = run("overlap")                     # câu sau vẫn đúng giờ, đọc đè lên
+    assert r[2]["start"] == 6.0 and r[1]["over"] > 0.4 and r[1]["end"] > 6.4
+    r = run("early")                       # bắt đầu sớm hơn để câu sau vào đúng giờ, không cần tăng tốc
+    assert r[1]["speed"] == 1.0 and r[1]["shift"] < -1.1 and r[1]["end"] <= 6.0 and r[2]["shift"] == 0
+    r = run("cut")                         # cách cũ: cắt bớt cuối câu
+    assert r[1]["keep"] is not None and r[1]["fit"] == "long" and r[2]["shift"] <= 0.25 + 1e-6
+    r = plan_layout(items, 12, mode="push", max_speedup=1.3)
+    items[1]["mode"] = "overlap"           # cách xếp riêng câu này thắng cách xếp chung
+    r2 = plan_layout(items, 12, mode="push", max_speedup=1.3)
+    assert r[2]["shift"] > 0.4 and r2[2]["shift"] == 0 and r2[1]["over"] > 0.4
+    items[1]["fixed"] = True               # đoạn giọng người dùng kéo tay: không bao giờ đọc sớm
+    assert plan_layout(items, 12, mode="early", max_speedup=1.3)[1]["start"] >= 4.0
+
+
+def test_dub_overflow_cluster_of_long_lines():
+    """5 câu dài liền nhau (3 s giọng cho mỗi 2 s): Tự động dùng 1 tốc độ chung cho cả cụm, trễ không quá mức cho
+    phép và đuổi kịp ở chỗ nghỉ; Nối tiếp thì trễ dồn lại rồi đuổi kịp; không câu nào đảo thứ tự."""
+    from trami.tts import plan_layout
+
+    items = [dict(k=i, want=2.0 + 2.0 * i, dur=3.0) for i in range(5)] + [dict(k=5, want=14.0, dur=1.0)]
+    r = plan_layout(items, 20, mode="smart", max_speedup=1.3, lead_max=1.0, max_lag=2.0)
+    speeds = {round(r[i]["speed"], 3) for i in range(5)}
+    assert len(speeds) == 1                                        # cả cụm cùng 1 tốc độ
+    assert max(r[i]["shift"] for i in range(6)) <= 2.0 and r[5]["shift"] == 0
+    starts = [r[i]["start"] for i in range(6)]
+    assert starts == sorted(starts) and all(r[i]["end"] <= r[i + 1]["start"] + 1e-6 for i in range(5))
+    r = plan_layout(items, 20, mode="push", max_speedup=1.3)
+    lags = [r[i]["shift"] for i in range(5)]
+    assert lags == sorted(lags) and lags[-1] > 1.0 and r[5]["shift"] == 0     # trễ dồn, đuổi kịp ở chỗ nghỉ
+    # cụm rất dài: Tự động không để trễ quá 2 s – câu sau vào đúng mức đó và đọc đè
+    many = [dict(k=i, want=2.0 + 2.0 * i, dur=4.0) for i in range(8)]
+    r = plan_layout(many, 30, mode="smart", max_speedup=1.3, max_lag=2.0)
+    assert max(x["shift"] for x in r.values()) <= 2.0 + 1e-6 and any(x["over"] > 0.5 for x in r.values())
+    assert [r[i]["start"] for i in range(8)] == sorted(r[i]["start"] for i in range(8))
+
+
+def test_dub_overlap_mix_and_subtitles_follow_voice(tmp_path):
+    """Đọc đè: 2 giọng cộng lại không vỡ tiếng (nén mềm); mỗi câu ghi đoạn giọng đang phát (dub_at), độ lệch, phần đè;
+    phụ đề chạy theo giọng lồng: câu bị lùi hiện đúng lúc giọng đọc, không đè câu sau."""
+    from trami import tts
+    from trami.subtitle import follow_dub
+
+    sr = tts.SR
+    files = []
+    for i, d in enumerate((1.0, 3.0, 1.0)):
+        f = tmp_path / f"c{i}.wav"
+        tts.write_wav(f, np.clip(_speech_like(sr, d, seed=i) * 4.0, -0.95, 0.95), sr)
+        files.append(str(f))
+    segs = [Segment(0.2, 1.2, "a", "một", "S1"), Segment(2.0, 3.8, "b", "hai", "S2"), Segment(4.0, 5.0, "c", "ba", "S1")]
+    for s, f in zip(segs, files):
+        s.extra["tts_file"] = f
+    st = {}
+    tts.synthesize_dub(segs, tmp_path / "o.wav", 7, tmp_path / "w", stats=st, only=set(), max_speedup=1.0,
+                       settings={"dub_overflow": "overlap", "dub_level_match": False})
+    a = tts._decode(tmp_path / "o.wav")
+    assert float(np.abs(a).max()) < 1.0
+    assert segs[1].extra["fit_over"] > 0.5 and segs[1].extra["fit"] == "long" and st["shift"]["over"] == 1
+    assert abs(segs[2].extra["dub_at"][0] - 4.0) < 0.01                       # câu sau vẫn đúng giờ
+    tts.synthesize_dub(segs, tmp_path / "o.wav", 7, tmp_path / "w", stats=st, only=set(), max_speedup=1.0,
+                       settings={"dub_overflow": "push", "dub_level_match": False})
+    lag = segs[2].extra["fit_shift"]
+    assert lag > 0.5 and st["shift"]["late"] == 1 and "fit_over" not in segs[1].extra
+    out = follow_dub(segs)
+    assert abs(out[2].start - segs[2].extra["dub_at"][0]) < 1e-6 and out[2].end > segs[2].extra["dub_at"][1]
+    assert out[1].end <= out[2].start and out[0].start == segs[0].start        # câu đúng giờ giữ nguyên
+    assert segs[2].start == 4.0                                                # không đổi thời gian gốc

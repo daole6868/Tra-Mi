@@ -743,6 +743,36 @@ def dub_wave(p: Project) -> tuple[str, float] | None:
 
 
 
+def dub_clips(p: Project, segs: list | None = None) -> list[list]:
+    """[[bắt đầu, kết thúc, câu, độ vừa]] các đoạn giọng lồng đang dùng – lấy từ chính từng câu (extra["dub_at"]) nên
+    vẫn đúng khi thêm / xoá câu sau khi lồng; dự án cũ (chưa có dub_at) dùng p.data["dub_layout"]."""
+    segs = p.segments if segs is None else segs
+    out = [[float(s.extra["dub_at"][0]), float(s.extra["dub_at"][1]), k, s.extra.get("fit") or "ok"]
+           for k, s in enumerate(segs) if s.extra.get("dub_at")]
+    return out or list(p.data.get("dub_layout") or [])
+
+
+def dub_audible(p: Project, edit: dict | None = None) -> bool:
+    """Bản lồng tiếng đang được nghe (bật, không tắt lớp, âm lượng > 0)."""
+    from .audiomix import audio_settings
+
+    ed = edit or p.edit
+    d = ed.get("dub") or {}
+    a = audio_settings(ed)
+    return bool(d.get("enabled") and d.get("wav")) and "dub" not in a["mute"] and float(a.get("dub", 1.0)) > 0
+
+
+def subs_follow_dub(p: Project, segs: list, edit: dict | None = None, settings: dict | None = None,
+                    which: str = "trans") -> list:
+    """Phụ đề Việt chạy theo giọng lồng (cài đặt dub_subs_follow, mặc định bật) khi đang nghe bản lồng tiếng."""
+    from .subtitle import follow_dub
+
+    settings = settings if settings is not None else load_settings()
+    if which == "source" or not settings.get("dub_subs_follow", True) or not dub_audible(p, edit):
+        return segs
+    return follow_dub(segs)
+
+
 def karaoke_spans(p: Project, edit: dict | None = None) -> dict[int, list]:
     """{số câu: [[giây bắt đầu, giây kết thúc] các đoạn có tiếng]} của giọng lồng từng câu – karaoke chạy theo giọng
     đọc. Không dùng bản lồng tiếng (tắt / tắt lớp / âm lượng 0) -> {} (karaoke theo thời gian hiện câu)."""
@@ -768,7 +798,12 @@ def karaoke_spans(p: Project, edit: dict | None = None) -> dict[int, list]:
     out: dict[int, list] = {}
     for item in layout:
         a0, a1, k = float(item[0]), float(item[1]), int(item[2])
-        if not 0 <= k < len(segs) or a1 <= segs[k].start - 1.0 or a0 >= segs[k].end + 1.0:
+        if not 0 <= k < len(segs):
+            continue
+        at = segs[k].extra.get("dub_at")
+        if at and abs(float(at[0]) - a0) < 0.05:
+            pass            # đúng đoạn giọng của câu này (kể cả khi bị lùi / đọc sớm nhiều)
+        elif a1 <= segs[k].start - 1.0 or a0 >= segs[k].end + 1.0:
             continue        # câu đã sửa / thêm bớt sau khi lồng tiếng
         sp = voiced(env, w[1], a0, a1)
         if sp:
@@ -891,6 +926,14 @@ def use_dub_version(p: Project, wav: str) -> None:
     p.data["dub_stats"] = v.get("stats") or {}
     p.data["dub_layout"] = v.get("layout") or []
     p.data["dub_versions"] = dub_versions(p)
+    segs = p.segments            # đoạn giọng từng câu của bản được chọn (phụ đề chạy theo giọng lồng)
+    at = {int(r[2]): [float(r[0]), float(r[1])] for r in p.data["dub_layout"]}
+    for k, s in enumerate(segs):
+        if k in at:
+            s.extra["dub_at"] = at[k]
+        else:
+            s.extra.pop("dub_at", None)
+    p.segments = segs
 
 
 def delete_dub_version(p: Project, wav: str) -> None:
@@ -1036,7 +1079,18 @@ def dub_summary(p: Project) -> str:
     fit = st.get("fit") or {}
     if fit:
         extra.append(f"{fit.get('ok', 0)} vừa khít, {fit.get('fast', 0)} đọc nhanh hơn"
-                     + (f", ⚠ {fit['long']} quá dài – sửa ngắn lại ở tab Phụ đề" if fit.get("long") else ""))
+                     + (f", ⚠ {fit['long']} quá dài – nên sửa ngắn lại / AI rút gọn" if fit.get("long") else ""))
+    sh = st.get("shift") or {}
+    if sh.get("early"):
+        extra.append(f"◀ {sh['early']} câu đọc sớm")
+    if sh.get("late"):
+        extra.append(f"▶ {sh['late']} câu bị lùi (nhiều nhất {sh.get('max_late', 0):.1f} s"
+                     + (" – trễ nhiều so với hình, nên dùng 'Tự động' hoặc rút gọn câu" if sh.get("max_late", 0) > 3 else "")
+                     + ")")
+    if sh.get("over"):
+        extra.append(f"⧉ {sh['over']} câu đọc đè câu sau")
+    if sh.get("cut"):
+        extra.append(f"✂ {sh['cut']} câu bị cắt bớt cuối")
     if st.get("shortened"):
         extra.append(f"AI đã rút gọn {st['shortened']} câu")
     if st.get("songs"):
@@ -1172,6 +1226,8 @@ def render(p: Project, settings: dict | None = None, progress: Prog | None = Non
     if edit["subtitles"]["style"].get("karaoke"):
         for k, sp in karaoke_spans(p, edit).items():
             segs[k].extra["kv"] = sp
+    # câu có giọng lồng đọc sớm / bị lùi / đọc dài: phụ đề hiện theo đúng lúc giọng đọc
+    segs = subs_follow_dub(p, segs, edit, settings, (edit.get("subtitles") or {}).get("which", "trans"))
     build_and_render(p.source, out, edit, settings, p.work / "render", segs, progress, cancel)
     p.add_output(out, "video")
     return out

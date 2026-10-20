@@ -14,14 +14,13 @@ from __future__ import annotations
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
-from PySide6.QtWidgets import QDoubleSpinBox, QHBoxLayout, QMenu, QScrollBar, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDoubleSpinBox, QHBoxLayout, QMenu, QPushButton, QScrollBar, QVBoxLayout, QWidget
 
 from . import icons, theme
-from .subs_model import spk_color
+from .subs_model import fit_tip, spk_color
 from .widgets import IconButton, button, label
 
 FIT_COL = {"ok": "#4ADE80", "fast": "#F5B841", "long": "#F87171"}
-FIT_TIP = {"ok": "vừa khít", "fast": "đọc nhanh hơn cho vừa", "long": "quá dài – nên sửa ngắn lại / AI rút gọn"}
 TICKS = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200]
 
 
@@ -191,10 +190,8 @@ class _Canvas(QWidget):
             d = self._dub_at(pos)
             if s and d:
                 shift = float(s.extra.get("dub_shift", 0) or 0)
-                sp = s.extra.get("speed")
-                tip = (f"#{row + 1} · giọng lồng {d[2] - d[1]:.1f} giây · {FIT_TIP.get(d[3], '')}"
-                       + (f" · đã dời {shift:+.2f} s" if shift else "")
-                       + (f" · tốc độ đặt tay ×{float(sp):.2f}" if sp else "")
+                tip = (f"#{row + 1} · giọng lồng {d[2] - d[1]:.1f} giây"
+                       + (f" · đã kéo dời {shift:+.2f} s" if shift else "") + "\n" + fit_tip(s)
                        + f"\n{s.trans}\nKéo sang trái / phải để dời · bấm đúp để nghe · Ctrl/Shift chọn nhiều")
             elif s and self.track_rect("dub").contains(pos):
                 why = ("chưa có lời tiếng Việt" if not (s.trans or "").strip() else "đã tắt lồng câu này"
@@ -364,10 +361,19 @@ class _Canvas(QWidget):
                                p.fontMetrics().elidedText(why, Qt.TextElideMode.ElideRight, int(r.width() - 6)))
         p.setFont(theme.font(7.6, QFont.Weight.DemiBold))
         ghost_row = self._ghost[0] if self._ghost else None
+        # 2 đoạn giọng đọc đè lên nhau: vẽ thành 2 làn (trên / dưới) để thấy rõ phần đè
+        lanes: dict[int, int] = {}
+        prev = None
+        for a, b, k, _f in sorted(tl.dub, key=lambda r: (float(r[0]), int(r[2]))):
+            if prev and float(a) < prev[1] - 0.05:
+                lanes[int(k)] = 2 if lanes.get(prev[0], 1) == 1 else 1
+                lanes.setdefault(prev[0], 1)
+            prev = (int(k), float(b))
         for a, b, k, fit in tl.dub:
             if b < t_lo or a > t_hi:
                 continue
-            self._paint_clip(p, rd, a, b, int(k), fit, faded=int(k) == ghost_row)
+            self._paint_clip(p, rd, a, b, int(k), fit, faded=int(k) == ghost_row, lane=lanes.get(int(k), 0))
+            self._paint_shift(p, rd, a, int(k))
         if self._ghost:
             row, a, b = self._ghost
             fit = next((f for *_x, k, f in tl.dub if int(k) == row), "ok")
@@ -482,10 +488,31 @@ class _Canvas(QWidget):
         p.drawPath(tri)
 
 
+    def _paint_shift(self, p: QPainter, rd: QRectF, a: float, k: int):
+        """Đoạn giọng đọc sớm / bị lùi: vạch đánh dấu lúc nhân vật bắt đầu nói + đường nối tới đầu đoạn giọng."""
+        tl = self.tl
+        if not 0 <= k < len(tl.segs):
+            return
+        s = tl.segs[k]
+        sh = float(s.extra.get("fit_shift", 0) or 0)
+        if abs(sh) < 0.3:
+            return
+        want = s.start + float(s.extra.get("dub_shift", 0) or 0)
+        xw, xa = self.x(want), self.x(a)
+        col = QColor(theme.INFO if sh < 0 else theme.WARN)
+        y = rd.top() + 2
+        p.setPen(QPen(col, 1.4))
+        p.drawLine(QPointF(xw, rd.top()), QPointF(xw, rd.bottom()))
+        p.setPen(QPen(col, 1.2, Qt.PenStyle.DashLine))
+        p.drawLine(QPointF(min(xw, xa), y), QPointF(max(xw, xa), y))
+
     def _paint_clip(self, p: QPainter, rd: QRectF, a: float, b: float, k: int, fit: str, faded: bool = False,
-                    ghost: bool = False):
+                    ghost: bool = False, lane: int = 0):
         tl = self.tl
         r = QRectF(self.x(a), rd.top() + 2, max(3.0, (b - a) * tl.pps - 1), rd.height() - 4)
+        if lane:   # đoạn đọc đè: nửa trên / nửa dưới của dòng
+            h = r.height() / 2
+            r = QRectF(r.left(), r.top() + (h if lane == 2 else 0), r.width(), h)
         col = QColor(FIT_COL.get(fit, "#4ADE80"))
         sel = tl.is_row_selected(k)
         fill = QColor(col)
@@ -512,9 +539,16 @@ class _Canvas(QWidget):
                 px += 1
         if r.width() > 24:
             p.setPen(QColor("#FFFFFF"))
-            sp = tl.segs[k].extra.get("speed") if 0 <= k < len(tl.segs) else None
+            ex = tl.segs[k].extra if 0 <= k < len(tl.segs) else {}
+            sp = ex.get("speed") or (ex.get("fit_speed") if float(ex.get("fit_speed", 1) or 1) > 1.06 else None)
+            sh = float(ex.get("fit_shift", 0) or 0)
             tag = f"#{k + 1}" + (f" ×{float(sp):.2f}" if sp and r.width() > 70 else "")
-            p.drawText(r.adjusted(5, 1, -3, 0), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft, tag)
+            if abs(sh) >= 0.3 and r.width() > 110:
+                tag += f" {'◀' if sh < 0 else '▶'}{abs(sh):.1f}s"
+            if float(ex.get("fit_over", 0) or 0) >= 0.1 and r.width() > 150:
+                tag += f" ⧉{float(ex['fit_over']):.1f}s"
+            p.drawText(r.adjusted(5, 1, -3, 0), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft,
+                       p.fontMetrics().elidedText(tag, Qt.TextElideMode.ElideRight, int(r.width() - 8)))
 
 
 class TrackTimeline(QWidget):
@@ -544,6 +578,8 @@ class TrackTimeline(QWidget):
                 ("dub_speed", "bolt", "Đặt tốc độ", "Tốc độ tối thiểu cho các câu đang chọn – câu đang đọc nhanh hơn giữ "
                  "nguyên, câu chậm hơn được nâng lên. Xếp lại ngay, không đọc lại"),
                 ("dub_speed_reset", "refresh", "Về tốc độ gốc", "Bỏ tốc độ đặt tay của các câu đang chọn"),
+                ("dub_mode", "layers", "Cách xếp", "Câu đang chọn đọc dài hơn chỗ trống thì: Tự động / Nối tiếp / "
+                 "Đọc đè / Đọc sớm / Cắt bớt (riêng các câu này) – xếp lại ngay, không đọc lại"),
                 ("dub_toggle", "mute", "Bỏ lồng / Lồng lại", "Tắt (hoặc bật lại) giọng lồng của các câu đang chọn"),
                 ("dub_reset_pos", "refresh", "Về đúng chỗ", "Đặt đoạn giọng về đúng lúc nhân vật nói"),
                 ("sel_all", "check", "Chọn hết", "Chọn mọi đoạn giọng (Ctrl+A)")],
@@ -806,8 +842,44 @@ class TrackTimeline(QWidget):
                 continue
             if name == "v_insert_del" and self.sel_insert is None:
                 continue
+            if name == "dub_mode":   # nút có menu chọn cách xếp
+                from ..tts import OVERFLOW_MODES
+
+                b = button(text, ic, tip, flat=True)
+                menu = QMenu(b)
+                menu.addAction("Theo cài đặt chung", lambda: self.actionRequested.emit("dub_mode:"))
+                for m, mname in OVERFLOW_MODES:
+                    menu.addAction(mname, lambda _=False, m=m: self.actionRequested.emit("dub_mode:" + m))
+                b.setMenu(menu)
+                b.setProperty("full_text", text)
+                lay.addWidget(b)
+                continue
             b = button(text, ic, tip, flat=True, on_click=lambda _=False, n=name: self.actionRequested.emit(n))
+            b.setProperty("full_text", text)
             lay.addWidget(b)
+        self._fit_tools()
+
+    def _fit_tools(self):
+        """Màn hẹp (1366 px): các nút cuối thanh công cụ chỉ còn biểu tượng (chữ vẫn ở chú thích khi rê chuột) cho
+        thanh không tràn / cắt chữ."""
+        btns = [w for w in (self.tools.itemAt(i).widget() for i in range(self.tools.count()))
+                if isinstance(w, QPushButton) and w.property("full_text")]
+        for b in btns:
+            if not b.text():
+                b.setText(b.property("full_text"))
+        avail = self.width() - 3 * 34 - 40
+        if avail <= 0:
+            return
+
+        def need() -> int:
+            ws = [self.tools.itemAt(i).widget() for i in range(self.tools.count())]
+            return self.sel_label.sizeHint().width() + sum(w.sizeHint().width() + 2 for w in ws if w)
+        for b in reversed(btns):
+            if need() <= avail:
+                break
+            b.setText("")
+            if not (b.toolTip() or "").startswith(b.property("full_text")):
+                b.setToolTip(b.property("full_text") + (" – " + b.toolTip() if b.toolTip() else ""))
 
     def set_selected(self, row: int):
         if self.sel_track in ("subs", "dub") and row in self.sel_rows:
@@ -882,6 +954,7 @@ class TrackTimeline(QWidget):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
+        self._fit_tools()
         if not self.duration:
             return
         if not self._opened and self.canvas.width() > _Canvas.HEAD + 50:

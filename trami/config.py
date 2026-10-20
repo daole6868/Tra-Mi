@@ -72,6 +72,10 @@ DEFAULT_SETTINGS: dict = {
     "tts_voice": "vi-VN-HoaiMyNeural",
     "tts_rate": "+0%",
     "tts_max_speedup": 1.3,           # tăng tốc giọng lồng tối đa (cao hơn nghe vội, mất tự nhiên)
+    "dub_overflow": "smart",          # câu đọc dài hơn chỗ trống: smart / push / overlap / early / cut (tts.OVERFLOW_MODES)
+    "dub_lead_max": 1.0,              # "Tự động": câu dài được bắt đầu sớm tối đa (giây)
+    "dub_max_lag": 2.0,               # "Tự động": câu sau bị lùi tối đa (giây), quá thì đọc đè
+    "dub_subs_follow": True,          # phụ đề Việt hiện theo đúng lúc giọng lồng đọc (khi giọng sớm / trễ / dài)
     "dub_fit": True,                  # AI dịch vừa thời lượng câu (giới hạn số tiếng)
     "dub_auto_shorten": True,         # câu đọc vẫn quá dài -> AI rút gọn rồi đọc lại
     "align_words": True,              # căn thời gian từng chữ sau khi nhận dạng

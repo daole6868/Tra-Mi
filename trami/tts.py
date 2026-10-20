@@ -586,6 +586,202 @@ def _why_nothing(total: int, songs: int, empty: int, nodub: int) -> str:
     return f"Không có câu nào để lồng tiếng trong {total} câu: " + "; ".join(parts or ["không rõ lý do"]) + "."
 
 
+# ------------------------------------------------------------------ xếp giọng lồng theo thời gian
+# Khi câu đọc dài hơn chỗ trống (tới lúc câu sau bắt đầu) – chọn chung ở tab Lồng tiếng, hoặc riêng từng câu
+# (extra["overflow"]).
+OVERFLOW_MODES = [
+    ("smart", "Tự động (khuyên dùng)"),
+    ("push", "Nối tiếp – đọc hết câu rồi mới sang câu sau"),
+    ("overlap", "Đọc đè – câu sau vẫn vào đúng giờ"),
+    ("early", "Đọc sớm – câu dài bắt đầu sớm hơn"),
+    ("cut", "Giữ đúng giờ – tăng tốc rồi cắt bớt (cách cũ)"),
+]
+OVERFLOW_HELP = {
+    "smart": "Tăng tốc nhẹ (tới ×1,15, khó nhận ra) → đọc sớm vào khoảng lặng phía trước câu → tăng tốc thêm (tới mức "
+             "tối đa) → vẫn thiếu thì câu sau lùi lại và đuổi kịp ở chỗ nghỉ kế tiếp. Không bao giờ cắt chữ. Nhiều câu "
+             "dài liền nhau được tính chung cả cụm (cùng 1 tốc độ, không câu nhanh câu chậm). Câu sau lùi quá 'Trễ tối "
+             "đa' thì vào đúng mức đó và đọc đè lên đuôi câu trước.",
+    "push": "Tăng tốc (tới mức tối đa) → vẫn thiếu thì đọc hết câu rồi câu sau mới bắt đầu (câu sau lùi lại). Nhiều câu "
+            "dài liền nhau thì độ trễ dồn lại, đuổi kịp ở chỗ nghỉ kế tiếp.",
+    "overlap": "Tăng tốc (tới mức tối đa) → vẫn thiếu thì câu đang đọc cứ đọc hết, câu sau vẫn vào đúng lúc nhân vật "
+               "nói và đọc đè lên. Hợp với cảnh cãi nhau, nói chen.",
+    "early": "Câu dài bắt đầu SỚM hơn (vào khoảng lặng phía trước, tới 3 s) để câu sau vào đúng giờ → vẫn thiếu thì tăng "
+             "tốc → vẫn thiếu thì câu sau lùi lại.",
+    "cut": "Như bản cũ: mượn 0,15 s phía trước, tăng tốc, câu sau lùi tối đa 0,25 s, vẫn thừa thì nhỏ dần rồi cắt "
+           "bớt cuối câu (có thể mất chữ).",
+}
+_MODE_IDS = {m for m, _ in OVERFLOW_MODES}
+GAP, BORROW, DELAY, FADE = 0.04, 0.15, 0.25, 0.3
+EARLY_MAX = 3.0        # "Đọc sớm": câu dài bắt đầu sớm tối đa 3 s
+COMFY_SPEED = 1.15     # "Tự động": tăng tốc tới mức này (khó nhận ra) trước khi phải đọc sớm
+SHIFT_OK = 0.3         # lệch ≤ 0,3 s so với lúc nhân vật nói vẫn coi là đúng chỗ
+_TOL = 0.05
+
+
+def plan_layout(items: list[dict], total: float, mode: str = "smart", max_speedup: float = 1.3,
+                lead_max: float = 1.0, max_lag: float = 2.0) -> dict[int, dict]:
+    """Xếp các đoạn giọng lồng theo thời gian (chỉ tính toán, không đụng âm thanh).
+
+    items: {"k": số câu, "want": lúc nên bắt đầu (giây), "dur": thời lượng giọng ở ×1, "user": tốc độ tối thiểu đặt tay
+    (0 = không), "fixed": người dùng đã kéo đoạn giọng (giữ đúng chỗ, không đọc sớm), "mode": cách xếp riêng ("" = chung)}.
+    Trả về {k: {"start", "end", "speed", "keep" (giây giữ lại khi phải cắt, None = đủ), "fit" ok/fast/long,
+    "shift" (bắt đầu − lúc nên bắt đầu: âm = đọc sớm, dương = bị lùi), "over" (giây đè lên câu sau), "mode"}}.
+
+    Nhiều câu dài liền nhau (smart / push / early): gom thành CỤM (các câu liên tiếp đều tràn sang câu sau) và chọn
+    1 tốc độ chung nhỏ nhất để không câu nào làm câu sau bị lùi (thử bằng chia đôi), đọc sớm chỉ đúng phần cần
+    (tính ngược từ câu cuối cụm: mỗi câu bắt đầu muộn nhất có thể mà vẫn chừa chỗ cho câu sau)."""
+    its = sorted(items, key=lambda x: (float(x["want"]), int(x["k"])))
+    n = len(its)
+    if not n:
+        return {}
+    want = [max(0.0, float(x["want"])) for x in its]
+    dur = [max(0.05, float(x["dur"])) for x in its]
+    nxt = [want[i + 1] if i + 1 < n else max(float(total), want[i] + 0.3) for i in range(n)]
+    modes = [(x.get("mode") if x.get("mode") in _MODE_IDS else mode if mode in _MODE_IDS else "smart") for x in its]
+    fixed = [bool(x.get("fixed")) for x in its]
+    base = [min(2.0, max(0.5, float(x["user"]))) if x.get("user") else 1.0 for x in its]
+    has_user = [bool(x.get("user")) for x in its]
+    cap = [max(max_speedup, b) for b in base]
+    lead = [0.0 if f else {"smart": max(0.0, lead_max), "early": EARLY_MAX}.get(m, 0.0) for f, m in zip(fixed, modes)]
+    seq = [m in ("smart", "push", "early") for m in modes]
+    start = [0.0] * n
+    end = [0.0] * n
+    speed = list(base)
+    keep: list[float | None] = [None] * n
+
+    def after(i: int, st: float, en: float) -> float:
+        """Lúc câu sau được phép bắt đầu khi câu i đọc từ st tới en (không bao giờ trước câu i)."""
+        m = modes[i]
+        if m == "overlap":
+            return min(en + GAP, max(nxt[i], st + SHIFT_OK))
+        if m == "smart" and i + 1 < n:
+            return min(en + GAP, max(nxt[i] + max(0.0, max_lag), st + SHIFT_OK))
+        return en + GAP
+
+    def overflows(i: int, busy: float) -> bool:
+        return max(want[i], busy) + dur[i] / base[i] + GAP > nxt[i] + 1e-3
+
+    def place_group(run: list[int], busy: float, f: float, lead_on: bool):
+        """Vị trí các câu trong cụm với tốc độ chung f: (starts, ends, câu sau có bị lùi quá _TOL không)."""
+        d = [dur[q] / max(base[q], f) for q in run]
+        lim = [0.0] * len(run)
+        nx = nxt[run[-1]]
+        for t in range(len(run) - 1, -1, -1):        # muộn nhất có thể mà vẫn chừa chỗ cho câu sau
+            q = run[t]
+            lo = want[q] - (lead[q] if lead_on else 0.0)
+            lim[t] = max(lo, min(want[q], nx - GAP - d[t]))
+            nx = lim[t]
+        sts, ens, late = [], [], False
+        b = busy
+        prev_st = start[run[0] - 1] if run[0] > 0 else -1e9
+        for t, q in enumerate(run):
+            st = max(b, lim[t])
+            if modes[q] == "smart" and st - want[q] > max_lag:
+                # trễ quá mức cho phép -> vào đúng mức đó, đè lên đuôi câu trước (nhưng không trước câu trước)
+                st = min(st, max(want[q] + max_lag, prev_st + SHIFT_OK))
+            prev_st = st
+            en = st + d[t]
+            late = late or en + GAP > nxt[q] + _TOL
+            sts.append(st)
+            ens.append(en)
+            b = after(q, st, en)
+        return sts, ens, late
+
+    def min_speed(run, busy, lead_on, hi) -> float | None:
+        """Tốc độ chung nhỏ nhất (1..hi) để không câu sau nào bị lùi; None = kể cả hi cũng không đủ."""
+        if not place_group(run, busy, 1.0, lead_on)[2]:
+            return 1.0
+        if hi <= 1.0 or place_group(run, busy, hi, lead_on)[2]:
+            return None
+        lo_f, hi_f = 1.0, hi
+        for _ in range(24):
+            mid = (lo_f + hi_f) / 2
+            if place_group(run, busy, mid, lead_on)[2]:
+                lo_f = mid
+            else:
+                hi_f = mid
+        return hi_f
+
+    busy = 0.0
+    i = 0
+    while i < n:
+        m = modes[i]
+        if seq[i] and not fixed[i] and overflows(i, busy):
+            run, b = [], busy
+            j = i
+            while j < n and seq[j] and not fixed[j]:
+                st = max(want[j], b)
+                en = st + dur[j] / base[j]
+                if run and en + GAP <= nxt[j] + 1e-3:
+                    break
+                run.append(j)
+                b = en + GAP
+                j += 1
+            policy = modes[i]
+            top = max(1.0, max_speedup)
+            if policy == "push":
+                lead_on, f = False, min_speed(run, busy, False, top) or top
+            elif policy == "early":
+                lead_on, f = True, min_speed(run, busy, True, top) or top
+            else:   # smart: tăng tốc nhẹ -> đọc sớm -> tăng tốc thêm -> lùi câu sau
+                comfy = min(top, COMFY_SPEED)
+                f = min_speed(run, busy, False, comfy)
+                lead_on = f is None
+                if f is None:
+                    f = comfy if not place_group(run, busy, comfy, True)[2] else (min_speed(run, busy, True, top) or top)
+            sts, ens, _ = place_group(run, busy, f, lead_on)
+            for t, q in enumerate(run):
+                start[q], end[q], speed[q] = sts[t], ens[t], max(base[q], f)
+            busy = after(run[-1], sts[-1], ens[-1])
+            i = run[-1] + 1
+            continue
+        st = max(want[i], busy)
+        need = dur[i] / base[i]
+        slot = max(0.3, nxt[i] - GAP - st)
+        if m == "cut" and need > slot and not fixed[i]:
+            # mượn khoảng lặng phía trước (tối đa 0,15 s)
+            borrow = min(BORROW, need - slot, max(0.0, want[i] - busy))
+            st -= borrow
+            slot += borrow
+        sp = base[i]
+        if need > slot * 1.03:
+            # tua nhanh (giữ cao độ). KHÔNG bắt OmniVoice đọc lại với thời lượng ép (duration=): hay ra tiếng "bíp" (2.0.34)
+            sp = max(sp, min(cap[i], dur[i] / slot))
+        en = st + dur[i] / sp
+        if m == "cut":
+            hard = nxt[i] + DELAY - GAP            # câu sau được lùi tối đa 0,25 s
+            if en > hard and i + 1 < n:
+                keep[i] = max(0.3, hard - st)
+                en = st + keep[i]
+        start[i], end[i], speed[i] = st, en, sp
+        busy = after(i, st, en)
+        i += 1
+
+    by_start = sorted(range(n), key=lambda q: (start[q], q))
+    over = [0.0] * n
+    for a, b in zip(by_start, by_start[1:]):
+        over[a] = max(0.0, end[a] - start[b])
+    out: dict[int, dict] = {}
+    for i, x in enumerate(its):
+        full_end = start[i] + dur[i] / speed[i]
+        long_ = keep[i] is not None or full_end + GAP > nxt[i] + SHIFT_OK
+        fit = "long" if long_ else ("ok" if speed[i] <= 1.06 or (has_user[i] and speed[i] <= base[i] + 0.005)
+                                    else "fast")
+        out[int(x["k"])] = {"start": start[i], "end": end[i], "speed": speed[i], "keep": keep[i], "fit": fit,
+                            "shift": start[i] - want[i], "over": over[i], "mode": modes[i],
+                            "have": max(0.3, nxt[i] - GAP - start[i])}
+    return out
+
+
+def soft_limit(a: np.ndarray, thr: float = 0.9) -> np.ndarray:
+    """Chỗ 2 giọng đọc đè cộng lại vượt ngưỡng -> nén mềm phần đỉnh (không vỡ tiếng, không hạ âm lượng cả bản)."""
+    over = np.abs(a) > thr
+    if over.any():
+        x = a[over]
+        a[over] = np.sign(x) * (thr + (1 - thr) * np.tanh((np.abs(x) - thr) / (1 - thr)))
+    return a
+
+
 def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: float, work_dir: str | Path,
                    voice: str = "edge:vi-VN-HoaiMyNeural", rate: str = "+0%", pitch: str = "+0Hz",
                    max_speedup: float = 1.6, progress: Callable[[float, str], None] | None = None,
@@ -791,9 +987,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         raise RuntimeError(_why_nothing(len(segs), n_song, n_empty, n_nodub))
 
     # --- xếp giọng theo thời gian: mỗi câu là 1 đoạn giọng riêng, đặt đúng lúc nhân vật nói (hoặc chỗ người dùng kéo
-    # tới trên timeline: extra["dub_shift"]), không bao giờ để 2 câu đọc chồng lên nhau
+    # tới trên timeline: extra["dub_shift"]); câu dài hơn chỗ trống xử lý theo cách xếp đã chọn (plan_layout)
     total = max(total_duration, max((s.end for s in segs), default=0) + 1)
-    track = np.zeros(int(total * SR) + SR, dtype=np.float32)
 
     def want(k: int) -> float:
         return max(0.0, segs[k].start + float(segs[k].extra.get("dub_shift", 0) or 0))
@@ -809,43 +1004,35 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                 levels[k] = speech_level(_decode_cached(p), SR)
         gains = level_gains(levels, {k: groups.get(k) or "spk:" + (segs[k].speaker or "S1") for k in levels})
     stats["level_fixed"] = len(gains)
-    placed = 0
-    prev_end = 0.0
-    GAP, BORROW, DELAY, FADE = 0.04, 0.15, 0.25, 0.3
-    layout: list[list] = []
-    too_long: list[tuple[int, float, float]] = []   # (câu, thời lượng cần, thời lượng có) -> để AI rút gọn
-    for n, k in enumerate(order):
+    items, files = [], {}
+    for k in order:
         s = segs[k]
         p = s.extra.pop("_tts", None)
-        s.extra.pop("fit", None)
+        for key in ("fit", "fit_shift", "fit_over", "dub_at"):
+            s.extra.pop(key, None)
         if not p or not Path(p).exists():
             continue
         clip = _trim_silence(_decode_cached(p))
         if len(clip) == 0:
             errors.append(f"Câu {k + 1}: giọng đọc tạo ra toàn khoảng lặng")
             continue
-        nxt = min(total, next((want(order[m]) for m in range(n + 1, len(order))), total))
-        ws = want(k)
-        start = max(ws, prev_end + GAP)
-        slot = max(0.3, nxt - GAP - start)
-        need0 = len(clip) / SR
+        files[k] = p
         # tốc độ người dùng đặt cho câu (tab Lồng tiếng / timeline) = mức TỐI THIỂU: câu vốn phải đọc nhanh hơn để vừa
         # thì giữ tốc độ đó; < 1 = đọc chậm lại (nếu còn chỗ)
-        user = min(2.0, max(0.5, float(s.extra.get("speed") or 0))) if s.extra.get("speed") else 0.0
-        need = need0 / user if user else need0
-        # mượn khoảng lặng phía trước (tối đa 0,15 s) nếu câu dài hơn chỗ trống (trừ khi người dùng đã tự đặt vị trí)
-        if need > slot and start <= ws + 1e-6 and not s.extra.get("dub_shift"):
-            borrow = min(BORROW, need - slot, max(0.0, ws - (prev_end + GAP)))
-            start -= borrow
-            slot += borrow
-        speed = user or 1.0
-        if need > slot * 1.03:
-            # tua nhanh (giữ cao độ) từ file gốc. KHÔNG bắt OmniVoice đọc lại với thời lượng ép (duration=): mô hình
-            # hay phát ra tiếng "bíp" thay cho lời khi bị ép ngắn (2.0.34)
-            speed = max(speed, min(max(max_speedup, user), need0 / slot))
-        if abs(speed - 1.0) > 0.005:
-            clip = _trim_silence(_decode(p, speed))
-            need = len(clip) / SR
+        items.append({"k": k, "want": want(k), "dur": len(clip) / SR, "user": float(s.extra.get("speed") or 0),
+                      "fixed": bool(s.extra.get("dub_shift")), "mode": s.extra.get("overflow") or ""})
+    durs = {it["k"]: it["dur"] for it in items}
+    plan = plan_layout(items, total, settings.get("dub_overflow", "smart"), max_speedup,
+                       float(settings.get("dub_lead_max", 1.0)), float(settings.get("dub_max_lag", 2.0)))
+    end_t = max([total] + [x["end"] + 0.5 for x in plan.values()])
+    track = np.zeros(int(end_t * SR) + SR, dtype=np.float32)
+    placed = 0
+    layout: list[list] = []
+    too_long: list[tuple[int, float, float]] = []   # (câu, thời lượng cần, thời lượng có) -> để AI rút gọn
+    for n, k in enumerate(sorted(plan, key=lambda q: plan[q]["start"])):
+        s, x, p = segs[k], plan[k], files[k]
+        speed = x["speed"]
+        clip = _trim_silence(_decode(p, speed)) if abs(speed - 1.0) > 0.005 else _trim_silence(_decode_cached(p))
         if k in gains:
             g = gains[k]
             pk = float(np.abs(clip).max()) if len(clip) else 0.0
@@ -853,42 +1040,48 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                 g = min(g, 0.89 / pk)            # không vượt -1 dBFS
             if g > 1.0:
                 clip = clip * g
-        fit = "ok" if speed <= 1.06 or (user and speed <= user + 0.005) else "fast"
-        end = start + need
-        hard_end = nxt + DELAY - GAP          # câu sau được lùi tối đa 0,25 s
-        if end > hard_end:
-            # vẫn quá dài: nhỏ dần phần cuối (≤0,3 s) rồi dừng đúng lúc câu sau vào, đánh dấu ⚠ để sửa
-            too_long.append((k, need0, hard_end - start))
-            keep = max(int(0.3 * SR), int((hard_end - start) * SR))
-            clip = clip[:keep].copy()
+        if x["keep"] is not None:
+            # "Giữ đúng giờ": vẫn quá dài -> nhỏ dần phần cuối (≤0,3 s) rồi dừng đúng lúc câu sau vào
+            clip = clip[:max(int(0.3 * SR), int(x["keep"] * SR))].copy()
             f = min(int(FADE * SR), len(clip) // 3)
             if f > 0:
                 clip[-f:] *= np.linspace(1.0, 0.0, f, dtype=np.float32)
-            fit = "long"
-        st = int(start * SR)
+        if x["fit"] == "long":
+            too_long.append((k, durs[k], x["have"]))
+        st = int(x["start"] * SR)
         seg_len = min(len(clip), len(track) - st)
         if seg_len > 0:
             track[st:st + seg_len] += clip[:seg_len]
             placed += 1
-            prev_end = start + seg_len / SR
-            layout.append([round(start, 3), round(prev_end, 3), k, fit])
+            a0, a1 = round(x["start"], 3), round(x["start"] + seg_len / SR, 3)
+            layout.append([a0, a1, k, x["fit"]])
             s.extra["tts_file"] = str(p)   # giọng đang dùng của câu này (để lần sau chỉ đọc lại câu được chọn)
-        s.extra["fit"] = fit
+            s.extra["dub_at"] = [a0, a1]   # đoạn giọng đang phát của câu (phụ đề chạy theo giọng lồng)
+            if abs(x["shift"]) >= 0.05:
+                s.extra["fit_shift"] = round(x["shift"], 2)
+            if x["over"] >= 0.05:
+                s.extra["fit_over"] = round(x["over"], 2)
+        s.extra["fit"] = x["fit"]
         s.extra["fit_speed"] = round(speed, 2)
         if progress and n % 20 == 0:
-            progress(0.8 + 0.2 * n / max(1, len(order)), "Đang xếp giọng đọc khớp thời gian nhân vật nói")
+            progress(0.8 + 0.2 * n / max(1, len(plan)), "Đang xếp giọng đọc khớp thời gian nhân vật nói")
     stats["layout"] = layout
     stats["too_long"] = too_long
     stats["fit"] = {"ok": sum(1 for x in layout if x[3] == "ok"), "fast": sum(1 for x in layout if x[3] == "fast"),
                     "long": sum(1 for x in layout if x[3] == "long")}
+    lay_segs = [segs[int(r[2])].extra for r in layout]
+    lates = [e.get("fit_shift", 0) for e in lay_segs if e.get("fit_shift", 0) >= SHIFT_OK]
+    stats["shift"] = {"mode": settings.get("dub_overflow", "smart"),
+                      "early": sum(1 for e in lay_segs if e.get("fit_shift", 0) <= -SHIFT_OK),
+                      "late": len(lates), "max_late": round(max(lates, default=0.0), 2),
+                      "over": sum(1 for e in lay_segs if e.get("fit_over", 0) >= 0.1),
+                      "cut": sum(1 for x in plan.values() if x["keep"] is not None)}
     stats.update({"placed": placed, "total": len(segs), "songs": n_song, "empty": n_empty,
                   "nodub": n_nodub, "errors": len(errors), "error_samples": errors[:3],
                   "redone": redone, "kept_old": kept_old})
     if placed == 0:
         raise RuntimeError("Bản lồng tiếng tạo ra không có tiếng nào. " + "; ".join(errors[:3]))
-    peak = float(np.max(np.abs(track))) if len(track) else 0
-    if peak > 0.98:
-        track *= 0.98 / peak
+    soft_limit(track)      # chỗ 2 giọng đọc đè lên nhau: nén mềm đỉnh, không vỡ tiếng
     write_wav(out_wav, track[: int(total * SR)])
     stats["wave"] = wave_envelope(track[: int(total * SR)], SR)
     if progress:

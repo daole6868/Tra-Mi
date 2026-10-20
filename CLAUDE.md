@@ -23,7 +23,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   âm thanh ngoài qua `ext_audio` (`apad=whole_dur` để không treo); trộn: nhạc nền đã tách + giọng gốc (đoạn hát) + bản lồng.
   Lệnh FFmpeg cuối: `data/projects/<id>/work/render/last_ffmpeg_cmd.txt`.
 - `trami/tts.py` – `synthesize_dub` (giọng mỗi người nói: `edge:<id>` / `vieneu:<preset>` / `clone`), `clean_tts_text`,
-  `preview_voice`. VieNeu API: `Vieneu(mode="v3turbo").infer(text, voice="<tên preset>" | ref_audio=...)` → numpy 48 kHz.
+  `preview_voice`, `plan_layout` (xếp giọng theo thời gian, thuần – không đụng âm thanh; `OVERFLOW_MODES`). VieNeu API: `Vieneu(mode="v3turbo").infer(text, voice="<tên preset>" | ref_audio=...)` → numpy 48 kHz.
 - `trami/asr_qwen.py` + `qwen_asr_worker.py` (Qwen3-ASR + Qwen3-ForcedAligner, tiến trình riêng `--qwen-asr-worker`,
   transformers ≥ 5.13, mặc định từ 2.0.29), `trami/asr.py` (faster-whisper), `asr_funasr.py` (SenseVoice/Paraformer, `mark_songs`), `diarize.py` (ECAPA),
   `separate.py` (audio-separator BS-RoFormer), `lama.py` + `inpaint.py` (xoá chữ), `ocr.py` (RapidOCR),
@@ -39,7 +39,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
   Chụp ảnh kiểm tra giao diện phải nạp theme như `run()`: `theme.load_fonts(); app.setFont(theme.font(10));
   app.setStyleSheet(theme.stylesheet())`.
-- `tests/test_core.py` – `python -m pytest -q tests` (72 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (75 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -464,6 +464,35 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   VieNeu/Omni/Qwen/Hy-MT2 vẫn ghi log ra file; báo "tắt đột ngột" chỉ đúng file log. Đã tái hiện đúng lỗi + chạy thử
   giao diện offscreen với stdout/stderr = None.
 
+- 2.0.42: "câu quá dài bị ngắt khi sang câu sau – cho chọn đọc đè / nối tiếp / lùi câu; nhiều câu dài cùng lúc xử lý
+  thế nào; thêm logic còn thiếu". `tts.plan_layout(items, total, mode, max_speedup, lead_max, max_lag)` (thuần, test
+  được) thay vòng xếp cũ trong `synthesize_dub`. Cách xếp (`dub_overflow`, chung; `extra["overflow"]` riêng câu):
+  * smart (mặc định, "Tự động"): tăng tốc tới `COMFY_SPEED` 1,15 → đọc sớm vào khoảng lặng trước (≤ `dub_lead_max` 1 s,
+    không đè câu trước) → tăng tốc tới `tts_max_speedup` → câu sau lùi (≤ `dub_max_lag` 2 s, quá thì vào đúng mức đó và
+    đè đuôi câu trước); không bao giờ cắt chữ. push "Nối tiếp": tăng tốc → câu sau lùi, trễ dồn, đuổi kịp ở chỗ nghỉ.
+    overlap "Đọc đè": tăng tốc → câu sau vẫn đúng giờ. early "Đọc sớm": lùi câu dài lên trước tới `EARLY_MAX` 3 s →
+    tăng tốc → câu sau lùi. cut: cách cũ (mượn 0,15 s, lùi 0,25 s, nhỏ dần + cắt).
+  * Cụm câu dài (smart/push/early): các câu liên tiếp đều tràn sang câu sau gom thành cụm, chọn 1 tốc độ CHUNG nhỏ nhất
+    (chia đôi) để không câu sau nào bị lùi; vị trí tính ngược từ câu cuối cụm (mỗi câu bắt đầu muộn nhất có thể mà vẫn
+    chừa chỗ) -> đọc sớm chỉ đúng phần cần. Câu kéo tay (`dub_shift`) không đọc sớm. Thứ tự câu không bao giờ đảo
+    (đã thử 4.000 tình huống ngẫu nhiên × 5 cách; 1.500 câu xếp < 0,02 s).
+  * Mỗi câu ghi `dub_at` [bắt đầu, kết thúc giọng], `fit_shift` (âm = đọc sớm, dương = bị lùi), `fit_over` (giây đè câu
+    sau); `fit` "long" = vẫn tràn > 0,3 s sau khi tăng tốc (bị cắt / làm câu sau lùi / đè) -> too_long (AI rút gọn).
+    `stats["shift"]` (early/late/max_late/over/cut) -> `dub_summary`. 2 giọng đè: `soft_limit` nén mềm đỉnh > 0,9.
+  * **Phụ đề chạy theo giọng lồng** (`dub_subs_follow`, mặc định bật): `subtitle.follow_dub` – câu giọng lệch > 0,3 s
+    hiện từ lúc giọng bắt đầu tới lúc đọc xong, không đè câu sau; `pipeline.subs_follow_dub` dùng khi xuất (`render`)
+    và xem trước (`_refresh_overlay`), chỉ khi đang nghe bản lồng và không phải phụ đề tiếng Trung. Karaoke nhận đoạn
+    giọng theo `dub_at` (trước bỏ câu lùi > 1 s). `use_dub_version` cập nhật `dub_at` theo bản được chọn.
+  * `pipeline.dub_clips` (đoạn giọng theo `dub_at` từng câu) cho timeline / Nghe câu -> hết lệch số câu khi thêm / xoá
+    câu sau khi lồng; xoá câu -> tự xếp lại bản lồng (bỏ giọng câu đã xoá, không đọc lại).
+  * GUI: tab Lồng tiếng mục 3 "Khi câu đọc dài hơn chỗ trống" (Cách xếp + giải thích, Tăng tốc tối đa, Đọc sớm tối đa,
+    Câu sau lùi tối đa, Phụ đề chạy theo giọng lồng, AI tự rút gọn) – đổi là lưu + xếp lại sau 0,9 s (`_relayout_timer`,
+    `_relayout`); mục 2 "Khi câu dài" + "Đặt cách xếp" cho câu đã tích (`_apply_overflow`); khung Câu đang chọn ô "Khi
+    câu dài"; timeline nút "Cách xếp ▾" (menu), đoạn đè vẽ 2 làn, vạch xanh (đọc sớm) / cam (bị lùi) nối từ lúc nhân vật
+    nói, nhãn "#n ×1.30 ◀0.8s ⧉0.4s"; cột Độ vừa `subs_model.fit_text/fit_tip` (◀ ▶ ⧉ ✎). Thanh công cụ timeline hẹp
+    (1366 px) tự bỏ chữ các nút cuối (`_fit_tools`). Đã chạy thử offscreen: đổi 5 cách -> bản lồng xếp lại đúng, video
+    xuất có phụ đề câu bị lùi khớp đoạn giọng (12,19–14,44 s vs giọng 12,19–14,43 s).
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -488,4 +517,5 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.38: chờ người dùng xác nhận hết mất chữ cuối khi nghe trong tool; nếu file bản lồng vẫn thiếu chữ -> làm kiểm tra lời đọc.
 - 2.0.39: chờ người dùng xác nhận đổi cỡ chữ không còn làm giật giọng lồng khi phát.
 - 2.0.40: chờ người dùng thử timeline mới (chọn nhiều, khoảng trống, công cụ theo dòng, chèn video) + tốc độ đọc.
-  Chỉ số câu của dub_layout lệch khi thêm / xoá câu sau khi lồng (có từ trước) – bấm Tạo bản lồng tiếng để xếp lại.
+- 2.0.42: chờ người dùng nghe thử các cách xếp giọng trên video thật (nhất là Tự động với cụm câu dài, Đọc đè 2 giọng
+  cùng lúc) và xem phụ đề chạy theo giọng lồng có dễ theo dõi không.

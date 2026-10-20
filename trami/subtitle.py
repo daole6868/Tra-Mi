@@ -473,6 +473,29 @@ def remap_after_cut(segs: list[Segment], keep: list[tuple[float, float]]) -> lis
     return out
 
 
+def follow_dub(segs: list[Segment], min_shift: float = 0.3) -> list[Segment]:
+    """Phụ đề hiện theo GIỌNG LỒNG (extra["dub_at"] = đoạn giọng đang phát của câu): câu có giọng đọc sớm / bị lùi /
+    đọc dài hơn phụ đề quá min_shift giây -> hiện từ lúc giọng bắt đầu tới lúc đọc xong (+0,15 s), không đè câu sau.
+    Trả về bản sao (không đổi thời gian gốc của câu)."""
+    out = [Segment(s.start, s.end, s.text, s.trans, s.speaker, dict(s.extra)) for s in segs]
+    moved = set()
+    for i, s in enumerate(out):
+        at = s.extra.get("dub_at")
+        if not at or len(at) < 2:
+            continue
+        a, b = float(at[0]), float(at[1])
+        if abs(a - s.start) < min_shift and b <= s.end + min_shift:
+            continue
+        s.start, s.end = a, max(b + 0.15, a + 0.6)
+        moved.add(i)
+    if moved:
+        order = sorted(range(len(out)), key=lambda q: (out[q].start, q))
+        for x, y in zip(order, order[1:]):
+            if (x in moved or y in moved) and out[x].end > out[y].start - 0.02:
+                out[x].end = max(out[x].start + 0.3, out[y].start - 0.02)
+    return out
+
+
 def scale_time(segs: list[Segment], speed: float) -> list[Segment]:
     if speed and speed != 1:
         for s in segs:

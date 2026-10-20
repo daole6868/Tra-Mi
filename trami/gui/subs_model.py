@@ -17,6 +17,56 @@ FIT_COLOR = {"ok": "#4ADE80", "fast": "#F5B841", "long": "#F87171"}
 SPK_COLORS = ["#FF8A3D", "#5B8CFF", "#3CCB7F", "#C07BFF", "#F5B841", "#FF5FA2", "#3BD1D1", "#B5C44B"]
 
 
+OVERFLOW_SHORT = {"smart": "Tự động", "push": "Nối tiếp", "overlap": "Đọc đè", "early": "Đọc sớm", "cut": "Cắt bớt"}
+
+
+def fit_text(s: Segment) -> str:
+    """Chữ ngắn ở cột Độ vừa: ✓/⚡/⚠ ×tốc độ, ◀ đọc sớm, ▶ bị lùi, ⧉ đọc đè, ✂ cắt, ✎ đặt tay."""
+    ex = s.extra
+    fit = ex.get("fit")
+    if not fit:
+        return "✎ ×" + f"{float(ex['speed']):.2f}" if ex.get("speed") else ""
+    sp = float(ex.get("fit_speed", 1) or 1)
+    out = FIT_TEXT.get(fit, "") + (f" ×{sp:.2f}" if sp > 1.06 or ex.get("speed") else "")
+    sh = float(ex.get("fit_shift", 0) or 0)
+    if sh <= -0.3:
+        out += f" ◀{-sh:.1f}s"
+    elif sh >= 0.3:
+        out += f" ▶{sh:.1f}s"
+    if float(ex.get("fit_over", 0) or 0) >= 0.1:
+        out += f" ⧉{float(ex['fit_over']):.1f}s"
+    if ex.get("overflow") or ex.get("speed"):
+        out += " ✎"
+    return out
+
+
+def fit_tip(s: Segment) -> str:
+    """Giải thích đầy đủ độ vừa của câu (chú thích cột Độ vừa, khung Câu đang chọn, timeline)."""
+    ex = s.extra
+    fit = ex.get("fit")
+    sp = float(ex.get("fit_speed", 1) or 1)
+    lines = [{"ok": "Giọng lồng vừa thời gian nhân vật nói",
+              "fast": f"Đọc nhanh hơn ×{sp:.2f} cho vừa",
+              "long": "Quá dài so với thời gian nhân vật nói (kể cả khi đã tăng tốc) – nên sửa ngắn lại / AI rút gọn"
+              }.get(fit, "Chưa lồng tiếng")]
+    if fit == "long" and sp > 1.06:
+        lines.append(f"Đã tăng tốc ×{sp:.2f}")
+    sh = float(ex.get("fit_shift", 0) or 0)
+    if sh <= -0.3:
+        lines.append(f"◀ Đọc sớm {-sh:.1f} s trước lúc nhân vật nói (để câu sau vào đúng giờ)")
+    elif sh >= 0.3:
+        lines.append(f"▶ Bị lùi {sh:.1f} s vì câu trước đọc chưa xong")
+    if float(ex.get("fit_over", 0) or 0) >= 0.1:
+        lines.append(f"⧉ Đọc đè lên câu sau {float(ex['fit_over']):.1f} s")
+    if ex.get("overflow"):
+        lines.append(f"✎ Cách xếp riêng câu này: {OVERFLOW_SHORT.get(ex['overflow'], ex['overflow'])}")
+    if ex.get("speed"):
+        lines.append(f"✎ Tốc độ đặt tay: tối thiểu ×{float(ex['speed']):.2f} (đang đọc ×{sp:.2f}) – 'Về tốc độ gốc' để bỏ")
+    if ex.get("trans_long"):
+        lines.append(f"AI đã rút gọn từ: {ex['trans_long']}")
+    return "\n".join(lines)
+
+
 def spk_color(spk: str) -> str:
     try:
         return SPK_COLORS[(int(spk.lstrip("S")) - 1) % len(SPK_COLORS)]
@@ -91,12 +141,7 @@ class SubsModel(QAbstractTableModel):
                 v = s.extra.get("voice", "")
                 return v if role == Qt.ItemDataRole.EditRole else (self.voice_names.get(v, v) if v else VOICE_DEFAULT)
             if c == C_FIT and role == Qt.ItemDataRole.DisplayRole:
-                fit = s.extra.get("fit")
-                if not fit:
-                    return "✎ ×" + f"{float(s.extra['speed']):.2f}" if s.extra.get("speed") else ""
-                sp = float(s.extra.get("fit_speed", 1) or 1)
-                return FIT_TEXT.get(fit, "") + (f" ×{sp:.2f}" if fit == "fast" or s.extra.get("speed") else "") + \
-                    (" ✎" if s.extra.get("speed") else "")
+                return fit_text(s)
             return None
         if role == Qt.ItemDataRole.CheckStateRole:
             if c == C_SONG:
@@ -138,17 +183,7 @@ class SubsModel(QAbstractTableModel):
             if c == C_VOICE:
                 return "Giọng riêng của câu này (bấm đúp để đổi). Để trống = theo giọng của người nói"
             if c == C_FIT:
-                fit = s.extra.get("fit")
-                tip = {"ok": "Giọng lồng vừa khít thời gian nhân vật nói",
-                       "fast": f"Phải đọc nhanh hơn ×{s.extra.get('fit_speed', 1):.2f} cho vừa",
-                       "long": "Quá dài so với thời gian nói – cuối câu bị nhỏ dần/cắt. Sửa bản dịch ngắn lại rồi tạo "
-                               "lại bản lồng tiếng"}.get(fit, "Chưa lồng tiếng")
-                if s.extra.get("trans_long"):
-                    tip += f"\nAI đã rút gọn từ: {s.extra['trans_long']}"
-                if s.extra.get("speed"):
-                    tip += (f"\n✎ Tốc độ đặt tay: tối thiểu ×{float(s.extra['speed']):.2f} (đang đọc "
-                            f"×{float(s.extra.get('fit_speed', s.extra['speed']) or 1):.2f}) – 'Về tốc độ gốc' để bỏ")
-                return tip
+                return fit_tip(s)
         if role == Qt.ItemDataRole.TextAlignmentRole and c in (C_N, C_START, C_END, C_SPK, C_FIT, C_SEL):
             return int(Qt.AlignmentFlag.AlignCenter)
         return None

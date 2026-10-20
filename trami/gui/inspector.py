@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QComboBox, QGridLayout, QLineEdit, QPlainTextEdit,
 from . import theme
 from .player import fmt
 from .subs_model import (C_END, C_NODUB, C_SPK, C_START, C_VI, C_VOICE, C_ZH, FIT_TEXT, VOICE_DEFAULT, SubsModel,
-                         spk_color)
+                         fit_tip, spk_color)
 from .widgets import Card, GradientButton, IconButton, Switch, button, hbox, label
 
 
@@ -22,7 +22,7 @@ class _TextBox(QPlainTextEdit):
 
 
 class LineInspector(Card):
-    action = Signal(str, int)     # (play | retranslate | shorten | redub, câu)
+    action = Signal(str, int)     # (play | retranslate | shorten | redub | overflow:<cách xếp>, câu)
     navigate = Signal(int)        # chuyển sang câu khác
 
     def __init__(self, model: SubsModel, voices_fn, parent=None):
@@ -77,6 +77,18 @@ class LineInspector(Card):
         self.nodub.toggledOn.connect(self._set_nodub)
         self.fit = label("", "muted", wrap=True)
         v.addLayout(hbox(label("Không lồng câu này", "muted"), self.nodub, None))
+        from ..tts import OVERFLOW_MODES
+
+        self.overflow = QComboBox()
+        self.overflow.addItem("Theo cài đặt chung", "")
+        for m, name in OVERFLOW_MODES:
+            self.overflow.addItem(name, m)
+        self.overflow.setMinimumContentsLength(10)
+        self.overflow.setToolTip("Câu này đọc dài hơn chỗ trống thì xử lý thế nào (riêng câu này) – xếp lại bản lồng "
+                                 "ngay, không đọc lại")
+        self.overflow.activated.connect(
+            lambda _i: None if self._filling else self._act("overflow:" + (self.overflow.currentData() or "")))
+        v.addLayout(hbox(label("Khi câu dài", "muted"), self.overflow))
         v.addWidget(self.fit)
         # lưới 2 cột cố định: nút đều nhau, khung hẹp cũng không bị cắt chữ
         grid = QGridLayout()
@@ -166,12 +178,11 @@ class LineInspector(Card):
                 self.refresh_voices()
             self.voice.setCurrentIndex(max(0, self.voice.findData(s.extra.get("voice", ""))))
             self.nodub.setChecked(bool(s.extra.get("nodub")))
+            self.overflow.setCurrentIndex(max(0, self.overflow.findData(s.extra.get("overflow", ""))))
             fit = s.extra.get("fit")
-            tip = {"ok": "giọng lồng vừa khít", "fast": f"đọc nhanh ×{s.extra.get('fit_speed', 1):.2f} cho vừa",
-                   "long": "quá dài so với thời gian nói – sửa ngắn lại hoặc bấm AI rút gọn"}.get(fit, "chưa lồng tiếng")
             shift = float(s.extra.get("dub_shift", 0) or 0)
-            self.fit.setText(f"Độ vừa: {FIT_TEXT.get(fit, '–')} {tip}"
-                             + (f" · giọng đã dời {shift:+.2f} s (chuột phải đoạn giọng trên timeline để đặt lại)"
+            self.fit.setText(f"Độ vừa: {FIT_TEXT.get(fit, '–')} " + fit_tip(s).replace("\n", " · ")
+                             + (f" · giọng đã kéo dời {shift:+.2f} s (chuột phải đoạn giọng trên timeline để đặt lại)"
                                 if shift else ""))
         finally:
             self._filling = False

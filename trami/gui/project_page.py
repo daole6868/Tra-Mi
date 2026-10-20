@@ -53,6 +53,9 @@ class ProjectPage(QWidget):
         self._save_edit_timer = QTimer(self, singleShot=True, interval=500, timeout=self._save_edit_now)
         self._live_timer = QTimer(self, singleShot=True, interval=40, timeout=self._apply_live)
         self._save_segs_timer = QTimer(self, singleShot=True, interval=800, timeout=self._save_segs_now)
+        # đổi cách xếp giọng ở tab Lồng tiếng -> xếp lại bản lồng (đợi người dùng chỉnh xong)
+        self._relayout_timer = QTimer(self, singleShot=True, interval=900,
+                                      timeout=lambda: self._relayout("Đã xếp lại giọng lồng theo cách mới"))
 
         # ---------------- thanh trên cùng: tên dự án · trạng thái lưu · Xuất (như trình dựng phim)
         self.name = QLineEdit()
@@ -805,6 +808,10 @@ class ProjectPage(QWidget):
         self.d_speed.setDecimals(2)
         self.d_speed.setValue(1.2)
         self.d_speed.setPrefix("×")
+        from ..tts import OVERFLOW_HELP, OVERFLOW_MODES
+
+        self.d_line_mode = combo([("", "Theo cài đặt chung")] + list(OVERFLOW_MODES), "")
+        self.d_line_mode.setMinimumContentsLength(12)
         self.d_speed.setToolTip("Tốc độ đọc tối thiểu cho các câu đã tích: câu đang tự đọc nhanh hơn mức này (để vừa thời "
                                 "gian nhân vật nói) giữ nguyên, câu chậm hơn được nâng lên. Dưới ×1 = đọc chậm lại nếu còn chỗ")
         spk.add(flow(self.d_picked, hbox(label("Giọng cho câu đã tích", "muted"), self.d_line_voice),
@@ -815,6 +822,11 @@ class ProjectPage(QWidget):
                             on_click=lambda: self._apply_speed(sorted(self.model.selected), self.d_speed.value())),
                      button("Về tốc độ gốc", "refresh", "Bỏ tốc độ đặt tay của các câu đã tích – đọc như lúc tạo bản lồng",
                             flat=True, on_click=lambda: self._apply_speed(sorted(self.model.selected), None)),
+                     hbox(label("Khi câu dài", "muted"), self.d_line_mode),
+                     button("Đặt cách xếp", "layers", "Cách xử lý riêng cho các câu đã tích khi đọc dài hơn chỗ trống "
+                            "– xếp lại bản lồng ngay (không đọc lại)",
+                            on_click=lambda: self._apply_overflow(sorted(self.model.selected),
+                                                                  self.d_line_mode.currentData() or None)),
                      button("AI rút gọn", "sparkle", "AI viết lại ngắn hơn các câu đã tích cho vừa thời gian nhân vật "
                             "nói (cần công cụ dịch AI)", on_click=self._shorten_picked),
                      button("Nghe câu", "play", "Phát câu đang chọn trên trình phát bên phải", on_click=self._play_line)))
@@ -839,6 +851,48 @@ class ProjectPage(QWidget):
         self.d_skipsong = f.row("Giữ nguyên bài hát (không lồng câu 🎵)", Switch(bool(self.settings.get("dub_skip_songs", True))))
         self.d_skipsong.toggledOn.connect(self._skip_song_changed)
         mix.add(f)
+        mix.add(label("Khi câu đọc dài hơn chỗ trống (tới lúc câu sau bắt đầu)", "h3"))
+        g = Form()
+        st = self.settings
+        self.d_overflow = g.row("Cách xếp", combo(OVERFLOW_MODES, st.get("dub_overflow", "smart")))
+        self.d_overflow.setMinimumContentsLength(18)
+        self.d_overflow_help = label("", "muted", wrap=True)
+        self._overflow_help = OVERFLOW_HELP
+
+        def dspin(lo, hi, step, val, prefix="", suffix="", tip=""):
+            w = QDoubleSpinBox()
+            w.setRange(lo, hi)
+            w.setSingleStep(step)
+            w.setDecimals(2)
+            w.setValue(float(val))
+            w.setPrefix(prefix)
+            w.setSuffix(suffix)
+            w.setToolTip(tip)
+            w.setMaximumWidth(120)
+            return w
+        self.d_maxspeed = g.row("Tăng tốc tối đa", dspin(
+            1.0, 2.0, 0.05, st.get("tts_max_speedup", 1.3), "×", "", "Đọc nhanh hơn tối đa bao nhiêu để vừa chỗ (×1 = "
+            "không bao giờ tăng tốc). Cao hơn ×1,3 nghe vội, mất tự nhiên"))
+        self.d_lead = g.row("Đọc sớm tối đa (Tự động)", dspin(
+            0.0, 3.0, 0.1, st.get("dub_lead_max", 1.0), "", " s", "Câu dài được bắt đầu sớm hơn lúc nhân vật nói tối "
+            "đa bao nhiêu giây (chỉ dùng khoảng lặng phía trước, không đè câu trước)"))
+        self.d_maxlag = g.row("Câu sau lùi tối đa (Tự động)", dspin(
+            0.3, 10.0, 0.1, st.get("dub_max_lag", 2.0), "", " s", "Nhiều câu dài liền nhau: giọng được trễ so với hình "
+            "tối đa bao nhiêu giây; quá mức này câu sau vào đúng mức đó và đọc đè lên đuôi câu trước"))
+        self.d_follow = g.row("Phụ đề chạy theo giọng lồng", Switch(bool(st.get("dub_subs_follow", True))))
+        self.d_follow.setToolTip("Câu có giọng đọc sớm / bị lùi / đọc dài hơn phụ đề: phụ đề tiếng Việt hiện đúng lúc "
+                                 "giọng đọc (xem trước + video xuất)")
+        self.d_autoshort = g.row("AI tự rút gọn câu quá dài", Switch(bool(st.get("dub_auto_shorten", True))))
+        self.d_autoshort.setToolTip("Khi bấm Tạo bản lồng tiếng: câu vẫn quá dài sau khi tăng tốc được AI viết lại ngắn "
+                                    "hơn rồi đọc lại (cần công cụ dịch AI; câu bạn tự sửa lời không bị đổi)")
+        mix.add(g)
+        mix.add(self.d_overflow_help)
+        self.d_overflow.currentIndexChanged.connect(self._dub_layout_changed)
+        for w in (self.d_maxspeed, self.d_lead, self.d_maxlag):
+            w.valueChanged.connect(self._dub_layout_changed)
+        self.d_follow.toggledOn.connect(self._dub_follow_changed)
+        self.d_autoshort.toggledOn.connect(self._dub_autoshort_changed)
+        self._update_overflow_help()
         gen = GradientButton("Tạo bản lồng tiếng", "mic", big=True)
         gen.clicked.connect(self.run_dub)
         self.d_status = label("", "muted", wrap=True)   # dòng thống kê dài tự xuống dòng, không đẩy thẻ rộng ra
@@ -957,6 +1011,7 @@ class ProjectPage(QWidget):
             self.glossary.setPlainText(p.data.get("glossary", ""))
             self._fill_edit()
             self._fill_speakers()
+            self._fill_dub_layout()
             self._fill_outputs()
             self._update_summary()
             self._update_timeline()
@@ -1262,6 +1317,8 @@ class ProjectPage(QWidget):
         self._update_count()
         self._refresh_overlay()
         self.saved.setText("● đang sửa…")
+        if self.p:   # thêm / xoá câu: đoạn giọng lồng trên timeline vẫn đúng câu của nó
+            self.tracks.dub = pipeline.dub_clips(self.p, self.model.segs)
         self.tracks.canvas.update()
 
     def _save_segs_now(self):
@@ -1503,7 +1560,12 @@ class ProjectPage(QWidget):
         st = pipeline.effective_style(self.p, self.current_style())
         if st.get("margin_v_rel") is not None:
             st["margin_v"] = st["margin_v_rel"] * self.player.view.out_h
-        self.player.set_subtitles(self.model.segs, st, which, self._karaoke_spans() if st.get("karaoke") else {})
+        segs = self.model.segs
+        try:   # câu có giọng lồng đọc sớm / bị lùi / đọc dài: phụ đề hiện theo đúng lúc giọng đọc (như video xuất)
+            segs = pipeline.subs_follow_dub(self.p, segs, self.collect_edit(), self.settings, which)
+        except Exception:  # noqa: BLE001 – giao diện chưa dựng xong
+            pass
+        self.player.set_subtitles(segs, st, which, self._karaoke_spans() if st.get("karaoke") else {})
 
     def _karaoke_spans(self) -> dict:
         """Đoạn giọng lồng từng câu cho karaoke xem trước (tính ở luồng nền, nhớ theo bản lồng + bật/tắt lồng tiếng)."""
@@ -1582,6 +1644,8 @@ class ProjectPage(QWidget):
             self._shorten_rows([row])
         elif name == "redub":
             self._redub_rows([row])
+        elif name.startswith("overflow:"):
+            self._apply_overflow([row], name.split(":", 1)[1] or None)
 
     def _dub_moved(self, row: int, delta: float | None):
         """Kéo đoạn giọng lồng của 1 câu trên timeline (delta giây) / đặt lại (None) -> xếp lại bản lồng (không đọc lại)."""
@@ -1650,6 +1714,8 @@ class ProjectPage(QWidget):
             return self._play_line(rows[0]) if name == "play" else self._redub_rows(rows)
         if name in ("dub_speed", "dub_speed_reset"):
             return self._apply_speed(rows, tl.speed.value() if name == "dub_speed" else None)
+        if name.startswith("dub_mode:"):
+            return self._apply_overflow(rows, name.split(":", 1)[1] or None)
         if name in ("dub_toggle", "dub_reset_pos"):
             return self._dub_rows_flag(name, rows)
         # ---- video / tiếng gốc
@@ -1721,6 +1787,9 @@ class ProjectPage(QWidget):
             self._select_line(focus)
         if op == "delete":
             self.win.toast(f"Đã xoá {len(rows)} câu", "ok")
+            if any(x.extra.get("tts_file") for x in segs) and (self.p.edit.get("dub") or {}).get("wav"):
+                self._save_segs_now()   # giọng lồng của câu đã xoá bỏ khỏi bản lồng ngay (không đọc lại câu nào)
+                self._relayout(f"Đã xoá {len(rows)} câu và giọng lồng của chúng")
 
     # ------------------------------------------------------------------ timeline: lồng tiếng
     def _dub_rows_flag(self, name: str, rows: list[int]):
@@ -2040,11 +2109,12 @@ class ProjectPage(QWidget):
             return
         e = self.p.edit
         d = self.p.data.get("info", {}).get("duration", 0)
-        self.timeline.dub = (self.p.data.get("dub_layout") or []) if (e.get("dub") or {}).get("enabled") else []
+        clips = pipeline.dub_clips(self.p, self.model.segs)   # theo từng câu: đúng cả khi vừa thêm / xoá câu
+        self.timeline.dub = clips if (e.get("dub") or {}).get("enabled") else []
         keep = (e["trim"].get("start") or 0, e["trim"].get("end") or 0)
         self.timeline.set_data(d, keep, e.get("cuts", []), self.model.segs)
         self.tracks.mark = self.timeline.mark
-        self.tracks.set_data(d, self.model.segs, self.p.data.get("dub_layout") or [], keep, e.get("cuts", []),
+        self.tracks.set_data(d, self.model.segs, clips, keep, e.get("cuts", []),
                              e.get("vsplits", []), e.get("inserts", []), e.get("mute_spans", []))
 
     def _crop_dialog(self):
@@ -2220,6 +2290,91 @@ class ProjectPage(QWidget):
         if not self.loading:
             self._save_edit_timer.start()
 
+    # ------------------------------------------------------------------ cách xếp giọng khi câu dài
+    def _update_overflow_help(self):
+        m = self.d_overflow.currentData() or "smart"
+        self.d_overflow_help.setText(self._overflow_help.get(m, ""))
+        for w in (self.d_lead, self.d_maxlag):
+            w.setEnabled(m == "smart")
+
+    def _fill_dub_layout(self):
+        """Ô cách xếp giọng theo cài đặt hiện tại (có thể đã đổi ở trang Cài đặt)."""
+        st = self.settings
+        set_combo(self.d_overflow, st.get("dub_overflow", "smart"))
+        self.d_maxspeed.setValue(float(st.get("tts_max_speedup", 1.3)))
+        self.d_lead.setValue(float(st.get("dub_lead_max", 1.0)))
+        self.d_maxlag.setValue(float(st.get("dub_max_lag", 2.0)))
+        self.d_follow.setChecked(bool(st.get("dub_subs_follow", True)))
+        self.d_autoshort.setChecked(bool(st.get("dub_auto_shorten", True)))
+        self._update_overflow_help()
+
+    def _dub_layout_changed(self, *_):
+        """Đổi cách xếp / tăng tốc tối đa / đọc sớm / trễ tối đa -> lưu + xếp lại bản lồng đang dùng (không đọc lại)."""
+        self._update_overflow_help()
+        if self.loading:
+            return
+        from ..config import save_settings
+
+        save_settings({"dub_overflow": self.d_overflow.currentData() or "smart",
+                       "tts_max_speedup": round(self.d_maxspeed.value(), 2),
+                       "dub_lead_max": round(self.d_lead.value(), 2), "dub_max_lag": round(self.d_maxlag.value(), 2)})
+        self.settings = load_settings()
+        if self.p and any(x.extra.get("tts_file") for x in self.model.segs) and (self.p.edit.get("dub") or {}).get("wav"):
+            self._relayout_timer.start()
+
+    def _dub_follow_changed(self, on: bool):
+        if self.loading:
+            return
+        from ..config import save_settings
+
+        save_settings({"dub_subs_follow": on})
+        self.settings = load_settings()
+        self._refresh_overlay()
+
+    def _dub_autoshort_changed(self, on: bool):
+        if not self.loading:
+            from ..config import save_settings
+
+            save_settings({"dub_auto_shorten": on})
+
+    def _relayout(self, what: str, replay_row: int | None = None):
+        """Xếp lại bản lồng tiếng đang dùng theo cài đặt / cách xếp mới (vài giây, không đọc lại câu nào)."""
+        if not self.p:
+            return
+        self._replay_row = replay_row
+
+        def fn(j, p):
+            pipeline.relayout(p, None, j.update, j.cancelled)
+            sts = p.data.get("dub_stats") or {}
+            return {"message": what + " – " + pipeline.dub_summary(p) if sts else what}
+        self.submit("redub", what, fn)
+
+    def _apply_overflow(self, rows: list[int], mode: str | None):
+        """Cách xếp riêng cho các câu (None = theo cài đặt chung) -> xếp lại bản lồng ngay."""
+        from .subs_model import OVERFLOW_SHORT
+
+        segs = self.model.segs
+        rows = [r for r in rows if 0 <= r < len(segs)]
+        if not rows:
+            return self.win.toast("Tích chọn câu trước (cột Chọn, hoặc chọn khối trên dòng Lồng tiếng của timeline)", "warn")
+        changed = 0
+        for r in rows:
+            ex = segs[r].extra
+            old = ex.get("overflow")
+            if mode:
+                ex["overflow"] = mode
+            else:
+                ex.pop("overflow", None)
+            changed += old != ex.get("overflow")
+        self.model.dataChanged.emit(self.model.index(rows[0], 0), self.model.index(rows[-1], self.model.columnCount() - 1))
+        self._save_segs_now()
+        what = f"'{OVERFLOW_SHORT.get(mode, mode)}'" if mode else "cách xếp chung"
+        if not changed:
+            return self.win.toast(f"{len(rows)} câu đã dùng {what}", "info")
+        if not any(x.extra.get("tts_file") for x in segs):
+            return self.win.toast(f"Đã đặt {what} cho {len(rows)} câu – áp dụng khi bấm Tạo bản lồng tiếng", "ok")
+        self._relayout(f"Đã đặt {what} cho {len(rows)} câu", rows[0])
+
     def _skip_song_changed(self, on: bool):
         if self.loading:
             return
@@ -2312,12 +2467,7 @@ class ProjectPage(QWidget):
             return self.win.toast(f"{len(rows)} câu đã ở {what}", "info")
         if not any(s.extra.get("tts_file") for s in segs):
             return self.win.toast(f"Đã đặt {what} cho {len(rows)} câu – áp dụng khi bấm Tạo bản lồng tiếng", "ok")
-        self._replay_row = rows[0]
-
-        def fn(j, p):
-            pipeline.relayout(p, None, j.update, j.cancelled)
-            return {"message": f"Đã đặt {what} cho {len(rows)} câu – trình phát đang dùng bản mới"}
-        self.submit("redub", f"Đặt {what} cho {len(rows)} câu", fn)
+        self._relayout(f"Đã đặt {what} cho {len(rows)} câu", rows[0])
 
     def _play_line(self, row: int | None = None):
         rows = [row] if row is not None else self._dub_current_rows()
@@ -2327,7 +2477,7 @@ class ProjectPage(QWidget):
         # dừng khi GIỌNG LỒNG của câu đọc xong (giọng Việt thường dài hơn phụ đề, có thể lấn sang ~0,2 s đầu câu sau);
         # trước đây dừng ở cuối phụ đề + 0,35 s -> mất chữ cuối
         end, start = s.end, s.start
-        for a, b, k, *_ in (self.p.data.get("dub_layout") or []):
+        for a, b, k, *_ in pipeline.dub_clips(self.p, self.model.segs):
             if int(k) == rows[0] and (self.p.edit.get("dub") or {}).get("enabled"):
                 end, start = max(end, float(b)), min(start, float(a))
         self._stop_at = end + 0.25
