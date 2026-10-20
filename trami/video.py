@@ -372,11 +372,19 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
         v = "vf"
     fc.append(f"[{v}]format=yuv420p[vout]")
 
-    # ================= ÂM THANH
+    # ================= ÂM THANH (cách trộn dùng chung với bộ trộn trực tiếp trong trình phát: trami/audiomix.py)
+    from .audiomix import audio_settings, gains as mix_gains, pitch_filter, use_stems
+
     amix_inputs: list[str] = []
-    vol = float(spec.get("volume", 1.0))
     dub = spec.get("dub") or {}
     use_dub = bool(dub.get("enabled") and dub.get("wav") and Path(dub["wav"]).exists())
+    aset = audio_settings(spec)
+    bgm = spec.get("bgm") or {}
+    has_bgm = bool(bgm.get("path") and Path(bgm["path"]).exists())
+    bg_ok = bool(dub.get("bg_wav") and Path(dub["bg_wav"]).exists())
+    stems_on = use_stems(aset, bg_ok, use_dub)
+    g = mix_gains(aset, stems_on, use_dub, has_bgm)
+    pf = pitch_filter(float(aset.get("pitch") or 1.0))
     tempo = (',' + ','.join(_atempo_chain(speed))) if abs(speed - 1) > 1e-3 else ''
     counter = [0]
     span = seek1 - seek0  # độ dài đoạn video đầu vào sau khi seek
@@ -399,52 +407,44 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
                       f"aselect='{expr}',asetpts=N/SR/TB[{lab}]")
         return lab
 
-    bg_ok = use_dub and dub.get("bg_wav") and Path(dub["bg_wav"]).exists()
-    if bg_ok and not spec.get("mute_original"):
+    if stems_on:
         # nền = nhạc + hiệu ứng đã tách (không còn giọng Trung)
-        lab = ext_audio(dub["bg_wav"])
-        fc.append(f"[{lab}]volume={vol * float(dub.get('bg_volume', 1.0)):.3f}{tempo}[bgx]")
-        amix_inputs.append("[bgx]")
-        # giọng gốc: giữ nguyên ở các đoạn đang hát, còn lại để nhỏ/tắt
+        if g["bg"] > 0.001:
+            lab = ext_audio(dub["bg_wav"])
+            fc.append(f"[{lab}]volume={g['bg']:.3f}{tempo}[bgx]")
+            amix_inputs.append("[bgx]")
+        # giọng gốc đã tách: nhỏ / tắt, riêng đoạn hát giữ to (nếu bật "giữ nguyên đoạn hát")
         voc = dub.get("vocals_wav")
         spans = dub.get("song_spans") or []
-        base_v = float(dub.get("vocals_volume", 0.0))
-        if voc and Path(voc).exists() and (spans or base_v > 0.001):
+        if voc and Path(voc).exists() and (g["voice"] > 0.001 or (spans and g["voice_song"] > 0.001)):
             # mốc thời gian lúc này là của file gốc (trước khi cắt) vì -ss đã dời về 0 tại seek0
             cond = "+".join(f"between(t,{a - seek0:.3f},{b - seek0:.3f})" for a, b in spans) or "0"
-            pre = f"volume='if({cond},{vol:.3f},{base_v * vol:.3f})':eval=frame"
+            pre = f"volume='if({cond},{g['voice_song']:.3f},{g['voice']:.3f})':eval=frame" + (f",{pf}" if pf else "")
             lab = ext_audio(voc, pre)
             fc.append(f"[{lab}]anull{tempo}[vcx]")
             amix_inputs.append("[vcx]")
-    else:
-        orig_vol = vol * (float(dub.get("original_volume", 0.15)) if use_dub else 1.0)
-        if spec.get("mute_original"):
-            orig_vol = 0.0
-        if has_a and orig_vol > 0.001:
-            af = [f"volume={orig_vol:.3f}"] + _atempo_chain(speed)
-            if spec.get("pitch_shift"):
-                ps = float(spec["pitch_shift"])
-                af.insert(0, f"asetrate=44100*{ps:.4f},aresample=44100,atempo={1 / ps:.4f}")
-            fc.append(f"[a0]aresample=44100,{','.join(af)}[ao]")
-            amix_inputs.append("[ao]")
-    bgm = spec.get("bgm") or {}
-    has_bgm = bool(bgm.get("path") and Path(bgm["path"]).exists())
-    duck = has_bgm and use_dub and bgm.get("duck", True)   # nhạc nền thêm tự nhỏ xuống khi có lời lồng tiếng
-    if use_dub:
+    elif has_a and g["orig"] > 0.001:
+        af = [f"volume={g['orig']:.3f}"] + _atempo_chain(speed)
+        if pf:
+            af.insert(0, pf)
+        fc.append(f"[a0]aresample=44100,{','.join(af)}[ao]")
+        amix_inputs.append("[ao]")
+    duck = has_bgm and use_dub and aset.get("duck", True) and g["dub"] > 0.001 and g["bgm"] > 0.001
+    if use_dub and g["dub"] > 0.001:
         lab = ext_audio(dub["wav"])
         split = ",asplit=2[dso][dsk]" if duck else "[dso]"
-        fc.append(f"[{lab}]volume={float(dub.get('dub_volume', 1.0)):.3f}{tempo}{split}")
+        fc.append(f"[{lab}]volume={g['dub']:.3f}{tempo}{split}")
         amix_inputs.append("[dso]")
     if has_a and "[ao]" not in amix_inputs:
         fc.append("[a0]anullsink")  # âm thanh gốc không dùng tới
-    if has_bgm:
+    if has_bgm and g["bgm"] > 0.001:
         inputs += ["-stream_loop", "-1", "-i", str(Path(bgm["path"]).resolve())]
         bi = n_in
         n_in += 1
-        fc.append(f"[{bi}:a]aresample=44100,aformat=channel_layouts=stereo,volume={float(bgm.get('volume', 0.2)):.3f},"
+        fc.append(f"[{bi}:a]aresample=44100,aformat=channel_layouts=stereo,volume={g['bgm']:.3f},"
                   f"atrim=0:{final_dur:.3f}" + ("[bgr]" if duck else "[bgo]"))
         if duck:
-            # giọng lồng làm "chìa khoá": có lời -> nhạc giảm ~10–15 dB trong 20 ms, hết lời -> lên lại trong 0,4 s
+            # giọng lồng làm "chìa khoá": có lời -> nhạc giảm ~10–16 dB trong 20 ms, hết lời -> lên lại trong 0,4 s
             fc.append("[dsk]aformat=channel_layouts=stereo[dsk2];"
                       "[bgr][dsk2]sidechaincompress=threshold=0.02:ratio=8:attack=20:release=400[bgo]")
         amix_inputs.append("[bgo]")

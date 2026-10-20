@@ -60,7 +60,7 @@ class ProjectPage(QWidget):
         self.name.editingFinished.connect(self._rename)
         self.saved = label("", "muted")
         export_btn = GradientButton("Xuất video", "export")
-        export_btn.clicked.connect(lambda: self.tabs.set_current(7))
+        export_btn.clicked.connect(lambda: self.tabs.set_current(self.TAB_EXPORT))
         b_dir = IconButton("folder", "Mở thư mục dự án", 34)
         b_dir.clicked.connect(self._open_dir)
         b_del = IconButton("trash", "Xoá dự án", 34)
@@ -105,10 +105,10 @@ class ProjectPage(QWidget):
         # ---------------- trái: thanh công cụ dạng icon + nội dung từng bước
         self.tabs = IconTabs([("Tự động", "bolt"), ("Phụ đề", "subtitles"), ("Xoá phụ đề", "eraser"),
                               ("Chỉnh sửa", "scissors"), ("Kiểu chữ", "palette"), ("Lồng tiếng", "mic"),
-                              ("Tài liệu", "download"), ("Xuất", "export")])
+                              ("Âm thanh", "volume"), ("Tài liệu", "download"), ("Xuất", "export")])
         self.stack = QStackedWidget()
         for build in (self._tab_auto, self._tab_subs, self._tab_hardsub, self._tab_edit, self._tab_style,
-                      self._tab_dub, self._tab_models, self._tab_export):
+                      self._tab_dub, self._tab_audio, self._tab_models, self._tab_export):
             self.stack.addWidget(build())
         self.tabs.changed.connect(self._tab_changed)
         tools = Card(padding=theme.PANEL_PAD)
@@ -324,6 +324,7 @@ class ProjectPage(QWidget):
         return w
 
     # ================================================================== TAB: Xoá phụ đề cũ
+    TAB_HARDSUB, TAB_STYLE, TAB_DUB, TAB_AUDIO, TAB_MODELS, TAB_EXPORT = 2, 4, 5, 6, 7, 8
     HS_MODES = [("none", "Không xoá", "x"), ("inpaint", "Xoá sạch (AI)", "sparkle"), ("patch", "Vá nền", "image"),
                 ("blur", "Làm mờ", "eye"), ("box", "Che dải màu", "stack"), ("delogo", "Delogo", "eraser")]
     HS_HELP = {
@@ -332,15 +333,15 @@ class ProjectPage(QWidget):
                    "(nên có card NVIDIA).<br>Cách dùng: ① khoanh vùng chữ (hoặc <i>Tự dò vùng phụ đề</i>) "
                    "② chọn <i>Công nghệ xoá</i> + <i>Độ mạnh</i> ③ bấm <i>Xem thử 1 khung</i> để kiểm tra "
                    "④ bấm <b>Chạy xoá bằng AI</b> ở mục 3 (hoặc cứ bấm <b>Xuất video</b> – tool tự xoá trước khi ghép). "
-                   "Trước khi chạy, video bên trái chỉ làm mờ gần đúng chỗ sẽ xoá.",
+                   "Trước khi chạy, video bên phải chỉ làm mờ gần đúng chỗ sẽ xoá.",
         "patch": "<b>Vá nền</b> – chép dải hình ngay sát vùng chữ (mặc định phía trên) phủ lên chữ cũ, viền mờ dần "
                  "cho hoà vào cảnh. Nhanh như Làm mờ nhưng nhìn tự nhiên hơn khi nền đơn giản (trời, tường, mặt nước, "
                  "nền tối); cảnh nhiều chi tiết có thể thấy vệt lặp. Không cần chạy riêng: áp dụng khi bấm "
-                 "<b>Xuất video</b>; video bên trái hiện gần đúng ngay.",
+                 "<b>Xuất video</b>; video bên phải hiện gần đúng ngay.",
         "blur": "<b>Làm mờ</b> – nhoè vùng chữ thành vệt mờ. Nhanh, không cần chạy riêng: áp dụng khi bấm "
-                "<b>Xuất video</b>. Kéo <i>Độ mờ</i> cho tới khi không đọc được chữ cũ (video bên trái hiện gần đúng).",
+                "<b>Xuất video</b>. Kéo <i>Độ mờ</i> cho tới khi không đọc được chữ cũ (video bên phải hiện gần đúng).",
         "box": "<b>Che dải màu</b> – phủ một dải màu đặc lên vùng chữ, phụ đề Việt đặt đè lên. Nhanh, gọn, hợp video "
-               "nền tối. Chọn <i>Màu</i> + <i>Độ đục</i>; video bên trái hiện đúng như khi xuất.",
+               "nền tối. Chọn <i>Màu</i> + <i>Độ đục</i>; video bên phải hiện đúng như khi xuất.",
         "delogo": "<b>Delogo</b> – bộ lọc của FFmpeg lấp vùng bằng màu viền xung quanh. Rất nhanh, hợp logo / chữ nhỏ; "
                   "chữ to sẽ thành vệt nhoè. Áp dụng khi bấm <b>Xuất video</b>.",
     }
@@ -349,7 +350,7 @@ class ProjectPage(QWidget):
         sv = lambda *_: (self._save_edit_timer.start(), self._live_timer.start())  # noqa: E731
         # --- bước 1: khoanh vùng
         area = SectionCard("1. Khoanh vùng chữ cần xoá", "eraser",
-                           "Kéo chuột ngay trên VIDEO bên trái (hoặc trên ảnh dưới đây) để khoanh vùng phụ đề Trung – "
+                           "Kéo chuột ngay trên VIDEO bên phải (hoặc trên ảnh dưới đây) để khoanh vùng phụ đề Trung – "
                            "khoanh nhiều vùng được, cả logo. Kéo 4 chấm trắng trên 4 cạnh để đổi cao / thấp / dài / "
                            "ngắn, kéo giữa vùng để di chuyển, bấm × để xoá vùng.")
         self.hs_editor = RegionEditor(multi=True)
@@ -402,7 +403,7 @@ class ProjectPage(QWidget):
                             on_click=self._preview_hardsub),
                      button("Về ảnh gốc", "refresh", on_click=self._clear_preview)))
         self.hs_run = GradientButton("Chạy xoá bằng AI (cả video)", "sparkle")
-        self.hs_run.setToolTip("Xoá phụ đề cũ trên toàn bộ video ngay bây giờ. Xong thì trình phát bên trái chiếu bản "
+        self.hs_run.setToolTip("Xoá phụ đề cũ trên toàn bộ video ngay bây giờ. Xong thì trình phát bên phải chiếu bản "
                                "đã xoá; Xuất video dùng lại bản này, không phải chạy lại.")
         self.hs_run.clicked.connect(self.run_inpaint)
         self.hs_viewclean = Switch(True)
@@ -413,7 +414,7 @@ class ProjectPage(QWidget):
         self.hs_status = label("", "muted", wrap=True)
         chk.add(self.hs_status)
         chk.add(hbox(button("Đi tới Xuất video", "export", "Mở tab Xuất để ghép phụ đề Việt + lồng tiếng và xuất MP4",
-                            on_click=lambda: self.tabs.set_current(7)), None))
+                            on_click=lambda: self.tabs.set_current(self.TAB_EXPORT)), None))
         w = QWidget()
         self.hs_mode.setParent(w)
         self.hs_mode.hide()
@@ -501,22 +502,6 @@ class ProjectPage(QWidget):
         self.e_sharpen = f3.row("Làm nét", Switch())
         self.e_denoise = f3.row("Khử nhiễu hình", Switch())
         color.add(f3)
-        # --- âm thanh
-        audio = SectionCard("Âm thanh", "volume")
-        f4 = Form()
-        self.e_volume = f4.row("Âm lượng gốc", SliderRow(0, 2, 0.05, 1))
-        self.e_mute = f4.row("Tắt tiếng gốc", Switch())
-        self.e_pitch = f4.row("Đổi cao độ giọng gốc", combo([("0", "Không"), ("0.94", "Trầm hơn"), ("1.06", "Cao hơn")], "0"))
-        self.bgm_name = label("Chưa chọn", "muted")
-        f4.row("Nhạc nền thêm", hbox(button("Chọn nhạc…", "music", on_click=lambda: self._pick_asset("bgm")),
-                                     button("", "x", "Bỏ nhạc nền", flat=True, on_click=lambda: self._clear_asset("bgm")),
-                                     self.bgm_name, None))
-        self.e_bgmvol = f4.row("Âm lượng nhạc nền", SliderRow(0, 1, 0.05, 0.2))
-        self.e_bgmduck = f4.row("Tự giảm nhạc khi có lời", Switch(True),
-                                "Khi có giọng lồng tiếng, nhạc nền thêm vào tự nhỏ xuống cho nghe rõ lời, hết lời thì "
-                                "to lại (áp dụng khi xuất video)")
-        self.e_bgmduck.toggledOn.connect(sv)
-        audio.add(f4)
         # --- logo & chữ
         brand = SectionCard("Logo & chữ", "image")
         f5 = Form()
@@ -538,12 +523,12 @@ class ProjectPage(QWidget):
         self.e_fout = f6.row("Mờ dần cuối (giây)", SliderRow(0, 5, 0.1, 0, 1))
         fx.add(f6)
 
-        for w in (self.e_aspect, self.e_amode, self.e_res, self.e_rot, self.e_pitch, self.e_wmpos, self.e_textpos):
+        for w in (self.e_aspect, self.e_amode, self.e_res, self.e_rot, self.e_wmpos, self.e_textpos):
             w.currentIndexChanged.connect(sv)
-        for w in (self.e_zoom, self.e_speed, self.e_bright, self.e_contrast, self.e_sat, self.e_gamma, self.e_volume,
-                  self.e_bgmvol, self.e_wmscale, self.e_wmop, self.e_fin, self.e_fout):
+        for w in (self.e_zoom, self.e_speed, self.e_bright, self.e_contrast, self.e_sat, self.e_gamma,
+                  self.e_wmscale, self.e_wmop, self.e_fin, self.e_fout):
             w.changed.connect(sv)
-        for w in (self.e_fliph, self.e_flipv, self.e_sharpen, self.e_denoise, self.e_mute):
+        for w in (self.e_fliph, self.e_flipv, self.e_sharpen, self.e_denoise):
             w.toggledOn.connect(sv)
         self.e_text.textChanged.connect(sv)
         self.e_textcolor.changed.connect(sv)
@@ -552,16 +537,49 @@ class ProjectPage(QWidget):
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 2, 0)
         v.setSpacing(theme.GAP)
-        for c in (cut, frame, color, audio, brand, fx):
+        for c in (cut, frame, color, brand, fx):
             v.addWidget(c)
         v.addStretch(1)
         return scroll(w)
+
+    # ================================================================== TAB: Âm thanh
+    def _tab_audio(self):
+        from .audio_tab import AudioTab
+
+        self.audio_tab = AudioTab(self)
+        self.audio_tab.changed.connect(self._audio_changed)
+        self.audio_tab.sources_changed.connect(lambda: self._update_player_audio(force=True))
+        self.audio_tab.solo.connect(self._audio_solo)
+        return scroll(self.audio_tab)
+
+    def _audio_changed(self):
+        """Đổi âm lượng / tắt lớp / nguồn ở tab Âm thanh: nghe NGAY trên trình phát + lưu."""
+        if self.loading or not self.p:
+            return
+        self._save_edit_timer.start()
+        self._apply_audio_now()
+
+    def _apply_audio_now(self):
+        mix = self.player.live.mix
+        if mix is None or not self.p:
+            return
+        try:
+            ed = self.collect_edit()
+        except Exception:  # noqa: BLE001 – giao diện chưa dựng xong
+            return
+        st = pipeline.audio_state(self.p, ed, getattr(self, "_audio_srcs", None))
+        pipeline.apply_audio_state(mix, st)
+        self.audio_tab.show_state(st, getattr(self, "_audio_srcs", {}) or {})
+
+    def _audio_solo(self, key):
+        if self.player.live.mix is not None:
+            self.player.live.mix.solo = key
 
     # ================================================================== TAB: Kiểu chữ
     def _tab_style(self):
         sv = lambda *_: (self._save_edit_timer.start(), self._live_timer.start())  # noqa: E731
         card = SectionCard("Kiểu phụ đề ghép vào video", "palette",
-                           "Xem trước trực tiếp trên khung video bên trái – đúng cỡ chữ, chỗ đặt như video xuất ra. "
+                           "Xem trước trực tiếp trên khung video bên phải – đúng cỡ chữ, chỗ đặt như video xuất ra. "
                            "Kéo phụ đề trên video để đặt chỗ khác; khi bật nền hộp, kéo 4 chấm trên 4 cạnh nền "
                            "để đổi chiều cao / độ dài.")
         f = Form()
@@ -696,7 +714,7 @@ class ProjectPage(QWidget):
         spk = SectionCard("2. Giọng đọc cho từng người nói", "users",
                           "Mỗi nhân vật (S1, S2…) một giọng. Bảng câu bên dưới: bấm đúp ô Tiếng Việt để sửa lời đọc, "
                           "tích cột Chọn để đổi giọng / tạo lại giọng riêng những câu đó – bản lồng tiếng đang dùng được "
-                          "cập nhật ngay, trình phát bên trái nghe được luôn.")
+                          "cập nhật ngay, trình phát bên phải nghe được luôn.")
         self.d_engine = combo(C.TTS_ENGINES, self.settings.get("tts_engine", "edge"))
         self.d_engine.setMinimumContentsLength(14)
         self.d_engine.currentIndexChanged.connect(self._dub_engine_changed)
@@ -769,7 +787,7 @@ class ProjectPage(QWidget):
                             on_click=self._set_line_voice),
                      button("AI rút gọn", "sparkle", "AI viết lại ngắn hơn các câu đã tích cho vừa thời gian nhân vật "
                             "nói (cần công cụ dịch AI)", on_click=self._shorten_picked),
-                     button("Nghe câu", "play", "Phát câu đang chọn trên trình phát bên trái", on_click=self._play_line)))
+                     button("Nghe câu", "play", "Phát câu đang chọn trên trình phát bên phải", on_click=self._play_line)))
         regen = GradientButton("Tạo lại giọng các câu đã tích", "refresh")
         regen.setToolTip("Đọc lại riêng các câu đã tích theo lời Việt + giọng hiện tại, cập nhật ngay vào bản lồng "
                          "tiếng đang dùng (không đọc lại cả video)")
@@ -783,20 +801,12 @@ class ProjectPage(QWidget):
                      button("Nạp SRT đã dịch…", "download", "Nạp bản dịch làm ở phần mềm khác vào các câu hiện có "
                             "(giữ nguyên lời gốc, thời gian, người nói)", on_click=self._import_translation)))
 
-        mix = SectionCard("3. Tạo bản lồng tiếng & trộn âm thanh", "mic",
+        mix = SectionCard("3. Tạo bản lồng tiếng", "mic",
                           "Mỗi câu phụ đề được đọc thành 1 đoạn giọng riêng và ghép đúng lúc nhân vật nói – xem từng đoạn "
                           "ở dòng \"Lồng tiếng\" trên timeline phía dưới: bấm đúp để nghe, kéo sang trái / phải để dời.")
         f = Form()
         self.d_rate = f.row("Tốc độ đọc", combo([("-10%", "Chậm"), ("+0%", "Bình thường"), ("+10%", "Nhanh"), ("+20%", "Rất nhanh")], "+0%"))
         self.d_skipsong = f.row("Giữ nguyên bài hát (không lồng câu 🎵)", Switch(bool(self.settings.get("dub_skip_songs", True))))
-        self.d_bg = f.row("Âm lượng nhạc nền (đã tách)", SliderRow(0, 1.5, 0.05, 1))
-        self.d_voc = f.row("Giọng Trung gốc còn lại", SliderRow(0, 1, 0.05, 0))
-        self.d_orig = f.row("Tiếng gốc (khi chưa tách)", SliderRow(0, 1, 0.05, 0.15))
-        self.d_vol = f.row("Âm lượng giọng lồng", SliderRow(0.2, 2, 0.05, 1))
-        self.d_enabled = f.row("Dùng bản lồng tiếng (xem trước + khi xuất)", Switch(False))
-        for w in (self.d_bg, self.d_voc, self.d_orig, self.d_vol):
-            w.changed.connect(lambda *_: self._save_edit_timer.start())
-        self.d_enabled.toggledOn.connect(lambda *_: self._save_edit_timer.start())
         self.d_skipsong.toggledOn.connect(self._skip_song_changed)
         mix.add(f)
         gen = GradientButton("Tạo bản lồng tiếng", "mic", big=True)
@@ -805,8 +815,9 @@ class ProjectPage(QWidget):
         mix.add(gen)
         mix.add(self.d_status)
         mix.add(flow(button("Nghe bản lồng", "volume", flat=True, on_click=self._open_dub),
-                     button("Tải MP3 bản lồng", "download", "Lưu bản lồng tiếng đã trộn nhạc nền thành MP3", flat=True,
-                            on_click=self._save_dub_mp3)))
+                     button("Chỉnh âm lượng giọng lồng / nhạc nền…", "volume",
+                            "Mọi chỉnh âm thanh (bật / tắt bản lồng, nhạc nền, giọng gốc, nhạc thêm) ở tab Âm thanh",
+                            flat=True, on_click=lambda: self.tabs.set_current(self.TAB_AUDIO))))
 
         hist = SectionCard("4. Các bản lồng tiếng đã tạo", "list",
                            "Mỗi lần bấm 'Tạo bản lồng tiếng' = 1 bản MỚI. 'Tạo lại giọng các câu đã tích' sửa THẲNG vào "
@@ -979,7 +990,7 @@ class ProjectPage(QWidget):
         if mode == "none":
             txt = "Không xoá phụ đề cũ."
         elif not self.hs_editor.regions:
-            txt = "⚠ Chưa có vùng nào – kéo chuột trên video bên trái hoặc bấm 'Tự dò vùng phụ đề'."
+            txt = "⚠ Chưa có vùng nào – kéo chuột trên video bên phải hoặc bấm 'Tự dò vùng phụ đề'."
         elif mode != "inpaint":
             txt = "Cách này không cần chạy riêng: tự áp dụng khi bấm Xuất video."
         elif self.player.view.hs.clean:
@@ -991,7 +1002,7 @@ class ProjectPage(QWidget):
             except Exception:  # noqa: BLE001
                 done = False
             txt = ("✓ Đã xoá xong cả video (đang tắt 'Xem bản đã xoá')." if done else
-                   "Chưa chạy xoá AI. Bấm 'Chạy xoá bằng AI' để xoá ngay và xem kết quả trên video bên trái – "
+                   "Chưa chạy xoá AI. Bấm 'Chạy xoá bằng AI' để xoá ngay và xem kết quả trên video bên phải – "
                    "hoặc cứ bấm Xuất video, tool tự xoá trước khi ghép (lâu hơn).")
         self.hs_status.setText(txt)
 
@@ -1026,32 +1037,43 @@ class ProjectPage(QWidget):
         self._dub_key = None
         self._update_player_audio()
 
-    def _update_player_audio(self):
-        """Trình phát trong tool phát luôn bản lồng tiếng (đã trộn nhạc nền) nếu đang bật lồng tiếng."""
+    def _update_player_audio(self, force: bool = False):
+        """Trình phát nghe đúng như video xuất: bộ trộn trực tiếp các lớp âm thanh (tab Âm thanh). File các lớp đổi
+        (vừa tách giọng, tạo / sửa bản lồng, đổi nhạc thêm, đổi cao độ) -> nạp lại các lớp (vài giây, chạy nền);
+        chỉ đổi âm lượng thì áp ngay, không nạp lại."""
         if not self.p:
             return
-        d = self.p.edit.get("dub") or {}
-        on = bool(d.get("enabled") and d.get("wav") and Path(d["wav"]).exists())
-        key = (on, d.get("wav"), Path(d["wav"]).stat().st_mtime if on else 0, d.get("bg_volume"), d.get("vocals_volume"),
-               d.get("original_volume"), d.get("dub_volume"), self.p.edit.get("volume"), self.p.edit.get("mute_original"))
-        if key == getattr(self, "_dub_key", None):
-            return
-        self._dub_key = key
-        self._load_dub_wave()   # sóng âm từng đoạn giọng lồng trên timeline
-        if not on:
-            self.player.set_alt_audio(None)
-            return
+        try:
+            ed = self.p.edit if self.loading else self.collect_edit()   # đang nạp dự án: ô chưa điền xong
+        except Exception:  # noqa: BLE001
+            ed = self.p.edit
+        srcs = pipeline.audio_sources(self.p, ed)
+        key = tuple(sorted((k, f, pre, Path(f).stat().st_mtime if Path(f).exists() else 0)
+                           for k, (f, pre) in srcs.items()))
+        dub_key = (srcs.get("dub"), key)
+        if dub_key != getattr(self, "_dub_key", None):
+            self._dub_key = dub_key
+            self._load_dub_wave()   # sóng âm từng đoạn giọng lồng trên timeline
+        if not force and key == getattr(self, "_audio_key", None) and self.player.live.mix is not None:
+            self._audio_srcs = srcs
+            return self._apply_audio_now()
+        self._audio_key = key
+        self._audio_srcs = srcs
         pid = self.p.id
+        self.audio_tab.show_state(pipeline.audio_state(self.p, ed, srcs), srcs)
 
-        def done(path):
-            if self.p and self.p.id == pid:
-                self.player.set_alt_audio(str(path) if path else None)
-                row = getattr(self, "_play_after_mix", None)
-                if row is not None and path:
-                    self._play_after_mix = None
-                    self._play_line(row)      # vừa tạo lại giọng -> phát luôn câu đó bằng bản mới
-        run_async(lambda: pipeline.dub_preview_audio(Project(pid)), done,
-                  lambda m: self.win.toast("Không trộn được bản nghe thử lồng tiếng: " + m, "err"))
+        def done(mix):
+            if not self.p or self.p.id != pid or self._audio_key != key:
+                return
+            mix.solo = self.player.live.mix.solo if self.player.live.mix is not None else None
+            self.player.set_live_mix(mix)
+            self._apply_audio_now()
+            row = getattr(self, "_play_after_mix", None)
+            if row is not None:
+                self._play_after_mix = None
+                self._play_line(row)      # vừa tạo lại giọng -> phát luôn câu đó bằng bản mới
+        run_async(lambda: pipeline.live_mix(Project(pid), ed), done,
+                  lambda m: self.win.toast("Không chuẩn bị được âm thanh để nghe thử: " + m, "err"))
 
     def _fill_edit(self):
         e = self.p.edit
@@ -1083,12 +1105,9 @@ class ProjectPage(QWidget):
         self.e_gamma.set(col.get("gamma", 1))
         self.e_sharpen.setChecked(bool(col.get("sharpen")))
         self.e_denoise.setChecked(bool(col.get("denoise")))
-        self.e_volume.set(e["volume"])
-        self.e_mute.setChecked(bool(e["mute_original"]))
-        set_combo(self.e_pitch, str(e.get("pitch_shift") or 0) if e.get("pitch_shift") else "0")
-        self.bgm_name.setText(Path(e["bgm"]["path"]).name if e["bgm"].get("path") else "Chưa chọn")
-        self.e_bgmvol.set(e["bgm"].get("volume", 0.2))
-        self.e_bgmduck.setChecked(e["bgm"].get("duck", True) is not False)
+        from ..audiomix import audio_settings
+
+        self.audio_tab.fill(audio_settings(e), bool(e["dub"].get("enabled")), e["bgm"].get("path", ""))
         self.wm_name.setText(Path(e["watermark"]["path"]).name if e["watermark"].get("path") else "Chưa chọn")
         set_combo(self.e_wmpos, e["watermark"].get("position", "top-right"))
         self.e_wmscale.set(e["watermark"].get("scale", 0.15))
@@ -1126,11 +1145,6 @@ class ProjectPage(QWidget):
         self._style_rows()
         # lồng tiếng
         d = e["dub"]
-        self.d_bg.set(d.get("bg_volume", 1.0))
-        self.d_voc.set(d.get("vocals_volume", 0.0))
-        self.d_orig.set(d.get("original_volume", 0.15))
-        self.d_vol.set(d.get("dub_volume", 1.0))
-        self.d_enabled.setChecked(bool(d.get("enabled")))
         set_combo(self.d_engine, self.p.data.get("tts_engine") or self.settings.get("tts_engine", "edge"))
         stems = pipeline.stems(self.p)
         self.d_sepstatus.setText("✓ Đã tách giọng / nhạc nền" if stems else "Chưa tách")
@@ -1141,6 +1155,7 @@ class ProjectPage(QWidget):
 
     def collect_edit(self) -> dict:
         e = self.p.edit
+        aud = self._audio_now()
         return {
             "trim": {"start": self.e_start.value(), "end": self.e_end.value()},
             "cuts": e.get("cuts", []), "crop": e.get("crop"),
@@ -1152,10 +1167,8 @@ class ProjectPage(QWidget):
             "color": {"brightness": self.e_bright.value(), "contrast": self.e_contrast.value(),
                       "saturation": self.e_sat.value(), "gamma": self.e_gamma.value(),
                       "sharpen": self.e_sharpen.isChecked(), "denoise": self.e_denoise.isChecked()},
-            "volume": self.e_volume.value(), "mute_original": self.e_mute.isChecked(),
-            "pitch_shift": float(self.e_pitch.currentData()),
-            "bgm": {"path": e["bgm"].get("path", ""), "volume": self.e_bgmvol.value(),
-                    "duck": self.e_bgmduck.isChecked()},
+            "audio": aud,
+            "bgm": {"path": e["bgm"].get("path", ""), "volume": aud["bgm"], "duck": aud["duck"]},
             "watermark": {"path": e["watermark"].get("path", ""), "position": self.e_wmpos.currentData(),
                           "scale": self.e_wmscale.value(), "opacity": self.e_wmop.value()},
             "text": {"content": self.e_text.text(), "position": self.e_textpos.currentData(),
@@ -1163,11 +1176,12 @@ class ProjectPage(QWidget):
             "fade": {"in": self.e_fin.value(), "out": self.e_fout.value()},
             "subtitles": {"burn": self.st_burn.isChecked(), "which": self.st_which.currentData(),
                           "style": self.current_style()},
-            "dub": {**e["dub"], "bg_volume": self.d_bg.value(), "vocals_volume": self.d_voc.value(),
-                    "original_volume": self.d_orig.value(), "dub_volume": self.d_vol.value(),
-                    "enabled": self.d_enabled.isChecked()},
+            "dub": {**e["dub"], "enabled": self.audio_tab.dub_on.isChecked()},
             "crf": int(self.x_crf.currentData()),
         }
+
+    def _audio_now(self) -> dict:
+        return self.audio_tab.collect()
 
     def _hs_widgets(self) -> dict:
         return {"mode": self.hs_mode.currentData(), "regions": self.hs_editor.regions,
@@ -1368,7 +1382,7 @@ class ProjectPage(QWidget):
         self.run_dub()
 
     def _step_export(self):
-        self.tabs.set_current(7)
+        self.tabs.set_current(self.TAB_EXPORT)
         self.run_render()
 
     def _update_steps(self):
@@ -1811,8 +1825,10 @@ class ProjectPage(QWidget):
         e[kind]["path"] = path
         self.p.data["edit"] = e
         self.p.save()
-        (self.bgm_name if kind == "bgm" else self.wm_name).setText(Path(path).name)
+        (self.audio_tab.bgm_name if kind == "bgm" else self.wm_name).setText(Path(path).name)
         self._update_summary()
+        if kind == "bgm":
+            self._update_player_audio(force=True)
 
     def _clear_asset(self, kind: str):
         self.p.reload()
@@ -1820,7 +1836,9 @@ class ProjectPage(QWidget):
         e[kind]["path"] = ""
         self.p.data["edit"] = e
         self.p.save()
-        (self.bgm_name if kind == "bgm" else self.wm_name).setText("Chưa chọn")
+        (self.audio_tab.bgm_name if kind == "bgm" else self.wm_name).setText("Chưa chọn")
+        if kind == "bgm":
+            self._update_player_audio(force=True)
 
     def _style_preset(self, name: str):
         presets = {
@@ -2114,19 +2132,22 @@ class ProjectPage(QWidget):
         stem = safe_stem(self.p)
         self._save_mp3(st[which], f"{stem}_{'giong' if which == 'vocals' else 'nhacnen'}.mp3")
 
-    def _save_dub_mp3(self):
-        if not (self.p.edit.get("dub") or {}).get("wav"):
-            return self.win.toast("Chưa có bản lồng tiếng", "warn")
-        pid, stem = self.p.id, safe_stem(self.p)
+    def _save_mix_mp3(self):
+        """Tải MP3 toàn bộ âm thanh đã trộn đúng như đang nghe (tab Âm thanh)."""
+        if not self.p:
+            return
+        out, _ = QFileDialog.getSaveFileName(self, "Lưu MP3", str(Path.home() / f"{safe_stem(self.p)}_amthanh.mp3"),
+                                             "MP3 (*.mp3)")
+        if not out:
+            return
+        if not out.lower().endswith(".mp3"):
+            out += ".mp3"
         self.flush()
 
-        def done(path):
-            if path:
-                self._save_mp3(path, f"{stem}_longtieng.mp3")
-            else:
-                self.win.toast("Bật 'Dùng bản lồng tiếng' ở mục 3 trước", "warn")
-        run_async(lambda: pipeline.dub_preview_audio(Project(pid)), done,
-                  lambda m: self.win.toast("Không trộn được bản lồng tiếng: " + m, "err"))
+        def fn(j, p):
+            pipeline.mix_audio_file(p, Path(out), j.update)
+            return {"message": f"Đã lưu {Path(out).name}", "path": out}
+        self.submit("tool", "Tải MP3 bản trộn", fn)
 
     def _open_stem(self, which: str):
         st = pipeline.stems(self.p)
@@ -2209,7 +2230,7 @@ class ProjectPage(QWidget):
 
     # ================================================================== xuất
     def _apply_live(self):
-        """Áp ngay chỉnh sửa (khung hình, màu, tốc độ, đoạn cắt) + kiểu phụ đề lên trình phát bên trái."""
+        """Áp ngay chỉnh sửa (khung hình, màu, tốc độ, đoạn cắt) + kiểu phụ đề lên trình phát bên phải."""
         if not self.p or self.loading:
             return
         try:
@@ -2289,7 +2310,7 @@ class ProjectPage(QWidget):
         self.player.update_sub()
         if i == 2 and not self.hs_editor.pix:
             self._grab_frame()
-        if i == 7:
+        if i == self.TAB_EXPORT:
             self._update_summary()
 
     def _rename(self):

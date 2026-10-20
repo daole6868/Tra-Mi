@@ -360,6 +360,20 @@ def _volume(p: QPainter):
     p.drawArc(QRectF(11, 5.5, 10, 13), -60 * 16, 120 * 16)
 
 
+def _mute(p: QPainter):
+    path = _p()
+    path.moveTo(4, 9.5)
+    path.lineTo(7.5, 9.5)
+    path.lineTo(12, 5.5)
+    path.lineTo(12, 18.5)
+    path.lineTo(7.5, 14.5)
+    path.lineTo(4, 14.5)
+    path.closeSubpath()
+    p.drawPath(path)
+    p.drawLine(QPointF(15, 9.5), QPointF(20, 14.5))
+    p.drawLine(QPointF(20, 9.5), QPointF(15, 14.5))
+
+
 def _crop(p: QPainter):
     path = _p()
     path.moveTo(7, 3)
@@ -460,7 +474,7 @@ ICONS = {
     "eye": _eye, "image": _image, "text": _text, "volume": _volume, "crop": _crop, "list": _list,
     "split": _split, "merge": _merge, "sparkle": _sparkle, "stack": _stack, "chev_left": _chev_left,
     "chev_right": _chev_right, "chev_down": _chev_down, "info": _info, "cpu": _cpu, "minus": _minus, "fit": _fit,
-    "panel_right": _panel_right,
+    "panel_right": _panel_right, "mute": _mute,
 }
 
 

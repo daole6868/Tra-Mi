@@ -717,6 +717,88 @@ class VideoView(QGraphicsView):
         self.sub.set_editable(not regions)
 
 
+class LiveAudio:
+    """Phát bộ trộn trực tiếp (trami/audiomix.LiveMix) ra loa, bám theo vị trí video: đổi âm lượng / tắt lớp / nghe
+    riêng nghe thấy ngay (~0,2 s). Đẩy từng khối nhỏ vào QAudioSink theo nhịp đồng hồ, lệch quá 0,15 s thì nhảy lại
+    đúng chỗ video."""
+    BUFFER = 0.2      # giây đệm trong loa (đổi âm lượng có tác dụng sau tối đa chừng này)
+
+    def __init__(self, owner: QWidget):
+        from ..audiomix import SR
+
+        self.SR = SR
+        self.owner = owner
+        self.mix = None
+        self.sink = None
+        self.io = None
+        self.pos = 0                     # khung (theo thời gian video gốc) đã đưa vào loa
+        self.volume = 0.8
+        self.failed = False              # máy không có thiết bị phát âm thanh
+        self.timer = QTimer(owner, interval=15, timeout=self._feed)
+
+    def ok(self) -> bool:
+        return self.mix is not None and bool(self.mix.tracks) and not self.failed
+
+    def _make_sink(self) -> bool:
+        from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
+
+        dev = QMediaDevices.defaultAudioOutput()
+        if dev.isNull():
+            self.failed = True
+            return False
+        fmt = QAudioFormat()
+        fmt.setSampleRate(self.SR)
+        fmt.setChannelCount(2)
+        fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+        self.sink = QAudioSink(dev, fmt, self.owner)
+        self.sink.setBufferSize(int(self.SR * 4 * self.BUFFER))
+        self.sink.setVolume(self.volume)
+        return True
+
+    def start(self, t: float):
+        if not self.ok() or (self.sink is None and not self._make_sink()):
+            return
+        self.sink.stop()
+        self.pos = int(max(0.0, t) * self.SR)
+        self.io = self.sink.start()
+        self._feed()
+        self.timer.start()
+
+    def stop(self):
+        self.timer.stop()
+        if self.sink is not None:
+            self.sink.stop()
+        self.io = None
+
+    def set_volume(self, v: float):
+        self.volume = v
+        if self.sink is not None:
+            self.sink.setVolume(v)
+
+    def _feed(self):
+        if self.io is None or self.mix is None or self.sink is None:
+            return
+        free = self.sink.bytesFree() // 4
+        if free < 512:
+            return
+        from ..audiomix import to_pcm16
+
+        a, adv = self.mix.render(self.pos, min(free, int(self.SR * 0.1)))
+        self.io.write(to_pcm16(a))
+        self.pos += adv
+
+    def audible(self) -> float:
+        """Giây video đang phát ra loa (trừ phần còn nằm trong bộ đệm)."""
+        if self.sink is None:
+            return self.pos / self.SR
+        buffered = (self.sink.bufferSize() - self.sink.bytesFree()) / 4
+        return (self.pos - buffered * (self.mix.rate if self.mix else 1.0)) / self.SR
+
+    def sync(self, t: float):
+        if self.io is not None and abs(self.audible() - t) > 0.15:
+            self.start(t)
+
+
 class Player(QWidget):
     positionChanged = Signal(float)   # giây
     mediaError = Signal(str)
@@ -732,11 +814,8 @@ class Player(QWidget):
         self.audio = QAudioOutput(self)
         self.mp.setAudioOutput(self.audio)
         self.mp.setVideoOutput(self.view.video)
-        # âm thanh thay thế (bản lồng tiếng đã trộn) phát song song, đồng bộ theo video
-        self.mp2 = QMediaPlayer(self)
-        self.audio2 = QAudioOutput(self)
-        self.mp2.setAudioOutput(self.audio2)
-        self.alt_audio = ""
+        # âm thanh trộn trực tiếp các lớp (tiếng gốc / nhạc nền / giọng gốc / lồng tiếng / nhạc thêm) theo tab Âm thanh
+        self.live = LiveAudio(self)
         self.source = ""
         self.segments: list = []
         self.style: dict = {}
@@ -758,7 +837,6 @@ class Player(QWidget):
         self.vol.setValue(80)
         self.vol.setFixedWidth(80)
         self.audio.setVolume(0.8)
-        self.audio2.setVolume(0.8)
 
         ctrl = QHBoxLayout()
         ctrl.setSpacing(8)
@@ -796,25 +874,24 @@ class Player(QWidget):
     # ------------------------------------------------------------ điều khiển
     def _set_volume(self, v: int):
         self.audio.setVolume(v / 100)
-        self.audio2.setVolume(v / 100)
+        self.live.set_volume(v / 100)
 
-    def set_alt_audio(self, path: str | None):
-        """Phát file âm thanh khác thay cho tiếng của video (vd. bản lồng tiếng). None = tiếng gốc."""
-        path = str(path or "")
-        if path == self.alt_audio:
-            return
-        self.alt_audio = path
-        self.mp2.stop()
-        self.mp2.setSource(QUrl.fromLocalFile(path) if path else QUrl())
-        self.audio.setMuted(bool(path))
-        if path:
-            self.mp2.setPosition(self.mp.position())
-            if self.playing():
-                self.mp2.play()
+    def set_live_mix(self, mix):
+        """Dùng bộ trộn trực tiếp thay cho tiếng của file video (None = tiếng gốc của file). Giữ nguyên vị trí phát."""
+        self.live.stop()
+        self.live.mix = mix
+        if mix is not None:
+            mix.rate = self.mp.playbackRate() or 1.0
+        on = self.live.ok()
+        if on and self.live.sink is None and not self.live._make_sink():
+            on = False
+        self.audio.setMuted(on)
+        if on and self.playing():
+            self.live.start(self.position())
 
     def load(self, path: str, duration: float = 0.0, fps: float = 25.0, height: int = 1080, start: float = 0.0):
         self.mp.stop()
-        self.set_alt_audio(None)
+        self.live.stop()
         self._dur = duration
         self.fps = fps or 25
         self.video_h = height or 1080
@@ -843,8 +920,8 @@ class Player(QWidget):
 
     def seek(self, t: float):
         self.mp.setPosition(int(max(0.0, t) * 1000))
-        if self.alt_audio:
-            self.mp2.setPosition(int(max(0.0, t) * 1000))
+        if self.playing() and self.live.ok():
+            self.live.start(t)
         self._pos(int(max(0.0, t) * 1000))
 
     def step(self, n: int):
@@ -861,12 +938,10 @@ class Player(QWidget):
 
     def _state(self, st):
         self.btn_play.set_icon("pause" if self.playing() else "play")
-        if self.alt_audio:
-            if self.playing():
-                self.mp2.setPosition(self.mp.position())
-                self.mp2.play()
-            else:
-                self.mp2.pause()
+        if self.playing() and self.live.ok():
+            self.live.start(self.position())
+        else:
+            self.live.stop()
 
     def set_edit(self, edit: dict, src_w: int = 0, src_h: int = 0, duration: float = 0.0):
         """Áp các chỉnh sửa (khung hình, màu, tốc độ, đoạn cắt) lên trình phát để xem ngay."""
@@ -877,7 +952,8 @@ class Player(QWidget):
         rate = min(4.0, max(0.25, float(edit.get("speed") or 1.0)))
         if abs(self.mp.playbackRate() - rate) > 1e-3:
             self.mp.setPlaybackRate(rate)
-            self.mp2.setPlaybackRate(rate)
+        if self.live.mix is not None:
+            self.live.mix.rate = rate
         dur = duration or self._dur
         try:
             self.keep = keep_ranges(dur, edit.get("trim"), edit.get("cuts")) if dur else []
@@ -906,8 +982,8 @@ class Player(QWidget):
         t = ms / 1000
         if self._skip_cut(t):
             return
-        if self.alt_audio and self.playing() and abs(self.mp2.position() - ms) > 250:
-            self.mp2.setPosition(ms)  # bù lệch tiếng / hình
+        if self.playing() and self.live.ok():
+            self.live.sync(t)       # bù lệch tiếng / hình
         if self._dur and not self.slider.isSliderDown():
             self.slider.blockSignals(True)
             self.slider.setValue(int(t / self._dur * 1000))

@@ -29,13 +29,15 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `translate.py` (`LLMClient` gọi HTTP: anthropic / OpenAI-compatible / gemini / deepseek / ollama; Google gtx;
   Hy-MT2 trên máy qua `hymt_worker.py`), `voicefix.py` (đọc số, phát hiện giọng AI hỏng, cân âm lượng),
   `gender.py` (đoán giọng nam/nữ mỗi người nói).
+- `trami/audiomix.py` – quy tắc trộn âm thanh dùng chung cho xuất video (`video.build_and_render`) và bộ trộn trực tiếp
+  `LiveMix` của trình phát (`player.LiveAudio`, QAudioSink); cài đặt ở `edit["audio"]`, tab `gui/audio_tab.py`.
 - `trami/jobs.py` – hàng đợi 1 luồng cho tác vụ dài; `trami/gui/*` – giao diện (QPainter), `common.run_async`,
   `WheelGuard` (lăn chuột không đổi ô chọn khi chưa bấm vào). Trang dự án bố cục kiểu trình dựng phim (từ 2.0.28):
-  trái `IconTabs` + 8 tab, giữa trình phát, phải `gui/inspector.LineInspector` (câu đang chọn), dưới `gui/timeline.TrackTimeline`.
+  trái `IconTabs` + 9 tab (Âm thanh = tab 6, `TAB_AUDIO`…`TAB_EXPORT` = 8), giữa trình phát, phải `gui/inspector.LineInspector` (câu đang chọn), dưới `gui/timeline.TrackTimeline`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
   Chụp ảnh kiểm tra giao diện phải nạp theme như `run()`: `theme.load_fonts(); app.setFont(theme.font(10));
   app.setStyleSheet(theme.stylesheet())`.
-- `tests/test_core.py` – `python -m pytest -q tests` (65 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (66 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -351,6 +353,25 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   * Nhạc nền thêm tự giảm khi có lời: `bgm.duck` (mặc định bật, tab Chỉnh sửa) -> dub `asplit` làm sidechain,
     `sidechaincompress=threshold=0.02:ratio=8:attack=20:release=400`. Đo: nhạc -16 dB lúc có lời, 0 dB lúc không lời.
 
+- 2.0.35: "tách tất cả chỗ chỉnh âm thanh thành 1 phần riêng (đang trùng nhau ở Chỉnh sửa / Lồng tiếng), chỉnh thật, tác dụng
+  ngay trên video". Tab mới **Âm thanh** (`gui/audio_tab.py`, giữa Lồng tiếng và Tài liệu; Chỉnh sửa bỏ khung Âm thanh, Lồng
+  tiếng mục 3 bỏ các thanh trộn + công tắc, thêm nút sang tab Âm thanh). 1 nơi lưu: `edit["audio"]` = src (auto/orig/stems),
+  orig, bg, voice, songs, dub, bgm, duck, pitch, master, mute[] (`audiomix.audio_settings` suy ra từ khoá cũ cho dự án cũ:
+  volume, mute_original, pitch_shift, dub.*_volume, bgm.volume/duck; `collect_edit` vẫn ghi bgm.volume/duck + dub.enabled).
+  * `audiomix.gains` (dùng chung): nguồn bản tách -> bg + voice (đoạn hát 🎵 `voice_song` = max(voice, master)), không thì
+    orig; × master; lớp tắt = 0. `video.build_and_render` dựng đồ thị âm thanh từ đó (giọng gốc `volume=if(...)` theo đoạn
+    hát, nhạc thêm `-stream_loop -1` + sidechaincompress khi duck).
+  * **Bộ trộn trực tiếp**: `pipeline.audio_sources/audio_state/live_mix` giải mã mỗi lớp 1 lần thành PCM 44,1 kHz
+    (`work/live/<lớp>_<md5>.raw`, memmap) -> `audiomix.LiveMix.render` trộn từng khối ~0,1 s (solo, đoạn hát, nhạc thêm
+    lặp theo thời gian SAU khi cắt + giảm −16 dB khi có lời, mờ dần, tốc độ) -> `player.LiveAudio` (QAudioSink đẩy PCM,
+    timer 15 ms, đệm 0,2 s, bám video: lệch > 0,15 s thì nhảy). Có bộ trộn -> tắt tiếng video. Kéo thanh / tắt / Nghe riêng
+    -> `project_page._apply_audio_now` -> đổi `mix.g` -> nghe ở khối kế tiếp. Đổi file / cao độ -> giải mã lại (vài giây).
+    Bỏ `dub_preview_audio` + `set_alt_audio` (m4a trộn sẵn). Không có loa (máy thử) -> `LiveAudio.failed`, video tự bật tiếng.
+  * Đo: xuất video vs bộ trộn trực tiếp lệch ≤ 0,44 dB mỗi lớp (nhạc nền, giọng gốc thường / đoạn hát, lồng tiếng, nhạc
+    thêm có / không lời). Tải MP3 bản trộn = `pipeline.mix_audio_file` (đúng LiveMix, khối 10 s).
+  * Lồng tiếng lần đầu khi chưa tách mà tiếng gốc > 50 % -> tự hạ tiếng gốc 15 % (như mặc định cũ).
+  * `widgets.FlowLayout`: các ô trong 1 hàng căn giữa theo chiều dọc. Chữ hướng dẫn "video bên trái" -> "bên phải".
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -368,3 +389,5 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (temperature 0,6 chưa nghe thử trên mô hình thật), 6 giọng thu âm sạch (cần vieneu>=3.8.3), Vá nền trên video thật.
 - 2.0.29: chờ người dùng cài `transformers>=5.13 accelerate`, tải Qwen3-ASR (tab Tài liệu) và chạy lại "1. Nghe & tách câu";
   VRAM: 1.7B bf16 ~4 GB + bộ căn 0.6B; lỗi thiếu bộ nhớ -> chọn 0.6B. Chưa làm: AI chấm câu / sửa lời trước khi tách.
+- 2.0.35: chờ người dùng thử tab Âm thanh trên máy thật (loa Windows: kéo thanh khi đang phát nghe đổi ngay, không
+  rè / lệch tiếng với hình; video xuất trộn đúng như nghe).

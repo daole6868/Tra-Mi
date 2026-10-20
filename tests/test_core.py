@@ -1382,3 +1382,59 @@ def test_hymt_prompt_and_patch_source():
     assert abs(patch_source(r, "below") - 0.7) < 1e-9 or patch_source(r, "below") <= 0.9  # dưới không đủ chỗ
     top = {"x": 0, "y": 0.02, "w": 1, "h": 0.1}
     assert patch_source(top) > top["y"]                                      # vùng sát mép trên -> lấy phía dưới
+
+
+def test_audio_settings_and_live_mix():
+    """Tab Âm thanh: dự án cũ suy ra đúng cách trộn cũ; bộ trộn trực tiếp: âm lượng, tắt, nghe riêng, đoạn hát,
+    nhạc thêm theo thời gian sau cắt + giảm khi có lời, mờ dần, phát nhanh."""
+    from trami.audiomix import SR, LiveMix, audio_settings, gains, use_stems
+
+    old = {"volume": 0.5, "mute_original": False, "pitch_shift": 0,
+           "dub": {"enabled": True, "original_volume": 0.15, "bg_volume": 1.2, "vocals_volume": 0.0, "dub_volume": 1.5},
+           "bgm": {"path": "", "volume": 0.3, "duck": False}}
+    a = audio_settings(old)
+    assert abs(a["orig"] - 0.075) < 1e-9 and abs(a["bg"] - 0.6) < 1e-9 and a["dub"] == 1.5 and a["bgm"] == 0.3
+    assert a["duck"] is False and a["pitch"] == 1.0 and a["mute"] == []
+    assert audio_settings({**old, "mute_original": True})["mute"] == ["orig", "bg", "voice"]
+    assert not use_stems(a, False, True) and use_stems(a, True, True) and not use_stems(a, True, False)
+    assert use_stems({**a, "src": "stems"}, True, False) and not use_stems({**a, "src": "orig"}, True, True)
+    g = gains({**a, "master": 2.0, "mute": ["dub"]}, True, True, False)
+    assert g["orig"] == 0 and abs(g["bg"] - 1.2) < 1e-9 and g["dub"] == 0 and g["voice_song"] == 2.0
+
+    n = SR * 4
+    one = np.full((n, 2), 10000, np.int16)          # mỗi lớp = hằng số 10000/32768 ≈ 0,305
+    mix = LiveMix()
+    mix.set_tracks({"bg": one, "voice": one, "dub": np.zeros((n, 2), np.int16), "bgm": one[: SR]})
+    mix.g = {"bg": 0.5, "voice": 0.0, "voice_song": 1.0, "dub": 1.0, "bgm": 0.0}
+    mix.songs = [(1.0, 2.0)]
+    out, adv = mix.render(0, SR * 3)
+    lvl = 10000 / 32768
+    assert adv == SR * 3 and abs(out[SR // 2, 0] - 0.5 * lvl) < 1e-3          # chỉ nhạc nền 50 %
+    assert abs(out[int(SR * 1.5), 0] - 1.5 * lvl) < 1e-3                        # đoạn hát: + giọng gốc 100 %
+    mix.g["bg"] = 1.0                                                           # đổi âm lượng: khối sau có ngay
+    assert abs(mix.render(0, 100)[0][0, 0] - lvl) < 1e-3
+    mix.solo = "voice"
+    assert abs(mix.render(int(SR * 1.5), 10)[0][0, 0] - lvl) < 1e-3 and abs(mix.render(0, 10)[0][0, 0]) < 1e-6
+    mix.solo = None
+    # nhạc thêm: theo thời gian SAU CẮT (đoạn 0–1 s bị cắt) và lặp lại; có lời lồng tiếng -> giảm 16 dB
+    mix.g = {"bgm": 1.0, "dub": 1.0}
+    mix.keep = [(1.0, 4.0)]
+    bgm = np.zeros((SR, 2), np.int16)
+    bgm[: SR // 2] = 10000
+    dub = np.zeros((n, 2), np.int16)
+    dub[int(SR * 2.5):int(SR * 3)] = 20000
+    mix.set_tracks({"bgm": bgm, "dub": dub})
+    mix.duck = True
+    assert abs(mix.render(int(SR * 1.2), 1)[0][0, 0] - lvl) < 1e-3     # 0,2 s sau chỗ cắt = nửa đầu file nhạc
+    assert abs(mix.render(int(SR * 1.7), 1)[0][0, 0]) < 1e-6           # 0,7 s = nửa sau (lặng)
+    on = mix.render(int(SR * 2.2), 1)[0][0, 0]                         # 1,2 s sau cắt -> vòng lặp 2, có nhạc
+    ducked = mix.render(int(SR * 3.1), 1)[0][0, 0]       # lời lồng tiếng vừa hết 0,1 s: nhạc vẫn đang nhỏ (nhả 0,4 s)
+    back = mix.render(int(SR * 3.45), 1)[0][0, 0]        # hết lời > 0,4 s: nhạc to lại
+    assert abs(on - lvl) < 1e-3 and abs(ducked - lvl * 10 ** (-16 / 20)) < 2e-3 and abs(back - lvl) < 1e-3
+    # mờ dần đầu 1 s (tính sau cắt) + phát nhanh 2×: 1 khối đi qua gấp đôi thời gian video
+    mix.set_tracks({"bg": one})
+    mix.g, mix.keep, mix.fade, mix.duck = {"bg": 1.0}, [], (1.0, 0.0), False
+    assert abs(mix.render(SR // 2, 1)[0][0, 0] - 0.5 * lvl) < 2e-3
+    mix.fade, mix.rate = (0.0, 0.0), 2.0
+    out, adv = mix.render(0, 1000)
+    assert adv == 2000 and out.shape == (1000, 2)

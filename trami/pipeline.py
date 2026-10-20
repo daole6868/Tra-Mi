@@ -692,8 +692,11 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
         vers[old_i] = entry
     p.data["dub_versions"] = vers
     ed = p.edit
+    was_on = bool(ed["dub"].get("enabled"))
     ed["dub"]["enabled"] = True
     ed["dub"]["wav"] = str(out)
+    if ed.get("audio") and not was_on and not st and float(ed["audio"].get("orig", 1.0)) > 0.5:
+        ed["audio"]["orig"] = 0.15     # mới bật lồng tiếng, chưa tách giọng: tiếng gốc nhỏ lại cho nghe rõ lời Việt
     if st:  # có nhạc nền đã tách -> dùng làm nền cho bản lồng tiếng (sạch giọng gốc)
         ed["dub"]["bg_wav"] = st["instrumental"]
         ed["dub"]["vocals_wav"] = st["vocals"]
@@ -876,67 +879,115 @@ def delete_dub_version(p: Project, wav: str) -> None:
     p.data["edit"] = ed
 
 
-def dub_preview_audio(p: Project) -> Path | None:
-    """Trộn sẵn âm thanh 'đã lồng tiếng' (giọng Việt + nhạc nền) theo mốc thời gian video gốc
-    để trình phát trong tool nghe được giống video xuất. Trả về None nếu chưa có bản lồng."""
-    import hashlib
-
+def song_spans(p: Project, settings: dict | None = None) -> list:
+    """Đoạn hát (giây) – giọng gốc giữ nguyên ở các đoạn này khi bật "giữ nguyên bài hát"."""
     d = (p.edit.get("dub") or {})
-    wav = d.get("wav")
-    if not (d.get("enabled") and wav and Path(wav).exists()):
-        return None
-    bg = d.get("bg_wav") if d.get("bg_wav") and Path(d["bg_wav"]).exists() else None
-    voc = d.get("vocals_wav") if bg and d.get("vocals_wav") and Path(d["vocals_wav"]).exists() else None
-    spans = d.get("song_spans") or []
-    vol = float(p.edit.get("volume", 1.0))
-    key = repr((Path(wav).stat().st_mtime, bg, voc, spans, vol, d.get("bg_volume"), d.get("vocals_volume"),
-                d.get("original_volume"), d.get("dub_volume"), p.edit.get("mute_original")))
-    out = p.work / f"dub_preview_{hashlib.md5(key.encode()).hexdigest()[:10]}.m4a"
-    if out.exists() and out.stat().st_size > 0:
-        return out
-    for old in p.work.glob("dub_preview_*.m4a"):
-        try:
-            if old.name.endswith(".tmp.m4a") and time.time() - old.stat().st_mtime < 3600:
-                continue   # file đang được 1 lần trộn khác ghi
-            old.unlink(missing_ok=True)
-        except OSError:
-            pass  # đang được trình phát mở (Windows khoá file) -> xoá ở lần sau
-    args, fc, mix = [], [], []
-    mute = bool(p.edit.get("mute_original"))
-    if bg:
-        if not mute:
-            args += ["-i", str(bg)]
-            fc.append(f"[{len(args) // 2 - 1}:a]aresample=44100,volume={vol * float(d.get('bg_volume', 1.0)):.3f}[b]")
-            mix.append("[b]")
-        base_v = float(d.get("vocals_volume", 0.0))
-        if voc and not mute and (spans or base_v > 0.001):
-            cond = "+".join(f"between(t,{a:.3f},{b:.3f})" for a, b in spans) or "0"
-            args += ["-i", str(voc)]
-            fc.append(f"[{len(args) // 2 - 1}:a]aresample=44100,"
-                      f"volume='if({cond},{vol:.3f},{base_v * vol:.3f})':eval=frame[v]")
-            mix.append("[v]")
-    elif p.data.get("info", {}).get("has_audio", True) and not mute:
-        ov = vol * float(d.get("original_volume", 0.15))
-        if ov > 0.001:
-            args += ["-i", str(p.source)]
-            fc.append(f"[{len(args) // 2 - 1}:a]aresample=44100,volume={ov:.3f}[o]")
-            mix.append("[o]")
-    args += ["-i", str(wav)]
-    fc.append(f"[{len(args) // 2 - 1}:a]aresample=44100,volume={float(d.get('dub_volume', 1.0)):.3f}[d]")
-    mix.append("[d]")
-    fc.append("".join(mix) + (f"amix=inputs={len(mix)}:duration=longest:dropout_transition=0:normalize=0,"
-                              if len(mix) > 1 else "anull,") + "alimiter=limit=0.95[out]")
-    import uuid
+    if d.get("song_spans") is not None and d.get("wav"):
+        return d["song_spans"]
+    st = settings or load_settings()
+    return [[s.start, s.end] for s in p.segments if s.extra.get("song")] if st.get("dub_skip_songs", True) else []
 
-    tmp = out.with_name(f"{out.stem}.{uuid.uuid4().hex[:6]}.tmp.m4a")   # 2 lần trộn cùng lúc không giẫm file của nhau
-    ff.run(args + ["-filter_complex", ";".join(fc), "-map", "[out]", "-vn", "-c:a", "aac", "-b:a", "160k",
-                   str(tmp)], float(p.data.get("info", {}).get("duration", 0)), None, None, "Đang trộn bản nghe thử")
+
+def audio_sources(p: Project, edit: dict | None = None) -> dict:
+    """Các lớp âm thanh hiện có của dự án: {lớp: (file, bộ lọc ffmpeg khi giải mã)} – xem trami/audiomix.py."""
+    from .audiomix import audio_settings, pitch_filter
+
+    ed = edit or p.edit
+    a = audio_settings(ed)
+    pf = pitch_filter(float(a.get("pitch") or 1.0))
+    out: dict[str, tuple[str, str]] = {}
+    if p.data.get("source") and p.data.get("info", {}).get("has_audio", True) and p.source.exists():
+        out["orig"] = (str(p.source), pf)
+    st = stems(p)
+    d = ed.get("dub") or {}
+    bg = d.get("bg_wav") if d.get("bg_wav") and Path(d["bg_wav"]).exists() else st.get("instrumental")
+    voc = d.get("vocals_wav") if d.get("vocals_wav") and Path(d["vocals_wav"]).exists() else st.get("vocals")
+    if bg:
+        out["bg"] = (str(bg), "")
+    if voc:
+        out["voice"] = (str(voc), pf)
+    if d.get("wav") and Path(d["wav"]).exists():
+        out["dub"] = (str(d["wav"]), "")
+    bgm = (ed.get("bgm") or {}).get("path")
+    if bgm and Path(bgm).exists():
+        out["bgm"] = (str(bgm), "")
+    return out
+
+
+def audio_state(p: Project, edit: dict | None = None, srcs: dict | None = None) -> dict:
+    """Cách trộn hiện tại (âm lượng thật từng lớp, đoạn hát, đoạn giữ lại, mờ dần, giảm nhạc) – giống hệt khi xuất."""
+    from .audiomix import audio_settings, gains, use_stems
+    from .video import keep_ranges
+
+    ed = edit or p.edit
+    a = audio_settings(ed)
+    srcs = audio_sources(p, ed) if srcs is None else srcs
+    d = ed.get("dub") or {}
+    dub_on = bool(d.get("enabled")) and "dub" in srcs
+    stems_on = use_stems(a, "bg" in srcs, dub_on)
+    dur = float(p.data.get("info", {}).get("duration") or 0)
     try:
-        tmp.replace(out)
-    except OSError:
-        if not (out.exists() and out.stat().st_size > 0):   # lần trộn kia đã xong trước -> dùng luôn
-            raise
-        tmp.unlink(missing_ok=True)
+        keep = keep_ranges(dur, ed.get("trim"), ed.get("cuts")) if dur else []
+    except Exception:  # noqa: BLE001
+        keep = []
+    fade = ed.get("fade") or {}
+    return {"gains": gains(a, stems_on, dub_on, "bgm" in srcs), "stems_on": stems_on, "dub_on": dub_on,
+            "songs": song_spans(p) if stems_on else [], "keep": keep, "duck": bool(a.get("duck", True)),
+            "fade": (float(fade.get("in") or 0), float(fade.get("out") or 0)), "settings": a}
+
+
+def live_mix(p: Project, edit: dict | None = None, progress: Prog | None = None):
+    """Bộ trộn đã nạp đủ các lớp (giải mã 1 lần vào work/live, lần sau dùng lại) + trạng thái trộn hiện tại."""
+    from .audiomix import LiveMix, decode_track, load_raw
+
+    ed = edit or p.edit
+    srcs = audio_sources(p, ed)
+    mix = LiveMix()
+    tracks = {}
+    for k, (f, pre) in srcs.items():
+        if progress:
+            progress(len(tracks) / max(1, len(srcs)), "Đang chuẩn bị âm thanh để nghe thử…")
+        raw = decode_track(f, p.work / "live", k, pre)
+        if raw:
+            tracks[k] = load_raw(raw)
+    mix.set_tracks(tracks)
+    apply_audio_state(mix, audio_state(p, ed, srcs))
+    return mix
+
+
+def apply_audio_state(mix, state: dict) -> None:
+    mix.g = dict(state["gains"])
+    mix.songs = state["songs"]
+    mix.keep = state["keep"]
+    mix.fade = state["fade"]
+    mix.duck = state["duck"]
+
+
+def mix_audio_file(p: Project, out: Path, progress: Prog | None = None) -> Path:
+    """Xuất âm thanh đã trộn (đúng như đang nghe trong tool) ra file – nút "Tải MP3 bản trộn"."""
+    from .audiomix import SR, to_pcm16
+
+    mix = live_mix(p, progress=progress)
+    dur = mix.duration()
+    if dur <= 0:
+        raise ValueError("Chưa có âm thanh nào để trộn.")
+    tmp = out.with_suffix(".tmp.wav")
+    import wave
+
+    with wave.open(str(tmp), "wb") as w:
+        w.setnchannels(2)
+        w.setsampwidth(2)
+        w.setframerate(SR)
+        pos, step = 0, SR * 10
+        total = int(dur * SR)
+        while pos < total:
+            a, adv = mix.render(pos, min(step, total - pos))
+            w.writeframes(to_pcm16(a))
+            pos += adv
+            if progress:
+                progress(pos / total, "Đang trộn âm thanh")
+    ff.run(["-i", str(tmp), "-c:a", "libmp3lame", "-b:a", "192k", str(out)], dur, None, None, "Đang lưu MP3")
+    tmp.unlink(missing_ok=True)
     return out
 
 
@@ -1066,6 +1117,13 @@ def render(p: Project, settings: dict | None = None, progress: Prog | None = Non
     settings = settings or load_settings()
     edit = p.edit
     edit["hardsub"] = hardsub_spec(p)
+    srcs = audio_sources(p, edit)
+    d = edit.setdefault("dub", {})
+    if "bg" in srcs and not (d.get("bg_wav") and Path(d["bg_wav"]).exists()):
+        # tab Âm thanh chọn "bản đã tách" khi chưa lồng tiếng: video xuất cũng dùng nhạc nền + giọng gốc đã tách
+        d["bg_wav"] = srcs["bg"][0]
+        d["vocals_wav"] = srcs.get("voice", ("",))[0]
+        d["song_spans"] = song_spans(p, settings)
     from .config import _deep_merge
 
     base_style = _deep_merge(settings.get("sub_style") or {}, (edit.get("subtitles") or {}).get("style") or {})

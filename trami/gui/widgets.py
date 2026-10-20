@@ -791,16 +791,24 @@ class FlowLayout(QLayout):
 
     def _place(self, rect: QRect, dry: bool) -> int:
         x, y, line, sp = rect.x(), rect.y(), 0, self.spacing()
+        row: list = []
+
+        def flush():                    # các ô trong 1 hàng căn giữa theo chiều dọc
+            if not dry:
+                for item, px, h in row:
+                    item.setGeometry(QRect(QPoint(px, y + (line - h.height()) // 2), h))
+            row.clear()
         for it in self._items:
             if it.isEmpty():
                 continue
             hint = it.sizeHint()
             if x > rect.x() and x + hint.width() > rect.right() + 1:
+                flush()
                 x, y, line = rect.x(), y + line + sp, 0
-            if not dry:
-                it.setGeometry(QRect(QPoint(x, y), hint))
+            row.append((it, x, hint))
             x += hint.width() + sp
             line = max(line, hint.height())
+        flush()
         return y + line - rect.y()
 
 
