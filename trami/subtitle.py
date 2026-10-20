@@ -200,27 +200,94 @@ def wrap_line(text: str, max_chars: int) -> str:
     return best[0] + "\n" + best[1] if best else text
 
 
+BOX_PAD = 0.18          # đệm nền hộp mặc định quanh chữ (× cỡ chữ)
+SOURCE_SCALE = 0.8      # dòng chữ Trung trong phụ đề song ngữ nhỏ hơn
+
+
+def sub_size(st: dict, width: int, height: int) -> int:
+    """Cỡ chữ ASS (= chiều cao 1 dòng khi libass vẽ: winAscent + winDescent của font)."""
+    return int(st.get("size") or 0) or max(16, round(min(width, height) * 0.058 if height > width else height * 0.055))
+
+
+def margin_v_px(st: dict, width: int, height: int) -> int:
+    if st.get("margin_v_rel") is not None and not st.get("margin_v"):
+        return max(2, int(float(st["margin_v_rel"]) * height))
+    return int(st.get("margin_v") or 0) or int(height * (0.07 if st.get("position") != "middle" else 0))
+
+
+def is_custom_pos(st: dict) -> bool:
+    return st.get("position") == "custom" and st.get("pos_x") is not None and st.get("pos_y") is not None
+
+
+def block_anchor(st: dict, width: int, height: int, block_h: float) -> tuple[float, float]:
+    """Tâm ngang + mép dưới của khối chữ (điểm ảnh khung xuất), đúng chỗ libass đặt."""
+    if is_custom_pos(st):
+        return float(st["pos_x"]) * width, float(st["pos_y"]) * height
+    pos = st.get("position", "bottom")
+    mv = margin_v_px(st, width, height)
+    if pos == "top":
+        return width / 2, mv + block_h
+    if pos == "middle":
+        return width / 2, height / 2 + block_h / 2
+    return width / 2, height - mv
+
+
+def box_pads(st: dict, size: float) -> tuple[float, float]:
+    """Đệm trái/phải và trên/dưới của nền hộp ôm chữ (điểm ảnh)."""
+    px, py = st.get("box_pad_x"), st.get("box_pad_y")
+    px = BOX_PAD if px is None else float(px)
+    py = BOX_PAD if py is None else float(py)
+    return max(1.0, px * size), max(1.0, py * size)
+
+
+def fixed_box(st: dict, width: int, height: int, cx: float, cy: float) -> tuple[float, float, float, float]:
+    """Nền dải cố định (mọi câu cùng cỡ): x, y, rộng, cao – tâm trùng tâm khối chữ."""
+    bw = max(0.02, min(1.0, float(st.get("box_w") or 0.8))) * width
+    bh = max(0.02, min(1.0, float(st.get("box_h") or 0.12))) * height
+    return cx - bw / 2, cy - bh / 2, bw, bh
+
+
+def cjk_font_name(st: dict) -> str:
+    import sys as _sys
+    return st.get("cjk_font") or ("Microsoft YaHei" if _sys.platform == "win32" else
+                                  "PingFang SC" if _sys.platform == "darwin" else "Noto Sans CJK SC")
+
+
+def _ass_color_alpha(color: str, opacity: float) -> tuple[str, str]:
+    full = _hex_to_ass(color, 1 - float(opacity))          # &HAABBGGRR
+    return f"&H{full[4:]}&", f"&H{full[2:4]}&"
+
+
 def to_ass(segs: list[Segment], style: dict, width: int = 1920, height: int = 1080, which: str = "trans") -> str:
     st = dict(style or {})
     width, height = max(16, int(width or 1920)), max(16, int(height or 1080))
-    size = int(st.get("size") or 0) or max(16, round(min(width, height) * 0.058 if height > width else height * 0.055))
+    size = sub_size(st, width, height)
     outline = float(st.get("outline", 2.5)) * size / 48
     shadow = float(st.get("shadow", 1)) * size / 48
     pos = st.get("position", "bottom")
+    custom = is_custom_pos(st)
     align = {"bottom": 2, "top": 8, "middle": 5}.get(pos, 2)   # "auto" = canh đáy theo vùng phụ đề cũ
-    if st.get("margin_v_rel") is not None and not st.get("margin_v"):
-        margin_v = max(2, int(float(st["margin_v_rel"]) * height))
-    else:
-        margin_v = int(st.get("margin_v") or 0) or int(height * (0.07 if pos != "middle" else 0))
+    margin_v = margin_v_px(st, width, height)
     margin_h = int(width * 0.05)
     box = bool(st.get("box"))
+    fixed = box and bool(st.get("box_fixed"))
     primary = _hex_to_ass(st.get("color", "#FFFFFF"))
     secondary = _hex_to_ass(st.get("secondary_color", "#FFE14D"))
-    if box:
+    bord = ""
+    if box and not fixed:
+        # nền hộp ôm từng dòng: libass vẽ hộp = chữ + \xbord (trái/phải) + \ybord (trên/dưới)
         border_style = 3
         outline_c = _hex_to_ass(st.get("box_color", "#000000"), 1 - float(st.get("box_opacity", 0.55)))
         back = outline_c
-        outline_v = max(2.0, size * 0.18)
+        pad_x, pad_y = box_pads(st, size)
+        outline_v = pad_y
+        bord = f"\\xbord{pad_x:.1f}\\ybord{pad_y:.1f}"
+    elif fixed:
+        # dải nền cố định vẽ riêng (lớp 0), chữ không viền ở lớp 1
+        border_style = 1
+        outline_c = _hex_to_ass(st.get("outline_color", "#000000"))
+        back = _hex_to_ass("#000000", 0.4)
+        outline_v = 0.0
     else:
         border_style = 1
         outline_c = _hex_to_ass(st.get("outline_color", "#000000"))
@@ -228,12 +295,11 @@ def to_ass(segs: list[Segment], style: dict, width: int = 1920, height: int = 10
         outline_v = outline
     bold = -1 if st.get("bold", True) else 0
     font = st.get("font", "Be Vietnam Pro")
-    import sys as _sys
-    cjk_font = st.get("cjk_font") or ("Microsoft YaHei" if _sys.platform == "win32" else
-                                      "PingFang SC" if _sys.platform == "darwin" else "Noto Sans CJK SC")
+    cjk_font = cjk_font_name(st)
     if which == "source":
         font = cjk_font
     max_chars = int(width / (size * 0.55)) if size else 42
+    src_size = int(size * SOURCE_SCALE)
 
     head = f"""[Script Info]
 ScriptType: v4.00+
@@ -246,12 +312,27 @@ YCbCr Matrix: TV.709
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Default,{font},{size},{primary},{secondary},{outline_c},{back},{bold},0,0,0,100,100,0,0,{border_style},{outline_v:.1f},{0 if box else shadow:.1f},{align},{margin_h},{margin_h},{margin_v},1
-Style: Source,{cjk_font},{int(size * 0.8)},{secondary},{secondary},{outline_c},{back},{bold},0,0,0,100,100,0,0,{border_style},{outline_v:.1f},{0 if box else shadow:.1f},{align},{margin_h},{margin_h},{margin_v},1
+Style: Source,{cjk_font},{src_size},{secondary},{secondary},{outline_c},{back},{bold},0,0,0,100,100,0,0,{border_style},{outline_v:.1f},{0 if box else shadow:.1f},{align},{margin_h},{margin_h},{margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     lines = [head]
+    tag = (f"\\an2\\pos({float(st['pos_x']) * width:.0f},{float(st['pos_y']) * height:.0f})" if custom else "") + bord
+    pre = "{" + tag + "}" if tag else ""
+    layer = 1 if fixed else 0
+
+    def emit(s: Segment, txt: str, n_main: int, n_src: int):
+        t0, t1 = fmt_ass_time(s.start), fmt_ass_time(s.end)
+        if fixed:
+            block_h = n_main * size + n_src * src_size
+            cx, bottom = block_anchor(st, width, height, block_h)
+            x, y, bw, bh = fixed_box(st, width, height, cx, bottom - block_h / 2)
+            c, a = _ass_color_alpha(st.get("box_color", "#000000"), float(st.get("box_opacity", 0.55)))
+            lines.append(f"Dialogue: 0,{t0},{t1},Default,,0,0,0,,{{\\an7\\pos({x:.0f},{y:.0f})\\bord0\\shad0"
+                         f"\\1c{c}\\1a{a}\\p1}}m 0 0 l {bw:.0f} 0 {bw:.0f} {bh:.0f} 0 {bh:.0f}{{\\p0}}\n")
+        lines.append(f"Dialogue: {layer},{t0},{t1},Default,,0,0,0,,{pre}{txt}\n")
+
     for s in segs:
         body = _pick(s, "source" if which == "source" else "trans").strip()
         if which == "both":
@@ -263,8 +344,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 continue
             txt = _ass_escape(vi)
             if zh:
-                txt += "\\N{\\rSource}" + _ass_escape(zh)
-            lines.append(f"Dialogue: 0,{fmt_ass_time(s.start)},{fmt_ass_time(s.end)},Default,,0,0,0,,{txt}\n")
+                txt += "\\N{\\rSource" + bord + "}" + _ass_escape(zh)
+            emit(s, txt, vi.count("\n") + 1 if vi else 0, zh.count("\n") + 1 if zh else 0)
             continue
         if not body:
             continue
@@ -272,7 +353,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             body = wrap_line(body, max_chars)
         if st.get("uppercase"):
             body = body.upper()
-        lines.append(f"Dialogue: 0,{fmt_ass_time(s.start)},{fmt_ass_time(s.end)},Default,,0,0,0,,{_ass_escape(body)}\n")
+        emit(s, _ass_escape(body), body.count("\n") + 1, 0)
     return "".join(lines)
 
 

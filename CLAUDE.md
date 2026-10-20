@@ -33,7 +33,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
   Chụp ảnh kiểm tra giao diện phải nạp theme như `run()`: `theme.load_fonts(); app.setFont(theme.font(10));
   app.setStyleSheet(theme.stylesheet())`.
-- `tests/test_core.py` – `python -m pytest -q tests` (58 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (61 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -286,6 +286,35 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     0 câu. Kết quả: video mẫu 55/55 câu như OCR mọi khung, video thử nhiều màu 6/6, phụ đề 1/2/3 dòng + câu dài + mở đầu
     8 s 5/5, không lẫn watermark / biển hiệu. Chậm hơn ~1,5 lần (nền chuyển động -> OCR nhiều khung hơn).
 
+- 2.0.33: "kéo phụ đề trên video, chỉnh chiều cao / độ dài nền phụ đề và vùng che bằng 4 chấm trên 4 cạnh, bấm gì để
+  chạy xoá AI". Phát hiện: khung xem trước vẽ chữ TO HƠN video xuất ~1,5 lần (libass coi Fontsize = winAscent +
+  winDescent của bảng OS/2, Be Vietnam Pro em = 0,655 × Fontsize). `player.ass_font` đọc bảng OS/2 (QRawFont) -> đúng cỡ;
+  chiều cao dòng = Fontsize; ngắt dòng bằng `wrap_line` như khi xuất. Đo bằng ffmpeg/libass: hộp nền xem trước lệch ≤ 1 px.
+  * `subtitle.py`: `sub_size`, `margin_v_px`, `block_anchor` (tâm ngang + chân khối chữ), `box_pads`, `fixed_box`,
+    `cjk_font_name` dùng chung cho `to_ass` và xem trước. Vị trí "custom" (`pos_x`, `pos_y` = tâm ngang / chân khối
+    chữ, 0..1 khung xuất) -> `{\an2\pos(x,y)}`. Nền ôm chữ: BorderStyle 3 + `\xbord`/`\ybord` (= `box_pad_x/y` × cỡ
+    chữ, mặc định 0,18; lặp lại sau `\rSource`). Dải cố định (`box_fixed`, `box_w`/`box_h` theo khung): Dialogue lớp 0
+    vẽ `\p1` hình chữ nhật tâm = tâm khối chữ, chữ lớp 1 không viền. `effective_style`: "custom" giữ chỗ, cỡ chữ tự
+    động theo phụ đề cũ như "auto".
+  * `player.SubtitleItem`: kéo chữ -> `position=custom` (hít vào giữa khung), 4 chấm trên cạnh nền đổi đệm (ôm chữ) /
+    `box_w`,`box_h` (dải cố định), đổi đối xứng quanh tâm; thả chuột -> `Player.subtitleEdited` ->
+    `project_page._sub_edited` ghi vào ô tab Kiểu chữ (Vị trí "Tự chọn", Ngang/Dọc %, Kiểu nền, Độ dài / Chiều cao nền).
+    `_ovr` giữ giá trị vừa kéo tới khi `set_subtitles` nhận kiểu mới. Tab Kiểu chữ: khung nét đứt + chữ mẫu khi không có câu.
+  * `player.HardsubOverlay` chỉnh được (tab Xoá phụ đề, `VideoView.set_tool(regions=)`): kéo trên chỗ trống vẽ vùng
+    mới, 4 chấm giữa cạnh + góc đổi cỡ, kéo giữa di chuyển, × xoá; toạ độ item video nên đúng cả khi lật/xoay/zoom.
+    -> `Player.regionsEdited` -> `_regions_edited` (đồng bộ `hs_editor`, lưu). Ở tab này phụ đề không nhận chuột.
+    `editors.hit_region / drag_region / paint_handles / REGION_CURSORS` dùng chung với `RegionEditor` (cũng có 4 chấm).
+    Làm mờ khi video đang dừng: lấy ngay `videoSink().videoFrame()` (trước chỉ mờ khi có khung mới).
+  * Xoá AI: `video.inpaint_key/inpainted_file/inpaint_cached` -> `work/render/inpainted_<mã>.mp4` (mã theo video gốc,
+    vùng, công nghệ, độ mạnh, file OCR, codec/crf; chỉ giữ 1 bản). `pipeline.hardsub_spec / inpainted_video /
+    run_inpaint`; `build_and_render` dùng lại bản đã có ("Dùng lại video đã xoá phụ đề bằng AI"). Tab Xoá phụ đề mục 3
+    "Kiểm tra & chạy": Xem thử 1 khung / Về ảnh gốc / **Chạy xoá bằng AI (cả video)** (job "inpaint") + công tắc "Xem bản
+    đã xoá" + trạng thái (`_update_hs_status`) + "Đi tới Xuất video". `_sync_clean` (trong `_apply_live`): bản đã xoá khớp
+    vùng hiện tại -> trình phát chiếu nó (`Player.load(start=)` giữ vị trí, `hs.clean` tắt hiệu ứng gần đúng), đổi vùng ->
+    về video gốc. `HS_HELP` viết lại (HTML) từng cách xoá: dùng khi nào, chạy lúc nào.
+  * Đã chạy thử offscreen có theme: kéo phụ đề dời đúng (−150, −200) px, hộp nền khớp libass, vẽ / kéo cạnh / di chuyển
+    / × vùng trên video, xoá AI qua hàng đợi (OpenCV) -> trình phát đổi bản, xuất video dùng lại (3,5 s).
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -297,5 +326,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.28: chờ người dùng xem giao diện mới trên máy thật (độ rộng các khung, cỡ chữ, timeline).
 - 2.0.30: chờ người dùng xem bố cục mới trên máy thật.
 - 2.0.32: chờ người dùng thử OCR mới trên video thật (tốc độ quét, vùng tự dò, phụ đề nhiều dòng / màu).
+- 2.0.33: chờ người dùng thử kéo phụ đề / nền / vùng che trên video và nút Chạy xoá bằng AI (LaMa thật, GPU).
+  Lưu ý: cỡ chữ xem trước giờ nhỏ hơn trước (đúng như video xuất) – nếu thấy nhỏ thì tăng Cỡ chữ.
 - 2.0.29: chờ người dùng cài `transformers>=5.13 accelerate`, tải Qwen3-ASR (tab Tài liệu) và chạy lại "1. Nghe & tách câu";
   VRAM: 1.7B bf16 ~4 GB + bộ căn 0.6B; lỗi thiếu bộ nhớ -> chọn 0.6B. Chưa làm: AI chấm câu / sửa lời trước khi tách.

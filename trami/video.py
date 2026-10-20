@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 from typing import Callable
@@ -87,6 +88,54 @@ def target_size(W: int, H: int, aspect: str, resolution: str) -> tuple[int, int]
     return _even(W), _even(H)
 
 
+def inpaint_key(src: str | Path, hs: dict, settings: dict) -> str:
+    """Mã của 1 lần xoá phụ đề bằng AI: đổi video gốc / vùng / công nghệ / độ mạnh / file OCR -> mã khác."""
+    import hashlib
+
+    src = Path(src)
+    st = src.stat() if src.exists() else None
+    boxes = hs.get("boxes_file")
+    bst = Path(boxes).stat() if boxes and Path(boxes).exists() else None
+    key = {"src": str(src), "size": st.st_size if st else 0, "mtime": int(st.st_mtime) if st else 0,
+           "regions": [[round(float(r[k]), 4) for k in ("x", "y", "w", "h")] for r in hs.get("regions") or []],
+           "backend": hs.get("backend") or settings.get("inpaint_backend", "lama"),
+           "strength": hs.get("strength", "normal"),
+           "boxes": [str(boxes), bst.st_size, int(bst.st_mtime)] if bst else None,
+           "codec": settings.get("video_codec"), "crf": min(18, int(settings.get("video_crf", 20)))}
+    return hashlib.sha1(json.dumps(key, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def inpainted_file(src: str | Path, hs: dict, settings: dict, work: str | Path) -> Path:
+    return Path(work) / f"inpainted_{inpaint_key(src, hs, settings)}.mp4"
+
+
+def inpaint_cached(src: str | Path, hs: dict, settings: dict, work: str | Path,
+                   progress: ProgressCB | None = None, cancel: Callable[[], bool] | None = None) -> Path:
+    """Xoá phụ đề cũ bằng AI cho cả video, lưu lại để xem trước / xuất nhiều lần không phải chạy lại.
+    Chỉ giữ 1 bản (bản cũ của vùng khác bị xoá cho đỡ tốn ổ đĩa)."""
+    from .inpaint import inpaint_video
+
+    work = Path(work)
+    work.mkdir(parents=True, exist_ok=True)
+    out = inpainted_file(src, hs, settings, work)
+    if out.exists():
+        return out
+    tmp = out.with_name(out.stem + "_tmp.mp4")
+    st_inp = dict(settings)
+    if hs.get("backend"):
+        st_inp["inpaint_backend"] = hs["backend"]
+    inpaint_video(src, tmp, hs["regions"], st_inp, boxes_file=hs.get("boxes_file"),
+                  progress=progress, cancel=cancel, strength=hs.get("strength", "normal"))
+    tmp.replace(out)
+    for old in list(work.glob("inpainted*.mp4")):
+        if old != out:
+            try:
+                old.unlink()
+            except OSError:
+                pass    # trình phát đang mở -> xoá lần sau
+    return out
+
+
 def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dict, work_dir: str | Path,
                      segments: list[Segment] | None = None, progress: ProgressCB | None = None,
                      cancel: Callable[[], bool] | None = None) -> Path:
@@ -97,22 +146,21 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
         raise ff.FFmpegError("File đầu vào không có hình ảnh.")
     W, H, dur = info.width, info.height, info.duration
 
-    # Tiền xử lý: xoá phụ đề bằng AI inpaint (tạo video trung gian)
+    # Tiền xử lý: xoá phụ đề bằng AI inpaint (tạo video trung gian; đã chạy với đúng vùng/tuỳ chọn -> dùng lại)
     hs = spec.get("hardsub") or {}
     if hs.get("mode") == "inpaint" and hs.get("regions"):
-        from .inpaint import inpaint_video
-
-        inp_out = work / "inpainted.mp4"
-        def p2(x, m):
+        cached = inpainted_file(src, hs, settings, work)
+        if cached.exists():
             if progress:
-                progress(x * 0.6, m)
-        st_inp = dict(settings)
-        if hs.get("backend"):
-            st_inp["inpaint_backend"] = hs["backend"]
-        inpaint_video(src, inp_out, hs["regions"], st_inp, boxes_file=hs.get("boxes_file"),
-                      progress=p2, cancel=cancel, strength=hs.get("strength", "normal"))
-        src = inp_out
-        base_p, span_p = 0.6, 0.4
+                progress(0.0, "Dùng lại video đã xoá phụ đề bằng AI")
+            src = cached
+            base_p, span_p = 0.0, 1.0
+        else:
+            def p2(x, m):
+                if progress:
+                    progress(x * 0.6, m)
+            src = inpaint_cached(src, hs, settings, work, p2, cancel)
+            base_p, span_p = 0.6, 0.4
     else:
         base_p, span_p = 0.0, 1.0
 

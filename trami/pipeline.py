@@ -965,13 +965,18 @@ def old_sub_region(p: Project) -> dict | None:
 
 
 def effective_style(p: Project, style: dict) -> dict:
-    """Vị trí 'auto': đặt câu Việt vào đúng chỗ phụ đề Trung cũ (canh theo mép dưới của vùng chữ cũ)."""
+    """Vị trí 'auto': đặt câu Việt vào đúng chỗ phụ đề Trung cũ (canh theo mép dưới của vùng chữ cũ).
+    'custom' (kéo phụ đề trên video): giữ chỗ người dùng đặt, cỡ chữ tự động vẫn theo phụ đề cũ như 'auto'."""
     st = dict(style or {})
-    if st.get("position", "auto") != "auto":
+    pos = st.get("position", "auto")
+    if pos == "custom" and (st.get("pos_x") is None or st.get("pos_y") is None):
+        pos = "auto"
+    if pos not in ("auto", "custom"):
         return st
-    st["position"] = "bottom"
-    if st.get("margin_v"):
-        return st
+    if pos == "auto":
+        st["position"] = "bottom"
+        if st.get("margin_v"):
+            return st
     ed = p.edit
     reg = old_sub_region(p)
     if not reg or ed.get("crop") or ed.get("aspect", "original") != "original" or int(ed.get("rotate") or 0) \
@@ -995,9 +1000,40 @@ def effective_style(p: Project, style: dict) -> dict:
         size_rel = min(0.085, max(0.045, old_h * 1.2))
         st["size"] = max(16, round(size_rel * th))
     bottom = center + size_rel * 0.42  # 0.42: bù khoảng trống dưới chân chữ của font
-    if 0.25 < center < 0.97:
+    if pos == "auto" and 0.25 < center < 0.97:
         st["margin_v_rel"] = round(min(0.7, max(0.01, 1.0 - bottom)), 4)
     return st
+
+
+def hardsub_spec(p: Project, hs: dict | None = None) -> dict:
+    """Cách xoá phụ đề cũ đúng như lúc xuất (thêm file khung chữ OCR khi xoá bằng AI 'chỉ lúc có chữ')."""
+    hs = dict((p.edit.get("hardsub") or {}) if hs is None else hs)
+    if hs.get("mode") == "inpaint" and p.data.get("ocr_boxes") and hs.get("use_ocr_boxes", True):
+        hs["boxes_file"] = p.data["ocr_boxes"]
+    return hs
+
+
+def inpainted_video(p: Project, hs: dict | None = None, settings: dict | None = None) -> Path | None:
+    """Video đã xoá phụ đề bằng AI với đúng vùng / tuỳ chọn hiện tại (None = chưa chạy hoặc đã đổi)."""
+    from .video import inpainted_file
+
+    hs = hardsub_spec(p, hs)
+    if hs.get("mode") != "inpaint" or not hs.get("regions") or not p.data.get("source"):
+        return None
+    f = inpainted_file(p.source, hs, settings or load_settings(), p.work / "render")
+    return f if f.exists() else None
+
+
+def run_inpaint(p: Project, settings: dict | None = None, progress: Prog | None = None, cancel=None) -> Path:
+    """Nút 'Chạy xoá bằng AI': xoá phụ đề cũ cả video ngay (không đợi xuất). Xuất video sau đó dùng lại bản này."""
+    from .video import inpaint_cached
+
+    hs = hardsub_spec(p)
+    if hs.get("mode") != "inpaint":
+        raise ValueError("Chọn cách xoá 'Xoá sạch (AI)' trước.")
+    if not hs.get("regions"):
+        raise ValueError("Chưa khoanh vùng chữ cần xoá.")
+    return inpaint_cached(p.source, hs, settings or load_settings(), p.work / "render", progress, cancel)
 
 
 def render(p: Project, settings: dict | None = None, progress: Prog | None = None, cancel=None,
@@ -1006,9 +1042,7 @@ def render(p: Project, settings: dict | None = None, progress: Prog | None = Non
 
     settings = settings or load_settings()
     edit = p.edit
-    hs = edit.get("hardsub") or {}
-    if hs.get("mode") == "inpaint" and p.data.get("ocr_boxes") and hs.get("use_ocr_boxes", True):
-        hs["boxes_file"] = p.data["ocr_boxes"]
+    edit["hardsub"] = hardsub_spec(p)
     from .config import _deep_merge
 
     base_style = _deep_merge(settings.get("sub_style") or {}, (edit.get("subtitles") or {}).get("style") or {})

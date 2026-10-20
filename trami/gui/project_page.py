@@ -74,6 +74,8 @@ class ProjectPage(QWidget):
         self.player = Player()
         self.player.positionChanged.connect(self._on_pos)
         self.player.mediaError.connect(self._media_error)
+        self.player.subtitleEdited.connect(self._sub_edited)
+        self.player.regionsEdited.connect(self._regions_edited)
         self.ov_which = combo([("trans", "Xem: Tiếng Việt"), ("both", "Xem: Song ngữ"), ("source", "Xem: Tiếng Trung")])
         self.ov_which.currentIndexChanged.connect(self._refresh_overlay)
         self.ov_show = Switch(True)
@@ -325,20 +327,27 @@ class ProjectPage(QWidget):
     HS_MODES = [("none", "Không xoá", "x"), ("inpaint", "Xoá sạch (AI)", "sparkle"), ("blur", "Làm mờ", "eye"),
                 ("box", "Che dải màu", "stack"), ("delogo", "Delogo", "eraser")]
     HS_HELP = {
-        "none": "Giữ nguyên chữ Trung cũ trên video.",
-        "inpaint": "AI vẽ lại nền phía sau chữ – sạch nhất. Video bên trái chỉ hiện làm mờ gần đúng; "
-                   "bấm 'Xem trước kết quả' để thấy chính xác.",
-        "blur": "Làm mờ vùng chữ. Video bên trái hiện gần đúng ngay khi chỉnh.",
-        "box": "Phủ một dải màu lên vùng chữ (đặt phụ đề Việt đè lên). Video bên trái hiện đúng như khi xuất.",
-        "delogo": "Xoá nhanh bằng bộ lọc delogo của FFmpeg – hợp với logo nhỏ, chữ ít.",
+        "none": "<b>Không xoá</b> – giữ nguyên chữ Trung cũ trên video. Dùng khi video gốc không có phụ đề cứng.",
+        "inpaint": "<b>Xoá sạch (AI)</b> – AI vẽ lại phần hình phía sau chữ như chưa từng có chữ. Đẹp nhất nhưng chậm "
+                   "(nên có card NVIDIA).<br>Cách dùng: ① khoanh vùng chữ (hoặc <i>Tự dò vùng phụ đề</i>) "
+                   "② chọn <i>Công nghệ xoá</i> + <i>Độ mạnh</i> ③ bấm <i>Xem thử 1 khung</i> để kiểm tra "
+                   "④ bấm <b>Chạy xoá bằng AI</b> ở mục 3 (hoặc cứ bấm <b>Xuất video</b> – tool tự xoá trước khi ghép). "
+                   "Trước khi chạy, video bên trái chỉ làm mờ gần đúng chỗ sẽ xoá.",
+        "blur": "<b>Làm mờ</b> – nhoè vùng chữ thành vệt mờ. Nhanh, không cần chạy riêng: áp dụng khi bấm "
+                "<b>Xuất video</b>. Kéo <i>Độ mờ</i> cho tới khi không đọc được chữ cũ (video bên trái hiện gần đúng).",
+        "box": "<b>Che dải màu</b> – phủ một dải màu đặc lên vùng chữ, phụ đề Việt đặt đè lên. Nhanh, gọn, hợp video "
+               "nền tối. Chọn <i>Màu</i> + <i>Độ đục</i>; video bên trái hiện đúng như khi xuất.",
+        "delogo": "<b>Delogo</b> – bộ lọc của FFmpeg lấp vùng bằng màu viền xung quanh. Rất nhanh, hợp logo / chữ nhỏ; "
+                  "chữ to sẽ thành vệt nhoè. Áp dụng khi bấm <b>Xuất video</b>.",
     }
 
     def _tab_hardsub(self):
         sv = lambda *_: (self._save_edit_timer.start(), self._live_timer.start())  # noqa: E731
         # --- bước 1: khoanh vùng
         area = SectionCard("1. Khoanh vùng chữ cần xoá", "eraser",
-                           "Kéo chuột trên ảnh để khoanh vùng phụ đề Trung (khoanh nhiều vùng được, cả logo). "
-                           "Vùng khoanh hiện ngay trên video bên trái.")
+                           "Kéo chuột ngay trên VIDEO bên trái (hoặc trên ảnh dưới đây) để khoanh vùng phụ đề Trung – "
+                           "khoanh nhiều vùng được, cả logo. Kéo 4 chấm trắng trên 4 cạnh để đổi cao / thấp / dài / "
+                           "ngắn, kéo giữa vùng để di chuyển, bấm × để xoá vùng.")
         self.hs_editor = RegionEditor(multi=True)
         self.hs_editor.changed.connect(sv)
         area.add(self.hs_editor)
@@ -365,7 +374,8 @@ class ProjectPage(QWidget):
                                                         self.settings.get("inpaint_backend", "lama")))
         self.hs_strength = f.row("Độ mạnh", combo([("light", "Nhẹ"), ("normal", "Vừa"), ("strong", "Mạnh (chữ viền dày)")], "normal"))
         self.hs_useocr = f.row("Chỉ xoá lúc có chữ (OCR)", Switch(True),
-                               "Nếu đã OCR, chỉ xoá đúng lúc có chữ → giữ hình gốc ở các đoạn không có phụ đề")
+                               "Nếu đã lấy phụ đề bằng quét chữ (OCR), AI chỉ xoá đúng khung chữ lúc có chữ → giữ hình "
+                               "gốc ở các đoạn không có phụ đề (nhanh hơn, ít vệt hơn)")
         self.hs_blur = f.row("Độ mờ", SliderRow(4, 60, 1, 20, 0))
         self.hs_color = f.row("Màu dải che", ColorButton("#000000"))
         self.hs_opacity = f.row("Độ đục dải che", SliderRow(0.2, 1, 0.05, 1))
@@ -377,11 +387,26 @@ class ProjectPage(QWidget):
         self.hs_color.changed.connect(sv)
         self.hs_useocr.toggledOn.connect(sv)
         how.add(f)
-        # --- bước 3: kiểm tra
-        chk = SectionCard("3. Kiểm tra kết quả", "eye",
-                          "Tạo ảnh kết quả chính xác ở khung hình đang phát (giống hệt khi xuất video).")
-        chk.add(hbox(button("Xem trước kết quả", "eye", on_click=self._preview_hardsub),
-                     button("Về ảnh gốc", "refresh", on_click=self._clear_preview), None))
+        # --- bước 3: chạy / kiểm tra
+        chk = SectionCard("3. Kiểm tra & chạy", "eye",
+                          "‘Xem thử 1 khung’ tạo ảnh kết quả THẬT ở khung đang phát (hiện ở ảnh mục 1), "
+                          "không đổi video. Video chỉ được xoá thật khi chạy bước dưới hoặc khi Xuất video.")
+        chk.add(flow(button("Xem thử 1 khung", "eye", "Tạo ảnh kết quả chính xác ở khung hình đang phát",
+                            on_click=self._preview_hardsub),
+                     button("Về ảnh gốc", "refresh", on_click=self._clear_preview)))
+        self.hs_run = GradientButton("Chạy xoá bằng AI (cả video)", "sparkle")
+        self.hs_run.setToolTip("Xoá phụ đề cũ trên toàn bộ video ngay bây giờ. Xong thì trình phát bên trái chiếu bản "
+                               "đã xoá; Xuất video dùng lại bản này, không phải chạy lại.")
+        self.hs_run.clicked.connect(self.run_inpaint)
+        self.hs_viewclean = Switch(True)
+        self.hs_viewclean.setToolTip("Bật: trình phát chiếu bản đã xoá bằng AI (khi đã chạy xong với đúng vùng hiện tại)")
+        self.hs_viewclean.toggledOn.connect(lambda *_: self._sync_clean())
+        self.hs_runrow = wrap(hbox(self.hs_run, label("Xem bản đã xoá", "muted"), self.hs_viewclean, None))
+        chk.add(self.hs_runrow)
+        self.hs_status = label("", "muted", wrap=True)
+        chk.add(self.hs_status)
+        chk.add(hbox(button("Đi tới Xuất video", "export", "Mở tab Xuất để ghép phụ đề Việt + lồng tiếng và xuất MP4",
+                            on_click=lambda: self.tabs.set_current(7)), None))
         w = QWidget()
         self.hs_mode.setParent(w)
         self.hs_mode.hide()
@@ -410,6 +435,8 @@ class ProjectPage(QWidget):
                self.hs_color: mode == "box", self.hs_opacity: mode == "box"}
         for wdg, on in vis.items():
             self.hs_form.setRowVisible(wdg, on)
+        self.hs_runrow.setVisible(mode == "inpaint")
+        self._update_hs_status()
         if not self.loading:
             self._save_edit_timer.start()
             self._live_timer.start()
@@ -522,7 +549,10 @@ class ProjectPage(QWidget):
     # ================================================================== TAB: Kiểu chữ
     def _tab_style(self):
         sv = lambda *_: (self._save_edit_timer.start(), self._live_timer.start())  # noqa: E731
-        card = SectionCard("Kiểu phụ đề ghép vào video", "palette", "Xem trước trực tiếp trên khung video bên trái.")
+        card = SectionCard("Kiểu phụ đề ghép vào video", "palette",
+                           "Xem trước trực tiếp trên khung video bên trái – đúng cỡ chữ, chỗ đặt như video xuất ra. "
+                           "Kéo phụ đề trên video để đặt chỗ khác; khi bật nền hộp, kéo 4 chấm trên 4 cạnh nền "
+                           "để đổi chiều cao / độ dài.")
         f = Form()
         self.st_burn = f.row("Ghép phụ đề vào video", Switch(True))
         self.st_which = f.row("Hiển thị", combo(C.WHICH[:3], "trans"))
@@ -531,9 +561,17 @@ class ProjectPage(QWidget):
         self.st_size = f.row("Cỡ chữ (0 = tự động)", QSpinBox())
         self.st_size.setRange(0, 200)
         self.st_pos = f.row("Vị trí", combo([("auto", "Tự động – đúng chỗ phụ đề cũ"), ("bottom", "Dưới"),
-                                              ("middle", "Giữa"), ("top", "Trên")], "auto"))
+                                              ("middle", "Giữa"), ("top", "Trên"),
+                                              ("custom", "Tự chọn – kéo trên video")], "auto"))
         self.st_margin = f.row("Cách mép (px, 0 = tự động)", QSpinBox())
         self.st_margin.setRange(0, 1000)
+        self.st_posx = f.row("Ngang (% từ trái)", SliderRow(0, 100, 0.5, 50, 1),
+                             "Tâm phụ đề tính từ mép trái khung hình (50 = giữa)")
+        self.st_posy = f.row("Dọc (% từ trên)", SliderRow(0, 100, 0.5, 90, 1),
+                             "Chân dòng chữ cuối tính từ mép trên khung hình")
+        self.st_posauto = f.row("", wrap(hbox(button("Về vị trí tự động", "refresh",
+                                                     "Đặt lại phụ đề đúng chỗ phụ đề Trung cũ", flat=True,
+                                                     on_click=lambda: set_combo(self.st_pos, "auto")), None)))
         self.st_color = f.row("Màu chữ", ColorButton("#FFFFFF"))
         self.st_ocolor = f.row("Màu viền", ColorButton("#000000"))
         self.st_outline = f.row("Độ dày viền", SliderRow(0, 8, 0.5, 2.5, 1))
@@ -541,19 +579,34 @@ class ProjectPage(QWidget):
         self.st_bold = f.row("Chữ đậm", Switch(True))
         self.st_upper = f.row("VIẾT HOA", Switch(False))
         self.st_box = f.row("Nền hộp sau chữ", Switch(False))
+        self.st_bfixed = f.row("Kiểu nền", combo([("text", "Ôm theo chữ (dài ngắn theo câu)"),
+                                                  ("fixed", "Dải cố định (mọi câu cùng cỡ)")], "text"),
+                               "Dải cố định hợp để che luôn phụ đề cũ: đặt nền đè lên chỗ chữ Trung")
+        self.st_bpadx = f.row("Độ dài nền (đệm trái/phải)", SliderRow(0, 4, 0.05, 0.18, 2),
+                              "Phần nền thừa ra mỗi bên chữ, tính theo cỡ chữ (1 = bằng 1 dòng chữ)")
+        self.st_bpady = f.row("Chiều cao nền (đệm trên/dưới)", SliderRow(0, 3, 0.05, 0.18, 2),
+                              "Phần nền thừa ra phía trên và dưới dòng chữ, tính theo cỡ chữ (1 = bằng 1 dòng chữ)")
+        self.st_bw = f.row("Độ dài nền (% chiều ngang)", SliderRow(5, 100, 0.5, 80, 1, " %"))
+        self.st_bh = f.row("Chiều cao nền (% chiều cao)", SliderRow(2, 100, 0.5, 12, 1, " %"))
         self.st_bcolor = f.row("Màu nền hộp", ColorButton("#000000"))
         self.st_bop = f.row("Độ đục nền hộp", SliderRow(0.1, 1, 0.05, 0.55))
-        for w in (self.st_which, self.st_font, self.st_pos):
+        self.st_form = f
+        for w in (self.st_which, self.st_font, self.st_pos, self.st_bfixed):
             w.currentIndexChanged.connect(sv)
         for w in (self.st_size, self.st_margin):
             w.valueChanged.connect(sv)
         for w in (self.st_color, self.st_ocolor, self.st_bcolor):
             w.changed.connect(sv)
-        for w in (self.st_outline, self.st_shadow, self.st_bop):
+        for w in (self.st_outline, self.st_shadow, self.st_bop, self.st_posx, self.st_posy, self.st_bpadx,
+                  self.st_bpady, self.st_bw, self.st_bh):
             w.changed.connect(sv)
+        self.st_pos.currentIndexChanged.connect(self._style_rows)
+        self.st_bfixed.currentIndexChanged.connect(self._style_rows)
+        self.st_box.toggledOn.connect(lambda *_: self._style_rows())
         for w in (self.st_burn, self.st_bold, self.st_upper, self.st_box):
             w.toggledOn.connect(sv)
         card.add(f)
+        self._style_rows()
         presets = SectionCard("Mẫu nhanh", "sparkle")
         presets.add(hbox(button("Trắng viền đen", on_click=lambda: self._style_preset("classic")),
                          button("Vàng nổi bật", on_click=lambda: self._style_preset("yellow")),
@@ -567,6 +620,45 @@ class ProjectPage(QWidget):
         v.addWidget(presets)
         v.addStretch(1)
         return scroll(w)
+
+    def _style_rows(self, *_):
+        """Chỉ hiện ô chỉnh của đúng lựa chọn: vị trí tự chọn / cách mép, kiểu nền ôm chữ / dải cố định."""
+        custom = self.st_pos.currentData() == "custom"
+        box, fixed = self.st_box.isChecked(), self.st_bfixed.currentData() == "fixed"
+        f = self.st_form
+        for w, on in ((self.st_margin, not custom and self.st_pos.currentData() != "middle"),
+                      (self.st_posx, custom), (self.st_posy, custom), (self.st_posauto, custom),
+                      (self.st_bfixed, box), (self.st_bpadx, box and not fixed), (self.st_bpady, box and not fixed),
+                      (self.st_bw, box and fixed), (self.st_bh, box and fixed), (self.st_bcolor, box),
+                      (self.st_bop, box)):
+            f.setRowVisible(w, on)
+
+    def _sub_edited(self, d: dict):
+        """Kéo phụ đề / 4 chấm của nền hộp trên video -> ghi vào tab Kiểu chữ (lưu lại, xuất đúng như vậy)."""
+        if not self.p:
+            return
+        if "pos_x" in d:
+            self.st_posx.set(float(d["pos_x"]) * 100)
+            self.st_posy.set(float(d["pos_y"]) * 100)
+            set_combo(self.st_pos, "custom")
+        for key, w, k in (("box_pad_x", self.st_bpadx, 1), ("box_pad_y", self.st_bpady, 1),
+                          ("box_w", self.st_bw, 100), ("box_h", self.st_bh, 100)):
+            if key in d:
+                w.set(float(d[key]) * k)
+        self._style_rows()
+        self._save_edit_timer.start()
+        self._live_timer.start()
+
+    def _regions_edited(self, regs: list):
+        """Vẽ / kéo / đổi cỡ / xoá vùng che ngay trên video -> đồng bộ ảnh khoanh vùng + lưu."""
+        if not self.p:
+            return
+        self.hs_editor.set_regions(regs)
+        if regs and self.hs_mode.currentData() == "none":
+            set_combo(self.hs_mode, "inpaint")
+            self.win.toast("Đã chọn cách xoá 'Xoá sạch (AI)' – đổi cách khác ở mục 2 nếu muốn", "ok")
+        self._save_edit_timer.start()
+        self._live_timer.start()
 
     # ================================================================== TAB: Lồng tiếng
     def _tab_dub(self):
@@ -841,12 +933,81 @@ class ProjectPage(QWidget):
                 self.tracks.set_wave(np.load(a["wave"]), a["hop"])
         run_async(lambda: pipeline.timeline_assets(Project(pid)), done, lambda m: None)
 
+    def _media_source(self, hs: dict | None = None) -> str:
+        """Video cho trình phát: bản đã xoá phụ đề bằng AI (nếu đã chạy với đúng vùng hiện tại) / bản xem trước / gốc."""
+        p = self.p
+        if not p or not p.data.get("source"):
+            return ""
+        if self.hs_viewclean.isChecked():
+            try:
+                f = pipeline.inpainted_video(p, hs)
+            except Exception:  # noqa: BLE001
+                f = None
+            if f:
+                return str(f)
+        return str(p.work / "preview.mp4" if (p.work / "preview.mp4").exists() else p.source)
+
+    def _sync_clean(self):
+        """Đổi vùng / tuỳ chọn xoá AI -> bản đã xoá không còn đúng -> chiếu lại video gốc (và ngược lại)."""
+        if not self.p or self.loading:
+            return
+        want = self._media_source(self._hs_widgets())
+        self.player.view.hs.clean = "inpainted_" in Path(want).name
+        self._update_hs_status()
+        if want and want != self.player.source:
+            i = self.p.data.get("info", {})
+            self.player.load(want, i.get("duration", 0), i.get("fps", 25), i.get("height", 1080),
+                             start=self.player.position())
+            self._dub_key = None
+            self._update_player_audio()
+
+    def _update_hs_status(self):
+        if not self.p or not hasattr(self, "hs_status"):
+            return
+        mode = self.hs_mode.currentData() or "none"
+        if mode == "none":
+            txt = "Không xoá phụ đề cũ."
+        elif not self.hs_editor.regions:
+            txt = "⚠ Chưa có vùng nào – kéo chuột trên video bên trái hoặc bấm 'Tự dò vùng phụ đề'."
+        elif mode != "inpaint":
+            txt = "Cách này không cần chạy riêng: tự áp dụng khi bấm Xuất video."
+        elif self.player.view.hs.clean:
+            txt = ("✓ Đã xoá xong cả video – trình phát đang chiếu bản đã xoá. Xuất video dùng luôn bản này "
+                   "(không chạy lại). Đổi vùng / tuỳ chọn thì phải chạy lại.")
+        else:
+            try:
+                done = pipeline.inpainted_video(self.p, self._hs_widgets()) is not None
+            except Exception:  # noqa: BLE001
+                done = False
+            txt = ("✓ Đã xoá xong cả video (đang tắt 'Xem bản đã xoá')." if done else
+                   "Chưa chạy xoá AI. Bấm 'Chạy xoá bằng AI' để xoá ngay và xem kết quả trên video bên trái – "
+                   "hoặc cứ bấm Xuất video, tool tự xoá trước khi ghép (lâu hơn).")
+        self.hs_status.setText(txt)
+
+    def run_inpaint(self):
+        if not self.p or not self.p.data.get("source"):
+            return self.win.toast("Dự án chưa có video", "err")
+        if self.hs_mode.currentData() != "inpaint":
+            return self.win.toast("Chọn cách xoá 'Xoá sạch (AI)' ở mục 2 trước", "warn")
+        if not self.hs_editor.regions:
+            return self.win.toast("Hãy khoanh vùng chữ cần xoá trước (kéo chuột trên video)", "warn")
+        if pipeline.inpainted_video(self.p, self._hs_widgets()):
+            self.hs_viewclean.setChecked(True)
+            self._sync_clean()
+            return self.win.toast("Đã xoá xong với đúng vùng này rồi – trình phát đang chiếu bản đã xoá", "ok")
+
+        def fn(j, p):
+            out = pipeline.run_inpaint(p, None, j.update, j.cancelled)
+            return {"message": "Đã xoá phụ đề cũ cả video – trình phát chiếu bản đã xoá, xuất video dùng luôn bản này",
+                    "path": str(out)}
+        self.submit("inpaint", "Xoá phụ đề bằng AI", fn)
+
     def _load_media(self):
         p = self.p
-        src = p.work / "preview.mp4" if (p.work / "preview.mp4").exists() else p.source
         i = p.data.get("info", {})
-        self.player.load(str(src) if p.data.get("source") else "", i.get("duration", 0), i.get("fps", 25),
-                         i.get("height", 1080))
+        src = self._media_source()
+        self.player.view.hs.clean = "inpainted_" in Path(src).name
+        self.player.load(src, i.get("duration", 0), i.get("fps", 25), i.get("height", 1080))
         self.hs_editor.set_image(QPixmap())
         self.hs_editor.overlay = None
         if p.data.get("source"):
@@ -942,6 +1103,14 @@ class ProjectPage(QWidget):
         self.st_box.setChecked(bool(st.get("box", False)))
         self.st_bcolor.set(st.get("box_color", "#000000"))
         self.st_bop.set(st.get("box_opacity", 0.55))
+        self.st_posx.set(float(st.get("pos_x", 0.5)) * 100)
+        self.st_posy.set(float(st.get("pos_y", 0.9)) * 100)
+        set_combo(self.st_bfixed, "fixed" if st.get("box_fixed") else "text")
+        self.st_bpadx.set(float(st.get("box_pad_x", 0.18)))
+        self.st_bpady.set(float(st.get("box_pad_y", 0.18)))
+        self.st_bw.set(float(st.get("box_w", 0.8)) * 100)
+        self.st_bh.set(float(st.get("box_h", 0.12)) * 100)
+        self._style_rows()
         # lồng tiếng
         d = e["dub"]
         self.d_bg.set(d.get("bg_volume", 1.0))
@@ -962,10 +1131,7 @@ class ProjectPage(QWidget):
         return {
             "trim": {"start": self.e_start.value(), "end": self.e_end.value()},
             "cuts": e.get("cuts", []), "crop": e.get("crop"),
-            "hardsub": {"mode": self.hs_mode.currentData(), "regions": self.hs_editor.regions,
-                        "backend": self.hs_backend.currentData(), "strength": self.hs_strength.currentData(),
-                        "blur_strength": int(self.hs_blur.value()), "box_color": self.hs_color.color,
-                        "box_opacity": self.hs_opacity.value(), "use_ocr_boxes": self.hs_useocr.isChecked()},
+            "hardsub": self._hs_widgets(),
             "aspect": self.e_aspect.currentData(), "aspect_mode": self.e_amode.currentData(),
             "resolution": self.e_res.currentData(), "rotate": int(self.e_rot.currentData()),
             "flip_h": self.e_fliph.isChecked(), "flip_v": self.e_flipv.isChecked(),
@@ -989,12 +1155,22 @@ class ProjectPage(QWidget):
             "crf": int(self.x_crf.currentData()),
         }
 
+    def _hs_widgets(self) -> dict:
+        return {"mode": self.hs_mode.currentData(), "regions": self.hs_editor.regions,
+                "backend": self.hs_backend.currentData(), "strength": self.hs_strength.currentData(),
+                "blur_strength": int(self.hs_blur.value()), "box_color": self.hs_color.color,
+                "box_opacity": self.hs_opacity.value(), "use_ocr_boxes": self.hs_useocr.isChecked()}
+
     def current_style(self) -> dict:
         return {"font": self.st_font.currentData(), "size": self.st_size.value(), "position": self.st_pos.currentData(),
                 "margin_v": self.st_margin.value(), "color": self.st_color.color, "outline_color": self.st_ocolor.color,
                 "outline": self.st_outline.value(), "shadow": self.st_shadow.value(), "bold": self.st_bold.isChecked(),
                 "uppercase": self.st_upper.isChecked(), "box": self.st_box.isChecked(),
-                "box_color": self.st_bcolor.color, "box_opacity": self.st_bop.value()}
+                "box_color": self.st_bcolor.color, "box_opacity": self.st_bop.value(),
+                "pos_x": round(self.st_posx.value() / 100, 4), "pos_y": round(self.st_posy.value() / 100, 4),
+                "box_fixed": self.st_bfixed.currentData() == "fixed", "box_pad_x": round(self.st_bpadx.value(), 3),
+                "box_pad_y": round(self.st_bpady.value(), 3), "box_w": round(self.st_bw.value() / 100, 4),
+                "box_h": round(self.st_bh.value() / 100, 4)}
 
     # ================================================================== lưu
     def _save_edit_now(self):
@@ -1073,6 +1249,8 @@ class ProjectPage(QWidget):
             self._update_player_audio()
             if j["kind"] in ("preview", "download"):
                 self._load_media()
+            elif j["kind"] == "inpaint":
+                self._sync_clean()
 
     def _auto_opts(self) -> dict:
         which = self.a_which.currentData()
@@ -1647,6 +1825,7 @@ class ProjectPage(QWidget):
         self.st_bop.set(st.get("box_opacity", 0.55))
         self.st_bold.setChecked(bool(st.get("bold", True)))
         set_combo(self.st_pos, st.get("position", "bottom"))
+        self._style_rows()
         self.loading = False
         self._save_edit_now()
         self._refresh_overlay()
@@ -2001,6 +2180,7 @@ class ProjectPage(QWidget):
         i = self.p.data.get("info", {})
         self.player.set_edit(ed, i.get("width", 0), i.get("height", 0), i.get("duration", 0))
         self._refresh_overlay()
+        self._sync_clean()
 
     def _update_summary(self):
         if not self.p:
@@ -2065,8 +2245,9 @@ class ProjectPage(QWidget):
     # ================================================================== khác
     def _tab_changed(self, i: int):
         self.stack.setCurrentIndex(i)
-        self.player.view.hs.show_outline = i == 2   # tab Xoá phụ đề: hiện khung vùng đã khoanh trên video
-        self.player.view.hs.update()
+        # tab Xoá phụ đề: chuột vẽ / kéo vùng che trên video; tab khác: chuột kéo phụ đề (tab Kiểu chữ hiện khung)
+        self.player.view.set_tool(regions=i == 2, sub_frame=i == 4)
+        self.player.update_sub()
         if i == 2 and not self.hs_editor.pix:
             self._grab_frame()
         if i == 7:

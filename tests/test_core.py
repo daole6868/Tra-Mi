@@ -1236,3 +1236,68 @@ def test_ocr_region_multiline_and_colors(tmp_path):
     for _, _, lines, _ in subs:
         assert any(ocr._similar("".join(lines), t) >= 0.85 for t in texts), ("".join(lines), texts)
     assert not any("水印" in t or "频道" in t for t in texts)
+
+
+def test_ass_custom_position_and_box_sizes():
+    """Kéo phụ đề trên video -> \\pos đúng chỗ; nền hộp ôm chữ dùng \\xbord/\\ybord; dải nền cố định vẽ riêng."""
+    segs = [Segment(0, 2, "你好", "Xin chào các bạn")]
+    a = st.to_ass(segs, {"position": "custom", "pos_x": 0.3, "pos_y": 0.5, "size": 100}, 1920, 1080)
+    assert "{\\an2\\pos(576,540)}Xin chào các bạn" in a
+    a = st.to_ass(segs, {"position": "bottom", "box": True, "box_pad_x": 0.5, "box_pad_y": 0.1, "size": 100},
+                  1920, 1080)
+    assert "\\xbord50.0\\ybord10.0" in a and ",3,10.0," in a          # BorderStyle 3, đệm dọc 10 px
+    a = st.to_ass(segs, {"position": "custom", "pos_x": 0.3, "pos_y": 0.5, "size": 100, "box": True,
+                         "box_fixed": True, "box_w": 0.4, "box_h": 0.2, "box_color": "#FF0000",
+                         "box_opacity": 1.0}, 1920, 1080)
+    draw = [ln for ln in a.splitlines() if "\\p1" in ln]
+    # khối chữ 1 dòng cao 100, chân ở y=540 -> tâm 490; dải 768×216 -> góc trên trái (192, 382)
+    assert len(draw) == 1 and draw[0].startswith("Dialogue: 0,") and "\\pos(192,382)" in draw[0]
+    assert "m 0 0 l 768 0 768 216 0 216" in draw[0] and "\\1c&H0000FF&" in draw[0] and "\\1a&H00&" in draw[0]
+    assert any(ln.startswith("Dialogue: 1,") and ln.endswith("Xin chào các bạn") for ln in a.splitlines())
+    # song ngữ: dòng Trung reset kiểu "Source" vẫn giữ đệm nền
+    a = st.to_ass(segs, {"box": True, "box_pad_x": 0.3, "size": 60}, 1280, 720, "both")
+    assert "\\N{\\rSource\\xbord18.0" in a
+
+
+def test_region_drag_handles():
+    pytest.importorskip("PySide6")
+    from PySide6.QtCore import QPointF, QRectF
+
+    from trami.gui.editors import drag_region, hit_region
+
+    r = {"x": 0.2, "y": 0.8, "w": 0.6, "h": 0.1}
+    rr = QRectF(200, 800, 600, 100)
+    assert hit_region(rr, QPointF(500, 800)) == "T" and hit_region(rr, QPointF(800, 850)) == "R"
+    assert hit_region(rr, QPointF(200, 900)) == "BL" and hit_region(rr, QPointF(400, 850)) == "move"
+    assert hit_region(rr, QPointF(100, 100)) == ""
+    t = drag_region(r, "T", 0, -0.1)                      # kéo cạnh trên lên: cao hơn, đáy giữ nguyên
+    assert abs(t["y"] - 0.7) < 1e-9 and abs(t["y"] + t["h"] - 0.9) < 1e-9
+    w = drag_region(r, "R", 0.5, 0)                       # kéo quá mép phải -> dừng ở mép
+    assert abs(w["x"] + w["w"] - 1.0) < 1e-9
+    m = drag_region(r, "move", -0.5, 0.5)                 # di chuyển: giữ cỡ, không ra ngoài khung
+    assert m["x"] == 0.0 and abs(m["y"] - 0.9) < 1e-9 and m["w"] == r["w"] and m["h"] == r["h"]
+    s = drag_region(r, "L", 0.9, 0)                       # kéo cạnh trái vượt cạnh phải -> còn bề rộng tối thiểu
+    assert s["w"] >= 0.01 - 1e-9
+
+
+def test_inpaint_cached_reused(tmp_path, monkeypatch):
+    """'Chạy xoá bằng AI' rồi Xuất video: cùng vùng -> dùng lại, đổi vùng -> chạy lại và xoá bản cũ."""
+    from trami import inpaint, video
+
+    src = tmp_path / "v.mp4"
+    src.write_bytes(b"x" * 100)
+    calls = []
+
+    def fake(src_, out, regions, settings, boxes_file=None, progress=None, cancel=None, strength="normal"):
+        calls.append(regions)
+        Path(out).write_bytes(b"done")
+    monkeypatch.setattr(inpaint, "inpaint_video", fake)
+    hs = {"mode": "inpaint", "regions": [{"x": 0.1, "y": 0.8, "w": 0.8, "h": 0.1}], "strength": "normal"}
+    sts = {"inpaint_backend": "opencv", "video_crf": 20}
+    a = video.inpaint_cached(src, hs, sts, tmp_path / "w")
+    b = video.inpaint_cached(src, hs, sts, tmp_path / "w")
+    assert a == b and len(calls) == 1 and a.read_bytes() == b"done"
+    hs2 = {**hs, "regions": [{"x": 0.1, "y": 0.75, "w": 0.8, "h": 0.15}]}
+    c = video.inpaint_cached(src, hs2, sts, tmp_path / "w")
+    assert c != a and len(calls) == 2 and not a.exists()
+    assert video.inpainted_file(src, hs2, sts, tmp_path / "w") == c

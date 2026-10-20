@@ -7,6 +7,67 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from . import icons, theme
 
+# Chỉnh vùng chữ nhật bằng chuột (dùng chung cho ảnh khoanh vùng và lớp vùng che trên video):
+# 4 chấm giữa 4 cạnh (L/R/T/B) đổi dài ngắn / cao thấp, góc (TL/TR/BL/BR) đổi cả hai, kéo bên trong để di chuyển.
+REGION_CURSORS = {"L": Qt.CursorShape.SizeHorCursor, "R": Qt.CursorShape.SizeHorCursor,
+                  "T": Qt.CursorShape.SizeVerCursor, "B": Qt.CursorShape.SizeVerCursor,
+                  "TL": Qt.CursorShape.SizeFDiagCursor, "BR": Qt.CursorShape.SizeFDiagCursor,
+                  "TR": Qt.CursorShape.SizeBDiagCursor, "BL": Qt.CursorShape.SizeBDiagCursor,
+                  "move": Qt.CursorShape.SizeAllCursor, "del": Qt.CursorShape.PointingHandCursor}
+
+
+def edge_handles(rr: QRectF) -> dict[str, QPointF]:
+    c = rr.center()
+    return {"L": QPointF(rr.left(), c.y()), "R": QPointF(rr.right(), c.y()),
+            "T": QPointF(c.x(), rr.top()), "B": QPointF(c.x(), rr.bottom())}
+
+
+def hit_region(rr: QRectF, pos: QPointF, tol: float = 7.0) -> str:
+    """Chỗ bấm thuộc phần nào của vùng: chấm cạnh / góc / cạnh / bên trong ('' = ngoài vùng)."""
+    for k, pt in edge_handles(rr).items():
+        if abs(pos.x() - pt.x()) <= tol * 1.4 and abs(pos.y() - pt.y()) <= tol * 1.4:
+            return k
+    near_l, near_r = abs(pos.x() - rr.left()) <= tol, abs(pos.x() - rr.right()) <= tol
+    near_t, near_b = abs(pos.y() - rr.top()) <= tol, abs(pos.y() - rr.bottom()) <= tol
+    in_x = rr.left() - tol <= pos.x() <= rr.right() + tol
+    in_y = rr.top() - tol <= pos.y() <= rr.bottom() + tol
+    if not (in_x and in_y):
+        return ""
+    v = "T" if near_t else "B" if near_b else ""
+    h = "L" if near_l else "R" if near_r else ""
+    if v or h:
+        return v + h
+    return "move" if rr.contains(pos) else ""
+
+
+def drag_region(r0: dict, kind: str, dx: float, dy: float, mw: float = 0.01, mh: float = 0.01) -> dict:
+    """Vùng mới (toạ độ 0..1) sau khi kéo phần `kind` đi (dx, dy)."""
+    x0, y0, w0, h0 = float(r0["x"]), float(r0["y"]), float(r0["w"]), float(r0["h"])
+    if kind == "move":
+        return {"x": min(1 - w0, max(0.0, x0 + dx)), "y": min(1 - h0, max(0.0, y0 + dy)), "w": w0, "h": h0}
+    x1, y1 = x0 + w0, y0 + h0
+    if "L" in kind:
+        x0 = min(x1 - mw, max(0.0, x0 + dx))
+    if "R" in kind:
+        x1 = max(x0 + mw, min(1.0, x1 + dx))
+    if "T" in kind:
+        y0 = min(y1 - mh, max(0.0, y0 + dy))
+    if "B" in kind:
+        y1 = max(y0 + mh, min(1.0, y1 + dy))
+    return {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0}
+
+
+def paint_handles(p: QPainter, rr: QRectF, color: str, size: float = 8.0):
+    """4 chấm vuông nhỏ giữa 4 cạnh."""
+    p.save()
+    pen = QPen(QColor(color), 1.5)
+    pen.setCosmetic(True)
+    p.setPen(pen)
+    p.setBrush(QColor("#FFFFFF"))
+    for pt in edge_handles(rr).values():
+        p.drawRoundedRect(QRectF(pt.x() - size / 2, pt.y() - size / 2, size, size), 2, 2)
+    p.restore()
+
 
 class RegionEditor(QWidget):
     """Hiển thị 1 khung hình, cho phép kéo chuột vẽ/di chuyển/đổi cỡ các vùng chữ nhật (toạ độ 0..1)."""
@@ -60,13 +121,11 @@ class RegionEditor(QWidget):
     def _hit(self, pos: QPointF):
         for i in range(len(self.regions) - 1, -1, -1):
             rr = self._rect_of(self.regions[i])
-            close = QRectF(rr.right() - 18, rr.top(), 18, 18)
-            if close.contains(pos):
+            if QRectF(rr.right() - 18, rr.top(), 18, 18).contains(pos):
                 return i, "del"
-            if QRectF(rr.right() - 9, rr.bottom() - 9, 18, 18).contains(pos):
-                return i, "resize"
-            if rr.contains(pos):
-                return i, "move"
+            kind = hit_region(rr, pos)
+            if kind:
+                return i, kind
         return -1, ""
 
     def mousePressEvent(self, e):
@@ -80,11 +139,8 @@ class RegionEditor(QWidget):
             self.update()
             self.changed.emit(self.regions)
             return
-        if kind == "resize":
-            self.drag = ("resize", i, None)
-        elif kind == "move":
-            r = self.regions[i]
-            self.drag = ("move", i, (p.x() - r["x"], p.y() - r["y"]))
+        if kind:
+            self.drag = (kind, i, (dict(self.regions[i]), p))
         else:
             if not self.multi:
                 self.regions = []
@@ -96,8 +152,7 @@ class RegionEditor(QWidget):
         pos = e.position()
         if not self.drag:
             _, kind = self._hit(pos)
-            self.setCursor({"move": Qt.CursorShape.SizeAllCursor, "resize": Qt.CursorShape.SizeFDiagCursor,
-                            "del": Qt.CursorShape.PointingHandCursor}.get(kind, Qt.CursorShape.CrossCursor))
+            self.setCursor(REGION_CURSORS.get(kind, Qt.CursorShape.CrossCursor))
             return
         kind, i, data = self.drag
         p = self._rel(pos)
@@ -105,13 +160,9 @@ class RegionEditor(QWidget):
         if kind == "new":
             ox, oy = data
             r.update(x=min(p.x(), ox), y=min(p.y(), oy), w=abs(p.x() - ox), h=abs(p.y() - oy))
-        elif kind == "move":
-            dx, dy = data
-            r["x"] = min(1 - r["w"], max(0, p.x() - dx))
-            r["y"] = min(1 - r["h"], max(0, p.y() - dy))
         else:
-            r["w"] = max(0.01, min(1 - r["x"], p.x() - r["x"]))
-            r["h"] = max(0.01, min(1 - r["y"], p.y() - r["y"]))
+            r0, p0 = data
+            r.update(drag_region(r0, kind, p.x() - p0.x(), p.y() - p0.y()))
         self.update()
 
     def mouseReleaseEvent(self, e):
@@ -151,9 +202,8 @@ class RegionEditor(QWidget):
             p.setBrush(QColor(theme.ACCENT))
             p.drawRoundedRect(close, 4, 4)
             icons.paint_icon(p, "x", close.adjusted(3, 3, -3, -3), "#FFFFFF", 2.4)
-            # tay cầm đổi cỡ
-            p.setBrush(QColor("#FFFFFF"))
-            p.drawEllipse(QPointF(rr.right(), rr.bottom()), 5, 5)
+            # 4 chấm giữa 4 cạnh: kéo để đổi cao / thấp / dài / ngắn
+            paint_handles(p, rr, theme.ACCENT2)
             p.setPen(QColor("#FFFFFF"))
             p.setFont(theme.font(8.5, QFont.Weight.Bold))
             p.drawText(QRectF(rr.left() + 6, rr.top() + 3, 120, 16), Qt.AlignmentFlag.AlignLeft,
