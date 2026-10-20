@@ -1486,3 +1486,38 @@ def test_karaoke_timing_and_ass():
     assert out[0].start == 2.0 and out[0].extra["kv"] == [[2.2, 3.0], [3.5, 4.5]]
     out = st.scale_time(out, 2.0)
     assert out[0].extra["kv"] == [[1.1, 1.5], [1.75, 2.25]]
+
+
+def test_omnivoice_design_presets(monkeypatch, tmp_path):
+    from trami import omni_design as od
+    from trami import tts
+
+    vocab = {"male", "female", "child", "teenager", "young adult", "middle-aged", "elderly", "very low pitch",
+             "low pitch", "moderate pitch", "high pitch", "very high pitch", "whisper"}
+    assert all(set(p[3].split(", ")) <= vocab for p in od.PRESETS)          # đúng từ OmniVoice hiểu
+    assert len({p[3] for p in od.PRESETS}) == len(od.PRESETS)               # không 2 giọng trùng mô tả
+    assert len({p[4] for p in od.PRESETS}) == len(od.PRESETS)
+    vs = od.voices()
+    assert vs[0]["name"].startswith("⭐") and all(v["id"].startswith("omnid:") for v in vs)
+    assert od.get("omnid:ong_lao")["gender"] == "male" and od.get("khong_co") is None
+    assert od.key("omnid:nu_tre", "a") != od.key("omnid:nu_tre", "b")
+    # tự gán giọng theo nam / nữ
+    monkeypatch.setattr(tts, "omnivoice_available", lambda: True)
+    asg = tts.auto_assign(["S1", "S2", "S3"], {"tts_engine": "omnivoice"}, {},
+                          {"S1": {"g": "male"}, "S2": {"g": "female"}, "S3": {"g": "male"}})
+    assert [od.get(asg[k])["gender"] for k in ("S1", "S2", "S3")] == ["male", "female", "male"]
+    assert len(set(asg.values())) == 3
+    # câu mẫu: tạo 1 lần, lần sau dùng lại; câu mẫu hỏng (im lặng) -> tạo lại với hạt khác
+    monkeypatch.setattr(od, "DESIGN_DIR", tmp_path / "design")
+    calls = []
+
+    class W:
+        def synth(self, text, out, instruct=None, seed=None, **kw):
+            calls.append((instruct, seed))
+            silent = len(calls) == 1
+            tts.write_wav(out, np.zeros(24000, np.float32) if silent else _speech_like(24000, 2.0), 24000)
+            return out
+    f, text = od.ensure_anchor(W(), "omnid:nam_tre", "repo")
+    assert Path(f).exists() and text == od.ANCHOR_TEXT and len(calls) == 2
+    assert calls[0] == ("male, young adult, moderate pitch", 1201) and calls[1][1] != 1201
+    assert od.ensure_anchor(W(), "omnid:nam_tre", "repo")[0] == f and len(calls) == 2

@@ -28,7 +28,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `separate.py` (audio-separator BS-RoFormer), `lama.py` + `inpaint.py` (xoá chữ), `ocr.py` (RapidOCR),
   `translate.py` (`LLMClient` gọi HTTP: anthropic / OpenAI-compatible / gemini / deepseek / ollama; Google gtx;
   Hy-MT2 trên máy qua `hymt_worker.py`), `voicefix.py` (đọc số, phát hiện giọng AI hỏng, cân âm lượng),
-  `gender.py` (đoán giọng nam/nữ mỗi người nói), `karaoke.py` (thời điểm từng từ cho phụ đề karaoke).
+  `gender.py` (đoán giọng nam/nữ mỗi người nói), `karaoke.py` (thời điểm từng từ cho phụ đề karaoke),
+  `omni_design.py` (23 giọng OmniVoice chọn sẵn tạo theo mô tả).
 - `trami/audiomix.py` – quy tắc trộn âm thanh dùng chung cho xuất video (`video.build_and_render`) và bộ trộn trực tiếp
   `LiveMix` của trình phát (`player.LiveAudio`, QAudioSink); cài đặt ở `edit["audio"]`, tab `gui/audio_tab.py`.
 - `trami/jobs.py` – hàng đợi 1 luồng cho tác vụ dài; `trami/gui/*` – giao diện (QPainter), `common.run_async`,
@@ -37,7 +38,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
   Chụp ảnh kiểm tra giao diện phải nạp theme như `run()`: `theme.load_fonts(); app.setFont(theme.font(10));
   app.setStyleSheet(theme.stylesheet())`.
-- `tests/test_core.py` – `python -m pytest -q tests` (67 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (68 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -392,6 +393,20 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     (Quét mượt / Đổi màu từng từ), mẫu nhanh "Karaoke vàng" (Bangers, viền 4,5, bóng 1,5, không đậm); mẫu khác tắt karaoke
     + bỏ Bangers. `_set_style_widgets` dùng chung khi mở dự án và mẫu nhanh. Cài đặt: `karaoke`, `karaoke_color`, `karaoke_mode`.
 
+- 2.0.37: người dùng hỏi HaizFlow có giọng nào: OmniVoice 40 giọng "chọn sẵn" (thực chất ~18 mô tả `instruct`, nhiều giọng
+  trùng mô tả chỉ khác hạt ngẫu nhiên; mỗi giọng đọc 1 câu mẫu rồi nhái lại cho cả video) + nhái giọng; VieNeu 25 preset (TraMi
+  có đủ, cùng lấy từ gói vieneu); Edge 2 giọng Việt. Thêm cho TraMi **23 giọng OmniVoice chọn sẵn** (tự viết danh sách):
+  * `trami/omni_design.py`: `PRESETS` (mã, tên, nam/nữ, mô tả, hạt, ⭐) chỉ dùng từ OmniVoice 0.2.1 hiểu (`_resolve_instruct`:
+    male/female · child/teenager/young adult/middle-aged/elderly · very low…very high pitch · whisper; đã kiểm bằng chính
+    hàm của gói, 23/23 hợp lệ, không trùng mô tả). `ensure_anchor`: đọc `ANCHOR_TEXT` (câu Việt ~6 s) với `instruct` + hạt cố
+    định 1 lần -> `data/voices/design/<mã>_<key>.wav` (key = mô tả|hạt|mô hình|câu mẫu); câu mẫu hỏng (`voice_problem`)
+    -> hạt khác, tối đa 3 lần. Mọi câu lồng tiếng nhái câu mẫu (`ref_audio` + `ref_text`) -> cả video 1 giọng.
+  * `tts`: mã giọng `omnid:<mã>`; `list_voices` thêm sau giọng mẫu / nhái giọng; `auto_assign` (OmniVoice) = giọng mẫu
+    của bạn + giọng chọn sẵn có nam/nữ (trước: chỉ giọng mẫu hoặc nhái giọng gốc); `synthesize_dub` hash có `omni_design.key`,
+    câu mẫu lỗi nhớ lỗi (không thử lại mỗi câu); `preview_voice`; `VieneuWorker.synth(instruct=)` (omni_worker đã nhận).
+  * Thử với OmniVoice giả (kiểm từ vựng như bản thật): mỗi giọng tạo câu mẫu 1 lần, các câu sau `voice_clone_prompt` từ câu
+    mẫu, sửa 1 câu chỉ đọc lại câu đó, nghe thử chạy, giao diện Tự gán giọng S1·nữ -> Nữ trẻ, S2/S3·nam -> Nam trẻ / Nam trầm.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -412,3 +427,4 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.35: chờ người dùng thử tab Âm thanh trên máy thật (loa Windows: kéo thanh khi đang phát nghe đổi ngay, không
   rè / lệch tiếng với hình; video xuất trộn đúng như nghe).
 - 2.0.36: chờ người dùng thử karaoke trên máy thật (nhịp chữ theo giọng VieNeu/Edge thật, chữ quét mượt khi phát).
+- 2.0.37: chờ người dùng nghe thử giọng OmniVoice chọn sẵn với tiếng Việt trên máy thật (mô hình thật chưa chạy ở sandbox).

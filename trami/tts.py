@@ -8,6 +8,7 @@ Giọng cho từng người nói (S1, S2…) được ghi dạng chuỗi:
   - "clone"                    : NHÁI GIỌNG nhân vật gốc bằng VieNeu-TTS (lấy mẫu 5–12 giây từ chính video)
   - "omni:<id>"                : OmniVoice nhái giọng từ FILE GHI ÂM MẪU trong thư viện giọng mẫu (trami/voices.py)
   - "omniclone"                : OmniVoice nhái giọng nhân vật gốc (mẫu 3–10 giây cắt từ video + lời gốc)
+  - "omnid:<mã>"               : OmniVoice giọng CHỌN SẴN tạo theo mô tả (trami/omni_design.py, không cần file mẫu)
 
 Mỗi câu được đọc rồi tự co giãn tốc độ cho vừa khung thời gian của phụ đề.
 """
@@ -144,9 +145,12 @@ def list_voices(settings: dict | None = None) -> list[dict]:
     if omnivoice_available():
         from . import voices as vlib
 
+        from . import omni_design
+
         omni = [{"id": f"omni:{v['id']}", "name": f"🎙 {v['name']} – giọng mẫu (OmniVoice)", "gender": ""}
                 for v in vlib.list_samples()]
         omni.append({"id": OMNI_CLONE, "name": "🎭 Nhái giọng nhân vật gốc (OmniVoice)", "gender": ""})
+        omni += omni_design.voices()
         voices = omni + voices
     return voices
 
@@ -162,9 +166,12 @@ def auto_assign(speakers: list[str], settings: dict | None = None, current: dict
     if engine == "vieneu" and vieneu_available():
         pool = [(v["id"], v.get("gender", "")) for v in vieneu_presets((settings or {}).get("vieneu_mode", "v3turbo"))]
     elif engine == "omnivoice" and omnivoice_available():
+        from . import omni_design
         from . import voices as vlib
 
-        pool = [(f"omni:{v['id']}", "") for v in vlib.list_samples()] or [(OMNI_CLONE, "")]
+        # giọng mẫu của bạn trước, rồi giọng chọn sẵn (có nam / nữ -> nhân vật nào nhận giọng đó)
+        pool = [(f"omni:{v['id']}", "") for v in vlib.list_samples()] + \
+            [(v["id"], v["gender"]) for v in omni_design.voices()]
     else:
         pool = [(v["id"], v["gender"]) for v in EDGE_VOICES]
     gmap = dict(pool)
@@ -434,10 +441,10 @@ class VieneuWorker:
 
     def synth(self, text: str, out: str | Path, voice: str | None = None, ref_audio: str | None = None,
               ref_text: str | None = None, duration: float | None = None, params: dict | None = None,
-              seed: int | None = None) -> Path:
+              seed: int | None = None, instruct: str | None = None) -> Path:
         req = json.dumps({"text": text, "out": str(out), "voice": voice, "ref_audio": ref_audio,
                           "ref_text": ref_text or "", "duration": duration, "params": params or {},
-                          "seed": seed}, ensure_ascii=False)
+                          "seed": seed, "instruct": instruct}, ensure_ascii=False)
         with self.lock:
             for attempt in range(2):
                 try:
@@ -584,7 +591,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     work = Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
     voices = voices or {}
-    if not voice.startswith(("edge:", "vieneu:", "omni:")) and voice not in (CLONE, OMNI_CLONE):
+    if not voice.startswith(("edge:", "vieneu:", "omni:", "omnid:")) and voice not in (CLONE, OMNI_CLONE):
         voice = "edge:" + voice  # tương thích bản cũ
     mode = settings.get("vieneu_mode", "v3turbo")
 
@@ -594,6 +601,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     groups: dict[int, str] = {}   # câu -> mã giọng (cân âm lượng giữa các câu cùng giọng)
     vn_params = vieneu_params(settings)
     samples = {}
+    from . import omni_design
+
     if omnivoice_available():
         from . import voices as vlib
 
@@ -620,8 +629,9 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         if spec in (CLONE,) or spec.startswith("vieneu:"):
             if not vieneu_available() or (spec.startswith((VN_SAMPLE, VN_LIB)) and not vieneu_ref(spec)):
                 spec = "edge:vi-VN-HoaiMyNeural"   # chưa cài VieNeu / giọng mẫu đã bị xoá
-        if spec == OMNI_CLONE or spec.startswith("omni:"):
-            if not omnivoice_available() or (spec.startswith("omni:") and spec[5:] not in samples):
+        if spec == OMNI_CLONE or spec.startswith(("omni:", "omnid:")):
+            if not omnivoice_available() or (spec.startswith("omni:") and spec[5:] not in samples) or \
+                    (spec.startswith("omnid:") and not omni_design.get(spec)):
                 spec = "edge:vi-VN-HoaiMyNeural"   # chưa cài OmniVoice / giọng mẫu đã bị xoá
         if spec == CLONE:
             spec = f"clone:{s.speaker or 'S1'}"
@@ -633,7 +643,9 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         if spec.startswith("omni:"):   # sửa lời / file mẫu thì đọc lại
             sm = samples[spec[5:]]
             extra = f"{sm.get('text', '')}|{sm.get('file')}|{settings.get('omnivoice_model', '')}"
-        if spec.startswith(("omni:", "omniclone:")):
+        if spec.startswith("omnid:"):  # đổi mô tả / mô hình -> câu mẫu mới -> đọc lại
+            extra = omni_design.key(spec, settings.get("omnivoice_model", ""))
+        if spec.startswith(("omni:", "omniclone:", "omnid:")):
             extra += "|nofade"          # 2.0.34: bỏ đoạn nhỏ dần 0,1 s cuối câu (mất phụ âm cuối của câu ngắn)
         elif spec.startswith(("vieneu:", "clone:")):
             extra += "|" + settings.get("vieneu_style", "clear")
@@ -650,7 +662,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             if have:
                 s.extra["_tts"] = str(p)
             continue
-        if spec.startswith(("omni:", "omniclone:")):
+        if spec.startswith(("omni:", "omniclone:", "omnid:")):
             if not have:
                 omni_items.append((i, t, p, spec))
         elif spec.startswith("edge:"):
@@ -703,10 +715,19 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
 
     def omni_ref(spec: str) -> tuple:
         """(file mẫu, lời trong file mẫu) cho mã giọng OmniVoice."""
+        if isinstance(orefs.get(spec), Exception):   # câu mẫu đã lỗi: không thử lại ở mỗi câu
+            raise orefs[spec]
         if spec not in orefs:
             if spec.startswith("omni:"):
                 sm = samples[spec[5:]]
                 orefs[spec] = (str(vlib.path_of(sm)), sm.get("text", ""))
+            elif spec.startswith("omnid:"):   # giọng chọn sẵn: nhái câu mẫu tạo 1 lần -> cả video 1 giọng
+                try:
+                    orefs[spec] = omni_design.ensure_anchor(om, spec,
+                                                            settings.get("omnivoice_model") or "k2-fsa/OmniVoice")
+                except Exception as e:  # noqa: BLE001
+                    orefs[spec] = e
+                    raise
             else:
                 spk = spec[10:]
                 r = build_reference_text(ref_audio, segs, spk, work / f"omniref_{spk}.wav") if ref_audio else None
@@ -888,8 +909,13 @@ def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,
             await edge_tts.Communicate(text, spec[5:]).save(str(out.with_suffix(".mp3")))
         asyncio.run(run())
         return out.with_suffix(".mp3")
-    if spec.startswith("omni:") or spec == OMNI_CLONE:
+    if spec.startswith(("omni:", "omnid:")) or spec == OMNI_CLONE:
         om = _omni(settings)
+        if spec.startswith("omnid:"):
+            from . import omni_design
+
+            ref, rtext = omni_design.ensure_anchor(om, spec, settings.get("omnivoice_model") or "k2-fsa/OmniVoice")
+            return om.synth(text, out.with_suffix(".wav"), ref_audio=ref, ref_text=rtext)
         if spec.startswith("omni:"):
             from . import voices as vlib
 

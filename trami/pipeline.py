@@ -593,7 +593,8 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
         progress: Prog | None = None, cancel=None, engine: str | None = None, inplace: bool = False,
         only: list[int] | None = None) -> Path:
     """Lồng tiếng Việt. Mỗi người nói có thể có giọng riêng (p.data['voices'][speaker]), mỗi câu cũng có thể có giọng
-    riêng (seg.extra['voice']): 'edge:<voice id>' | 'vieneu:<preset>' | 'clone' | 'omni:<id>' | 'omniclone'.
+    riêng (seg.extra['voice']): 'edge:<voice id>' | 'vieneu:<preset>' | 'clone' | 'omni:<id>' | 'omniclone'
+    | 'omnid:<mã giọng chọn sẵn>'.
     Câu đã đọc được lưu đệm theo (lời, giọng, tốc độ, lần đọc) -> chỉ câu mới / đã sửa mới phải đọc lại.
     inplace: ghi đè bản lồng tiếng đang dùng (sửa vài câu) thay vì thêm bản mới; only: chỉ AI rút gọn các câu này."""
     from .tts import synthesize_dub
