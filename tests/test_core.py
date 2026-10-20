@@ -1734,3 +1734,35 @@ def test_dub_overlap_mix_and_subtitles_follow_voice(tmp_path):
     assert abs(out[2].start - segs[2].extra["dub_at"][0]) < 1e-6 and out[2].end > segs[2].extra["dub_at"][1]
     assert out[1].end <= out[2].start and out[0].start == segs[0].start        # câu đúng giờ giữ nguyên
     assert segs[2].start == 4.0                                                # không đổi thời gian gốc
+
+
+def test_realign_split_drops_whole_line_voice(monkeypatch):
+    """Căn khớp thoại tách 1 câu đã lồng thành 2: 2 nửa KHÔNG được giữ giọng của cả câu cũ (trước đây xếp lại -> đặt
+    giọng đó 2 lần); câu không bị tách giữ giọng; đã có bản lồng -> tự xếp lại theo mốc mới, không đọc lại câu nào."""
+    from trami import pipeline
+    from trami.project import Project
+
+    p = Project.create("realign_dub")
+    p.data["info"] = {"duration": 10}
+    p.segments = [Segment(1.0, 3.0, "你好", "Xin chào", "S1", {"tts_file": "a.wav", "fit": "long", "dub_at": [1, 3]}),
+                  Segment(4.0, 7.0, "我们走吧快点", "Đi thôi nhanh lên", "S1",
+                          {"tts_file": "b.wav", "fit": "ok", "speed": 1.2, "dub_at": [4, 6]})]
+    p.save()
+    (p.work).mkdir(parents=True, exist_ok=True)
+
+    def fake_align(segs, wav, lang, settings, progress, cancel, engine=""):
+        a, b = segs
+        return [Segment(1.3, 2.4, a.text, a.trans, a.speaker, dict(a.extra)),          # chỉ dời mốc
+                Segment(4.2, 5.0, "我们走吧", "", b.speaker, dict(b.extra)),          # tách đôi
+                Segment(5.6, 6.5, "快点", "", b.speaker, dict(b.extra))]
+    monkeypatch.setattr(pipeline, "align_segments", fake_align)
+    monkeypatch.setattr(pipeline.ff, "run", lambda *a, **k: Path(a[0][-1]).write_bytes(b"x" * 2000))
+    relaid = []
+    monkeypatch.setattr(pipeline, "relayout", lambda *a, **k: relaid.append(1))
+    monkeypatch.setattr(pipeline, "has_dub", lambda q: True)
+    assert pipeline.realign(p) == 3
+    s = Project(p.id).segments
+    assert s[0].extra.get("tts_file") == "a.wav" and "fit" not in s[0].extra and "dub_at" not in s[0].extra
+    assert all("tts_file" not in x.extra and "dub_at" not in x.extra for x in s[1:])
+    assert s[1].extra.get("speed") == 1.2           # tốc độ đặt tay vẫn giữ
+    assert relaid == [1]

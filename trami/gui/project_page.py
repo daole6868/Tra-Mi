@@ -1450,6 +1450,10 @@ class ProjectPage(QWidget):
             before = len(p.segments)
             n = pipeline.realign(p, None, j.update, j.cancelled)
             extra = f" – tách thêm {n - before} câu, bấm 'Dịch dòng trống' để dịch các câu mới tách" if n > before else ""
+            if pipeline.has_dub(p):
+                extra += " · đã xếp lại giọng lồng theo mốc mới (không đọc lại)"
+                if n > before:
+                    extra += ", câu mới tách cần 'Tạo bản lồng tiếng' để có giọng"
             return {"message": f"Đã căn lại thời gian {n} câu{extra}"}
         self.submit("realign", "Căn lại thời gian", fn)
 

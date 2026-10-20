@@ -191,6 +191,7 @@ def diarize(p: Project, settings: dict | None = None, progress: Prog | None = No
     if not segs:
         raise ValueError("Chưa có phụ đề để phân biệt người nói.")
     audio = stems(p).get("vocals") or str(p.source)
+    old_texts = {s.text for s in segs}
     for s in segs:
         s.speaker = ""
     assign_speakers.splits = 0
@@ -201,13 +202,41 @@ def diarize(p: Project, settings: dict | None = None, progress: Prog | None = No
     from .align import drop_char_times
 
     drop_char_times(segs)
+    lost = forget_stale_voice(old_texts, segs, moved=False)
     p.segments = segs
     p.save()
+    if lost and has_dub(p):   # câu bị tách: bỏ giọng cũ khỏi bản lồng ngay (không đọc lại câu nào)
+        relayout(p, settings)
     try:   # đoán giọng nam / nữ của từng người nói để "Tự gán giọng" chọn giọng lồng hợp
         speaker_genders(p, audio)
     except Exception:  # noqa: BLE001
         log_error("Đoán giọng nam/nữ")
     return n
+
+
+DUB_MARKS = ("dub_at", "fit", "fit_speed", "fit_shift", "fit_over")
+
+
+def forget_stale_voice(old_texts: set, segs: list, moved: bool) -> int:
+    """Sau khi căn lại thời gian / tách câu: câu bị tách (lời gốc khác mọi câu cũ) đang mang giọng lồng của CẢ câu cũ
+    -> bỏ (đọc lại khi Tạo bản lồng tiếng; trước đây 2 nửa cùng giữ 1 giọng -> xếp lại thì đặt 2 lần). moved: mốc thời
+    gian đã đổi -> độ vừa / đoạn giọng cũ không còn đúng (xếp lại tính lại). Trả về số câu bị bỏ giọng."""
+    n = 0
+    for s in segs:
+        if moved:
+            for k in DUB_MARKS:
+                s.extra.pop(k, None)
+        if s.text not in old_texts and s.extra.get("tts_file"):
+            for k in DUB_MARKS + ("tts_file", "take"):
+                s.extra.pop(k, None)
+            n += 1
+    return n
+
+
+def has_dub(p: Project) -> bool:
+    """Đã có bản lồng tiếng + giọng từng câu (xếp lại được mà không đọc lại)."""
+    wav = (p.edit.get("dub") or {}).get("wav")
+    return bool(wav and Path(wav).exists() and any(s.extra.get("tts_file") for s in p.segments))
 
 
 def speaker_genders(p: Project, audio: str | None = None) -> dict:
@@ -342,8 +371,9 @@ def realign(p: Project, settings: dict | None = None, progress: Prog | None = No
     from .align import drop_char_times
 
     drop_char_times(segs)   # đo lại từ đầu theo lời hiện tại (người dùng có thể đã sửa chữ)
+    old_texts = {s.text for s in segs}
     try:
-        segs = align_segments(segs, wav, p.data.get("language", "zh"), settings, _sub(progress, 0.1, 1.0), cancel,
+        segs = align_segments(segs, wav, p.data.get("language", "zh"), settings, _sub(progress, 0.1, 0.9), cancel,
                               engine=p.data.get("asr_engine_used", ""))
     finally:
         from .asr_qwen import release
@@ -351,8 +381,11 @@ def realign(p: Project, settings: dict | None = None, progress: Prog | None = No
         release()
 
     drop_char_times(segs)
+    forget_stale_voice(old_texts, segs, moved=True)
     p.segments = segs
     p.save()
+    if has_dub(p):   # đã lồng tiếng: xếp lại giọng theo mốc mới ngay (không đọc lại) -> độ vừa, màu tính lại
+        relayout(p, settings, _sub(progress, 0.9, 1.0), cancel)
     return len(segs)
 
 

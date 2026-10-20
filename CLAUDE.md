@@ -39,7 +39,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
   Chụp ảnh kiểm tra giao diện phải nạp theme như `run()`: `theme.load_fonts(); app.setFont(theme.font(10));
   app.setStyleSheet(theme.stylesheet())`.
-- `tests/test_core.py` – `python -m pytest -q tests` (75 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (76 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -492,6 +492,15 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     nói, nhãn "#n ×1.30 ◀0.8s ⧉0.4s"; cột Độ vừa `subs_model.fit_text/fit_tip` (◀ ▶ ⧉ ✎). Thanh công cụ timeline hẹp
     (1366 px) tự bỏ chữ các nút cuối (`_fit_tools`). Đã chạy thử offscreen: đổi 5 cách -> bản lồng xếp lại đúng, video
     xuất có phụ đề câu bị lùi khớp đoạn giọng (12,19–14,44 s vs giọng 12,19–14,43 s).
+
+- 2.0.43: người dùng hỏi "căn khớp thoại xong câu đỏ có về xanh, tốc độ có về bình thường không". Tìm ra lỗi: `align.refine`
+  / `split_timed` và `split_speaker_changes` chép NGUYÊN `extra` sang 2 nửa câu bị tách (trans rỗng) -> cả 2 nửa giữ
+  `tts_file` + `dub_at` của CẢ câu cũ; sau "Dịch dòng trống" + xếp lại -> giọng cả câu bị đặt 2 lần; độ vừa / màu cũ
+  không tính lại theo mốc mới. Sửa: `pipeline.forget_stale_voice(old_texts, segs, moved)` (câu có lời gốc khác mọi câu
+  cũ -> bỏ tts_file/take/dub_at/fit*; moved -> bỏ dub_at/fit* mọi câu), `has_dub(p)`; `realign` gọi + đã có bản lồng thì
+  `relayout` ngay (màu / tốc độ tính lại theo mốc mới, không đọc lại); `diarize` tách câu -> bỏ giọng nửa câu + xếp lại.
+  Tốc độ đặt tay (`speed`), giọng riêng, cách xếp riêng vẫn giữ. Lưu ý: ô "Tốc độ đọc" (Chậm/Bình thường/Nhanh) ở mục 3
+  là tốc độ BỘ ĐỌC khi đọc (nằm trong mã hash file giọng) -> đổi rồi Tạo bản lồng tiếng = đọc lại mọi câu.
 
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
