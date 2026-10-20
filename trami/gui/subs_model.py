@@ -92,7 +92,11 @@ class SubsModel(QAbstractTableModel):
                 return v if role == Qt.ItemDataRole.EditRole else (self.voice_names.get(v, v) if v else VOICE_DEFAULT)
             if c == C_FIT and role == Qt.ItemDataRole.DisplayRole:
                 fit = s.extra.get("fit")
-                return (FIT_TEXT.get(fit, "") + (f" ×{s.extra.get('fit_speed', 1):.2f}" if fit == "fast" else "")) if fit else ""
+                if not fit:
+                    return "✎ ×" + f"{float(s.extra['speed']):.2f}" if s.extra.get("speed") else ""
+                sp = float(s.extra.get("fit_speed", 1) or 1)
+                return FIT_TEXT.get(fit, "") + (f" ×{sp:.2f}" if fit == "fast" or s.extra.get("speed") else "") + \
+                    (" ✎" if s.extra.get("speed") else "")
             return None
         if role == Qt.ItemDataRole.CheckStateRole:
             if c == C_SONG:
@@ -141,6 +145,9 @@ class SubsModel(QAbstractTableModel):
                                "lại bản lồng tiếng"}.get(fit, "Chưa lồng tiếng")
                 if s.extra.get("trans_long"):
                     tip += f"\nAI đã rút gọn từ: {s.extra['trans_long']}"
+                if s.extra.get("speed"):
+                    tip += (f"\n✎ Tốc độ đặt tay: tối thiểu ×{float(s.extra['speed']):.2f} (đang đọc "
+                            f"×{float(s.extra.get('fit_speed', s.extra['speed']) or 1):.2f}) – 'Về tốc độ gốc' để bỏ")
                 return tip
         if role == Qt.ItemDataRole.TextAlignmentRole and c in (C_N, C_START, C_END, C_SPK, C_FIT, C_SEL):
             return int(Qt.AlignmentFlag.AlignCenter)

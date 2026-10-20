@@ -38,7 +38,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
   Chụp ảnh kiểm tra giao diện phải nạp theme như `run()`: `theme.load_fonts(); app.setFont(theme.font(10));
   app.setStyleSheet(theme.stylesheet())`.
-- `tests/test_core.py` – `python -m pytest -q tests` (69 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (71 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -434,6 +434,26 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   * Đo lại: 0,05–0,12 ms mỗi lần vẽ; so từng điểm ảnh với cách cũ: lệch tối đa 17–33/255 ở vài điểm mép bóng (mắt không
     thấy); khớp hộp nền libass, kéo phụ đề, karaoke xem trước = video xuất như trước.
 
+- 2.0.40: (1) **Tốc độ đọc** cho câu đã tích: `extra["speed"]` = mức TỐI THIỂU – `synthesize_dub` tốc độ = max(đặt tay,
+  cần để vừa chỗ) (chậm < 1 khi còn chỗ), `fit` "ok" nếu không vượt mức đặt; chỉ xếp lại (`pipeline.relayout`, không đọc
+  lại). Tab Lồng tiếng: ô `d_speed` + "Đặt tốc độ" / "Về tốc độ gốc" (`project_page._apply_speed`); cột Độ vừa "✓ ×1.30 ✎";
+  khối giọng trên timeline ghi "#n ×1.30". (2) **Timeline** (`gui/timeline.py`): chọn nhiều (`sel_track`, `sel_rows`,
+  `sel_pieces`, `sel_gap`, `sel_insert`; Ctrl bật/tắt, Shift dải, kéo quét trên chỗ trống `select_span`, bấm tên dòng
+  `select_all`, Delete / Ctrl+A / Esc), bấm chỗ trống dòng Phụ đề = chọn khoảng trống -> "Thêm phụ đề" đúng chỗ
+  (`_sub_add`, tối đa 2,5 s, focus ô Tiếng Việt). Thước = tua (trước kéo trên mọi chỗ trống). Thanh công cụ theo dòng
+  (`TrackTimeline.TOOLS`, `_refresh_tools` – nút cũ phải hide + setParent(None) trước deleteLater, không thì chữ chồng).
+  `project_page._timeline_action`: sub_add/split/merge/delete/translate, play/dub_redo/dub_speed/dub_speed_reset/
+  dub_toggle (nodub)/dub_reset_pos (`_dub_rows_flag` + relayout), v_split (edit `vsplits`) / v_delete (`cuts`) / v_restore /
+  v_unsplit / v_insert (`inserts` [{at, path, dur, name}], QFileDialog) / v_insert_del, a_mute / a_unmute (edit
+  `mute_spans`); `audiomix.merge_spans / subtract_spans / mute_mask / mute_expr`.
+  * Tắt tiếng gốc theo đoạn: `LiveMix.mute` (lớp orig/bg/voice, vào/ra 15 ms) qua `audio_state["mute"]`; xuất: `volume=0:
+    enable=between(...)` trên [0:a] + bản tách nhạc nền / giọng gốc (mốc − seek0). Giọng lồng không bị tắt.
+  * Chèn video (chỉ khi xuất, trình phát không chiếu – dấu + tím trên dòng Video): `video.out_time` (giây gốc -> giây xuất
+    sau cắt/tốc độ); sau phụ đề tách video chính bằng trim tại các điểm chèn, video chèn scale+pad về TW×TH, fps nguồn;
+    tiếng: [amx] apad/atrim -> asplit/atrim, đoạn chèn có tiếng riêng (không có -> anullsrc); concat 2k+1 đoạn; mờ dần áp
+    sau khi ghép; logo / chữ chạy / nhạc thêm chỉ ở phần video chính. Thử: 10 s − cắt 1 s + chèn 2 s + 1,5 s = 12,5 s,
+    tắt tiếng 1–2 s = 0, đoạn chèn đúng màu + tiếng.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -457,3 +477,5 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.37: chờ người dùng nghe thử giọng OmniVoice chọn sẵn với tiếng Việt trên máy thật (mô hình thật chưa chạy ở sandbox).
 - 2.0.38: chờ người dùng xác nhận hết mất chữ cuối khi nghe trong tool; nếu file bản lồng vẫn thiếu chữ -> làm kiểm tra lời đọc.
 - 2.0.39: chờ người dùng xác nhận đổi cỡ chữ không còn làm giật giọng lồng khi phát.
+- 2.0.40: chờ người dùng thử timeline mới (chọn nhiều, khoảng trống, công cụ theo dòng, chèn video) + tốc độ đọc.
+  Chỉ số câu của dub_layout lệch khi thêm / xoá câu sau khi lồng (có từ trước) – bấm Tạo bản lồng tiếng để xếp lại.

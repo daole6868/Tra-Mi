@@ -126,6 +126,7 @@ class LiveMix:
         self.keep: list = []                      # đoạn giữ lại sau khi cắt (giây) – nhạc thêm / mờ dần theo đó
         self.fade = (0.0, 0.0)
         self.duck = False
+        self.mute: list = []                      # đoạn tắt tiếng gốc (orig / bg / voice), giây video gốc
         self.solo: str | None = None              # "nghe riêng" 1 lớp (chỉ khi xem trước, không lưu)
         self.rate = 1.0                           # tốc độ phát
         self._dub_env = None                      # độ to giọng lồng mỗi 0,05 s (để giảm nhạc thêm)
@@ -191,10 +192,16 @@ class LiveMix:
                     continue
                 part = np.zeros((span, 2), np.float32)
                 part[: b - a] = arr[a:b]
+            gv = None
             if name == "voice" and self.songs:
                 gv = np.full(span, gain, np.float32)
                 for s0, s1 in self.songs:
                     gv[(t >= s0) & (t < s1)] = gs
+            if name in ORIGINAL and self.mute:
+                m = mute_mask(t, self.mute)
+                if m is not None:
+                    gv = (gv if gv is not None else np.full(span, gain, np.float32)) * m
+            if gv is not None:
                 acc += part * (gv[:, None] / 32768.0)
             else:
                 acc += part * (gain / 32768.0)
@@ -227,6 +234,59 @@ class LiveMix:
         lo = np.clip(k - look, 0, len(active))
         on = (cs[hi] - cs[lo]) > 0
         return np.where(on, 10 ** (DUCK_DB / 20), 1.0).astype(np.float32)
+
+
+ORIGINAL = ("orig", "bg", "voice")      # các lớp "tiếng gốc" (tắt theo đoạn trên timeline)
+MUTE_RAMP = 0.015
+
+
+def mute_mask(t: np.ndarray, spans: list) -> np.ndarray | None:
+    """Hệ số 0..1 cho các thời điểm t (giây): 0 trong đoạn tắt tiếng, vào / ra dần 15 ms cho khỏi tiếng "bụp"."""
+    m = None
+    for a, b in spans:
+        a, b = float(a), float(b)
+        if b <= t[0] - MUTE_RAMP or a >= t[-1] + MUTE_RAMP:
+            continue
+        d = np.minimum(t - a, b - t)
+        w = np.clip(1.0 - (d + MUTE_RAMP) / MUTE_RAMP, 0.0, 1.0).astype(np.float32)   # 1 ngoài đoạn, 0 bên trong
+        w[d < -MUTE_RAMP] = 1.0
+        m = w if m is None else np.minimum(m, w)
+    return m
+
+
+def merge_spans(spans: list) -> list[list[float]]:
+    """Gộp các đoạn [a, b] chồng / sát nhau."""
+    out: list[list[float]] = []
+    for a, b in sorted((float(a), float(b)) for a, b in spans if float(b) > float(a)):
+        if out and a <= out[-1][1] + 0.01:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([round(a, 3), round(b, 3)])
+    return out
+
+
+def subtract_spans(spans: list, cut: list) -> list[list[float]]:
+    """Các đoạn trong spans trừ đi các đoạn trong cut."""
+    out = [[float(a), float(b)] for a, b in spans]
+    for c0, c1 in cut:
+        nxt = []
+        for a, b in out:
+            if c1 <= a or c0 >= b:
+                nxt.append([a, b])
+                continue
+            if a < c0 - 0.01:
+                nxt.append([a, c0])
+            if c1 < b - 0.01:
+                nxt.append([c1, b])
+        out = nxt
+    return [[round(a, 3), round(b, 3)] for a, b in out]
+
+
+def mute_expr(spans: list, offset: float = 0.0) -> str:
+    """Biểu thức FFmpeg (theo t của luồng) cho các đoạn tắt tiếng gốc; "" nếu không có."""
+    parts = [f"between(t,{float(a) - offset:.3f},{float(b) - offset:.3f})" for a, b in spans
+             if float(b) - offset > 0]
+    return "+".join(parts)
 
 
 def to_pcm16(a: np.ndarray) -> bytes:

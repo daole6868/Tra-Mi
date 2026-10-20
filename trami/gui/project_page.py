@@ -799,9 +799,22 @@ class ProjectPage(QWidget):
         spk.add(dt)
         self.d_line_voice = QComboBox()
         self.d_line_voice.setMinimumContentsLength(16)
+        self.d_speed = QDoubleSpinBox()
+        self.d_speed.setRange(0.5, 2.0)
+        self.d_speed.setSingleStep(0.05)
+        self.d_speed.setDecimals(2)
+        self.d_speed.setValue(1.2)
+        self.d_speed.setPrefix("×")
+        self.d_speed.setToolTip("Tốc độ đọc tối thiểu cho các câu đã tích: câu đang tự đọc nhanh hơn mức này (để vừa thời "
+                                "gian nhân vật nói) giữ nguyên, câu chậm hơn được nâng lên. Dưới ×1 = đọc chậm lại nếu còn chỗ")
         spk.add(flow(self.d_picked, hbox(label("Giọng cho câu đã tích", "muted"), self.d_line_voice),
                      button("Đổi giọng", "users", "Đặt giọng riêng cho các câu đã tích (chưa đọc lại)",
                             on_click=self._set_line_voice),
+                     hbox(label("Tốc độ đọc", "muted"), self.d_speed),
+                     button("Đặt tốc độ", "bolt", "Áp dụng tốc độ cho các câu đã tích – xếp lại bản lồng ngay (không đọc lại)",
+                            on_click=lambda: self._apply_speed(sorted(self.model.selected), self.d_speed.value())),
+                     button("Về tốc độ gốc", "refresh", "Bỏ tốc độ đặt tay của các câu đã tích – đọc như lúc tạo bản lồng",
+                            flat=True, on_click=lambda: self._apply_speed(sorted(self.model.selected), None)),
                      button("AI rút gọn", "sparkle", "AI viết lại ngắn hơn các câu đã tích cho vừa thời gian nhân vật "
                             "nói (cần công cụ dịch AI)", on_click=self._shorten_picked),
                      button("Nghe câu", "play", "Phát câu đang chọn trên trình phát bên phải", on_click=self._play_line)))
@@ -1156,6 +1169,7 @@ class ProjectPage(QWidget):
         return {
             "trim": {"start": self.e_start.value(), "end": self.e_end.value()},
             "cuts": e.get("cuts", []), "crop": e.get("crop"),
+            "vsplits": e.get("vsplits", []), "inserts": e.get("inserts", []), "mute_spans": e.get("mute_spans", []),
             "hardsub": self._hs_widgets(),
             "aspect": self.e_aspect.currentData(), "aspect_mode": self.e_amode.currentData(),
             "resolution": self.e_res.currentData(), "rotate": int(self.e_rot.currentData()),
@@ -1611,12 +1625,207 @@ class ProjectPage(QWidget):
         run_async(lambda: pipeline.dub_wave(Project(pid)), done, lambda m: None)
 
     def _timeline_action(self, name: str):
-        row = self._selected_row()
-        if name in ("insert", "split", "merge", "delete"):
-            return self._seg_op(name)
-        if row < 0:
-            return self.win.toast("Bấm chọn 1 câu trên timeline trước", "warn")
-        self._line_action(name, row)
+        """Công cụ trên thanh timeline – làm với thứ đang chọn trên timeline (nhiều câu / đoạn / khoảng trống)."""
+        if not self.p:
+            return
+        tl = self.tracks
+        rows = tl.selected_rows()
+        if name == "sel_all":
+            return tl.select_all(tl.sel_track or "subs")
+        # ---- phụ đề
+        if name == "sub_add":
+            return self._sub_add(tl.sel_gap if tl.sel_track == "subs" else None)
+        if name in ("insert", "split", "merge", "delete", "sub_split", "sub_merge", "sub_delete"):
+            return self._sub_op(name.replace("sub_", ""), rows)
+        if name == "sub_translate":
+            if not rows:
+                return self.win.toast("Chọn câu trên dòng Phụ đề trước", "warn")
+            for r in rows:
+                self._retranslate_one(r)
+            return
+        # ---- lồng tiếng
+        if name in ("play", "redub", "dub_redo"):
+            if not rows:
+                return self.win.toast("Bấm chọn câu trên timeline trước", "warn")
+            return self._play_line(rows[0]) if name == "play" else self._redub_rows(rows)
+        if name in ("dub_speed", "dub_speed_reset"):
+            return self._apply_speed(rows, tl.speed.value() if name == "dub_speed" else None)
+        if name in ("dub_toggle", "dub_reset_pos"):
+            return self._dub_rows_flag(name, rows)
+        # ---- video / tiếng gốc
+        if name in ("v_split", "v_delete", "v_restore", "v_unsplit", "v_insert", "v_insert_del", "a_mute", "a_unmute"):
+            return self._video_op(name)
+
+    # ------------------------------------------------------------------ timeline: phụ đề
+    def _sub_add(self, gap: tuple[float, float] | None):
+        """Thêm câu: vào khoảng trống đang chọn (đặt ở chỗ vừa bấm, tối đa 2,5 s, không lấn câu bên cạnh) hoặc tại
+        đầu phát; chọn câu mới + đưa con trỏ vào ô Tiếng Việt để gõ ngay."""
+        segs = self.model.segs
+        if gap:
+            lo, hi = gap
+            t = float(getattr(self.tracks, "gap_click", lo))
+            a = max(lo + 0.02, min(t, hi - 0.6))
+            b = min(hi - 0.02, a + 2.5)
+        else:
+            a = self.player.position()
+            nxt = min((x.start for x in segs if x.start > a + 0.05), default=a + 2.0)
+            b = max(a + 0.4, min(a + 2.0, nxt - 0.02))
+        pos = next((k for k, x in enumerate(segs) if x.start > a), len(segs))
+        segs.insert(pos, Segment(round(a, 3), round(b, 3), "", ""))
+        self.model.set_segments(segs)
+        self._fit_rows()
+        self._segs_edited()
+        self.tracks.select("subs", rows={pos})
+        self._select_line(pos, seek=True)
+        self._show_inspector(True)
+        self.inspector.vi.setFocus()
+        self.win.toast(f"Đã thêm câu #{pos + 1} ({fmt(a)} → {fmt(b)}) – gõ lời ở khung Câu đang chọn", "ok")
+
+    def _sub_op(self, op: str, rows: list[int]):
+        from .. import subtitle as st
+
+        segs = self.model.segs
+        if op == "insert":
+            return self._sub_add(None)
+        t = self.player.position()
+        if op == "split":
+            row = next((r for r in rows if segs[r].start < t < segs[r].end), None)
+            if row is None:
+                row = next((i for i, x in enumerate(segs) if x.start < t < x.end), rows[0] if rows else -1)
+            if row < 0:
+                return self.win.toast("Đưa đầu phát vào giữa câu cần tách", "warn")
+            st.split(segs, row, t)
+            focus = row
+        elif not rows:
+            return self.win.toast("Chọn câu trên dòng Phụ đề trước", "warn")
+        elif op == "merge":
+            lo, hi = rows[0], rows[-1]
+            if lo == hi:
+                st.merge(segs, lo)
+            else:
+                for _ in range(hi - lo):
+                    st.merge(segs, lo)
+            focus = lo
+        elif op == "delete":
+            for r in sorted(rows, reverse=True):
+                del segs[r]
+            focus = min(rows[0], len(segs) - 1)
+        else:
+            return
+        self.model.set_segments(segs)
+        self._fit_rows()
+        self._segs_edited()
+        self._sel_row = -1
+        self.tracks.select("subs", rows={focus} if 0 <= focus < len(segs) else set())
+        if 0 <= focus < len(segs):
+            self._select_line(focus)
+        if op == "delete":
+            self.win.toast(f"Đã xoá {len(rows)} câu", "ok")
+
+    # ------------------------------------------------------------------ timeline: lồng tiếng
+    def _dub_rows_flag(self, name: str, rows: list[int]):
+        """Bỏ lồng / lồng lại, về đúng chỗ cho nhiều câu -> xếp lại bản lồng ngay (không đọc lại)."""
+        segs = self.model.segs
+        rows = [r for r in rows if 0 <= r < len(segs)]
+        if not rows:
+            return self.win.toast("Chọn đoạn giọng trên dòng Lồng tiếng trước", "warn")
+        if name == "dub_toggle":
+            off = not all(segs[r].extra.get("nodub") for r in rows)
+            for r in rows:
+                if off:
+                    segs[r].extra["nodub"] = True
+                else:
+                    segs[r].extra.pop("nodub", None)
+            what = f"Đã bỏ lồng {len(rows)} câu" if off else f"Đã lồng lại {len(rows)} câu"
+        else:
+            for r in rows:
+                segs[r].extra.pop("dub_shift", None)
+            what = f"Đã đặt {len(rows)} đoạn giọng về đúng lúc nhân vật nói"
+        self.model.dataChanged.emit(self.model.index(rows[0], 0), self.model.index(rows[-1], self.model.columnCount() - 1))
+        self._save_segs_now()
+        if not any(x.extra.get("tts_file") for x in segs):
+            return self.win.toast(what + " – áp dụng khi tạo bản lồng tiếng", "ok")
+        self._replay_row = rows[0] if name != "dub_toggle" else None
+
+        def fn(j, p):
+            pipeline.relayout(p, None, j.update, j.cancelled)
+            return {"message": what + " – trình phát đang dùng bản mới"}
+        self.submit("redub", what, fn)
+
+    # ------------------------------------------------------------------ timeline: video / tiếng gốc
+    def _video_op(self, name: str):
+        from ..audiomix import merge_spans, subtract_spans
+
+        tl = self.tracks
+        self.p.reload()
+        e = self.p.edit
+        dur = float(self.p.data.get("info", {}).get("duration") or 0)
+        pcs = tl.pieces()
+        sel = [pcs[i] for i in sorted(tl.sel_pieces) if 0 <= i < len(pcs)]
+        t = self.player.position()
+        msg = ""
+        if name == "v_split":
+            sp = [float(x) for x in e.get("vsplits", [])]
+            if not 0.05 < t < dur - 0.05 or any(abs(x - t) < 0.05 for x in sp):
+                return self.win.toast("Đưa đầu phát tới chỗ cần tách (không trùng điểm tách cũ)", "warn")
+            e["vsplits"] = sorted(sp + [round(t, 3)])
+            msg = f"Đã tách tại {fmt(t)} – bấm chọn từng đoạn trên dòng Video / Tiếng gốc"
+        elif name in ("v_delete", "v_restore", "a_mute", "a_unmute"):
+            if not sel:
+                return self.win.toast("Chọn đoạn trên dòng Video / Tiếng gốc trước (Tách tại đầu phát để chia đoạn)",
+                                      "warn")
+            if name == "v_delete" and sum(b - a for a, b in sel) >= dur - 0.1:
+                return self.win.toast("Không thể xoá hết video", "warn")
+            key = "cuts" if name.startswith("v_") else "mute_spans"
+            cur = [list(map(float, x)) for x in e.get(key, [])]
+            e[key] = merge_spans(cur + [list(x) for x in sel]) if name in ("v_delete", "a_mute") else \
+                subtract_spans(cur, sel)
+            msg = {"v_delete": f"Đã xoá {len(sel)} đoạn – trình phát bỏ qua ngay, video xuất không có đoạn này",
+                   "v_restore": f"Đã khôi phục {len(sel)} đoạn",
+                   "a_mute": f"Đã tắt tiếng gốc {len(sel)} đoạn – nghe ngay trên trình phát",
+                   "a_unmute": f"Đã bật lại tiếng gốc {len(sel)} đoạn"}[name]
+        elif name == "v_unsplit":
+            if len(sel) < 2:
+                return self.win.toast("Chọn từ 2 đoạn liền nhau trở lên để gộp", "warn")
+            lo, hi = sel[0][0], sel[-1][1]
+            e["vsplits"] = [x for x in e.get("vsplits", []) if not lo + 0.01 < float(x) < hi - 0.01]
+            msg = f"Đã gộp {len(sel)} đoạn"
+        elif name == "v_insert":
+            path, _ = QFileDialog.getOpenFileName(self, "Chọn video để chèn vào", "",
+                                                  "Video (*.mp4 *.mov *.mkv *.avi *.webm *.flv *.m4v)")
+            if not path:
+                return
+            from .. import ffmpeg as ff
+
+            try:
+                info = ff.probe(path)
+            except Exception as ex:  # noqa: BLE001
+                return self.win.toast(f"Không đọc được video: {ex}", "err")
+            if not info.has_video:
+                return self.win.toast("File này không có hình", "warn")
+            at = round(min(max(0.0, t), dur), 3)
+            e["inserts"] = sorted(e.get("inserts", []) + [{"at": at, "path": path, "dur": round(info.duration, 3),
+                                                           "name": Path(path).name}], key=lambda x: x["at"])
+            msg = (f"Đã chèn {Path(path).name} ({info.duration:.1f} giây) tại {fmt(at)} – có trong video xuất "
+                   f"(dấu + tím trên dòng Video)")
+        elif name == "v_insert_del":
+            if tl.sel_insert is None:
+                return
+            ins = list(e.get("inserts", []))
+            if 0 <= tl.sel_insert < len(ins):
+                gone = ins.pop(tl.sel_insert)
+                e["inserts"] = ins
+                msg = f"Đã bỏ video chèn {gone.get('name', '')}"
+            tl.sel_insert = None
+        self.p.data["edit"] = e
+        self.p.save()
+        self._update_timeline()
+        self._update_cuts_label()
+        self._update_summary()
+        self._live_timer.start()          # trình phát bỏ qua đoạn xoá ngay
+        self._apply_audio_now()           # tắt / bật tiếng gốc nghe ngay
+        if msg:
+            self.win.toast(msg, "ok")
 
     def _fit_rows(self):
         if len(self.model.segs) <= 3000:  # bảng quá dài thì bỏ qua cho nhanh
@@ -1835,7 +2044,8 @@ class ProjectPage(QWidget):
         keep = (e["trim"].get("start") or 0, e["trim"].get("end") or 0)
         self.timeline.set_data(d, keep, e.get("cuts", []), self.model.segs)
         self.tracks.mark = self.timeline.mark
-        self.tracks.set_data(d, self.model.segs, self.p.data.get("dub_layout") or [], keep, e.get("cuts", []))
+        self.tracks.set_data(d, self.model.segs, self.p.data.get("dub_layout") or [], keep, e.get("cuts", []),
+                             e.get("vsplits", []), e.get("inserts", []), e.get("mute_spans", []))
 
     def _crop_dialog(self):
         from PySide6.QtWidgets import QDialog, QDialogButtonBox
@@ -2078,6 +2288,36 @@ class ProjectPage(QWidget):
         for r in rows:
             self.model.setData(self.model.index(r, C_VOICE), vid)
         self.win.toast(f"Đã đổi giọng {len(rows)} câu – bấm 'Tạo lại giọng các câu đã tích' để đọc lại", "ok")
+
+    def _apply_speed(self, rows: list[int], speed: float | None):
+        """Tốc độ đọc tối thiểu cho các câu (None = về tốc độ gốc) -> xếp lại bản lồng đang dùng (không đọc lại câu nào),
+        trình phát nghe ngay."""
+        segs = self.model.segs
+        rows = [r for r in rows if 0 <= r < len(segs)]
+        if not rows:
+            return self.win.toast("Tích chọn câu trước (cột Chọn, hoặc chọn khối trên dòng Lồng tiếng của timeline)", "warn")
+        changed = 0
+        for r in rows:
+            ex = segs[r].extra
+            old = ex.get("speed")
+            if speed is None:
+                ex.pop("speed", None)
+            else:
+                ex["speed"] = round(float(speed), 2)
+            changed += old != ex.get("speed")
+        self.model.dataChanged.emit(self.model.index(rows[0], 0), self.model.index(rows[-1], self.model.columnCount() - 1))
+        self._save_segs_now()
+        what = f"tốc độ ×{speed:.2f}" if speed is not None else "tốc độ gốc"
+        if not changed:
+            return self.win.toast(f"{len(rows)} câu đã ở {what}", "info")
+        if not any(s.extra.get("tts_file") for s in segs):
+            return self.win.toast(f"Đã đặt {what} cho {len(rows)} câu – áp dụng khi bấm Tạo bản lồng tiếng", "ok")
+        self._replay_row = rows[0]
+
+        def fn(j, p):
+            pipeline.relayout(p, None, j.update, j.cancelled)
+            return {"message": f"Đã đặt {what} cho {len(rows)} câu – trình phát đang dùng bản mới"}
+        self.submit("redub", f"Đặt {what} cho {len(rows)} câu", fn)
 
     def _play_line(self, row: int | None = None):
         rows = [row] if row is not None else self._dub_current_rows()

@@ -967,7 +967,8 @@ def audio_state(p: Project, edit: dict | None = None, srcs: dict | None = None) 
     fade = ed.get("fade") or {}
     return {"gains": gains(a, stems_on, dub_on, "bgm" in srcs), "stems_on": stems_on, "dub_on": dub_on,
             "songs": song_spans(p) if stems_on else [], "keep": keep, "duck": bool(a.get("duck", True)),
-            "fade": (float(fade.get("in") or 0), float(fade.get("out") or 0)), "settings": a}
+            "fade": (float(fade.get("in") or 0), float(fade.get("out") or 0)), "settings": a,
+            "mute": [list(x) for x in ed.get("mute_spans") or []]}
 
 
 def live_mix(p: Project, edit: dict | None = None, progress: Prog | None = None):
@@ -995,6 +996,7 @@ def apply_audio_state(mix, state: dict) -> None:
     mix.keep = state["keep"]
     mix.fade = state["fade"]
     mix.duck = state["duck"]
+    mix.mute = state.get("mute") or []
 
 
 def mix_audio_file(p: Project, out: Path, progress: Prog | None = None) -> Path:

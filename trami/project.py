@@ -18,6 +18,9 @@ _glock = threading.Lock()
 DEFAULT_EDIT = {
     "trim": {"start": 0, "end": 0},
     "cuts": [],
+    "vsplits": [],          # điểm tách video / tiếng gốc trên timeline (giây video gốc) – chia thành từng đoạn
+    "inserts": [],          # video chèn thêm: [{"at": giây video gốc, "path", "dur", "name"}] (chỉ khi xuất)
+    "mute_spans": [],       # đoạn tắt TIẾNG GỐC (nguyên bản / nhạc nền / giọng gốc đã tách), giây video gốc
     "crop": None,
     "hardsub": {"mode": "none", "regions": [], "box_color": "#000000", "box_opacity": 1.0,
                 "blur_strength": 20, "strength": "normal"},

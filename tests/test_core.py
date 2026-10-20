@@ -1534,3 +1534,87 @@ def test_trim_silence_keeps_soft_word_endings():
     assert len(out) >= len(voice) + len(tail)                    # không mất cuối chữ
     assert len(out) <= len(voice) + len(tail) + int(0.2 * sr)    # khoảng lặng dài phía sau vẫn bị bỏ
     assert len(tts._trim_silence(np.zeros(sr, np.float32))) == 0
+
+
+def test_dub_user_speed_is_minimum(tmp_path):
+    """Tốc độ đặt tay = mức tối thiểu: câu vốn phải đọc nhanh hơn (×1,18) giữ tốc độ đó khi đặt ×1,1; đặt ×1,3 thì lên
+    ×1,3; bỏ tốc độ -> về như cũ."""
+    from trami import tts
+
+    sr = tts.SR
+    files = []
+    for i in range(3):
+        f = tmp_path / f"c{i}.wav"
+        tts.write_wav(f, _speech_like(sr, 1.0, seed=i), sr)
+        files.append(str(f))
+    # câu 0: vừa khít (1 s) · câu 1: chỗ trống ~0,8 s cho 1 s giọng (phải đọc nhanh ~×1,23) · câu 2: rộng
+    segs = [Segment(0.0, 1.0, "a", "một", "S1"), Segment(1.15, 1.85, "b", "hai", "S1"), Segment(1.9, 4.5, "c", "ba", "S1")]
+
+    def run(speed):
+        for s, f in zip(segs, files):
+            s.extra["tts_file"] = f
+            if speed is None:
+                s.extra.pop("speed", None)
+            else:
+                s.extra["speed"] = speed
+        st = {}
+        tts.synthesize_dub(segs, tmp_path / "dub.wav", 6, tmp_path / "w", stats=st, only=set(),
+                           settings={"dub_level_match": False}, max_speedup=1.5)
+        return [s.extra.get("fit_speed") for s in segs], {int(k): b - a for a, b, k, _f in st["layout"]}
+
+    auto, lay0 = run(None)
+    assert auto[0] == 1.0 and 1.15 <= auto[1] <= 1.4 and auto[2] == 1.0
+    sp, lay = run(1.1)
+    assert sp[0] == 1.1 and sp[2] == 1.1 and sp[1] > 1.12              # câu vốn phải đọc nhanh hơn: không bị hạ xuống ×1,1
+    assert lay[0] < lay0[0] - 0.05                                      # câu thường ngắn lại thật
+    sp, _ = run(1.3)
+    assert sp == [1.3, 1.3, 1.3]                                         # nâng hết lên ×1,3
+    assert segs[0].extra["fit"] == "ok" and segs[1].extra["fit"] == "ok"
+    sp, lay = run(0.9)
+    assert sp[2] == 0.9 and lay[2] > lay0[2] + 0.05                      # còn chỗ -> đọc chậm lại
+    assert sp[1] > 1.12                                                  # hết chỗ -> vẫn đọc nhanh cho vừa
+    assert run(None)[0] == auto                                          # về tốc độ gốc
+
+
+def test_spans_and_export_inserts_mute(tmp_path):
+    from trami import video
+    from trami.audiomix import LiveMix, merge_spans, mute_mask, subtract_spans
+    from trami.config import _deep_merge, load_settings
+    from trami.project import DEFAULT_EDIT
+
+    assert merge_spans([[3, 4], [1, 2], [1.5, 3.2]]) == [[1.0, 4.0]]
+    assert subtract_spans([[0, 10]], [[2, 3], [5, 6]]) == [[0.0, 2.0], [3.0, 5.0], [6.0, 10.0]]
+    assert video.out_time(15, [(0, 10), (20, 30)]) == 10 and video.out_time(25, [(0, 10), (20, 30)]) == 15
+    t = np.arange(0, 3, 0.01)
+    m = mute_mask(t, [[1.0, 2.0]])
+    assert m[50] == 1 and m[150] == 0 and m[250] == 1
+    mix = LiveMix()
+    mix.set_tracks({"orig": np.full((44100 * 3, 2), 10000, np.int16), "dub": np.full((44100 * 3, 2), 5000, np.int16)})
+    mix.g, mix.mute = {"orig": 1.0, "dub": 1.0}, [[1.0, 2.0]]
+    a, _ = mix.render(int(1.5 * 44100), 1000)
+    assert abs(float(a.mean()) - 5000 / 32768) < 1e-3          # trong đoạn tắt: chỉ còn giọng lồng
+    # xuất: video 4 s, tắt tiếng gốc 1–2 s, chèn video 1 s (tiếng 1 kHz) tại giây 3
+    ff = video.ff
+    src, clip = tmp_path / "src.mp4", tmp_path / "clip.mp4"
+    subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:d=4:r=25", "-f", "lavfi",
+                    "-i", "sine=f=440:d=4", "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(src)],
+                   check=True)
+    subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=red:s=160x120:d=1:r=30", "-f",
+                    "lavfi", "-i", "sine=f=1000:d=1", "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
+                    str(clip)], check=True)
+    spec = _deep_merge(DEFAULT_EDIT, {"inserts": [{"at": 3.0, "path": str(clip)}], "mute_spans": [[1.0, 2.0]]})
+    out = video.build_and_render(src, tmp_path / "out.mp4", spec, load_settings(), tmp_path / "w")
+    assert abs(ff.probe(out).duration - 5.0) < 0.15
+    pcm = subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-i", str(out), "-ac", "1", "-ar", "8000", "-f", "s16le", "-"],
+                         capture_output=True).stdout
+    x = np.frombuffer(pcm, np.int16).astype(float) / 32768
+
+    def rms(a0, a1):
+        return float(np.sqrt(np.mean(x[int(a0 * 8000):int(a1 * 8000)] ** 2)))
+
+    def peak_hz(a0, a1):
+        seg = x[int(a0 * 8000):int(a1 * 8000)]
+        return int(np.argmax(np.abs(np.fft.rfft(seg))) * 8000 / len(seg))
+    assert rms(0.3, 0.8) > 0.02 and rms(1.2, 1.8) < 0.002          # tắt tiếng gốc đúng đoạn
+    assert abs(peak_hz(3.2, 3.8) - 1000) < 20                      # đoạn chèn giữ tiếng của nó
+    assert abs(peak_hz(4.2, 4.8) - 440) < 20                       # sau đoạn chèn là video gốc tiếp

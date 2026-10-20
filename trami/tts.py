@@ -825,17 +825,22 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         ws = want(k)
         start = max(ws, prev_end + GAP)
         slot = max(0.3, nxt - GAP - start)
-        need = len(clip) / SR
+        need0 = len(clip) / SR
+        # tốc độ người dùng đặt cho câu (tab Lồng tiếng / timeline) = mức TỐI THIỂU: câu vốn phải đọc nhanh hơn để vừa
+        # thì giữ tốc độ đó; < 1 = đọc chậm lại (nếu còn chỗ)
+        user = min(2.0, max(0.5, float(s.extra.get("speed") or 0))) if s.extra.get("speed") else 0.0
+        need = need0 / user if user else need0
         # mượn khoảng lặng phía trước (tối đa 0,15 s) nếu câu dài hơn chỗ trống (trừ khi người dùng đã tự đặt vị trí)
         if need > slot and start <= ws + 1e-6 and not s.extra.get("dub_shift"):
             borrow = min(BORROW, need - slot, max(0.0, ws - (prev_end + GAP)))
             start -= borrow
             slot += borrow
-        speed = 1.0
+        speed = user or 1.0
         if need > slot * 1.03:
             # tua nhanh (giữ cao độ) từ file gốc. KHÔNG bắt OmniVoice đọc lại với thời lượng ép (duration=): mô hình
             # hay phát ra tiếng "bíp" thay cho lời khi bị ép ngắn (2.0.34)
-            speed = min(max_speedup, need / slot)
+            speed = max(speed, min(max(max_speedup, user), need0 / slot))
+        if abs(speed - 1.0) > 0.005:
             clip = _trim_silence(_decode(p, speed))
             need = len(clip) / SR
         if k in gains:
@@ -845,12 +850,12 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                 g = min(g, 0.89 / pk)            # không vượt -1 dBFS
             if g > 1.0:
                 clip = clip * g
-        fit = "ok" if speed <= 1.06 else "fast"
+        fit = "ok" if speed <= 1.06 or (user and speed <= user + 0.005) else "fast"
         end = start + need
         hard_end = nxt + DELAY - GAP          # câu sau được lùi tối đa 0,25 s
         if end > hard_end:
             # vẫn quá dài: nhỏ dần phần cuối (≤0,3 s) rồi dừng đúng lúc câu sau vào, đánh dấu ⚠ để sửa
-            too_long.append((k, need * speed, hard_end - start))
+            too_long.append((k, need0, hard_end - start))
             keep = max(int(0.3 * SR), int((hard_end - start) * SR))
             clip = clip[:keep].copy()
             f = min(int(FADE * SR), len(clip) // 3)

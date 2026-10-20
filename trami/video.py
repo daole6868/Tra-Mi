@@ -156,6 +156,16 @@ def inpaint_cached(src: str | Path, hs: dict, settings: dict, work: str | Path,
     return out
 
 
+def out_time(t: float, keep: list[tuple[float, float]], speed: float = 1.0) -> float:
+    """Giây trên video gốc -> giây trên video xuất ra (sau khi cắt đầu / cuối / giữa và đổi tốc độ)."""
+    acc = 0.0
+    for a, b in keep:
+        if t <= a:
+            break
+        acc += min(t, b) - a
+    return acc / (speed or 1.0)
+
+
 def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dict, work_dir: str | Path,
                      segments: list[Segment] | None = None, progress: ProgressCB | None = None,
                      cancel: Callable[[], bool] | None = None) -> Path:
@@ -207,15 +217,20 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
     full = len(keep) == 1 and keep[0][0] <= 0.01 and abs(keep[0][1] - dur) < 0.05
     has_a = info.has_audio
     fps = info.fps if 1 <= (info.fps or 0) <= 120 else 25
+    # đoạn tắt TIẾNG GỐC trên timeline (mốc của luồng sau -ss = giây gốc − seek0)
+    from .audiomix import mute_expr
+
+    mexpr = mute_expr(spec.get("mute_spans") or [], seek0)
+    mute_f = f"volume=volume=0:enable='{mexpr}'," if mexpr else ""
     if len(keep) == 1:
         fc.append("[0:v]setpts=PTS-STARTPTS[v0]")
         if has_a:
-            fc.append("[0:a]asetpts=PTS-STARTPTS[a0]")
+            fc.append(f"[0:a]{mute_f}asetpts=PTS-STARTPTS[a0]")
     else:
         expr = "+".join(f"between(t,{a:.3f},{b - 0.001:.3f})" for a, b in rel_keep)
         fc.append(f"[0:v]fps={fps:.5f},select='{expr}',setpts=N/FRAME_RATE/TB[v0]")
         if has_a:
-            fc.append(f"[0:a]aresample=44100,aselect='{expr}',asetpts=N/SR/TB[a0]")
+            fc.append(f"[0:a]aresample=44100,{mute_f}aselect='{expr}',asetpts=N/SR/TB[a0]")
     v = "v0"
 
     # ---- 2. che/xoá phụ đề cũ (toạ độ khung gốc)
@@ -361,6 +376,35 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
         fc.append(f"[{v}]subtitles=burn.ass:fontsdir=fonts[vs]")
         v = "vs"
 
+    # ---- 11b. video chèn thêm (timeline: "Chèn video…") – ghép vào đúng chỗ trên video XUẤT RA (sau khi cắt / đổi
+    # tốc độ); đoạn chèn giữ hình + tiếng của chính nó, không có phụ đề / lồng tiếng
+    ins = []
+    for it in spec.get("inserts") or []:
+        ip = Path(it.get("path") or "")
+        if not ip.exists():
+            raise FileNotFoundError(f"Không tìm thấy video chèn: {ip}")
+        ii = ff.probe(ip)
+        if not ii.has_video or ii.duration <= 0.05:
+            continue
+        at = out_time(float(it.get("at") or 0), keep, speed)
+        ins.append((min(at, final_dur), ip, ii))
+    ins.sort(key=lambda x: x[0])
+    main_dur = final_dur
+    cuts_at = [0.0] + [x[0] for x in ins] + [main_dur]
+    if ins:
+        k = len(ins) + 1
+        fc.append(f"[{v}]split={k}" + "".join(f"[vm{i}]" for i in range(k)))
+        for i in range(k):
+            fc.append(f"[vm{i}]trim=start={cuts_at[i]:.3f}:end={cuts_at[i + 1]:.3f},setpts=PTS-STARTPTS,"
+                      f"fps={fps:.5f},format=yuv420p[vp{i}]")
+        for j, (_at, ip, ii) in enumerate(ins):
+            inputs += ["-i", str(ip.resolve())]
+            ins[j] = (_at, ip, ii, n_in)
+            fc.append(f"[{n_in}:v]scale={TW}:{TH}:force_original_aspect_ratio=decrease,pad={TW}:{TH}:(ow-iw)/2:"
+                      f"(oh-ih)/2,setsar=1,fps={fps:.5f},format=yuv420p,setpts=PTS-STARTPTS[vi{j}]")
+            n_in += 1
+        final_dur = main_dur + sum(ii.duration for _a, _p, ii, _n in ins)
+
     # ---- 12. hiệu ứng mờ dần
     fade = spec.get("fade") or {}
     fin, fout = float(fade.get("in") or 0), float(fade.get("out") or 0)
@@ -369,10 +413,11 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
         fl.append(f"fade=t=in:st=0:d={fin}")
     if fout > 0:
         fl.append(f"fade=t=out:st={max(0, final_dur - fout):.3f}:d={fout}")
-    if fl:
+    if fl and not ins:
         fc.append(f"[{v}]{','.join(fl)}[vf]")
         v = "vf"
-    fc.append(f"[{v}]format=yuv420p[vout]")
+    if not ins:
+        fc.append(f"[{v}]format=yuv420p[vout]")
 
     # ================= ÂM THANH (cách trộn dùng chung với bộ trộn trực tiếp trong trình phát: trami/audiomix.py)
     from .audiomix import audio_settings, gains as mix_gains, pitch_filter, use_stems
@@ -412,7 +457,7 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
     if stems_on:
         # nền = nhạc + hiệu ứng đã tách (không còn giọng Trung)
         if g["bg"] > 0.001:
-            lab = ext_audio(dub["bg_wav"])
+            lab = ext_audio(dub["bg_wav"], mute_f.rstrip(","))
             fc.append(f"[{lab}]volume={g['bg']:.3f}{tempo}[bgx]")
             amix_inputs.append("[bgx]")
         # giọng gốc đã tách: nhỏ / tắt, riêng đoạn hát giữ to (nếu bật "giữ nguyên đoạn hát")
@@ -421,7 +466,8 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
         if voc and Path(voc).exists() and (g["voice"] > 0.001 or (spans and g["voice_song"] > 0.001)):
             # mốc thời gian lúc này là của file gốc (trước khi cắt) vì -ss đã dời về 0 tại seek0
             cond = "+".join(f"between(t,{a - seek0:.3f},{b - seek0:.3f})" for a, b in spans) or "0"
-            pre = f"volume='if({cond},{g['voice_song']:.3f},{g['voice']:.3f})':eval=frame" + (f",{pf}" if pf else "")
+            pre = f"volume='if({cond},{g['voice_song']:.3f},{g['voice']:.3f})':eval=frame" + (f",{pf}" if pf else "") \
+                + (f",{mute_f.rstrip(',')}" if mute_f else "")
             lab = ext_audio(voc, pre)
             fc.append(f"[{lab}]anull{tempo}[vcx]")
             amix_inputs.append("[vcx]")
@@ -450,20 +496,51 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
             fc.append("[dsk]aformat=channel_layouts=stereo[dsk2];"
                       "[bgr][dsk2]sidechaincompress=threshold=0.02:ratio=8:attack=20:release=400[bgo]")
         amix_inputs.append("[bgo]")
+    if ins and not amix_inputs:   # video gốc không có tiếng nhưng đoạn chèn có -> nền im lặng cho phần video gốc
+        fc.append(f"anullsrc=r=44100:cl=stereo,atrim=0:{main_dur:.3f}[silm]")
+        amix_inputs.append("[silm]")
     if amix_inputs:
         if len(amix_inputs) == 1:
             fc.append(f"{amix_inputs[0]}anull[amx]")
         else:
             fc.append("".join(amix_inputs) + f"amix=inputs={len(amix_inputs)}:duration=first:"
                       f"dropout_transition=0:normalize=0[amx]")
+        if ins:
+            k = len(ins) + 1
+            fc.append(f"[amx]aformat=sample_rates=44100:channel_layouts=stereo,apad=whole_dur={main_dur:.3f},"
+                      f"atrim=0:{main_dur:.3f},asplit={k}" + "".join(f"[am{i}]" for i in range(k)))
+            for i in range(k):
+                fc.append(f"[am{i}]atrim=start={cuts_at[i]:.3f}:end={cuts_at[i + 1]:.3f},asetpts=PTS-STARTPTS[ap{i}]")
+            for j, (_at, _ip, ii, idx) in enumerate(ins):
+                if ii.has_audio:
+                    fc.append(f"[{idx}:a]aresample=44100,aformat=sample_rates=44100:channel_layouts=stereo,"
+                              f"apad=whole_dur={ii.duration:.3f},atrim=0:{ii.duration:.3f},asetpts=PTS-STARTPTS[ai{j}]")
+                else:
+                    fc.append(f"anullsrc=r=44100:cl=stereo,atrim=0:{ii.duration:.3f}[ai{j}]")
+            order = []
+            for i in range(k):
+                order.append(f"[vp{i}][ap{i}]")
+                if i < len(ins):
+                    order.append(f"[vi{i}][ai{i}]")
+            fc.append("".join(order) + f"concat=n={2 * k - 1}:v=1:a=1[vcat][amx2]")
+            # mờ dần áp cho cả video sau khi ghép
+            vf = []
+            if fin > 0:
+                vf.append(f"fade=t=in:st=0:d={fin}")
+            if fout > 0:
+                vf.append(f"fade=t=out:st={max(0, final_dur - fout):.3f}:d={fout}")
+            fc.append("[vcat]" + (",".join(vf) + "," if vf else "") + "format=yuv420p[vout2]")
+            amx_lab = "amx2"
+        else:
+            amx_lab = "amx"
         afl = ["alimiter=limit=0.95"]
         if fin > 0:
             afl.append(f"afade=t=in:st=0:d={fin}")
         if fout > 0:
             afl.append(f"afade=t=out:st={max(0, final_dur - fout):.3f}:d={fout}")
-        fc.append(f"[amx]{','.join(afl)}[aout]")
+        fc.append(f"[{amx_lab}]{','.join(afl)}[aout]")
 
-    args = inputs + ["-filter_complex", ";".join(fc), "-map", "[vout]"]
+    args = inputs + ["-filter_complex", ";".join(fc), "-map", "[vout2]" if ins else "[vout]"]
     if amix_inputs:
         args += ["-map", "[aout]"] + ff.audio_encode_args(settings)
     args += ff.video_encode_args(settings, spec.get("crf"))
