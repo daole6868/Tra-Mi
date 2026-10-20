@@ -422,6 +422,18 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   * Nếu chữ thiếu ngay trong file bản lồng ("Nghe bản lồng") thì là lỗi bộ đọc (VieNeu tự ngắt sớm) – chưa có cách tự phát
     hiện (đề xuất: kiểm tra lời đọc bằng Whisper tiếng Việt).
 
+- 2.0.39: "đặt Cỡ chữ 22 thì vài câu giọng lồng bị giật, để 0 hoặc < 10 thì không". Đo `SubtitleItem.paint` (offscreen):
+  không nền hộp mà có bóng đổ (> 0,3 px trên khung xem) -> 47–82 ms MỖI lần vẽ (Bangers 266 ms) do dựng viền + ghép bóng
+  bằng `QPainterPath.united`; viền ≥ 1 px mà không bóng ~7 ms; nhỏ hơn ~1 ms -> nặng / nhẹ theo cỡ chữ, câu dài nặng hơn.
+  Và phụ đề bị vẽ lại MỖI lần trình phát báo vị trí dù chữ không đổi -> luồng giao diện nghẽn, giữ GIL -> loa giật.
+  * `SubtitleItem._sprite`: vẽ chữ 1 lần thành QImage (theo devicePixelRatio, khớp lưới điểm ảnh) – bóng = lớp đen đặc
+    riêng (viền + chữ dời đi) phủ độ trong 0,6 (không cần `united`), viền, màu chữ; karaoke có thêm ảnh tô màu karaoke, dán
+    theo vùng cắt từng dòng. Khoá ảnh = chữ / font / vị trí / viền / bóng / dpr / màu karaoke.
+  * `SubtitleItem.set`: cùng câu + cùng kiểu -> không vẽ lại; chỉ karaoke đổi -> `update(vùng chữ)`. `clear_override`
+    chỉ vẽ lại khi thật sự có giá trị kéo dở.
+  * Đo lại: 0,05–0,12 ms mỗi lần vẽ; so từng điểm ảnh với cách cũ: lệch tối đa 17–33/255 ở vài điểm mép bóng (mắt không
+    thấy); khớp hộp nền libass, kéo phụ đề, karaoke xem trước = video xuất như trước.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -444,3 +456,4 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.36: chờ người dùng thử karaoke trên máy thật (nhịp chữ theo giọng VieNeu/Edge thật, chữ quét mượt khi phát).
 - 2.0.37: chờ người dùng nghe thử giọng OmniVoice chọn sẵn với tiếng Việt trên máy thật (mô hình thật chưa chạy ở sandbox).
 - 2.0.38: chờ người dùng xác nhận hết mất chữ cuối khi nghe trong tool; nếu file bản lồng vẫn thiếu chữ -> làm kiểm tra lời đọc.
+- 2.0.39: chờ người dùng xác nhận đổi cỡ chữ không còn làm giật giọng lồng khi phát.

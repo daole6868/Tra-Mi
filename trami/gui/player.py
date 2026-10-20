@@ -75,6 +75,7 @@ class SubtitleItem(QGraphicsItem):
         self._snap = False
         self._geo = None
         self.kara: list[float] | None = None   # karaoke: mỗi từ của câu đã đổi màu bao nhiêu (0..1)
+        self._spr = None          # ảnh chữ đã vẽ sẵn (khoá, (vùng, ảnh màu chữ, ảnh màu karaoke)) – xem _sprite
         self.setAcceptHoverEvents(True)
         self.set_editable(False)
 
@@ -88,16 +89,27 @@ class SubtitleItem(QGraphicsItem):
         self.update()
 
     def clear_override(self):
-        if not self._drag:
+        if not self._drag and self._ovr:
             self._ovr = {}
+            self.prepareGeometryChange()
+            self._geo = None
+            self.update()
 
     def boundingRect(self):
         w, h = self.box.width(), self.box.height()   # rộng ra: chữ kéo sát mép vẫn vẽ trọn
         return self.box.adjusted(-w / 2, -h / 2, w / 2, h / 2)
 
     def set(self, parts: list, box: QRectF, style: dict, video_h: int, kara: list[float] | None = None):
+        vh = max(16, video_h or 1080)
+        if parts == self.parts and box == self.box and style == self.style and vh == self.video_h:
+            # cùng câu, cùng kiểu (trình phát báo vị trí ~25 lần/giây): KHÔNG vẽ lại; karaoke chỉ tô lại vùng chữ
+            if kara != self.kara:
+                self.kara = kara
+                g = self._geo
+                self.update(g["outer"].adjusted(-40, -40, 40, 40) if g else self.boundingRect())
+            return
         self.prepareGeometryChange()
-        self.parts, self.box, self.style, self.video_h = parts, box, style, max(16, video_h or 1080)
+        self.parts, self.box, self.style, self.video_h = parts, box, style, vh
         self.kara = kara
         self._geo = None
         self.update()
@@ -180,6 +192,83 @@ class SubtitleItem(QGraphicsItem):
             self._geo = self._layout()
         return self._geo
 
+    def _sprite(self, g: dict, dpr: float):
+        """Vẽ chữ (bóng + viền + màu chữ) 1 LẦN thành ảnh, các lần sau chỉ dán ảnh. 2.0.39: trước đây mỗi khung hình
+        đều dựng lại đường viền + ghép bóng bằng phép hợp hình (QPainterPath.united ~50 ms/câu) -> giao diện nghẽn,
+        tiếng lồng giật ở câu dài, nặng nhẹ tuỳ cỡ chữ."""
+        st = g["st"]
+        box = bool(st.get("box"))
+        size_s = g["size"] * g["sc"]
+        outline = 0.0 if box else max(0.0, float(st.get("outline", 2.5))) / 48 * size_s
+        shadow = 0.0 if box else max(0.0, float(st.get("shadow", 1))) / 48 * size_s
+        if shadow <= 0.3:
+            shadow = 0.0
+        lines = [ln for ln in g["lines"] if ln[0]]
+        kara = any(ln[9] is not None for ln in lines)
+        kcol = st.get("karaoke_color") or "#FFEF00"
+        key = (tuple((ln[0], ln[1].family(), ln[1].bold(), round(ln[2], 6), round(ln[3], 2), round(ln[7], 2), ln[8])
+                     for ln in lines), round(outline, 3), round(shadow, 3), st.get("outline_color", "#000000"),
+               round(dpr, 3), kcol if kara else None)
+        if self._spr is not None and self._spr[0] == key:
+            return self._spr[1]
+        paths = []
+        for text, f, fac, x, _y, _w, _lh, base, col, _split in lines:
+            path = QPainterPath()
+            path.addText(0, 0, f, text)
+            paths.append((QTransform.fromScale(fac, fac).map(path).translated(x, base), col))
+        if not paths:
+            self._spr = (key, None)
+            return None
+        rect = QRectF()
+        for pth, _c in paths:
+            rect = rect.united(pth.boundingRect())
+        pad = outline + shadow + 2
+        rect = rect.adjusted(-pad, -pad, pad, pad)
+        # khớp lưới điểm ảnh: dán ảnh đúng ô, không nội suy (chữ nét như vẽ thẳng lên khung)
+        import math
+
+        x0, y0 = math.floor(rect.left() * dpr) / dpr, math.floor(rect.top() * dpr) / dpr
+        size = (max(1, math.ceil((rect.right() - x0) * dpr)), max(1, math.ceil((rect.bottom() - y0) * dpr)))
+        rect = QRectF(x0, y0, size[0] / dpr, size[1] / dpr)
+        fmt = QImage.Format.Format_ARGB32_Premultiplied
+        pen = QPen(QColor(st.get("outline_color", "#000000")), outline * 2)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+
+        def layer(color: QColor | None, dx: float = 0.0, solid: QColor | None = None) -> QImage:
+            img = QImage(size[0], size[1], fmt)
+            img.setDevicePixelRatio(dpr)
+            img.fill(Qt.GlobalColor.transparent)
+            q = QPainter(img)
+            q.setRenderHint(QPainter.RenderHint.Antialiasing)
+            q.translate(-rect.left() + dx, -rect.top() + dx)
+            for pth, col in paths:
+                if outline > 0:
+                    q.strokePath(pth, QPen(solid, outline * 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.SquareCap,
+                                           Qt.PenJoinStyle.RoundJoin) if solid is not None else pen)
+                q.fillPath(pth, solid if solid is not None else QColor(color or col))
+            q.end()
+            return img
+
+        def compose(color: QColor | None) -> QImage:
+            img = layer(color)
+            if not shadow:
+                return img
+            # bóng = (chữ + viền) dời đi, đen đặc trên lớp riêng rồi phủ trong suốt 40 % (như BackColour khi xuất)
+            out = QImage(size[0], size[1], fmt)
+            out.setDevicePixelRatio(dpr)
+            out.fill(Qt.GlobalColor.transparent)
+            q = QPainter(out)
+            q.setOpacity(0.6)
+            q.drawImage(QPointF(0, 0), shadow_img)
+            q.setOpacity(1.0)
+            q.drawImage(QPointF(0, 0), img)
+            q.end()
+            return out
+        shadow_img = layer(None, shadow, QColor(0, 0, 0)) if shadow else None
+        res = (rect, compose(None), compose(QColor(kcol)) if kara else None)
+        self._spr = (key, res)
+        return res
+
     def shape(self):
         path = QPainterPath()
         g = self._geometry() if self.editable else None
@@ -203,40 +292,17 @@ class SubtitleItem(QGraphicsItem):
             p.setBrush(bc)
             for b in g["boxes"]:
                 p.drawRect(b)
-        size_s = g["size"] * g["sc"]
-        outline = float(st.get("outline", 2.5)) / 48 * size_s
-        shadow = float(st.get("shadow", 1)) / 48 * size_s
-        shadow_c = QColor(0, 0, 0, 153)          # BackColour khi xuất: đen, trong suốt 40 %
-        kcol = QColor(st.get("karaoke_color") or "#FFEF00")
-        for text, f, fac, x, _y, _w, _lh, base, col, split in g["lines"]:
-            if not text:
-                continue
-            path = QPainterPath()
-            path.addText(0, 0, f, text)
-            path = QTransform.fromScale(fac, fac).map(path).translated(x, base)
-            if not box and shadow > 0.3:
-                sh = path.translated(shadow, shadow)
-                if outline > 0:     # bóng = (chữ + viền) dời đi, tô 1 lần để không đậm chồng
-                    from PySide6.QtGui import QPainterPathStroker
-
-                    stroker = QPainterPathStroker()
-                    stroker.setWidth(outline * 2)
-                    stroker.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-                    sh = stroker.createStroke(sh).united(sh)
-                p.fillPath(sh, shadow_c)
-            if not box and outline > 0:
-                pen = QPen(QColor(st.get("outline_color", "#000000")), outline * 2)
-                pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-                p.strokePath(path, pen)
-            if split is None:
-                p.fillPath(path, QColor(col))
-                continue
-            big = 1e5
-            for clip, c in ((QRectF(-big, -big, x + split + big, 2 * big), kcol),
-                            (QRectF(x + split, -big, 2 * big, 2 * big), QColor(col))):
-                p.save()
-                p.setClipRect(clip)
-                p.fillPath(path, c)
+        dev = p.device()
+        spr = self._sprite(g, dev.devicePixelRatioF() if dev is not None else 1.0)
+        if spr:
+            rect, img, kimg = spr
+            p.drawImage(rect, img)
+            for text, _f, _fac, x, y, _w, lh, _base, _col, split in g["lines"]:
+                if kimg is None or split is None or not text or x + split <= rect.left():
+                    continue
+                p.save()        # karaoke: phần đã đọc lấy từ ảnh tô màu karaoke (viền, bóng giống hệt)
+                p.setClipRect(QRectF(rect.left(), y, x + split - rect.left(), lh))
+                p.drawImage(rect, kimg)
                 p.restore()
         p.setOpacity(1.0)
         if self.editable and (self.show_frame or self._hover or self._drag):
