@@ -21,6 +21,8 @@ ASR_ENGINES = [("qwen3", "Qwen3-ASR – nghe chuẩn nhất, căn giờ từng c
 LANGS = [("zh", "Tiếng Trung (Phổ thông)"), ("yue", "Tiếng Quảng Đông"), ("auto", "Tự nhận diện"),
          ("en", "Tiếng Anh"), ("ja", "Tiếng Nhật"), ("ko", "Tiếng Hàn")]
 METHODS = [("asr", "Nhận dạng giọng nói"), ("ocr", "OCR phụ đề cứng có sẵn trên video")]
+OCR_SPEEDS = [("2", "Nhanh – 2 lần/giây (video dài, câu hiện lâu)"), ("4", "Chuẩn – 4 lần/giây (khuyên dùng)"),
+              ("8", "Kỹ – 8 lần/giây (câu đổi rất nhanh, chậm gấp đôi)")]
 HARDSUB = [("none", "Giữ nguyên"), ("inpaint", "Xoá sạch bằng AI (LaMa)"), ("blur", "Làm mờ vùng phụ đề"),
            ("box", "Che bằng dải màu"), ("delogo", "Delogo (nhanh)")]
 WHICH = [("trans", "Chỉ tiếng Việt"), ("both", "Song ngữ Việt + Trung"), ("source", "Chỉ tiếng Trung"),

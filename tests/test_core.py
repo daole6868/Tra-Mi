@@ -1175,3 +1175,64 @@ def test_ocr_drops_static_watermark():
 
 def _bbox_h(item):
     return float(item[0][:, 1].max() - item[0][:, 1].min())
+
+
+def test_ocr_change_detector_any_color():
+    """Bước "chữ có đổi không" nhận ra chữ MỌI màu (trước chỉ nhận trắng / vàng có viền -> chữ hồng không bao giờ được
+    đọc) và câu mới hiện trên cảnh sáng (trước chỉ đổi 14 % -> bị coi là câu cũ); nhiễu nén nhẹ không tính là đổi."""
+    import cv2
+    from trami import ocr
+
+    bg = np.full((180, 1280, 3), (200, 200, 200), np.uint8)               # cảnh sáng
+    pink = bg.copy()
+    for k in range(8):                                                     # 8 "chữ" nét hồng
+        x = 380 + k * 66
+        cv2.rectangle(pink, (x, 60), (x + 44, 110), (180, 110, 255), 4)
+        cv2.line(pink, (x, 85), (x + 44, 85), (180, 110, 255), 4)
+    noisy = np.clip(bg.astype(np.int16) + np.random.default_rng(0).integers(-3, 4, bg.shape), 0, 255).astype(np.uint8)
+    a, b, c = ocr._text_signature(bg), ocr._text_signature(pink), ocr._text_signature(noisy)
+    assert ocr._changed(a, b) and not ocr._changed(a, c)
+    # cùng câu đọc lệch 1 chữ = 1 câu; 2 câu na ná nhau (khác 2 chữ) = 2 câu
+    assert ocr._same_line("没想到你也有这一天", "没想到你也有这—天")
+    assert not ocr._same_line("这是黄色的字幕测试", "这是粉红色的字幕测试")
+
+
+def _cjk_font():
+    for f in ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+              "C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simhei.ttf", "/System/Library/Fonts/PingFang.ttc"):
+        if os.path.exists(f):
+            return f
+    return None
+
+
+def test_ocr_region_multiline_and_colors(tmp_path):
+    """Dò vùng phụ đề từ câu đầu tiên (nới lên / xuống, hết chiều ngang) + đọc đủ: chữ hồng, phụ đề 2–3 dòng (trước chỉ
+    đọc được dòng dưới cùng), câu dài gần hết ngang; watermark góc không lẫn vào câu."""
+    pytest.importorskip("rapidocr_onnxruntime")
+    font = _cjk_font()
+    if not font:
+        pytest.skip("không có font chữ Hán để vẽ video thử")
+    from trami import ocr
+
+    font_ff = font.replace("\\", "/").replace(":", "\\:")
+    subs = [(0.8, 2.4, ["第一句只有一行字幕"], "white"), (2.4, 4.0, ["这是粉红色的字幕测试"], "0xFF6EB4"),
+            (4.0, 5.6, ["这是第二句的第一行", "第二句的第二行在下面"], "white"),
+            (5.6, 7.2, ["三行字幕的第一行", "三行字幕的第二行", "三行字幕的第三行"], "white"),
+            (7.2, 8.8, ["这是一句非常非常长的字幕从左边一直写到右边几乎占满整个画面"], "white")]
+    f = []
+    for a, b, lines, col in subs:
+        for k, line in enumerate(reversed(lines)):
+            f.append(f"drawtext=fontfile='{font_ff}':text='{line}':fontsize={30 if len(line) > 20 else 34}:"
+                     f"fontcolor={col}:borderw=2:bordercolor=black:x=(w-tw)/2:y=h-70-{k * 46}:"
+                     f"enable='between(t,{a},{b - 0.04})'")
+    f.append(f"drawtext=fontfile='{font_ff}':text='频道水印':fontsize=20:fontcolor=white:x=w-110:y=h-36")
+    v = tmp_path / "subs.mp4"
+    subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=0x203040:s=960x540:r=25:d=9.2",
+                    "-vf", ",".join(f), "-pix_fmt", "yuv420p", str(v)], check=True)
+    r = ocr.detect_subtitle_region(v)
+    assert r["found"] and r["x"] == 0 and r["w"] == 1 and abs(r["first_t"] - 0.8) < 0.3
+    assert r["y"] < 0.75 and r["y"] + r["h"] > 0.9            # có chỗ cho 3 dòng phía trên dòng đầu
+    texts = [s.text for s in ocr.extract_hardsubs(v, r)]
+    for _, _, lines, _ in subs:
+        assert any(ocr._similar("".join(lines), t) >= 0.85 for t in texts), ("".join(lines), texts)
+    assert not any("水印" in t or "频道" in t for t in texts)

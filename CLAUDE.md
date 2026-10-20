@@ -33,7 +33,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
   Chụp ảnh kiểm tra giao diện phải nạp theme như `run()`: `theme.load_fonts(); app.setFont(theme.font(10));
   app.setStyleSheet(theme.stylesheet())`.
-- `tests/test_core.py` – `python -m pytest -q tests` (56 test; 1 test cần gói AI).
+- `tests/test_core.py` – `python -m pytest -q tests` (58 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -269,6 +269,23 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   tải. `models._hf_complete`: có config.json + đủ file trọng số theo `model.safetensors.index.json` (tải dở -> "Chưa tải");
   tải xong mà thiếu file -> báo bấm Tải về lần nữa. Đổi mô hình 1.7B/0.6B ở Cài đặt thì phải tải bản kia.
 
+- 2.0.32: OCR phụ đề cứng "quét nhầm / sót câu". Kiểm tra trên video mẫu (so với OCR MỌI khung) + video thử tự vẽ
+  (drawtext, font Noto CJK): cách cũ sót 3/55 câu (cảnh sáng: mặt nạ chữ trắng/vàng chỉ đổi 14 % khi câu mới hiện ->
+  coi là câu cũ), chữ HỒNG không bao giờ đọc (mặt nạ chỉ nhận trắng/vàng có viền), phụ đề 2–3 dòng chỉ đọc dòng dưới
+  (vùng dò cao 1 dòng), vùng dò x=0,1 cắt câu dài, 2 câu liền giống ≥ 0,7 bị gộp. Sửa `ocr.py`:
+  * `_text_signature` = mật độ biên Canny ô 4×4 (mọi màu) + `_changed` (≥ 3 ô đổi > 25 %); OCR lại ít nhất mỗi 1 s.
+  * Đọc ngưỡng 0,45; chữ < 0,6 chỉ giữ khi lần đọc khác ±1 s ra giống (≥ 0,8). `_same_line`: cùng câu nếu khác ≤ 1 chữ / 6
+    chữ (thay tỉ lệ 0,7). Chữ cùng nội dung mà mỗi lần đọc 1 chỗ (vật có chữ bay qua) -> bỏ.
+  * `detect_subtitle_region`: 5 s đầu 4 khung/s, 5 s cuối 2 khung/s, 8 khung giữa; 5 s đầu không có chữ -> quét tới 30 s.
+    Watermark = nét chữ y hệt ở khung xa nhất (IoU biên ≥ 0,35 hoặc tương quan ≥ 0,5; đo: watermark 0,52/0,56, phụ đề
+    khác câu ≤ 0,19/0,13). Hàng phụ đề = hàng có nhiều câu khác nhau nhất; CÂU ĐẦU TIÊN làm mốc: cao dòng h -> vùng quét
+    thêm `UP_LINES` 2,2·h trên + `DOWN_LINES` 1,2·h dưới, ngang 0..1. Trả thêm line_y/line_h (`_anchor_block`: chỉ giữ khối
+    dòng liền nhau có 1 dòng đúng hàng phụ đề chính -> bỏ chữ trong cảnh), erase (khung vừa khít để xoá), first_t.
+    `expand_region`: vùng người dùng khoanh -> vùng quét rộng tương tự. Vùng xoá gợi ý = `stats["text_box"]` (khung chữ
+    thật đã đọc), KHÔNG dùng vùng quét. Cài đặt + tab Tự động: `ocr_fps` "2"/"4"/"8" (`C.OCR_SPEEDS`). `ocr_warning` khi
+    0 câu. Kết quả: video mẫu 55/55 câu như OCR mọi khung, video thử nhiều màu 6/6, phụ đề 1/2/3 dòng + câu dài + mở đầu
+    8 s 5/5, không lẫn watermark / biển hiệu. Chậm hơn ~1,5 lần (nền chuyển động -> OCR nhiều khung hơn).
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -279,5 +296,6 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.26: chờ người dùng cập nhật edge-tts>=7.3.1 và xác nhận Edge hết 403.
 - 2.0.28: chờ người dùng xem giao diện mới trên máy thật (độ rộng các khung, cỡ chữ, timeline).
 - 2.0.30: chờ người dùng xem bố cục mới trên máy thật.
+- 2.0.32: chờ người dùng thử OCR mới trên video thật (tốc độ quét, vùng tự dò, phụ đề nhiều dòng / màu).
 - 2.0.29: chờ người dùng cài `transformers>=5.13 accelerate`, tải Qwen3-ASR (tab Tài liệu) và chạy lại "1. Nghe & tách câu";
   VRAM: 1.7B bf16 ~4 GB + bộ căn 0.6B; lỗi thiếu bộ nhớ -> chọn 0.6B. Chưa làm: AI chấm câu / sửa lời trước khi tách.

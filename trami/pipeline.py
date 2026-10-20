@@ -345,23 +345,30 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
     engine = engine or settings.get("asr_engine", "qwen3")
     want_spk = bool(settings.get("diarize", True))
     if method == "ocr":
-        from .ocr import detect_subtitle_region, extract_hardsubs
+        from .ocr import detect_subtitle_region, expand_region, extract_hardsubs
 
-        if not region:
+        if region:   # vùng khoanh ở tab Xoá phụ đề (vừa khít 1 dòng) -> mở rộng: hết ngang, thêm dòng trên / dưới
+            scan = expand_region(region)
+        else:
             if progress:
-                progress(0.0, "Đang tự dò vùng phụ đề trên video…")
-            region = detect_subtitle_region(src)
+                progress(0.0, "Đang dò vùng phụ đề (kỹ ở 5 giây đầu và 5 giây cuối)…")
+            scan = detect_subtitle_region(src, _sub(progress, 0.0, 0.05))
         boxes = p.work / "ocr_boxes.json"
-        segs = extract_hardsubs(src, region, fps=ocr_fps, progress=_sub(progress, 0.02, 0.85), cancel=cancel,
-                                boxes_out=boxes)
-        p.data["ocr_region"] = region
+        stats: dict = {}
+        segs = extract_hardsubs(src, scan, fps=float(ocr_fps or 4), progress=_sub(progress, 0.05, 0.85),
+                                cancel=cancel, boxes_out=boxes, stats=stats)
+        p.data["ocr_region"] = scan
         p.data["ocr_boxes"] = str(boxes)
-        # gợi ý luôn vùng xoá phụ đề
+        p.data["ocr_stats"] = {"fps": float(ocr_fps or 4), "frames": stats.get("frames", 0),
+                               "ocr_runs": stats.get("ocr_runs", 0), "first_t": scan.get("first_t")}
+        p.data["ocr_warning"] = "" if segs else (
+            "Không đọc được câu phụ đề nào – video có thể không có chữ Trung in sẵn, hoặc chữ nằm ngoài vùng quét: "
+            "vào tab Xoá phụ đề bấm Tự dò / khoanh lại vùng chữ, hoặc dùng Nhận dạng giọng nói.")
+        # gợi ý luôn vùng xoá phụ đề: vừa khít chữ phụ đề đã đọc (không phải cả vùng quét rộng)
         ed = p.edit
-        if not ed["hardsub"].get("regions"):
-            pad = 0.01
-            ed["hardsub"]["regions"] = [{"x": max(0, region["x"] - pad), "y": max(0, region["y"] - pad),
-                                         "w": min(1, region["w"] + 2 * pad), "h": min(1, region["h"] + 2 * pad)}]
+        box = stats.get("text_box") or scan.get("erase")
+        if not ed["hardsub"].get("regions") and box:
+            ed["hardsub"]["regions"] = [box]
             p.data["edit"] = ed
         spk_from_asr = False
     else:
@@ -1056,7 +1063,8 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
             if "separate" in opts:
                 settings["sep_before_asr"] = bool(opts["separate"])
             recognize(p, opts.get("method", "asr"), opts.get("language", "zh"), opts.get("region"),
-                      float(opts.get("ocr_fps", 4)), settings, pr, cancel, bool(opts.get("denoise")))
+                      float(opts.get("ocr_fps") or settings.get("ocr_fps") or 4), settings, pr, cancel,
+                      bool(opts.get("denoise")))
         elif st == "translate":
             translate(p, opts.get("engine"), opts.get("style"), bool(opts.get("only_empty")), settings, pr, cancel)
         elif st == "dub":
@@ -1072,12 +1080,14 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
             if opts.get("hardsub_mode"):
                 ed["hardsub"]["mode"] = opts["hardsub_mode"]
                 if opts.get("hardsub_mode") != "none" and not ed["hardsub"].get("regions"):
-                    reg = p.data.get("ocr_region")
+                    # vùng xoá = khung vừa khít chữ phụ đề cũ (vùng quét OCR rộng hơn nhiều, không dùng để xoá)
+                    reg = (p.data.get("ocr_region") or {}).get("erase")
                     if not reg:
                         from .ocr import detect_subtitle_region
 
-                        reg = detect_subtitle_region(p.source)
-                    ed["hardsub"]["regions"] = [reg]
+                        r = detect_subtitle_region(p.source)
+                        reg = r.get("erase") or r
+                    ed["hardsub"]["regions"] = [{k: reg[k] for k in ("x", "y", "w", "h")}]
             if "burn" in opts:
                 ed["subtitles"]["burn"] = bool(opts["burn"])
             if opts.get("which"):
@@ -1100,7 +1110,7 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
         result["message"] = "Hoàn tất! " + (f"Video: {Path(result['video']).name}" if result.get("video") else "")
     if opts.get("dub") and not no_tr:
         result["message"] += "  · " + dub_summary(p)
-    for w in ("asr_warning", "translate_warning"):
+    for w in ("asr_warning", "ocr_warning", "translate_warning"):
         if p.data.get(w):
             result["message"] += "  ⚠ " + p.data[w]
     return result

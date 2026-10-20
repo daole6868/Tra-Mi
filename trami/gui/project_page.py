@@ -199,6 +199,10 @@ class ProjectPage(QWidget):
         f = Form()
         self.a_method = f.row("Nguồn phụ đề", combo(C.METHODS, "asr"))
         self.a_asr = f.row("Bộ nhận dạng", combo(C.ASR_ENGINES, s.get("asr_engine")))
+        self.a_ocrfps = f.row("Tốc độ quét phụ đề", combo(C.OCR_SPEEDS, str(s.get("ocr_fps", "4"))),
+                              "Khi lấy phụ đề bằng OCR: quét vùng chữ bao nhiêu lần mỗi giây. Câu hiện rất nhanh "
+                              "(dưới 0,5 giây) thì chọn Kỹ; video dài, câu hiện lâu thì chọn Nhanh")
+        self.a_ocrfps.setEnabled(False)
         self.a_lang = f.row("Ngôn ngữ gốc", combo(C.LANGS, "zh"))
         self.a_sep = f.row("Tách giọng khỏi nhạc trước", Switch(bool(s.get("sep_before_asr", True))),
                            "Nhận dạng chính xác hơn với video có nhạc nền; cũng dùng để lồng tiếng giữ nhạc gốc")
@@ -214,7 +218,8 @@ class ProjectPage(QWidget):
         self.a_denoise = f.row("Lọc nhiễu âm thanh", Switch(False))
         self.a_force = f.row("Nhận dạng lại từ đầu", Switch(False))
         self.a_method.currentIndexChanged.connect(
-            lambda: self.a_asr.setEnabled(self.a_method.currentData() == "asr"))
+            lambda: (self.a_asr.setEnabled(self.a_method.currentData() == "asr"),
+                     self.a_ocrfps.setEnabled(self.a_method.currentData() == "ocr")))
         card.add(f)
         go = GradientButton("Bắt đầu dịch tự động", "bolt", big=True)
         go.clicked.connect(self.run_auto)
@@ -1072,6 +1077,7 @@ class ProjectPage(QWidget):
     def _auto_opts(self) -> dict:
         which = self.a_which.currentData()
         return {"method": self.a_method.currentData(), "asr_engine": self.a_asr.currentData(),
+                "ocr_fps": float(self.a_ocrfps.currentData() or 4),
                 "language": self.a_lang.currentData(), "separate": self.a_sep.isChecked(),
                 "diarize": self.a_spk.isChecked(), "engine": self.a_engine.currentData(),
                 "style": self.a_style.currentData(), "hardsub_mode": self.a_hardsub.currentData(),
@@ -1097,7 +1103,8 @@ class ProjectPage(QWidget):
         region = self.hs_editor.regions[0] if (o["method"] == "ocr" and self.hs_editor.regions) else None
 
         def fn(j, p):
-            n = pipeline.recognize(p, o["method"], o["language"], region, 4.0, st, j.update, j.cancelled, o["denoise"])
+            n = pipeline.recognize(p, o["method"], o["language"], region, o["ocr_fps"], st, j.update, j.cancelled,
+                                   o["denoise"])
             r = p.data.get("asr_rescued", 0)
             msg = f"Đã lấy {n} câu phụ đề" + (f" (nghe lại được thêm {r} câu bị sót)" if r else "")
             used = {"qwen3": "Qwen3-ASR", "sensevoice": "SenseVoice", "paraformer": "Paraformer",
@@ -1106,6 +1113,12 @@ class ProjectPage(QWidget):
                 msg += f" · nghe bằng {used}"
             if o["method"] != "ocr" and p.data.get("asr_warning"):
                 msg += "  ⚠ " + p.data["asr_warning"]
+            if o["method"] == "ocr":
+                ost = p.data.get("ocr_stats") or {}
+                if ost.get("frames"):
+                    msg += f" · quét {ost['frames']} khung ({ost.get('fps', 4):g} lần/giây), đọc chữ {ost['ocr_runs']} lần"
+                if p.data.get("ocr_warning"):
+                    msg = "⚠ " + p.data["ocr_warning"]
             return {"message": msg}
         self.submit("recognize", "Lấy phụ đề", fn)
 
@@ -1466,7 +1479,7 @@ class ProjectPage(QWidget):
     def _detect_region(self):
         from ..ocr import detect_subtitle_region
 
-        self.win.toast("Đang dò vùng phụ đề (OCR vài khung hình)…")
+        self.win.toast("Đang dò vùng phụ đề (quét kỹ 5 giây đầu + 5 giây cuối)…")
         src = self.p.source
 
         def done(r):
@@ -1474,7 +1487,8 @@ class ProjectPage(QWidget):
                 self.win.toast("Không thấy phụ đề tiếng Trung rõ ràng – đã đặt vùng mặc định phía dưới", "warn")
             else:
                 self.win.toast("Đã tìm thấy vùng phụ đề", "ok")
-            self.hs_editor.set_regions([{k: r[k] for k in ("x", "y", "w", "h")}])
+            box = r.get("erase") or r   # vùng xoá vừa khít chữ phụ đề (vùng quét OCR thì rộng hơn, tự tính)
+            self.hs_editor.set_regions([{k: box[k] for k in ("x", "y", "w", "h")}])
             if self.hs_mode.currentData() == "none":
                 set_combo(self.hs_mode, "inpaint")
             self._save_edit_timer.start()

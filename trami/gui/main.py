@@ -502,6 +502,7 @@ class ConcatPage(QWidget):
 class SettingsPage(QWidget):
     KEYS = [  # (widget attr, setting key, kiểu)
         ("asr_engine", "asr_engine", "c"), ("qwen_model", "qwen_asr_model", "c"), ("asr_model", "asr_model", "c"),
+        ("ocr_fps", "ocr_fps", "c"),
         ("asr_device", "asr_device", "c"),
         ("asr_max", "asr_max_chars", "i"), ("asr_beam", "asr_beam_size", "i"), ("asr_vad", "asr_vad", "b"),
         ("sep_model", "sep_model", "c"), ("sep_before", "sep_before_asr", "b"), ("diarize", "diarize", "b"),
@@ -565,6 +566,8 @@ class SettingsPage(QWidget):
                                                          ("large-v3-turbo", "large-v3-turbo – nhanh"),
                                                          ("medium", "medium"), ("small", "small – máy yếu")]))
         self.asr_device = f.row("Thiết bị", combo([("auto", "Tự động (ưu tiên GPU)"), ("cuda", "GPU NVIDIA"), ("cpu", "CPU")]))
+        self.ocr_fps = f.row("Tốc độ quét phụ đề cứng (OCR)", combo(C.OCR_SPEEDS),
+                             "Lấy phụ đề bằng OCR chữ Trung in sẵn: quét vùng chữ bao nhiêu lần mỗi giây")
         self.asr_max = f.row("Số chữ Hán tối đa / câu", spin(8, 60),
                              "Câu dài hơn mới chia đôi (ở dấu phẩy / chỗ nghỉ gần giữa); dấu phẩy nói liền không tách")
         self.asr_beam = f.row("Beam size (Whisper)", spin(1, 10))
