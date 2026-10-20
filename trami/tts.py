@@ -402,14 +402,14 @@ class VieneuWorker:
         return [sys.executable, str(APP_DIR / "TraMi.py"), self.flag, self.mode]
 
     def _start(self, progress=None, cancel=None):
-        from .config import APP_DIR, DATA_DIR
+        from .config import APP_DIR, DATA_DIR, no_console
 
         # HF_DEACTIVATE_ASYNC_LOAD: nạp trọng số tuần tự – transformers 5.x nạp song song từng làm sập ngầm
         # trên Windows + CUDA (tắt không báo lỗi)
         env = dict(os.environ, VIENEU_FUSED_FRAME=self.fused, PYTHONUTF8="1", PYTHONIOENCODING="utf-8",
                    HF_DEACTIVATE_ASYNC_LOAD="1", **self._extra_env())
         err = None  # log của VieNeu hiện trong cửa sổ đen; chạy không cửa sổ (pythonw/exe) thì ghi ra file
-        if sys.stderr is None or not getattr(sys.stderr, "fileno", None):
+        if no_console():
             (DATA_DIR / "logs").mkdir(parents=True, exist_ok=True)
             err = open(DATA_DIR / "logs" / self.log_name, "a", encoding="utf-8")
         self.proc = subprocess.Popen(self._cmd(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err,
@@ -437,7 +437,10 @@ class VieneuWorker:
             return obj
         code = self.proc.poll() if self.proc else None
         self.proc = None
-        raise RuntimeError(f"Tiến trình {self.title} bị tắt đột ngột (mã {code}). Xem log trong cửa sổ đen để biết chi tiết.")
+        from .config import no_console
+
+        where = f"file data\\logs\\{self.log_name}" if no_console() else "cửa sổ đen"
+        raise RuntimeError(f"Tiến trình {self.title} bị tắt đột ngột (mã {code}). Xem log trong {where} để biết chi tiết.")
 
     def ensure_started(self, progress=None, cancel=None):
         """Mở tiến trình VieNeu và nạp mô hình (tự tải nếu chưa có), báo tiến độ tải."""

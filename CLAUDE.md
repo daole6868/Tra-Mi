@@ -15,7 +15,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 ## Cấu trúc
 - `TraMi.py` – mở giao diện; có tham số → CLI (`python TraMi.py dich phim.mp4 ...`).
 - `trami/config.py` – `DATA_DIR` (`data/`, exe: `%LOCALAPPDATA%\TraMi`), `DEFAULT_SETTINGS`, settings chỉ lưu phần khác mặc định,
-  `installed()` dùng `find_spec` (không import – import funasr mất ~2 phút), `log_error()` ghi `data/logs/loi.txt`.
+  `installed()` dùng `find_spec` (không import – import funasr mất ~2 phút), `log_error()` ghi `data/logs/loi.txt`,
+  `fix_std_streams()` (gọi đầu tiên khi mở tool: pythonw để sys.stdout/stderr = None -> ghi `data/logs/console.txt`).
 - `trami/pipeline.py` – các bước: `attach_source`, `separate_audio`, `recognize` (tự chuyển Whisper nếu FunASR/torch lỗi),
   `diarize`, `translate`, `dub`, `render`, `auto`; `effective_style` (đặt phụ đề Việt vào đúng chỗ chữ Trung cũ).
 - `trami/video.py` – `build_and_render`: 1 lần encode, `filter_complex`; cắt giữa dùng `select/aselect`;
@@ -38,7 +39,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
   Chụp ảnh kiểm tra giao diện phải nạp theme như `run()`: `theme.load_fonts(); app.setFont(theme.font(10));
   app.setStyleSheet(theme.stylesheet())`.
-- `tests/test_core.py` – `python -m pytest -q tests` (71 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (72 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -453,6 +454,15 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     tiếng: [amx] apad/atrim -> asplit/atrim, đoạn chèn có tiếng riêng (không có -> anullsrc); concat 2k+1 đoạn; mờ dần áp
     sau khi ghép; logo / chữ chạy / nhạc thêm chỉ ở phần video chính. Thử: 10 s − cắt 1 s + chèn 2 s + 1,5 s = 12,5 s,
     tắt tiếng 1–2 s = 0, đoạn chèn đúng màu + tiếng.
+
+- 2.0.41: "Tách giọng/nhạc nền: AttributeError: 'NoneType' object has no attribute 'write'" (lúc có lúc không). Mở tool bằng
+  shortcut ngoài màn hình / `ChayTool_Windows.bat` = `pythonw.exe` (không cửa sổ đen) -> Python để `sys.stdout`/`sys.stderr`
+  = None; audio-separator vẽ thanh tqdm (mdxc/mdx/vr/demucs, tải mô hình) ra stderr -> lỗi. Mở bằng cửa sổ đen
+  (`python TraMi.py`, `ChayTool_XemLog.bat`) thì không lỗi -> "một số lần". Cùng lỗi có thể gặp ở SenseVoice, tải mô hình
+  Whisper / HF. Sửa: `config.fix_std_streams()` (TraMi.py, `gui.main.run`, `__main__.main`) thay None bằng `_ConsoleLog`
+  ghi `data/logs/console.txt` (ghi mới mỗi lần mở, ≤ 5 MB); `config.no_console()` (theo `sys.__stderr__`) cho tiến trình
+  VieNeu/Omni/Qwen/Hy-MT2 vẫn ghi log ra file; báo "tắt đột ngột" chỉ đúng file log. Đã tái hiện đúng lỗi + chạy thử
+  giao diện offscreen với stdout/stderr = None.
 
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.

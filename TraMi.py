@@ -22,10 +22,16 @@ if __name__ == "__main__":
 
         mt_main(sys.argv[2] if len(sys.argv) > 2 else "tencent/Hy-MT2-1.8B")
     elif len(sys.argv) > 1:          # có tham số -> chế độ dòng lệnh (VD: python TraMi.py dich video.mp4)
+        from trami.config import fix_std_streams
+
+        fix_std_streams()
         from trami.__main__ import main
 
         main()
     else:
+        from trami.config import fix_std_streams
+
+        fix_std_streams()   # mở bằng pythonw (shortcut, không cửa sổ đen) -> log thư viện ra data/logs/console.txt
         from trami.gui.main import run
 
         sys.exit(run())

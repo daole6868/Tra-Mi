@@ -1011,6 +1011,9 @@ def _crash_log():
 
 
 def run():
+    from ..config import fix_std_streams
+
+    fix_std_streams()   # python -m trami / exe không cửa sổ đen
     _keep_crash_file = _crash_log()  # noqa: F841
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     if sys.platform == "win32":

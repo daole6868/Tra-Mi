@@ -1,6 +1,7 @@
 """Cấu hình, đường dẫn và lưu thiết lập người dùng."""
 from __future__ import annotations
 
+import io
 import json
 import os
 import threading
@@ -138,6 +139,69 @@ def log_error(where: str = "") -> Path:
     except OSError:
         pass
     return f
+
+
+class _ConsoleLog(io.TextIOBase):
+    """Thay sys.stdout / sys.stderr khi tool chạy KHÔNG có cửa sổ đen (pythonw: shortcut ngoài màn hình,
+    ChayTool_Windows.bat, exe) – lúc đó Python để cả hai là None. Thư viện AI (tách giọng, SenseVoice, tải mô hình…)
+    vẽ thanh tiến độ tqdm ra đó -> "AttributeError: 'NoneType' object has no attribute 'write'". Ghi vào
+    data/logs/console.txt (mỗi lần mở tool ghi mới, tối đa 5 MB)."""
+
+    encoding = "utf-8"
+    errors = "replace"
+    LIMIT = 5_000_000
+
+    def __init__(self, path: Path):
+        super().__init__()
+        self._lock = threading.Lock()
+        self._n = 0
+        self._f = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._f = open(path, "w", encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+
+    def writable(self) -> bool:
+        return True
+
+    def isatty(self) -> bool:
+        return False
+
+    def write(self, s) -> int:
+        s = s if isinstance(s, str) else str(s)
+        with self._lock:
+            if self._f and self._n < self.LIMIT:
+                try:
+                    self._f.write(s)
+                    self._n += len(s)
+                except (OSError, ValueError):
+                    pass
+        return len(s)
+
+    def flush(self) -> None:
+        with self._lock:
+            try:
+                if self._f:
+                    self._f.flush()
+            except (OSError, ValueError):
+                pass
+
+
+def fix_std_streams(path: Path | None = None) -> None:
+    """Gọi đầu tiên khi mở tool: sys.stdout / sys.stderr là None (không cửa sổ đen) -> ghi ra data/logs/console.txt."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    log = _ConsoleLog(path or DATA_DIR / "logs" / "console.txt")
+    if sys.stdout is None:
+        sys.stdout = log
+    if sys.stderr is None:
+        sys.stderr = log
+
+
+def no_console() -> bool:
+    """Tool đang chạy không có cửa sổ đen (sys.__stderr__ giữ giá trị gốc kể cả sau fix_std_streams)."""
+    return sys.__stderr__ is None or sys.stderr is None or not getattr(sys.stderr, "fileno", None)
 
 
 def err_text(e: BaseException) -> str:

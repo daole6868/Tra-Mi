@@ -1618,3 +1618,35 @@ def test_spans_and_export_inserts_mute(tmp_path):
     assert rms(0.3, 0.8) > 0.02 and rms(1.2, 1.8) < 0.002          # tắt tiếng gốc đúng đoạn
     assert abs(peak_hz(3.2, 3.8) - 1000) < 20                      # đoạn chèn giữ tiếng của nó
     assert abs(peak_hz(4.2, 4.8) - 440) < 20                       # sau đoạn chèn là video gốc tiếp
+
+
+def test_no_console_streams_keep_progress_bars_working(tmp_path, monkeypatch):
+    """Mở tool bằng pythonw (shortcut / ChayTool_Windows.bat, không cửa sổ đen): sys.stdout, sys.stderr = None ->
+    thanh tiến độ tqdm của bộ tách giọng từng báo "'NoneType' object has no attribute 'write'"."""
+    tqdm = pytest.importorskip("tqdm").tqdm
+    import logging
+
+    from trami.config import fix_std_streams, no_console
+    from trami.progress_hook import tqdm_progress
+
+    for name in ("stdout", "stderr", "__stdout__", "__stderr__"):
+        monkeypatch.setattr(sys, name, None)
+    with pytest.raises(AttributeError):                      # đúng lỗi người dùng gặp
+        for _ in tqdm(range(3)):
+            pass
+    log = tmp_path / "logs" / "console.txt"
+    fix_std_streams(log)
+    assert sys.stdout is sys.stderr and no_console()
+    seen = []
+    with tqdm_progress(lambda x, m: seen.append(m), 0.15, 0.97, "Đang tách giọng – đoạn"):
+        for _ in tqdm(range(5), mininterval=0):
+            pass
+    print("xin chào")
+    logging.getLogger("trami-test").addHandler(logging.StreamHandler())
+    logging.getLogger("trami-test").warning("cảnh báo")
+    sys.stderr.flush()
+    text = log.read_text("utf-8")
+    assert "5/5" in text and "xin chào" in text and "cảnh báo" in text
+    assert seen and seen[-1].endswith("5/5")
+    fix_std_streams(tmp_path / "khac.txt")                   # gọi lại không tạo file mới
+    assert not (tmp_path / "khac.txt").exists()
