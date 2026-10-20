@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 
-from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt, QUrl, Signal, QTimer
+from PySide6.QtCore import QObject, QPointF, QRectF, QSizeF, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QImage, QPainter, QPainterPath, QPen,
                            QTransform)
 from PySide6.QtWidgets import (QGraphicsEffect, QGraphicsItem, QGraphicsRectItem, QGraphicsScene, QGraphicsView,
@@ -749,11 +749,85 @@ class VideoView(QGraphicsView):
         self.sub.set_editable(not regions)
 
 
+class _Feeder(QObject):
+    """Sống ở LUỒNG RIÊNG: tạo QAudioSink và đẩy PCM của bộ trộn vào loa theo nhịp 10 ms. Giao diện bận (cuộn bảng câu,
+    vẽ timeline khi chuyển câu, nạp xong tác vụ) không làm loa cạn tiếng. 2.0.38: trước đây đẩy trên luồng giao diện,
+    đệm 0,2 s -> chuyển câu là cạn tiếng -> nhảy theo hình -> mất chữ cuối câu, câu sau đọc luôn."""
+
+    def __init__(self, live: "LiveAudio"):
+        super().__init__()
+        self.live = live
+        self.sink = None
+        self.io = None
+        self.timer = None
+        self.pos = 0                      # khung (theo thời gian video gốc) đã đưa vào loa
+
+    def _ensure(self):
+        if self.sink is not None:
+            return
+        from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
+
+        fmt = QAudioFormat()
+        fmt.setSampleRate(self.live.SR)
+        fmt.setChannelCount(2)
+        fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+        self.sink = QAudioSink(QMediaDevices.defaultAudioOutput(), fmt, self)
+        self.sink.setBufferSize(int(self.live.SR * 4 * self.live.BUFFER))
+        self.sink.setVolume(self.live.volume)
+        self.timer = QTimer(self)
+        self.timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self.timer.setInterval(10)
+        self.timer.timeout.connect(self._feed)
+
+    @Slot(float)
+    def begin(self, t: float):
+        self._ensure()
+        self.sink.stop()
+        self.pos = int(max(0.0, t) * self.live.SR)
+        self.io = self.sink.start()
+        self._feed()
+        self.timer.start()
+
+    @Slot()
+    def end(self):
+        if self.timer is not None:
+            self.timer.stop()
+        if self.sink is not None:
+            self.sink.stop()
+        self.io = None
+
+    @Slot(float)
+    def volume(self, v: float):
+        if self.sink is not None:
+            self.sink.setVolume(v)
+
+    def _feed(self):
+        mix = self.live.mix
+        if self.io is None or mix is None or self.sink is None:
+            return
+        from ..audiomix import to_pcm16
+
+        free = self.sink.bytesFree() // 4
+        if free >= 512:
+            a, adv = mix.render(self.pos, min(free, int(self.live.SR * 0.1)))
+            self.io.write(to_pcm16(a))
+            self.pos += adv
+        buffered = (self.sink.bufferSize() - self.sink.bytesFree()) / 4
+        self.live._audible = (self.pos - buffered * (mix.rate or 1.0)) / self.live.SR
+
+
+class _Bridge(QObject):
+    begin = Signal(float)
+    end = Signal()
+    volume = Signal(float)
+
+
 class LiveAudio:
     """Phát bộ trộn trực tiếp (trami/audiomix.LiveMix) ra loa, bám theo vị trí video: đổi âm lượng / tắt lớp / nghe
-    riêng nghe thấy ngay (~0,2 s). Đẩy từng khối nhỏ vào QAudioSink theo nhịp đồng hồ, lệch quá 0,15 s thì nhảy lại
+    riêng nghe thấy ngay (~0,3 s). Việc đẩy tiếng chạy ở luồng riêng (_Feeder); lệch hình quá 0,25 s thì nhảy lại
     đúng chỗ video."""
-    BUFFER = 0.2      # giây đệm trong loa (đổi âm lượng có tác dụng sau tối đa chừng này)
+    BUFFER = 0.3      # giây đệm trong loa (đổi âm lượng có tác dụng sau tối đa chừng này)
+    RESYNC = 0.25     # lệch tiếng / hình quá chừng này mới nhảy (nhảy = bỏ qua 1 đoạn tiếng)
 
     def __init__(self, owner: QWidget):
         from ..audiomix import SR
@@ -761,73 +835,73 @@ class LiveAudio:
         self.SR = SR
         self.owner = owner
         self.mix = None
-        self.sink = None
-        self.io = None
-        self.pos = 0                     # khung (theo thời gian video gốc) đã đưa vào loa
         self.volume = 0.8
         self.failed = False              # máy không có thiết bị phát âm thanh
-        self.timer = QTimer(owner, interval=15, timeout=self._feed)
+        self.running = False
+        self._audible = 0.0              # giây video đang phát ra loa (luồng phát cập nhật)
+        self._thread = None
+        self._feeder = None
+        self._bridge = None
 
     def ok(self) -> bool:
         return self.mix is not None and bool(self.mix.tracks) and not self.failed
 
-    def _make_sink(self) -> bool:
-        from PySide6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
+    def ready(self) -> bool:
+        """Có loa -> dựng luồng phát (1 lần). Không có loa -> False (video tự phát tiếng của nó)."""
+        if self._thread is not None:
+            return True
+        if self.failed:
+            return False
+        from PySide6.QtCore import QCoreApplication, QThread
+        from PySide6.QtMultimedia import QMediaDevices
 
-        dev = QMediaDevices.defaultAudioOutput()
-        if dev.isNull():
+        if QMediaDevices.defaultAudioOutput().isNull():
             self.failed = True
             return False
-        fmt = QAudioFormat()
-        fmt.setSampleRate(self.SR)
-        fmt.setChannelCount(2)
-        fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
-        self.sink = QAudioSink(dev, fmt, self.owner)
-        self.sink.setBufferSize(int(self.SR * 4 * self.BUFFER))
-        self.sink.setVolume(self.volume)
+        self._thread = QThread()
+        self._thread.setObjectName("trami-audio")
+        self._feeder = _Feeder(self)
+        self._feeder.moveToThread(self._thread)
+        self._bridge = _Bridge()
+        self._bridge.begin.connect(self._feeder.begin)
+        self._bridge.end.connect(self._feeder.end)
+        self._bridge.volume.connect(self._feeder.volume)
+        self._thread.start(QThread.Priority.TimeCriticalPriority)
+        app = QCoreApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self.shutdown)
         return True
 
     def start(self, t: float):
-        if not self.ok() or (self.sink is None and not self._make_sink()):
+        if not self.ok() or not self.ready():
             return
-        self.sink.stop()
-        self.pos = int(max(0.0, t) * self.SR)
-        self.io = self.sink.start()
-        self._feed()
-        self.timer.start()
+        self.running = True
+        self._audible = max(0.0, t)
+        self._bridge.begin.emit(float(t))
 
     def stop(self):
-        self.timer.stop()
-        if self.sink is not None:
-            self.sink.stop()
-        self.io = None
+        self.running = False
+        if self._bridge is not None:
+            self._bridge.end.emit()
+
+    def shutdown(self):
+        if self._thread is not None:
+            self.stop()
+            self._thread.quit()
+            self._thread.wait(2000)
+            self._thread = None
 
     def set_volume(self, v: float):
         self.volume = v
-        if self.sink is not None:
-            self.sink.setVolume(v)
-
-    def _feed(self):
-        if self.io is None or self.mix is None or self.sink is None:
-            return
-        free = self.sink.bytesFree() // 4
-        if free < 512:
-            return
-        from ..audiomix import to_pcm16
-
-        a, adv = self.mix.render(self.pos, min(free, int(self.SR * 0.1)))
-        self.io.write(to_pcm16(a))
-        self.pos += adv
+        if self._bridge is not None:
+            self._bridge.volume.emit(float(v))
 
     def audible(self) -> float:
         """Giây video đang phát ra loa (trừ phần còn nằm trong bộ đệm)."""
-        if self.sink is None:
-            return self.pos / self.SR
-        buffered = (self.sink.bufferSize() - self.sink.bytesFree()) / 4
-        return (self.pos - buffered * (self.mix.rate if self.mix else 1.0)) / self.SR
+        return self._audible
 
     def sync(self, t: float):
-        if self.io is not None and abs(self.audible() - t) > 0.15:
+        if self.running and abs(self.audible() - t) > self.RESYNC:
             self.start(t)
 
 
@@ -919,9 +993,7 @@ class Player(QWidget):
         self.live.mix = mix
         if mix is not None:
             mix.rate = self.mp.playbackRate() or 1.0
-        on = self.live.ok()
-        if on and self.live.sink is None and not self.live._make_sink():
-            on = False
+        on = self.live.ok() and self.live.ready()
         self.audio.setMuted(on)
         if on and self.playing():
             self.live.start(self.position())

@@ -1521,3 +1521,16 @@ def test_omnivoice_design_presets(monkeypatch, tmp_path):
     assert Path(f).exists() and text == od.ANCHOR_TEXT and len(calls) == 2
     assert calls[0] == ("male, young adult, moderate pitch", 1201) and calls[1][1] != 1201
     assert od.ensure_anchor(W(), "omnid:nam_tre", "repo")[0] == f and len(calls) == 2
+
+
+def test_trim_silence_keeps_soft_word_endings():
+    from trami import tts
+
+    sr = tts.SR
+    voice = _speech_like(sr, 1.0) * 0.05 / max(1e-6, float(np.abs(_speech_like(sr, 1.0)).max()))   # giọng nhỏ (đỉnh 0,05)
+    tail = np.sin(2 * np.pi * 180 * np.arange(int(0.25 * sr)) / sr).astype(np.float32) * 0.006       # cuối chữ rất nhỏ
+    a = np.concatenate([np.zeros(int(0.3 * sr), np.float32), voice, tail, np.zeros(int(1.0 * sr), np.float32)])
+    out = tts._trim_silence(a)
+    assert len(out) >= len(voice) + len(tail)                    # không mất cuối chữ
+    assert len(out) <= len(voice) + len(tail) + int(0.2 * sr)    # khoảng lặng dài phía sau vẫn bị bỏ
+    assert len(tts._trim_silence(np.zeros(sr, np.float32))) == 0

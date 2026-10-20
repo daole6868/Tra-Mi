@@ -31,14 +31,14 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `gender.py` (đoán giọng nam/nữ mỗi người nói), `karaoke.py` (thời điểm từng từ cho phụ đề karaoke),
   `omni_design.py` (23 giọng OmniVoice chọn sẵn tạo theo mô tả).
 - `trami/audiomix.py` – quy tắc trộn âm thanh dùng chung cho xuất video (`video.build_and_render`) và bộ trộn trực tiếp
-  `LiveMix` của trình phát (`player.LiveAudio`, QAudioSink); cài đặt ở `edit["audio"]`, tab `gui/audio_tab.py`.
+  `LiveMix` của trình phát (`player.LiveAudio` + `_Feeder` ở QThread riêng, QAudioSink); cài đặt ở `edit["audio"]`, tab `gui/audio_tab.py`.
 - `trami/jobs.py` – hàng đợi 1 luồng cho tác vụ dài; `trami/gui/*` – giao diện (QPainter), `common.run_async`,
   `WheelGuard` (lăn chuột không đổi ô chọn khi chưa bấm vào). Trang dự án bố cục kiểu trình dựng phim (từ 2.0.28):
   trái `IconTabs` + 9 tab (Âm thanh = tab 6, `TAB_AUDIO`…`TAB_EXPORT` = 8), giữa trình phát, phải `gui/inspector.LineInspector` (câu đang chọn), dưới `gui/timeline.TrackTimeline`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
   Chụp ảnh kiểm tra giao diện phải nạp theme như `run()`: `theme.load_fonts(); app.setFont(theme.font(10));
   app.setStyleSheet(theme.stylesheet())`.
-- `tests/test_core.py` – `python -m pytest -q tests` (68 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (69 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -407,6 +407,21 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   * Thử với OmniVoice giả (kiểm từ vựng như bản thật): mỗi giọng tạo câu mẫu 1 lần, các câu sau `voice_clone_prompt` từ câu
     mẫu, sửa 1 câu chỉ đọc lại câu đó, nghe thử chạy, giao diện Tự gán giọng S1·nữ -> Nữ trẻ, S2/S3·nam -> Nam trẻ / Nam trầm.
 
+- 2.0.38: "nhiều câu mất chữ cuối rồi nhảy sang câu sau" (vd. "…làm máy treo tận 3 tiếng." chỉ nghe tới "tận 3"; cột Độ vừa ✓
+  -> bộ xếp giọng KHÔNG cắt câu này). 3 nguyên nhân trong tool:
+  * `player.LiveAudio` (2.0.35) đẩy PCM trên LUỒNG GIAO DIỆN, đệm 0,2 s: chuyển câu -> giao diện bận (cuộn bảng câu, vẽ
+    timeline, karaoke) -> loa cạn tiếng -> `sync` thấy lệch > 0,15 s -> nhảy theo hình = BỎ QUA đuôi câu. Giờ `_Feeder`
+    (QObject ở QThread riêng "trami-audio", ưu tiên TimeCritical) tạo QAudioSink + QTimer 10 ms (Precise) trong luồng đó;
+    giao diện gửi lệnh qua `_Bridge` (signal begin/end/volume); `_audible` do luồng phát cập nhật; đệm 0,3 s, nhảy khi lệch
+    > 0,25 s; `ready()` dựng luồng 1 lần (`aboutToQuit` -> `shutdown`). Mô phỏng loa thời gian thật + giao diện bận 0,5 s
+    mỗi lần chuyển câu (Python giữ GIL): cách cũ cạn tiếng 6 lần / 1,54 s, cách mới 0.
+  * "Nghe câu" (`_play_line`, cả nghe từ timeline / khung câu) dừng ở cuối PHỤ ĐỀ + 0,35 s, trong khi giọng Việt hay dài hơn
+    (lấn tới đầu câu sau + 0,21 s) -> giờ dừng ở cuối đoạn giọng lồng thật (`dub_layout`) + 0,25 s.
+  * `tts._trim_silence` ngưỡng cố định 0,01 + giữ 0,06 s đuôi: giọng nhỏ mất phụ âm / hơi cuối chữ -> ngưỡng
+    min(0,01; 3 % đỉnh của đoạn), giữ 0,15 s đuôi, 0,03 s đầu.
+  * Nếu chữ thiếu ngay trong file bản lồng ("Nghe bản lồng") thì là lỗi bộ đọc (VieNeu tự ngắt sớm) – chưa có cách tự phát
+    hiện (đề xuất: kiểm tra lời đọc bằng Whisper tiếng Việt).
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -428,3 +443,4 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   rè / lệch tiếng với hình; video xuất trộn đúng như nghe).
 - 2.0.36: chờ người dùng thử karaoke trên máy thật (nhịp chữ theo giọng VieNeu/Edge thật, chữ quét mượt khi phát).
 - 2.0.37: chờ người dùng nghe thử giọng OmniVoice chọn sẵn với tiếng Việt trên máy thật (mô hình thật chưa chạy ở sandbox).
+- 2.0.38: chờ người dùng xác nhận hết mất chữ cuối khi nghe trong tool; nếu file bản lồng vẫn thiếu chữ -> làm kiểm tra lời đọc.

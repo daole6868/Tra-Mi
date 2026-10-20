@@ -2084,8 +2084,14 @@ class ProjectPage(QWidget):
         if not rows or not (0 <= rows[0] < len(self.model.segs)):
             return self.win.toast("Chọn 1 câu trong bảng trước", "warn")
         s = self.model.segs[rows[0]]
-        self._stop_at = s.end + 0.35
-        self.player.seek(max(0.0, s.start - 0.1))
+        # dừng khi GIỌNG LỒNG của câu đọc xong (giọng Việt thường dài hơn phụ đề, có thể lấn sang ~0,2 s đầu câu sau);
+        # trước đây dừng ở cuối phụ đề + 0,35 s -> mất chữ cuối
+        end, start = s.end, s.start
+        for a, b, k, *_ in (self.p.data.get("dub_layout") or []):
+            if int(k) == rows[0] and (self.p.edit.get("dub") or {}).get("enabled"):
+                end, start = max(end, float(b)), min(start, float(a))
+        self._stop_at = end + 0.25
+        self.player.seek(max(0.0, start - 0.1))
         if not self.player.playing():
             self.player.toggle()
 

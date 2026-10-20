@@ -232,10 +232,16 @@ def _decode_cached(path: str | Path) -> np.ndarray:
 
 
 def _trim_silence(a: np.ndarray, thr: float = 0.01) -> np.ndarray:
+    """Bỏ khoảng lặng 2 đầu đoạn giọng. Ngưỡng theo độ to của chính đoạn đó (giọng nhỏ không bị cắt mất phụ âm cuối /
+    hơi thở cuối chữ như "tiếng", "rồi"), giữ thêm 0,15 s đuôi."""
+    if not len(a):
+        return a
+    pk = float(np.abs(a).max())
+    thr = min(thr, max(0.002, 0.03 * pk))
     idx = np.where(np.abs(a) > thr)[0]
     if len(idx) == 0:
         return a[:0]
-    s, e = max(0, idx[0] - int(0.02 * SR)), min(len(a), idx[-1] + int(0.06 * SR))
+    s, e = max(0, idx[0] - int(0.03 * SR)), min(len(a), idx[-1] + int(0.15 * SR))
     return a[s:e]
 
 
