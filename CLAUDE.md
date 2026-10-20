@@ -26,14 +26,16 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - `trami/asr_qwen.py` + `qwen_asr_worker.py` (Qwen3-ASR + Qwen3-ForcedAligner, tiến trình riêng `--qwen-asr-worker`,
   transformers ≥ 5.13, mặc định từ 2.0.29), `trami/asr.py` (faster-whisper), `asr_funasr.py` (SenseVoice/Paraformer, `mark_songs`), `diarize.py` (ECAPA),
   `separate.py` (audio-separator BS-RoFormer), `lama.py` + `inpaint.py` (xoá chữ), `ocr.py` (RapidOCR),
-  `translate.py` (`LLMClient` gọi HTTP: anthropic / OpenAI-compatible / gemini / deepseek / ollama; Google gtx).
+  `translate.py` (`LLMClient` gọi HTTP: anthropic / OpenAI-compatible / gemini / deepseek / ollama; Google gtx;
+  Hy-MT2 trên máy qua `hymt_worker.py`), `voicefix.py` (đọc số, phát hiện giọng AI hỏng, cân âm lượng),
+  `gender.py` (đoán giọng nam/nữ mỗi người nói).
 - `trami/jobs.py` – hàng đợi 1 luồng cho tác vụ dài; `trami/gui/*` – giao diện (QPainter), `common.run_async`,
   `WheelGuard` (lăn chuột không đổi ô chọn khi chưa bấm vào). Trang dự án bố cục kiểu trình dựng phim (từ 2.0.28):
   trái `IconTabs` + 8 tab, giữa trình phát, phải `gui/inspector.LineInspector` (câu đang chọn), dưới `gui/timeline.TrackTimeline`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
   Chụp ảnh kiểm tra giao diện phải nạp theme như `run()`: `theme.load_fonts(); app.setFont(theme.font(10));
   app.setStyleSheet(theme.stylesheet())`.
-- `tests/test_core.py` – `python -m pytest -q tests` (61 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (65 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -315,6 +317,40 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   * Đã chạy thử offscreen có theme: kéo phụ đề dời đúng (−150, −200) px, hộp nền khớp libass, vẽ / kéo cạnh / di chuyển
     / × vùng trên video, xoá AI qua hàng đợi (OpenCV) -> trình phát đổi bản, xuất video dùng lại (3,5 s).
 
+- 2.0.34: người dùng đưa github.com/MachHongHai/HaizFlow (app cùng loại; giấy phép "Source-Available" – CHỈ HỌC cách
+  làm, KHÔNG chép mã) -> làm 10 mục + "VieNeu thêm giọng, giọng rõ hơn".
+  * `trami/voicefix.py`: `spoken_vi` đọc số -> chữ cho bộ đọc AI (VieNeu / OmniVoice, không Edge; phụ đề giữ số):
+    nghìn/triệu/tỷ, "linh", "mốt/tư/lăm", thập phân dấu phẩy, %, $, giờ 10:30, ngày d/m/yyyy (không năm thì cần chữ
+    "ngày"/"hôm" đứng trước), "thứ 4" -> "thứ tư"; giữ nguyên 1.2.3 / 3.14 / 3/4 / iPhone15. `voice_problem`: im lặng,
+    DC, bíp (năng lượng dồn ±2 vạch quanh đỉnh > 80 %, ≥ 500 Hz), còi ≥ 0,32 s 1–4 kHz, ≥ 2 bíp ở 1 s đầu – đo trên 6
+    giọng VieNeu thật + 57 đoạn thoại phim: 0 báo nhầm. `speech_level` + `level_gains`: tăng câu nhỏ hơn trung vị cùng
+    giọng > 1 dB (giọng nhỏ hơn mức chung > 3 dB cũng kéo lên), tối đa +9 dB, đỉnh ≤ -1 dBFS (`dub_level_match`).
+  * `tts.synth_checked`: đọc -> kiểm tra -> hỏng thì đọc lại 1 lần với `seed` khác -> vẫn hỏng thì bỏ câu + báo lỗi.
+    BỎ việc bắt OmniVoice đọc lại với `duration=` (HaizFlow đo: ép thời lượng -> tiếng bíp); câu dài chỉ tua bằng
+    atempo. OmniVoice `fade_duration=0.0` (đoạn nhỏ dần 0,1 s mất phụ âm cuối); worker nhận `seed`. Mọi tiến trình
+    (VieNeu/Omni/Qwen/Hy-MT2) có `HF_DEACTIVATE_ASYNC_LOAD=1` (transformers 5.x nạp song song từng sập ngầm Windows+CUDA).
+  * VieNeu thêm giọng: preset xếp theo `featured` (⭐ 10 giọng tiêu biểu đầu), nhãn "nữ miền Bắc, tự nhiên / đọc tin
+    tức, rất rõ"; `vieneu:mau:<tên>` = 6 file thu âm sạch trong gói vieneu (assets/samples, Bình/Tuyên/Vĩnh/Đoan/Ly/
+    Ngọc) dùng làm ref_audio; `vieneu:lib:<id>` = thư viện giọng mẫu của người dùng (voices.py, khung đổi tên "Giọng
+    mẫu của bạn (VieNeu + OmniVoice)"). Kiểu đọc `vieneu_style`: clear (temperature 0,6, top_k 20, top_p 0,9 – mặc định)
+    / natural (mặc định VieNeu 0,8/25/0,95); worker nhận `params` (bản cũ TypeError -> bỏ). requirements vieneu>=3.8.3.
+    API v3turbo: `infer(text, voice=tên|dict{speaker_emb,codes}, ref_audio=, temperature, top_k, top_p, ...)`.
+  * Dịch trên máy **Hy-MT2-1.8B** (tencent, Apache-2.0, GGUF chính thức có sẵn): `trami/hymt_worker.py` (`--hymt-worker`,
+    nạp local_files_only trước, bf16/fp16 GPU, fp32 CPU, lô 8, greedy + repetition 1.05), câu lệnh kiểu Hunyuan-MT
+    (thường / ngữ cảnh 3 câu trước / thuật ngữ "参考下面的翻译"), `translate.HymtWorker`, engine "hymt" (`LOCAL_ENGINES`:
+    không analyze, không rút gọn), tắt tiến trình sau mỗi lần dịch. Tab Tài liệu mục "hymt". Đã chạy thật với mô hình
+    HunYuanDenseV1 tí hon trọng số ngẫu nhiên (transformers 5.19) – mô hình thật chưa chạy (sandbox chặn HF).
+  * `trami/gender.py`: chất giọng nam/nữ mỗi người nói = mô hình ONNX ECAPA (Alice-Sabrina-Ivy/voice-gender-classifier-
+    onnx-q8, MIT, 16 MB, input_values [1,N] 16 kHz -> logits [male, female]; tab Tài liệu "gender") 75 % + cao độ F0
+    (YIN tự viết, vector hoá) 25 %; chưa tải mô hình -> chỉ cao độ (6 giọng thật: 5 đúng, 1 nữ trầm 167 Hz -> "chưa rõ").
+    `pipeline.speaker_genders` (sau `diarize`, hoặc khi bấm Tự gán giọng) -> `p.data["speaker_gender"]`; bảng người
+    nói "S1 · nam". `tts.auto_assign(..., genders)`: nam -> giọng nam, nữ -> nữ, chưa rõ -> xen kẽ; ⭐ dùng trước.
+  * Che phụ đề **Vá nền** (`patch`): `video.patch_source` (dải sát trên vùng chữ, thiếu chỗ thì dưới; `patch_from`),
+    FFmpeg crop + alphamerge mặt nạ geq viền mờ `patch_feather` + overlay theo từng khung; `inpaint.preview_frame`
+    + `HardsubOverlay._paint_patch` xem trước. Thử: chữ 10.703 điểm ảnh -> 0, màu chênh 1,3/255.
+  * Nhạc nền thêm tự giảm khi có lời: `bgm.duck` (mặc định bật, tab Chỉnh sửa) -> dub `asplit` làm sidechain,
+    `sidechaincompress=threshold=0.02:ratio=8:attack=20:release=400`. Đo: nhạc -16 dB lúc có lời, 0 dB lúc không lời.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -328,5 +364,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.32: chờ người dùng thử OCR mới trên video thật (tốc độ quét, vùng tự dò, phụ đề nhiều dòng / màu).
 - 2.0.33: chờ người dùng thử kéo phụ đề / nền / vùng che trên video và nút Chạy xoá bằng AI (LaMa thật, GPU).
   Lưu ý: cỡ chữ xem trước giờ nhỏ hơn trước (đúng như video xuất) – nếu thấy nhỏ thì tăng Cỡ chữ.
+- 2.0.34: chờ người dùng thử Hy-MT2 thật (tải 3,6 GB), mô hình giọng nam/nữ thật, VieNeu kiểu đọc "Rõ ràng"
+  (temperature 0,6 chưa nghe thử trên mô hình thật), 6 giọng thu âm sạch (cần vieneu>=3.8.3), Vá nền trên video thật.
 - 2.0.29: chờ người dùng cài `transformers>=5.13 accelerate`, tải Qwen3-ASR (tab Tài liệu) và chạy lại "1. Nghe & tách câu";
   VRAM: 1.7B bf16 ~4 GB + bộ căn 0.6B; lỗi thiếu bộ nhớ -> chọn 0.6B. Chưa làm: AI chấm câu / sửa lời trước khi tách.

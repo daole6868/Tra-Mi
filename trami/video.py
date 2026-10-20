@@ -88,6 +88,26 @@ def target_size(W: int, H: int, aspect: str, resolution: str) -> tuple[int, int]
     return _even(W), _even(H)
 
 
+def patch_source(r: dict, prefer: str = "auto") -> float:
+    """Vá nền: y (0..1) của dải hình cùng cỡ ngay sát vùng chữ dùng để phủ lên chữ cũ. Mặc định lấy phía trên
+    (phụ đề thường ở dưới, phía trên là cảnh phim); không đủ chỗ thì lấy phía dưới."""
+    y, h = float(r["y"]), float(r["h"])
+    gap = min(0.01, h * 0.15)
+    above, below = y - h - gap, y + h + gap
+    if prefer == "below" and below + h <= 1:
+        return below
+    if above >= 0 and prefer != "below":
+        return above
+    if below + h <= 1:
+        return below
+    return max(0.0, min(1.0 - h, above))
+
+
+def patch_feather(w: int, h: int) -> int:
+    """Độ rộng viền mờ dần (điểm ảnh) để dải vá hoà vào hình xung quanh."""
+    return max(2, min(w, h) // 5)
+
+
 def inpaint_key(src: str | Path, hs: dict, settings: dict) -> str:
     """Mã của 1 lần xoá phụ đề bằng AI: đổi video gốc / vùng / công nghệ / độ mạnh / file OCR -> mã khác."""
     import hashlib
@@ -200,7 +220,7 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
 
     # ---- 2. che/xoá phụ đề cũ (toạ độ khung gốc)
     mode = hs.get("mode", "none")
-    if mode in ("blur", "box", "delogo") and hs.get("regions"):
+    if mode in ("blur", "box", "delogo", "patch") and hs.get("regions"):
         for k, r in enumerate(hs["regions"]):
             x, y = int(float(r["x"]) * W), int(float(r["y"]) * H)
             w, h = _even(float(r["w"]) * W), _even(float(r["h"]) * H)
@@ -209,6 +229,14 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
                 col = _hex(hs.get("box_color", "#000000"))
                 op = float(hs.get("box_opacity", 1.0))
                 fc.append(f"[{v}]drawbox=x={x}:y={y}:w={w}:h={h}:color={col}@{op:.2f}:t=fill[hb{k}]")
+            elif mode == "patch":
+                # vá nền: chép dải hình ngay sát vùng chữ (theo từng khung, nên nền chuyển động vẫn khớp) đè lên,
+                # viền mờ dần cho hoà vào xung quanh
+                sy = min(H - h, max(0, int(patch_source(r, hs.get("patch_from", "auto")) * H)))
+                f = patch_feather(w, h)
+                fc.append(f"[{v}]split[hm{k}][hp{k}];[hp{k}]crop={w}:{h}:{x}:{sy},format=yuva420p,split[pa{k}][pb{k}];"
+                          f"[pb{k}]format=gray,geq=lum='255*min(1,min(min(X,W-1-X),min(Y,H-1-Y))/{f})'[pm{k}];"
+                          f"[pa{k}][pm{k}]alphamerge[pp{k}];[hm{k}][pp{k}]overlay={x}:{y}[hb{k}]")
             elif mode == "delogo":
                 x1, y1 = max(1, x), max(1, y)
                 w1, h1 = min(w, W - x1 - 1), min(h, H - y1 - 1)
@@ -399,19 +427,26 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
                 af.insert(0, f"asetrate=44100*{ps:.4f},aresample=44100,atempo={1 / ps:.4f}")
             fc.append(f"[a0]aresample=44100,{','.join(af)}[ao]")
             amix_inputs.append("[ao]")
+    bgm = spec.get("bgm") or {}
+    has_bgm = bool(bgm.get("path") and Path(bgm["path"]).exists())
+    duck = has_bgm and use_dub and bgm.get("duck", True)   # nhạc nền thêm tự nhỏ xuống khi có lời lồng tiếng
     if use_dub:
         lab = ext_audio(dub["wav"])
-        fc.append(f"[{lab}]volume={float(dub.get('dub_volume', 1.0)):.3f}{tempo}[dso]")
+        split = ",asplit=2[dso][dsk]" if duck else "[dso]"
+        fc.append(f"[{lab}]volume={float(dub.get('dub_volume', 1.0)):.3f}{tempo}{split}")
         amix_inputs.append("[dso]")
     if has_a and "[ao]" not in amix_inputs:
         fc.append("[a0]anullsink")  # âm thanh gốc không dùng tới
-    bgm = spec.get("bgm") or {}
-    if bgm.get("path") and Path(bgm["path"]).exists():
+    if has_bgm:
         inputs += ["-stream_loop", "-1", "-i", str(Path(bgm["path"]).resolve())]
         bi = n_in
         n_in += 1
-        fc.append(f"[{bi}:a]aresample=44100,volume={float(bgm.get('volume', 0.2)):.3f},"
-                  f"atrim=0:{final_dur:.3f}[bgo]")
+        fc.append(f"[{bi}:a]aresample=44100,aformat=channel_layouts=stereo,volume={float(bgm.get('volume', 0.2)):.3f},"
+                  f"atrim=0:{final_dur:.3f}" + ("[bgr]" if duck else "[bgo]"))
+        if duck:
+            # giọng lồng làm "chìa khoá": có lời -> nhạc giảm ~10–15 dB trong 20 ms, hết lời -> lên lại trong 0,4 s
+            fc.append("[dsk]aformat=channel_layouts=stereo[dsk2];"
+                      "[bgr][dsk2]sidechaincompress=threshold=0.02:ratio=8:attack=20:release=400[bgo]")
         amix_inputs.append("[bgo]")
     if amix_inputs:
         if len(amix_inputs) == 1:

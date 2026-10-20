@@ -324,8 +324,8 @@ class ProjectPage(QWidget):
         return w
 
     # ================================================================== TAB: Xoá phụ đề cũ
-    HS_MODES = [("none", "Không xoá", "x"), ("inpaint", "Xoá sạch (AI)", "sparkle"), ("blur", "Làm mờ", "eye"),
-                ("box", "Che dải màu", "stack"), ("delogo", "Delogo", "eraser")]
+    HS_MODES = [("none", "Không xoá", "x"), ("inpaint", "Xoá sạch (AI)", "sparkle"), ("patch", "Vá nền", "image"),
+                ("blur", "Làm mờ", "eye"), ("box", "Che dải màu", "stack"), ("delogo", "Delogo", "eraser")]
     HS_HELP = {
         "none": "<b>Không xoá</b> – giữ nguyên chữ Trung cũ trên video. Dùng khi video gốc không có phụ đề cứng.",
         "inpaint": "<b>Xoá sạch (AI)</b> – AI vẽ lại phần hình phía sau chữ như chưa từng có chữ. Đẹp nhất nhưng chậm "
@@ -333,6 +333,10 @@ class ProjectPage(QWidget):
                    "② chọn <i>Công nghệ xoá</i> + <i>Độ mạnh</i> ③ bấm <i>Xem thử 1 khung</i> để kiểm tra "
                    "④ bấm <b>Chạy xoá bằng AI</b> ở mục 3 (hoặc cứ bấm <b>Xuất video</b> – tool tự xoá trước khi ghép). "
                    "Trước khi chạy, video bên trái chỉ làm mờ gần đúng chỗ sẽ xoá.",
+        "patch": "<b>Vá nền</b> – chép dải hình ngay sát vùng chữ (mặc định phía trên) phủ lên chữ cũ, viền mờ dần "
+                 "cho hoà vào cảnh. Nhanh như Làm mờ nhưng nhìn tự nhiên hơn khi nền đơn giản (trời, tường, mặt nước, "
+                 "nền tối); cảnh nhiều chi tiết có thể thấy vệt lặp. Không cần chạy riêng: áp dụng khi bấm "
+                 "<b>Xuất video</b>; video bên trái hiện gần đúng ngay.",
         "blur": "<b>Làm mờ</b> – nhoè vùng chữ thành vệt mờ. Nhanh, không cần chạy riêng: áp dụng khi bấm "
                 "<b>Xuất video</b>. Kéo <i>Độ mờ</i> cho tới khi không đọc được chữ cũ (video bên trái hiện gần đúng).",
         "box": "<b>Che dải màu</b> – phủ một dải màu đặc lên vùng chữ, phụ đề Việt đặt đè lên. Nhanh, gọn, hợp video "
@@ -376,11 +380,14 @@ class ProjectPage(QWidget):
         self.hs_useocr = f.row("Chỉ xoá lúc có chữ (OCR)", Switch(True),
                                "Nếu đã lấy phụ đề bằng quét chữ (OCR), AI chỉ xoá đúng khung chữ lúc có chữ → giữ hình "
                                "gốc ở các đoạn không có phụ đề (nhanh hơn, ít vệt hơn)")
+        self.hs_patch = f.row("Lấy nền từ", combo([("auto", "Tự chọn (phía trên, thiếu chỗ thì phía dưới)"),
+                                                   ("above", "Phía trên vùng chữ"), ("below", "Phía dưới vùng chữ")]),
+                              "Chọn phía có nền giống chỗ chữ nhất (cùng màu, ít chi tiết)")
         self.hs_blur = f.row("Độ mờ", SliderRow(4, 60, 1, 20, 0))
         self.hs_color = f.row("Màu dải che", ColorButton("#000000"))
         self.hs_opacity = f.row("Độ đục dải che", SliderRow(0.2, 1, 0.05, 1))
         self.hs_mode.currentIndexChanged.connect(self._hs_mode_changed)
-        for w in (self.hs_backend, self.hs_strength):
+        for w in (self.hs_backend, self.hs_strength, self.hs_patch):
             w.currentIndexChanged.connect(sv)
         for w in (self.hs_blur, self.hs_opacity):
             w.changed.connect(sv)
@@ -431,7 +438,7 @@ class ProjectPage(QWidget):
         self.hs_pills.set_current(i, emit=False)
         self.hs_help.setText(self.HS_HELP.get(mode, ""))
         vis = {self.hs_backend: mode == "inpaint", self.hs_strength: mode == "inpaint",
-               self.hs_useocr: mode == "inpaint", self.hs_blur: mode == "blur",
+               self.hs_useocr: mode == "inpaint", self.hs_blur: mode == "blur", self.hs_patch: mode == "patch",
                self.hs_color: mode == "box", self.hs_opacity: mode == "box"}
         for wdg, on in vis.items():
             self.hs_form.setRowVisible(wdg, on)
@@ -505,6 +512,10 @@ class ProjectPage(QWidget):
                                      button("", "x", "Bỏ nhạc nền", flat=True, on_click=lambda: self._clear_asset("bgm")),
                                      self.bgm_name, None))
         self.e_bgmvol = f4.row("Âm lượng nhạc nền", SliderRow(0, 1, 0.05, 0.2))
+        self.e_bgmduck = f4.row("Tự giảm nhạc khi có lời", Switch(True),
+                                "Khi có giọng lồng tiếng, nhạc nền thêm vào tự nhỏ xuống cho nghe rõ lời, hết lời thì "
+                                "to lại (áp dụng khi xuất video)")
+        self.e_bgmduck.toggledOn.connect(sv)
         audio.add(f4)
         # --- logo & chữ
         brand = SectionCard("Logo & chữ", "image")
@@ -703,7 +714,7 @@ class ProjectPage(QWidget):
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self.spk_table.setColumnWidth(0, 90)
+        self.spk_table.setColumnWidth(0, 100)
         self.spk_table.setColumnWidth(1, 70)
         self.spk_table.setColumnWidth(3, 54)
         self.spk_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -1050,6 +1061,7 @@ class ProjectPage(QWidget):
         set_combo(self.hs_backend, hs.get("backend") or self.settings.get("inpaint_backend", "lama"))
         set_combo(self.hs_strength, hs.get("strength", "normal"))
         self.hs_blur.set(hs.get("blur_strength", 20))
+        set_combo(self.hs_patch, hs.get("patch_from", "auto"))
         self.hs_color.set(hs.get("box_color", "#000000"))
         self.hs_opacity.set(hs.get("box_opacity", 1.0))
         self.hs_useocr.setChecked(hs.get("use_ocr_boxes", True) is not False)
@@ -1076,6 +1088,7 @@ class ProjectPage(QWidget):
         set_combo(self.e_pitch, str(e.get("pitch_shift") or 0) if e.get("pitch_shift") else "0")
         self.bgm_name.setText(Path(e["bgm"]["path"]).name if e["bgm"].get("path") else "Chưa chọn")
         self.e_bgmvol.set(e["bgm"].get("volume", 0.2))
+        self.e_bgmduck.setChecked(e["bgm"].get("duck", True) is not False)
         self.wm_name.setText(Path(e["watermark"]["path"]).name if e["watermark"].get("path") else "Chưa chọn")
         set_combo(self.e_wmpos, e["watermark"].get("position", "top-right"))
         self.e_wmscale.set(e["watermark"].get("scale", 0.15))
@@ -1141,7 +1154,8 @@ class ProjectPage(QWidget):
                       "sharpen": self.e_sharpen.isChecked(), "denoise": self.e_denoise.isChecked()},
             "volume": self.e_volume.value(), "mute_original": self.e_mute.isChecked(),
             "pitch_shift": float(self.e_pitch.currentData()),
-            "bgm": {"path": e["bgm"].get("path", ""), "volume": self.e_bgmvol.value()},
+            "bgm": {"path": e["bgm"].get("path", ""), "volume": self.e_bgmvol.value(),
+                    "duck": self.e_bgmduck.isChecked()},
             "watermark": {"path": e["watermark"].get("path", ""), "position": self.e_wmpos.currentData(),
                           "scale": self.e_wmscale.value(), "opacity": self.e_wmop.value()},
             "text": {"content": self.e_text.text(), "position": self.e_textpos.currentData(),
@@ -1159,7 +1173,8 @@ class ProjectPage(QWidget):
         return {"mode": self.hs_mode.currentData(), "regions": self.hs_editor.regions,
                 "backend": self.hs_backend.currentData(), "strength": self.hs_strength.currentData(),
                 "blur_strength": int(self.hs_blur.value()), "box_color": self.hs_color.color,
-                "box_opacity": self.hs_opacity.value(), "use_ocr_boxes": self.hs_useocr.isChecked()}
+                "box_opacity": self.hs_opacity.value(), "use_ocr_boxes": self.hs_useocr.isChecked(),
+                "patch_from": self.hs_patch.currentData()}
 
     def current_style(self) -> dict:
         return {"font": self.st_font.currentData(), "size": self.st_size.value(), "position": self.st_pos.currentData(),
@@ -1693,7 +1708,8 @@ class ProjectPage(QWidget):
             self.hs_editor.set_image(pm)
             self.hs_editor.overlay = None
             self.hs_editor.update()
-        run_async(lambda: str(preview_frame(src, t, regs, out, mode, strength, st)), done,
+        pfrom = self.hs_patch.currentData()
+        run_async(lambda: str(preview_frame(src, t, regs, out, mode, strength, st, pfrom)), done,
                   lambda m: self.win.toast(m, "err"))
 
     def _clear_preview(self):
@@ -1848,8 +1864,16 @@ class ProjectPage(QWidget):
         self.inspector.refresh_voices()
         self.spk_table.setRowCount(len(spks))
         self.spk_table.setFixedHeight(36 + 44 * max(1, min(len(spks), 6)))
+        gend = p.data.get("speaker_gender") or {}
         for r, s in enumerate(spks):
-            it = QTableWidgetItem(s["speaker"])
+            gi = gend.get(s["speaker"]) or {}
+            tag = {"male": " · nam", "female": " · nữ"}.get(gi.get("g", ""), "")
+            it = QTableWidgetItem(s["speaker"] + tag)
+            if gi:
+                it.setToolTip(f"Chất giọng: {('nam' if gi.get('g') == 'male' else 'nữ' if gi.get('g') == 'female' else 'chưa rõ')}"
+                              + (f" · cao độ ~{gi['f0']:.0f} Hz" if gi.get("f0") else "")
+                              + (" · theo mô hình + cao độ" if gi.get("by") == "model+pitch" else " · theo cao độ giọng"
+                                 if gi.get("by") == "pitch" else ""))
             it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             from .subs_model import spk_color
             from PySide6.QtGui import QColor
@@ -1879,18 +1903,33 @@ class ProjectPage(QWidget):
         self.p.save()
 
     def _auto_voices(self):
+        """Gán giọng khác nhau cho từng người nói, đúng nam / nữ theo chất giọng (đoán trên CPU vài giây nếu chưa có)."""
         from .. import tts
 
-        self.p.reload()
-        st = dict(self.settings)
-        st["tts_engine"] = self.d_engine.currentData()
+        pid = self.p.id
         spks = [s["speaker"] for s in pipeline.speaker_list(self.p)]
-        self.p.data["voices"] = tts.auto_assign(spks, st, {})
-        self.p.save()
-        self.loading = True
-        self._fill_speakers()
-        self.loading = False
-        self.win.toast("Đã gán giọng khác nhau cho từng người nói", "ok")
+        known = self.p.data.get("speaker_gender") or {}
+
+        def apply(genders: dict):
+            if not self.p or self.p.id != pid:
+                return
+            self.p.reload()
+            st = dict(self.settings)
+            st["tts_engine"] = self.d_engine.currentData()
+            self.p.data["voices"] = tts.auto_assign(spks, st, {}, genders)
+            self.p.save()
+            self.loading = True
+            self._fill_speakers()
+            self.loading = False
+            n = sum(1 for k in spks if (genders.get(k) or {}).get("g"))
+            self.win.toast(f"Đã gán giọng cho {len(spks)} người nói" +
+                           (f" ({n} người đoán được giọng nam / nữ)" if n else ""), "ok")
+
+        if all(k in known for k in spks) or not self.p.data.get("source"):
+            return apply(known)
+        self.win.toast("Đang nghe giọng từng người nói để chọn giọng nam / nữ…")
+        run_async(lambda: pipeline.speaker_genders(Project(pid)), apply,
+                  lambda m: (self.win.toast("Không đoán được giọng nam / nữ: " + m, "warn"), apply(known)))
 
     def _dub_engine_changed(self):
         if not self.loading:

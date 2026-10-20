@@ -220,7 +220,7 @@ def inpaint_video(src: str | Path, out: str | Path, regions: list[dict], setting
 
 
 def preview_frame(src: str | Path, t: float, regions: list[dict], out_jpg: str | Path, mode: str = "inpaint",
-                  strength: str = "normal", settings: dict | None = None) -> Path:
+                  strength: str = "normal", settings: dict | None = None, patch_from: str = "auto") -> Path:
     """Xem trước hiệu quả xoá phụ đề trên 1 khung hình."""
     import cv2
 
@@ -245,6 +245,16 @@ def preview_frame(src: str | Path, t: float, regions: list[dict], out_jpg: str |
             frame[y0:y1, x0:x1] = cv2.GaussianBlur(roi, (k, k), 0)
         elif mode == "box":
             frame[y0:y1, x0:x1] = 0
+        elif mode == "patch":
+            from .video import patch_feather, patch_source
+
+            h, w = y1 - y0, x1 - x0
+            sy = min(H - h, max(0, int(patch_source(r, patch_from) * H)))
+            src_px = frame[sy:sy + h, x0:x1].astype(np.float32)
+            f = patch_feather(w, h)
+            yy, xx = np.mgrid[0:h, 0:w]
+            a = np.clip(np.minimum(np.minimum(xx, w - 1 - xx), np.minimum(yy, h - 1 - yy)) / f, 0, 1)[..., None]
+            frame[y0:y1, x0:x1] = (src_px * a + roi.astype(np.float32) * (1 - a)).astype(np.uint8)
         elif mode == "mask":
             m = text_mask(roi, dil)
             over = roi.copy()

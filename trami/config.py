@@ -77,6 +77,8 @@ DEFAULT_SETTINGS: dict = {
     "asr_rescue": True,               # nghe lại đoạn có tiếng mà bộ chia đoạn bỏ sót (cần tách giọng trước)
     "split_speaker_changes": True,    # tách câu có 2 người nói liền nhau
     "vieneu_mode": "v3turbo",         # v3turbo (đẹp) / v3nano (máy yếu)
+    "vieneu_style": "clear",          # clear: đọc rõ, ổn định / natural: mặc định VieNeu (nhiều ngữ điệu hơn)
+    "dub_level_match": True,          # câu lồng tiếng nhỏ hơn hẳn các câu khác -> tăng lên cho đều
     "omnivoice_model": "k2-fsa/OmniVoice",   # hoặc g-group-ai-lab/g-omnivoice (tối ưu tiếng Việt, cần HF token)
     "hf_token": "",                           # token HuggingFace cho mô hình cần đồng ý điều khoản
     "dub_skip_songs": True,           # không lồng tiếng các câu đang hát -> giữ nguyên bài hát gốc

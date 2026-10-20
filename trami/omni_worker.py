@@ -9,7 +9,7 @@ import json
 import os
 import sys
 
-from .vieneu_worker import _reply
+from .vieneu_worker import _reply, _seed
 
 
 def main(repo: str = "k2-fsa/OmniVoice") -> None:
@@ -67,8 +67,14 @@ def main(repo: str = "k2-fsa/OmniVoice") -> None:
             elif req.get("instruct"):
                 gen["instruct"] = req["instruct"]
             if req.get("duration"):
-                gen["duration"] = float(req["duration"])   # đọc vừa đúng số giây (khớp thời gian nhân vật)
-            audio = model.generate(**gen)
+                gen["duration"] = float(req["duration"])   # ép số giây: dễ ra tiếng bíp, TraMi không còn dùng
+            if req.get("seed") is not None:
+                _seed(int(req["seed"]))
+            try:
+                # bỏ đoạn nhỏ dần 0,1 s ở 2 đầu: câu ngắn ("Đi mau!") mất phụ âm cuối
+                audio = model.generate(**gen, fade_duration=0.0)
+            except TypeError:       # bản OmniVoice cũ không có tham số này
+                audio = model.generate(**gen)
             write_wav(req["out"], audio[0], sr)
             _reply(proto, {"ok": True, "sr": sr})
         except Exception as e:  # noqa: BLE001

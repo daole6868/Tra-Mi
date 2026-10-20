@@ -1,4 +1,4 @@
-"""Khung "Giọng mẫu để nhái (OmniVoice)" trong tab Lồng tiếng: thêm file ghi âm, ghi âm từ micro,
+"""Khung "Giọng mẫu của bạn (VieNeu + OmniVoice)" trong tab Lồng tiếng: thêm file ghi âm, ghi âm từ micro,
 cắt từ video; sửa lời nói trong file mẫu; nghe / xoá."""
 from __future__ import annotations
 
@@ -19,15 +19,17 @@ MAX_REC = 12  # giây
 
 class VoiceSamplesCard(SectionCard):
     def __init__(self, page):
-        super().__init__("Giọng mẫu để nhái (OmniVoice)", "mic",
-                         "Thêm đoạn ghi âm 3–10 giây của giọng muốn nhái (nói rõ, không nhạc nền). Điền đúng lời "
-                         "nói trong đoạn đó để nhái chuẩn nhất. Sau đó chọn giọng mẫu cho từng người nói ở bảng phía trên.")
+        super().__init__("Giọng mẫu của bạn (VieNeu + OmniVoice)", "mic",
+                         "Thêm đoạn ghi âm 3–10 giây của giọng muốn dùng (nói rõ, không nhạc nền) – mỗi mẫu thành 1 giọng "
+                         "mới cho cả VieNeu (“🎙 … – giọng mẫu của bạn (VieNeu)”) và OmniVoice. Mẫu càng sạch, giọng đọc "
+                         "càng rõ. OmniVoice cần điền đúng lời nói trong đoạn; VieNeu không cần. Sau đó chọn giọng cho "
+                         "từng người nói ở bảng phía trên.")
         self.page = page
-        from ..tts import omnivoice_available
+        from ..tts import omnivoice_available, vieneu_available
 
-        if not omnivoice_available():
-            self.add(label("⚠ Chưa cài OmniVoice: chạy CaiDat_AI_NangCao.bat (hoặc lệnh trong README) rồi mở lại tool. "
-                           "Vẫn thêm giọng mẫu trước được.", "", wrap=True))
+        if not omnivoice_available() and not vieneu_available():
+            self.add(label("⚠ Chưa cài VieNeu / OmniVoice: chạy CaiDat_AI_NangCao.bat (hoặc lệnh trong README) rồi mở "
+                           "lại tool. Vẫn thêm giọng mẫu trước được.", "", wrap=True))
         self.rec_btn = button("Ghi âm từ micro", "mic", on_click=self.toggle_record)
         self.add(hbox(button("Thêm file ghi âm…", "upload", on_click=self.add_file),
                       self.rec_btn,

@@ -88,7 +88,7 @@ def main(argv=None):
     d.add_argument("--engine", default=None, help="google/openai/anthropic/gemini/deepseek/ollama")
     d.add_argument("--style", default=None, help="auto/co_trang/hien_dai/review/hoat_hinh/tai_lieu")
     d.add_argument("--ocr", action="store_true", help="Lấy phụ đề bằng OCR chữ Trung có sẵn trên video")
-    d.add_argument("--xoa-phude", default="none", choices=["none", "blur", "box", "delogo", "inpaint"],
+    d.add_argument("--xoa-phude", default="none", choices=["none", "blur", "box", "delogo", "inpaint", "patch"],
                    help="Cách xử lý phụ đề Trung cũ trên video")
     d.add_argument("--long-tieng", action="store_true", help="Lồng tiếng Việt bằng AI")
     d.add_argument("--khong-ghep", action="store_true", help="Không ghép phụ đề vào video")

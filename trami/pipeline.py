@@ -203,7 +203,28 @@ def diarize(p: Project, settings: dict | None = None, progress: Prog | None = No
     drop_char_times(segs)
     p.segments = segs
     p.save()
+    try:   # đoán giọng nam / nữ của từng người nói để "Tự gán giọng" chọn giọng lồng hợp
+        speaker_genders(p, audio)
+    except Exception:  # noqa: BLE001
+        log_error("Đoán giọng nam/nữ")
     return n
+
+
+def speaker_genders(p: Project, audio: str | None = None) -> dict:
+    """{người nói: {"g": male/female/"", "conf", "f0", "by"}} – lưu p.data["speaker_gender"]. Chạy CPU, vài giây."""
+    from .asr_funasr import load_wav16k
+    from .gender import speaker_gender
+
+    wav = load_wav16k(audio or stems(p).get("vocals") or str(p.source))
+    spans: dict[str, list] = {}
+    for s in p.segments:
+        if not s.extra.get("song"):
+            spans.setdefault(s.speaker or "S1", []).append((s.start, s.end))
+    out = {spk: speaker_gender(wav, sp) for spk, sp in spans.items()}
+    p.reload()
+    p.data["speaker_gender"] = out
+    p.save()
+    return out
 
 
 def use_qwen_align(engine: str, settings: dict) -> bool:
@@ -618,7 +639,8 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     long_ = [x for x in (stats.get("too_long") or []) if not segs[x[0]].extra.get("trans_user")
              and (only is None or x[0] in only)]
     shortened = 0
-    if long_ and settings.get("dub_auto_shorten", True) and settings.get("translate_engine", "google") != "google":
+    if long_ and settings.get("dub_auto_shorten", True) and \
+            settings.get("translate_engine", "google") not in ("google", "hymt", NO_TRANSLATE):
         from .translate import Translator, budget_for, syllables
 
         if progress:
@@ -738,8 +760,9 @@ def shorten_lines(p: Project, rows: list[int], settings: dict | None = None) -> 
     from .translate import Translator, budget_for, syllables
 
     settings = settings or load_settings()
-    if settings.get("translate_engine", "google") in ("google", NO_TRANSLATE):
-        raise ValueError("Rút gọn câu cần công cụ dịch AI (DeepSeek, Claude, GPT…) – chọn ở Cài đặt → Công cụ dịch.")
+    if settings.get("translate_engine", "google") in ("google", "hymt", NO_TRANSLATE):
+        raise ValueError("Rút gọn câu cần công cụ dịch AI hội thoại (DeepSeek, Claude, GPT…) – Google và Hy-MT2 chỉ "
+                         "dịch được, không viết lại câu. Chọn ở Cài đặt → Công cụ dịch.")
     segs = p.segments
     items = [(k, (segs[k].text, segs[k].trans, max(2, min(syllables(segs[k].trans) - 1, budget_for(segs[k].duration, 1.15)))))
              for k in sorted(set(rows)) if 0 <= k < len(segs) and segs[k].trans.strip()]

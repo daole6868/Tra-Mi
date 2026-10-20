@@ -5,7 +5,8 @@ VieNeu…) và nếu thư viện GPU sập thì cả cửa sổ TraMi tắt theo
 sập thì TraMi chỉ báo lỗi và khởi động lại.
 
 Giao thức (mỗi dòng 1 JSON, UTF-8):
-  vào : {"text": "...", "out": "đường/dẫn.wav", "voice": "Tên giọng" | null, "ref_audio": "mẫu.wav" | null}
+  vào : {"text": "...", "out": "đường/dẫn.wav", "voice": "Tên giọng" | null, "ref_audio": "mẫu.wav" | null,
+         "params": {"temperature": 0.6, ...} (tuỳ chọn, kiểu đọc), "seed": số | null (đọc lại khi câu trước hỏng)}
   ra  : @@TRAMI@@{"ok": true, "sr": 48000}   hoặc   @@TRAMI@@{"error": "..."}
 Dòng đầu tiên sau khi nạp mô hình: @@TRAMI@@{"ready": true}
 """
@@ -15,6 +16,26 @@ import json
 import sys
 
 MARK = "@@TRAMI@@"
+_INFER_KEYS = {"temperature", "top_k", "top_p", "repetition_penalty"}
+
+
+def _seed(n: int) -> None:
+    """Đổi hạt ngẫu nhiên (đọc lại câu bị hỏng sẽ ra kết quả khác)."""
+    import random
+
+    random.seed(n)
+    try:
+        import numpy as np
+
+        np.random.seed(n % (2 ** 32))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import torch
+
+        torch.manual_seed(n)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _reply(out, obj: dict) -> None:
@@ -62,7 +83,13 @@ def main(mode: str = "v3turbo") -> None:
                 kw["ref_audio"] = req["ref_audio"]
             elif req.get("voice"):
                 kw["voice"] = req["voice"]
-            wav = tts.infer(req["text"], **kw)
+            if req.get("seed") is not None:
+                _seed(int(req["seed"]))
+            prm = {k: v for k, v in (req.get("params") or {}).items() if k in _INFER_KEYS}
+            try:
+                wav = tts.infer(req["text"], **kw, **prm)
+            except TypeError:       # bản VieNeu cũ không nhận thông số lấy mẫu
+                wav = tts.infer(req["text"], **kw)
             write_wav(req["out"], wav, sr)
             _reply(proto, {"ok": True, "sr": sr})
         except Exception as e:  # noqa: BLE001

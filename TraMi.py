@@ -17,6 +17,10 @@ if __name__ == "__main__":
         from trami.qwen_asr_worker import main as qa_main
 
         qa_main(sys.argv[2] if len(sys.argv) > 2 else "Qwen/Qwen3-ASR-1.7B-hf")
+    elif len(sys.argv) > 1 and sys.argv[1] == "--hymt-worker":   # tiến trình riêng dịch trên máy Hy-MT2
+        from trami.hymt_worker import main as mt_main
+
+        mt_main(sys.argv[2] if len(sys.argv) > 2 else "tencent/Hy-MT2-1.8B")
     elif len(sys.argv) > 1:          # có tham số -> chế độ dòng lệnh (VD: python TraMi.py dich video.mp4)
         from trami.__main__ import main
 

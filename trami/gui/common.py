@@ -8,7 +8,9 @@ from PySide6.QtCore import QCoreApplication, QEvent, QObject, QRunnable, Qt, QTh
 import shiboken6
 from PySide6.QtWidgets import QAbstractScrollArea, QAbstractSlider, QAbstractSpinBox, QComboBox, QScrollBar, QWidget
 
-ENGINES = [("google", "Google Dịch (miễn phí)"), ("deepseek", "DeepSeek AI (giỏi tiếng Trung, rẻ)"),
+ENGINES = [("google", "Google Dịch (miễn phí)"),
+           ("hymt", "Hy-MT2 – dịch trên máy, miễn phí, không cần mạng (tải ở tab Tài liệu)"),
+           ("deepseek", "DeepSeek AI (giỏi tiếng Trung, rẻ)"),
            ("openai", "OpenAI GPT / API tương thích"), ("anthropic", "Claude (Anthropic)"),
            ("gemini", "Google Gemini"), ("ollama", "Ollama (offline trên máy)")]
 STYLES = [("auto", "Tự nhận biết"), ("co_trang", "Cổ trang / tiên hiệp / kiếm hiệp"),
@@ -24,10 +26,11 @@ METHODS = [("asr", "Nhận dạng giọng nói"), ("ocr", "OCR phụ đề cứn
 OCR_SPEEDS = [("2", "Nhanh – 2 lần/giây (video dài, câu hiện lâu)"), ("4", "Chuẩn – 4 lần/giây (khuyên dùng)"),
               ("8", "Kỹ – 8 lần/giây (câu đổi rất nhanh, chậm gấp đôi)")]
 HARDSUB = [("none", "Giữ nguyên"), ("inpaint", "Xoá sạch bằng AI (LaMa)"), ("blur", "Làm mờ vùng phụ đề"),
-           ("box", "Che bằng dải màu"), ("delogo", "Delogo (nhanh)")]
+           ("box", "Che bằng dải màu"), ("delogo", "Delogo (nhanh)"),
+           ("patch", "Vá nền (chép nền sát bên, nhanh)")]
 WHICH = [("trans", "Chỉ tiếng Việt"), ("both", "Song ngữ Việt + Trung"), ("source", "Chỉ tiếng Trung"),
          ("none", "Không ghép (chỉ xuất SRT)")]
-TTS_ENGINES = [("edge", "Microsoft Edge (2 giọng, cần mạng)"), ("vieneu", "VieNeu-TTS (25 giọng + nhái giọng, offline)"),
+TTS_ENGINES = [("edge", "Microsoft Edge (2 giọng, cần mạng)"), ("vieneu", "VieNeu-TTS (25 giọng + 6 giọng thu âm sạch + nhái giọng, offline)"),
                ("omnivoice", "OmniVoice (nhái giọng từ file ghi âm mẫu, offline)")]
 ASPECTS = [("original", "Giữ nguyên"), ("9:16", "9:16 – TikTok/Reels/Shorts"), ("16:9", "16:9 – YouTube/Facebook"),
            ("1:1", "1:1 vuông"), ("4:5", "4:5 – Facebook dọc"), ("4:3", "4:3"), ("3:4", "3:4")]

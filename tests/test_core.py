@@ -287,6 +287,18 @@ def test_inpaint_removes_text():
     assert (res.min(axis=2) > 200).sum() < white.sum() * 0.03
 
 
+def _speech_like(sr: int, dur: float = 1.0, seed: int = 0) -> np.ndarray:
+    """Âm thanh giả GIỐNG TIẾNG NÓI (nhiều hoạ âm, cao độ & độ to thay đổi, có chỗ nghỉ + phụ âm) – bộ đọc giả trong
+    test phải trả loại này: sóng sin đơn bị TraMi coi là "tiếng bíp" (giọng AI hỏng) và đọc lại / bỏ câu."""
+    rng = np.random.default_rng(seed)
+    t = np.arange(int(dur * sr)) / sr
+    f0 = 140 + 40 * np.sin(2 * np.pi * 1.3 * t)
+    ph = 2 * np.pi * np.cumsum(f0) / sr
+    voiced = sum((0.5 / k) * np.sin(k * ph) for k in range(1, 12))
+    env = (np.sin(2 * np.pi * 3 * t) > -0.3).astype(float) * (0.5 + 0.5 * np.sin(2 * np.pi * 0.7 * t) ** 2)
+    return (0.2 * voiced * env + 0.02 * rng.standard_normal(len(t)) * (1 - env)).astype(np.float32)
+
+
 def _fake_audio(path, dur, freq=500):
     subprocess.run([ff.ffmpeg_bin(), "-loglevel", "error", "-y", "-f", "lavfi", "-i",
                     f"sine=frequency={freq}:duration={dur}", str(path)], check=True)
@@ -324,9 +336,9 @@ def test_multi_voice_clone_and_skip_song(monkeypatch, tmp_path):
         def ensure_started(self, progress=None, cancel=None):
             pass
 
-        def synth(self, text, out, voice=None, ref_audio=None):
+        def synth(self, text, out, voice=None, ref_audio=None, **kw):
             calls.append((text, ref_audio, voice))
-            return tts.write_wav(out, np.sin(np.linspace(0, 800, 48000)).astype(np.float32) * 0.3, 48000)
+            return tts.write_wav(out, _speech_like(48000), 48000)
 
     edge_voices = []
 
@@ -928,9 +940,9 @@ def test_omnivoice_samples_and_dub(monkeypatch, tmp_path):
         def ensure_started(self, progress=None, cancel=None):
             pass
 
-        def synth(self, text, out, voice=None, ref_audio=None, ref_text=None):
+        def synth(self, text, out, voice=None, ref_audio=None, ref_text=None, **kw):
             calls.append((text, Path(ref_audio).name if ref_audio else None, ref_text))
-            return tts.write_wav(out, np.sin(np.linspace(0, 800, 24000)).astype(np.float32) * 0.3, 24000)
+            return tts.write_wav(out, _speech_like(24000), 24000)
 
     monkeypatch.setattr(tts, "omnivoice_available", lambda: True)
     monkeypatch.setattr(tts, "_omni", lambda settings=None: FakeOmni())
@@ -1301,3 +1313,72 @@ def test_inpaint_cached_reused(tmp_path, monkeypatch):
     c = video.inpaint_cached(src, hs2, sts, tmp_path / "w")
     assert c != a and len(calls) == 2 and not a.exists()
     assert video.inpainted_file(src, hs2, sts, tmp_path / "w") == c
+
+
+def test_vi_numbers_spoken():
+    """Bộ đọc AI: số đọc thành chữ, giờ / ngày / % / $; số không chắc cách đọc (phiên bản, tỉ số) giữ nguyên."""
+    from trami.voicefix import read_int, spoken_vi
+
+    assert read_int("21") == "hai mươi mốt" and read_int("15") == "mười lăm" and read_int("105") == "một trăm linh năm"
+    assert read_int("1005") == "một nghìn không trăm linh năm" and read_int("24") == "hai mươi tư"
+    assert read_int("2500000000000") == "hai nghìn năm trăm tỷ" and read_int("007") == "không không bảy"
+    assert spoken_vi("Giá 90.000 đồng, giảm 50%") == "Giá chín mươi nghìn đồng, giảm năm mươi phần trăm"
+    assert spoken_vi("Năm 2026.") == "Năm hai nghìn không trăm hai mươi sáu."
+    assert spoken_vi("Có 3,5 triệu") == "Có ba phẩy năm triệu"
+    assert spoken_vi("Lúc 10:30 ngày 12/10/2026").startswith("Lúc mười giờ ba mươi ngày mười hai tháng mười năm")
+    assert spoken_vi("Đứng thứ 4") == "Đứng thứ tư"
+    for keep in ("Phiên bản 1.2.3", "Tỉ số 3/4 hiệp", "iPhone15", "3.14"):
+        assert spoken_vi(keep) == keep
+
+
+def test_voice_problem_and_levels():
+    """Phát hiện giọng AI hỏng (im lặng / bíp / còi / ù) mà không báo nhầm tiếng nói; cân âm lượng chỉ tăng câu nhỏ."""
+    from trami.voicefix import level_gains, speech_level, voice_problem
+
+    sr = 24000
+    t = np.arange(int(1.5 * sr)) / sr
+    speech = _speech_like(sr, 1.5)
+    assert voice_problem(speech, sr) is None
+    assert voice_problem(np.zeros(sr, np.float32), sr) == "toàn khoảng lặng"
+    assert voice_problem((0.3 * np.sin(2 * np.pi * 1000 * t)).astype(np.float32), sr)
+    assert voice_problem(np.full(sr, 0.2, np.float32), sr)
+    beep = 0.3 * np.sin(2 * np.pi * 1500 * t[: int(0.15 * sr)])
+    gap = np.zeros(int(0.1 * sr))
+    assert voice_problem(np.concatenate([beep, gap, beep, gap, speech]).astype(np.float32), sr)
+    whistle = 0.25 * np.sin(2 * np.pi * 2000 * t[: int(0.4 * sr)])
+    assert voice_problem(np.concatenate([speech[:sr], whistle, speech[sr:]]).astype(np.float32), sr)
+    lv = speech_level(speech, sr)
+    assert abs(speech_level(speech * 0.5, sr) - lv / 2) < lv * 0.05
+    g = level_gains({0: lv, 1: lv, 2: lv, 3: lv * 0.25}, {k: "A" for k in range(4)})
+    assert set(g) == {3} and abs(g[3] - 10 ** (9 / 20)) < 1e-6        # tăng tối đa +9 dB, câu thường không đổi
+
+
+def test_gender_pitch_and_auto_assign():
+    from trami import tts
+    from trami.gender import SR, pitch_track, speaker_gender
+
+    t = np.arange(SR * 2) / SR
+    for f in (110, 220, 300):
+        x = (0.3 * np.sin(2 * np.pi * f * t) + 0.15 * np.sin(4 * np.pi * f * t)).astype(np.float32)
+        assert abs(np.median(pitch_track(x)) - f) < f * 0.03
+    low = (0.3 * np.sin(2 * np.pi * 115 * t) + 0.1 * np.sin(4 * np.pi * 115 * t)).astype(np.float32)
+    high = (0.3 * np.sin(2 * np.pi * 240 * t) + 0.1 * np.sin(4 * np.pi * 240 * t)).astype(np.float32)
+    assert speaker_gender(low, [(0, 2)])["g"] == "male" and speaker_gender(high, [(0, 2)])["g"] == "female"
+    g = {"S1": {"g": "male"}, "S2": {"g": "female"}, "S3": {"g": "female"}}
+    v = tts.auto_assign(["S1", "S2", "S3"], {"tts_engine": "edge"}, {}, g)
+    assert v == {"S1": "edge:vi-VN-NamMinhNeural", "S2": "edge:vi-VN-HoaiMyNeural", "S3": "edge:vi-VN-HoaiMyNeural"}
+
+
+def test_hymt_prompt_and_patch_source():
+    from trami.hymt_worker import build_prompt, clean_output
+    from trami.video import patch_source
+
+    p = build_prompt("你好", ["前一句"], [["李逍遥", "Lý Tiêu Dao"]])
+    assert p.startswith("参考下面的翻译：\n李逍遥 翻译成 Lý Tiêu Dao") and p.endswith("也不要额外解释：\n你好")
+    assert build_prompt("你好") == "把下面的文本翻译成越南语，不要额外解释。\n\n你好"
+    assert clean_output("<think>x</think> Xin  chào ") == "Xin chào"
+    r = {"x": 0.2, "y": 0.8, "w": 0.6, "h": 0.1}
+    assert abs(patch_source(r) - (0.8 - 0.1 - 0.01)) < 1e-9                 # mặc định lấy dải phía trên
+    assert abs(patch_source(r, "below") - 0.7) < 1e-9 or patch_source(r, "below") <= 0.9  # dưới không đủ chỗ
+    top = {"x": 0, "y": 0.02, "w": 1, "h": 0.1}
+    assert patch_source(top) > top["y"]                                      # vùng sát mép trên -> lấy phía dưới

@@ -47,6 +47,9 @@ MODELS = [
               "1.7B / 0.6B ở Cài đặt)", "~4,7 GB / 1,9 GB", ("transformers", "torch"), "mic"),
     ModelInfo("qwen_align", "Căn thời gian từng chữ – Qwen3", "Giờ từng chữ lệch ~0,03 s: tách câu đúng chỗ nghỉ, giọng "
               "lồng khớp miệng", "~1,8 GB", ("transformers", "torch"), "clock"),
+    ModelInfo("hymt", "Dịch trên máy – Hy-MT2 1.8B", "Mô hình chuyên dịch của Tencent: dịch Trung -> Việt ngay trên máy, "
+              "miễn phí, không cần API key (chọn \"Hy-MT2\" ở Công cụ dịch; GPU nhanh, CPU chậm)", "~3,6 GB",
+              ("transformers", "torch"), "globe"),
     ModelInfo("sensevoice", "Nhận dạng – SenseVoice + VAD", "Nghe tiếng Trung nhanh, nhẹ; VAD dùng chung cho Qwen3-ASR",
               "~900 MB", ("funasr", "modelscope"), "mic"),
     ModelInfo("paraformer", "Nhận dạng – Paraformer + dấu câu + CAM++",
@@ -57,6 +60,9 @@ MODELS = [
               ("faster_whisper",), "globe"),
     ModelInfo("ecapa", "Phân biệt người nói – ECAPA", "Tìm ai đang nói để gán giọng lồng riêng", "~80 MB",
               ("speechbrain", "torch"), "users"),
+    ModelInfo("gender", "Nhận giọng nam / nữ – ECAPA", "\"Tự gán giọng khác nhau\" chọn giọng nam cho nhân vật nam, "
+              "giọng nữ cho nhân vật nữ (không tải vẫn đoán theo cao độ giọng, kém chắc hơn)", "16 MB",
+              ("onnxruntime",), "users"),
     ModelInfo("lama", "Xoá phụ đề – AI LaMa", "Vẽ lại nền phía sau chữ Trung cũ", "206 MB", ("torch",), "eraser"),
     ModelInfo("vieneu", "Giọng đọc – VieNeu-TTS v3 Turbo", "25 giọng Việt + nhái giọng nhân vật", "~1–2 GB",
               ("vieneu",), "volume"),
@@ -209,6 +215,10 @@ def is_ready(key: str, settings: dict | None = None) -> bool:
             from .asr_qwen import ALIGNER
 
             return _hf_complete(ALIGNER)
+        if key == "hymt":
+            from .translate import HYMT_REPO
+
+            return _hf_complete((settings or {}).get("hymt_model") or HYMT_REPO)
         if key == "sensevoice":
             return _ms_cached(MS_IDS["sensevoice"]) and _ms_cached(MS_IDS["fsmn-vad"])
         if key == "align":
@@ -223,6 +233,10 @@ def is_ready(key: str, settings: dict | None = None) -> bool:
             return True
         if key == "ecapa":
             return (MODELS_DIR / "spkrec-ecapa" / "embedding_model.ckpt").exists()
+        if key == "gender":
+            from .gender import model_path
+
+            return model_path() is not None
         if key == "lama":
             from .lama import LAMA_FILE
 
@@ -328,17 +342,24 @@ def download(key: str, progress: Prog | None = None, cancel=None, settings: dict
                                    f"{repo}, bấm đồng ý, rồi dán token (huggingface.co/settings/tokens) vào "
                                    "Cài đặt → HuggingFace token.") from None
             raise
-    elif key in ("qwen_asr", "qwen_align"):
+    elif key in ("qwen_asr", "qwen_align", "hymt"):
         from huggingface_hub import snapshot_download
 
         from .asr_qwen import ALIGNER
+        from .translate import HYMT_REPO
 
-        repo = qwen_repo(settings) if key == "qwen_asr" else ALIGNER
+        repo = {"qwen_asr": qwen_repo(settings), "qwen_align": ALIGNER}.get(key) or \
+            (settings or {}).get("hymt_model") or HYMT_REPO
         with tqdm_progress(progress, 0.0, 1.0, label, cancel, download=label):
             # tải vào kho HuggingFace trên máy – đúng chỗ tiến trình Qwen3-ASR nạp, nên khi dịch không tải lại
             snapshot_download(repo, token=(settings or {}).get("hf_token") or None, allow_patterns=HF_FILES)
         if not _hf_complete(repo):
             raise RuntimeError("Tải chưa đủ file mô hình (mạng bị ngắt?) – bấm Tải về lần nữa để tải tiếp phần còn thiếu.")
+    elif key == "gender":
+        from .gender import model_path
+
+        with tqdm_progress(progress, 0.0, 1.0, label, cancel, download=label):
+            model_path(download=True)
     elif key == "vieneu":
         from .tts import _vieneu
 

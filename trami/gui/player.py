@@ -390,7 +390,7 @@ class HardsubOverlay(QGraphicsItem):
         if self._drag:      # đang kéo: giữ vùng đang kéo, không để bản lưu cũ ghi đè
             hs["regions"] = self.hs.get("regions") or []
         self.hs = hs
-        need = self.hs.get("mode") in ("blur", "inpaint", "delogo") and bool(self.hs.get("regions"))
+        need = self.hs.get("mode") in ("blur", "inpaint", "delogo", "patch") and bool(self.hs.get("regions"))
         if need and not self._sink_connected:
             sink = self.video.videoSink()
             sink.videoFrameChanged.connect(self._on_frame)
@@ -411,6 +411,42 @@ class HardsubOverlay(QGraphicsItem):
         self._frame = frame
         self._img = None
         self.update()
+
+    def _frame_image(self):
+        if self._img is None and self._frame is not None and self._frame.isValid():
+            self._img = self._frame.toImage()
+        img = self._img
+        return img if img is not None and not img.isNull() else None
+
+    def _paint_patch(self, p: QPainter, img: QImage, regs: list, rects: list):
+        """Vá nền gần đúng như khi xuất: chép dải hình sát vùng chữ của khung đang hiện, viền mờ dần."""
+        from PySide6.QtGui import QLinearGradient
+
+        from ..video import patch_feather, patch_source
+
+        iw, ih = img.width(), img.height()
+        for reg, r in zip(regs, rects):
+            sy = patch_source(reg, self.hs.get("patch_from", "auto"))
+            src = QRectF(float(reg["x"]) * iw, sy * ih, float(reg["w"]) * iw, float(reg["h"]) * ih).toRect()
+            part = img.copy(src).convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+            if part.isNull() or part.width() < 2 or part.height() < 2:
+                continue
+            w, h = part.width(), part.height()
+            f = patch_feather(w, h)
+            q = QPainter(part)
+            q.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+            for horiz in (True, False):
+                n = w if horiz else h
+                g = QLinearGradient(0, 0, n if horiz else 0, 0 if horiz else n)
+                k = min(0.5, f / max(1, n))
+                g.setColorAt(0, QColor(0, 0, 0, 0))
+                g.setColorAt(k, QColor(0, 0, 0, 255))
+                g.setColorAt(1 - k, QColor(0, 0, 0, 255))
+                g.setColorAt(1, QColor(0, 0, 0, 0))
+                q.fillRect(0, 0, w, h, g)
+            q.end()
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            p.drawImage(r, part)
 
     def _rect(self, r: dict) -> QRectF:
         br = self.boundingRect()
@@ -441,11 +477,13 @@ class HardsubOverlay(QGraphicsItem):
             c.setAlphaF(max(0.0, min(1.0, float(self.hs.get("box_opacity", 1.0)))))
             for r in rects:
                 p.fillRect(r, c)
+        elif mode == "patch":
+            img = self._frame_image()
+            if img is not None:
+                self._paint_patch(p, img, regs, rects)
         elif mode in ("blur", "inpaint", "delogo"):
-            if self._img is None and self._frame is not None and self._frame.isValid():
-                self._img = self._frame.toImage()
-            img = self._img
-            if img is not None and not img.isNull():
+            img = self._frame_image()
+            if img is not None:
                 k = 24 if mode != "blur" else max(2, int(self.hs.get("blur_strength", 20)) // 2)
                 for r in rects:
                     src = QRectF(r.x() / br.width() * img.width(), r.y() / br.height() * img.height(),

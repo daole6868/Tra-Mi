@@ -514,6 +514,7 @@ class SettingsPage(QWidget):
         ("ge_key", "gemini_api_key", "t"), ("ge_model", "gemini_model", "t"),
         ("ol_base", "ollama_base_url", "t"), ("ol_model", "ollama_model", "t"),
         ("glossary", "glossary", "p"), ("tts_engine", "tts_engine", "c"), ("vn_mode", "vieneu_mode", "c"),
+        ("vn_style", "vieneu_style", "c"), ("level_match", "dub_level_match", "b"),
         ("omni_model", "omnivoice_model", "c"), ("hf_token", "hf_token", "t"),
         ("align_words", "align_words", "b"), ("split_spk", "split_speaker_changes", "b"),
         ("dub_fit", "dub_fit", "b"), ("dub_short", "dub_auto_shorten", "b"),
@@ -583,7 +584,8 @@ class SettingsPage(QWidget):
         self.spk_thr = f.row("Độ nhạy gộp giọng (0.5–0.8)", dspin(0.3, 0.95, 0.02))
         b.add(f)
 
-        t = SectionCard("Dịch thuật", "globe", "DeepSeek: giỏi tiếng Trung, rẻ – dịch cả bộ phim chỉ vài nghìn đồng.")
+        t = SectionCard("Dịch thuật", "globe", "DeepSeek: giỏi tiếng Trung, rẻ – dịch cả bộ phim chỉ vài nghìn đồng. "
+                        "Hy-MT2: dịch ngay trên máy, miễn phí (tải 1 lần ~3,6 GB ở tab Tài liệu của dự án).")
         f = Form()
         self.engine = f.row("Công cụ dịch mặc định", combo(C.ENGINES))
         self.style = f.row("Văn phong mặc định", combo(C.STYLES))
@@ -613,6 +615,12 @@ class SettingsPage(QWidget):
         f = Form()
         self.tts_engine = f.row("Bộ đọc mặc định", combo(C.TTS_ENGINES))
         self.vn_mode = f.row("VieNeu-TTS", combo([("v3turbo", "v3 Turbo – đẹp (khuyên dùng)"), ("v3nano", "v3 Nano – máy yếu")]))
+        self.vn_style = f.row("Kiểu đọc VieNeu", combo([("clear", "Rõ ràng, ổn định (khuyên dùng)"),
+                                                        ("natural", "Tự nhiên, nhiều ngữ điệu (mặc định VieNeu)")]),
+                              "Rõ ràng: bớt ngẫu nhiên khi đọc -> phát âm rõ, ít đọc nhịu / lạc giọng")
+        self.level_match = f.row("Cân âm lượng giọng lồng", Switch(),
+                                 "Câu nào nhỏ hơn hẳn các câu khác cùng giọng (hoặc giọng nhỏ hơn hẳn giọng khác) "
+                                 "được tăng lên cho đều, tối đa +9 dB")
         self.omni_model = f.row("OmniVoice", combo([("k2-fsa/OmniVoice", "OmniVoice gốc – đa ngôn ngữ"),
                                                     ("g-group-ai-lab/g-omnivoice",
                                                      "G-OmniVoice – tối ưu tiếng Việt (cần HF token)")]))

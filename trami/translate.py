@@ -7,6 +7,7 @@ Hỗ trợ:
   - gemini    : Google Gemini (qua endpoint tương thích OpenAI)
   - deepseek  : DeepSeek (rất giỏi tiếng Trung, giá rẻ)
   - ollama    : chạy mô hình offline trên máy (VD qwen2.5)
+  - hymt      : Hy-MT2 (Tencent) – mô hình chuyên dịch chạy trên máy (GPU / CPU), miễn phí, không cần mạng sau khi tải
 
 Với các engine AI: dịch theo lô có ngữ cảnh, tự trích tên riêng -> Hán Việt để thống nhất,
 bắt buộc trả về JSON đúng số dòng, tự thử lại và chia nhỏ lô khi lỗi.
@@ -22,6 +23,7 @@ import requests
 
 from .ffmpeg import Cancelled
 from .subtitle import Segment
+from .tts import VieneuWorker
 
 ProgressCB = Callable[[float, str], None]
 
@@ -196,6 +198,57 @@ class LLMClient:
                        f"Kiểm tra Internet / API key / số dư tài khoản ở trang Cài đặt.")
 
 
+# ======================================================================= Hy-MT2
+
+LOCAL_ENGINES = ("google", "hymt")    # không phải AI hội thoại: không tự đọc kịch bản, không rút gọn câu được
+HYMT_REPO = "tencent/Hy-MT2-1.8B"
+_hymt = None
+
+
+def hymt_available() -> bool:
+    from .config import installed
+
+    return installed("transformers", "torch")
+
+
+class HymtWorker(VieneuWorker):
+    """Tiến trình riêng chạy Hy-MT2 (trami/hymt_worker.py), cùng cách điều khiển với VieNeu / Qwen3."""
+    title = "Hy-MT2"
+    flag = "--hymt-worker"
+    log_name = "hymt.txt"
+
+    def __init__(self, repo: str, token: str = ""):
+        super().__init__(repo)
+        self.token = token
+
+    def _extra_env(self) -> dict:
+        return {"HF_TOKEN": self.token} if self.token else {}
+
+    def call(self, req: dict, progress=None, cancel=None) -> dict:
+        with self.lock:
+            if not self.proc or self.proc.poll() is not None:
+                self._start(progress, cancel)
+            assert self.proc and self.proc.stdin
+            self.proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
+            self.proc.stdin.flush()
+            r = self._read(progress, cancel)
+        if "error" in r:
+            raise RuntimeError(r["error"])
+        return r
+
+
+def hymt_worker(settings: dict | None = None) -> HymtWorker:
+    global _hymt
+    st = settings or {}
+    repo = st.get("hymt_model") or HYMT_REPO
+    if _hymt is None or _hymt.mode != repo:
+        _hymt = HymtWorker(repo, st.get("hf_token", ""))
+        import atexit
+
+        atexit.register(_hymt.stop)
+    return _hymt
+
+
 # ======================================================================= Translator
 
 class Translator:
@@ -209,7 +262,7 @@ class Translator:
             self.glossary.update(glossary)
         self.cache = cache if cache is not None else {}
         self.batch = max(5, int(settings.get("translate_batch", 40)))
-        self.llm = None if self.engine == "google" else LLMClient(settings, self.engine)
+        self.llm = None if self.engine in LOCAL_ENGINES else LLMClient(settings, self.engine)
         self.fit_dub = bool(settings.get("dub_fit", True))   # dịch vừa thời lượng để lồng tiếng khớp
         self.fallback_lines = 0   # số câu AI trả lỗi định dạng, phải dùng Google bù
 
@@ -267,7 +320,13 @@ class Translator:
             else:
                 todo.append(i)
         done = len(lines) - len(todo)
-        if self.engine == "google":
+        if self.engine == "hymt":
+            res = self._hymt(lines, todo, progress, cancel, done)
+            for gi, r in zip(todo, res):
+                out[gi] = r
+                if r and not untranslated(r):
+                    self.cache[f"{self.engine}|{self.style}|{lines[gi]}"] = r
+        elif self.engine == "google":
             batches = self._google_batches([lines[i] for i in todo])
             pos = 0
             for chunk in batches:
@@ -382,6 +441,37 @@ class Translator:
             return self._google(lines)
         except Exception:
             return [""] * len(lines)
+
+    # ------------------------------------------------------------- Hy-MT2 (trên máy)
+    def _hymt(self, lines: list[str], todo: list[int], progress: ProgressCB | None, cancel, done0: int) -> list[str]:
+        """Dịch bằng Hy-MT2 trong tiến trình riêng: mỗi câu kèm 3 câu trước làm ngữ cảnh + tên riêng có trong câu.
+        Xong thì tắt tiến trình để trả bộ nhớ GPU cho bước lồng tiếng."""
+        if not todo:
+            return []
+        w = hymt_worker(self.s)
+        res: list[str] = []
+        step = 32
+        try:
+            for b in range(0, len(todo), step):
+                if cancel and cancel():
+                    raise Cancelled()
+                ids = todo[b:b + step]
+                items = [{"text": lines[i],
+                          "context": [lines[k] for k in range(max(0, i - 3), i) if lines[k].strip()],
+                          "terms": [[k, v] for k, v in self.glossary.items() if k in lines[i]][:12]} for i in ids]
+                base = done0 + b
+
+                def pr(x: float, msg: str, base=base, n=len(ids)):
+                    if progress and "dịch" in msg:
+                        progress((base + x * n) / max(1, len(lines)), f"Hy-MT2 đang dịch {int(base + x * n)}/"
+                                 f"{len(lines)} câu (trên máy)")
+                    elif progress:
+                        progress(base / max(1, len(lines)), msg)
+                r = w.call({"items": items}, pr, cancel)
+                res += [str(x) for x in r.get("out", [])][:len(ids)] + [""] * max(0, len(ids) - len(r.get("out", [])))
+        finally:
+            w.stop()
+        return res
 
     # ------------------------------------------------------------- Google
     def _apply_glossary_src(self, text: str) -> str:

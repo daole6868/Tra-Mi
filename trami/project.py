@@ -26,7 +26,7 @@ DEFAULT_EDIT = {
     "color": {"brightness": 0, "contrast": 1, "saturation": 1, "gamma": 1, "sharpen": False, "denoise": False},
     "volume": 1.0, "mute_original": False, "pitch_shift": 0,
     "dub": {"enabled": False, "wav": "", "original_volume": 0.15, "dub_volume": 1.0},
-    "bgm": {"path": "", "volume": 0.2},
+    "bgm": {"path": "", "volume": 0.2, "duck": True},
     "watermark": {"path": "", "position": "top-right", "scale": 0.15, "opacity": 0.85},
     "text": {"content": "", "position": "top-left", "size": 0, "color": "#FFFFFF"},
     "subtitles": {"burn": True, "which": "trans", "style": {}},
