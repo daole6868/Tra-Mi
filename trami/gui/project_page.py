@@ -71,7 +71,12 @@ class ProjectPage(QWidget):
         b_del.clicked.connect(self._delete)
         self.insp_btn = IconButton("panel_right", "Ẩn / hiện khung \"Câu đang chọn\" bên phải", 34)
         self.insp_btn.clicked.connect(lambda: self._show_inspector(not self.insp_box.isVisible()))
-        head = hbox(self.name, self.saved, None, self.insp_btn, b_dir, b_del, export_btn)
+        # video gốc bị chuyển chỗ / đổi tên / xoá: nút chọn lại file (giữ nguyên phụ đề, bản dịch, lồng tiếng)
+        self.relink_btn = button("Tìm lại video gốc…", "folder", "Video gốc của dự án không còn ở chỗ cũ – chọn lại "
+                                 "file video (phụ đề, bản dịch, lồng tiếng giữ nguyên)", danger=True,
+                                 on_click=self._relink_source)
+        self.relink_btn.hide()
+        head = hbox(self.name, self.saved, None, self.relink_btn, self.insp_btn, b_dir, b_del, export_btn)
         head.setSpacing(8)
 
         # ---------------- giữa: khung xem trước (trình phát) + tiến độ tác vụ
@@ -1025,7 +1030,7 @@ class ProjectPage(QWidget):
 
     def _load_timeline_assets(self):
         """Ảnh thu nhỏ + sóng âm cho timeline (tạo 1 lần ở nền, có sẵn thì nạp ngay)."""
-        if not self.p or not self.p.data.get("source"):
+        if not self.p or not self.p.data.get("source") or pipeline.source_missing(self.p):
             return
         pid = self.p.id
 
@@ -1111,6 +1116,20 @@ class ProjectPage(QWidget):
 
     def _load_media(self):
         p = self.p
+        if pipeline.source_missing(p):
+            old = p.source
+            found = pipeline.find_moved_source(p)
+            try:
+                if found:
+                    pipeline.relink_source(p, found)
+            except Exception:  # noqa: BLE001
+                found = None
+            if found:
+                self.win.toast(f"Video gốc đã bị chuyển chỗ – đã tìm thấy và nối lại: {found}", "ok")
+            else:
+                self.win.toast(f"Không tìm thấy video gốc: {old}\nFile đã bị chuyển chỗ, đổi tên hoặc xoá – bấm 'Tìm lại "
+                               "video gốc…' (nút đỏ trên cùng) để chọn lại file", "err")
+        self.relink_btn.setVisible(pipeline.source_missing(p))
         i = p.data.get("info", {})
         src = self._media_source()
         self.player.view.hs.clean = "inpainted_" in Path(src).name
@@ -1605,11 +1624,29 @@ class ProjectPage(QWidget):
         return cache[1] if cache else {}
 
     def _media_error(self, msg: str):
-        if not self.p or (self.p.work / "preview.mp4").exists():
-            return
+        if not self.p or (self.p.work / "preview.mp4").exists() or pipeline.source_missing(self.p):
+            return      # mất video gốc: không phải lỗi định dạng, tạo bản xem trước cũng không được
         self.win.toast("Không phát được định dạng này → đang tạo bản xem trước (không ảnh hưởng chất lượng xuất)", "warn")
         self.submit("preview", "Tạo bản xem trước", lambda j, p: (pipeline.make_preview(p, j.update, j.cancelled),
                                                                  {"message": "Đã tạo bản xem trước"})[1])
+
+    def _relink_source(self):
+        """Chọn lại file video gốc (bị chuyển chỗ / đổi tên) – phụ đề, bản dịch, lồng tiếng giữ nguyên."""
+        if not self.p:
+            return
+        old = self.p.source
+        start = str(old.parent) if old.parent.exists() else str(Path.home() / "Downloads")
+        exts = " ".join("*" + e for e in pipeline.VIDEO_EXTS)
+        path, _ = QFileDialog.getOpenFileName(self, f"Chọn lại video gốc ({old.name})", start,
+                                              f"Video ({exts});;Mọi file (*)")
+        if not path:
+            return
+        try:
+            pipeline.relink_source(self.p, path)
+        except Exception as e:  # noqa: BLE001
+            return self.win.toast(str(e), "err")
+        self.populate(reload_media=True)
+        self.win.toast(f"Đã nối lại video gốc: {Path(path).name} – phụ đề, bản dịch, lồng tiếng giữ nguyên", "ok")
 
     def _row_clicked(self, pidx):
         row = self.proxy.mapToSource(pidx).row()
@@ -2007,7 +2044,7 @@ class ProjectPage(QWidget):
 
     # ================================================================== xoá phụ đề
     def _grab_frame(self):
-        if not self.p or not self.p.data.get("source"):
+        if not self.p or not self.p.data.get("source") or pipeline.source_missing(self.p):
             return
         from .. import ffmpeg as ff
 

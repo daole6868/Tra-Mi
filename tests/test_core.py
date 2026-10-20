@@ -1766,3 +1766,34 @@ def test_realign_split_drops_whole_line_voice(monkeypatch):
     assert all("tts_file" not in x.extra and "dub_at" not in x.extra for x in s[1:])
     assert s[1].extra.get("speed") == 1.2           # tốc độ đặt tay vẫn giữ
     assert relaid == [1]
+
+
+def test_moved_source_video_found_or_relinked(sample_video, tmp_path, monkeypatch):
+    """Video gốc bị chuyển chỗ: tự tìm lại file cùng tên + cùng độ dài (Downloads…), chọn lại tay thì giữ nguyên phụ đề;
+    chọn nhầm video khác độ dài -> báo lỗi; FFmpeg báo 'không tìm thấy file' dễ hiểu thay vì lỗi khó hiểu."""
+    from trami import pipeline
+    from trami.project import Project
+
+    old_dir, home = tmp_path / "cu", tmp_path / "home"
+    old_dir.mkdir()
+    (home / "Downloads" / "phim").mkdir(parents=True)
+    src = old_dir / "42788455331-1-192.mp4"
+    shutil.copy(sample_video, src)
+    p = Project.create("mat_video")
+    pipeline.attach_source(p, src)
+    p.segments = [Segment(1, 2, "你好", "Xin chào")]
+    p.save()
+    moved = home / "Downloads" / "phim" / src.name
+    src.replace(moved)
+    assert pipeline.source_missing(p)
+    with pytest.raises(ff.FFmpegError, match="Không tìm thấy file"):
+        pipeline.make_preview(p)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    assert pipeline.find_moved_source(p) == moved
+    other = tmp_path / "khac.m4a"
+    _fake_audio(other, 2.0)
+    with pytest.raises(ValueError, match="không phải cùng"):
+        pipeline.relink_source(p, other)
+    pipeline.relink_source(p, moved)
+    q = Project(p.id)
+    assert not pipeline.source_missing(q) and q.source == moved.resolve() and q.segments[0].trans == "Xin chào"

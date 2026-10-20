@@ -177,6 +177,11 @@ def probe(path: str | Path) -> MediaInfo:
 def run(args: list[str], duration: float = 0.0, progress: ProgressCB | None = None,
         cancel: Callable[[], bool] | None = None, msg: str = "Đang xử lý video", cwd: str | Path | None = None) -> None:
     """Chạy ffmpeg với -progress để báo tiến độ. Ném FFmpegError nếu lỗi."""
+    for i, a in enumerate(args[:-1]):   # file vào không còn (bị chuyển chỗ / đổi tên / xoá): báo dễ hiểu
+        src = args[i + 1]
+        if a == "-i" and os.path.isabs(src) and "://" not in src and not os.path.exists(src):
+            raise FFmpegError(f"Không tìm thấy file: {src}\nFile đã bị chuyển chỗ, đổi tên hoặc xoá. Nếu đây là video gốc "
+                              "của dự án: bấm 'Tìm lại video gốc…' ở thanh trên cùng của dự án.")
     cmd = [ffmpeg_bin(), "-hide_banner", "-y", "-nostdin", "-progress", "pipe:1", "-stats_period", "0.5"] + args
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             encoding="utf-8", errors="replace", creationflags=_NO_WINDOW,

@@ -88,6 +88,76 @@ def attach_source(p: Project, path: Path):
     p.save()
 
 
+VIDEO_EXTS = (".mp4", ".mkv", ".mov", ".flv", ".webm", ".avi", ".m4v", ".ts", ".wmv")
+
+
+def source_missing(p: Project) -> bool:
+    """Dự án có video gốc nhưng file không còn ở chỗ cũ (bị chuyển / đổi tên / xoá, hoặc mở dự án trên máy khác)."""
+    return bool(p.data.get("source")) and not p.source.exists()
+
+
+def _same_length(path: Path, want: float) -> bool:
+    if not want:
+        return True
+    try:
+        return abs(ff.probe(path).duration - want) <= max(1.5, want * 0.01)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def find_moved_source(p: Project) -> Path | None:
+    """Tìm lại video gốc đã bị chuyển chỗ: file CÙNG TÊN, cùng thời lượng, ở thư mục cũ, thư mục tool, Downloads, Desktop,
+    Videos, Documents (và các thư mục con 1 cấp của chúng)."""
+    from .config import APP_DIR
+
+    name = p.source.name
+    if not name:
+        return None
+    home = Path.home()
+    roots = [p.source.parent, APP_DIR, APP_DIR.parent, p.dir] + \
+        [home / d for d in ("Downloads", "Desktop", "Videos", "Documents", "OneDrive/Desktop", "OneDrive/Documents")]
+    want = float(p.data.get("info", {}).get("duration", 0) or 0)
+    seen: set[str] = set()
+    for root in roots:
+        try:
+            if not root.is_dir():
+                continue
+            dirs = [root] + [d for d in sorted(root.iterdir())[:300] if d.is_dir()]
+        except OSError:
+            continue
+        for d in dirs:
+            cand = d / name
+            key = str(cand).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                if cand.is_file() and _same_length(cand, want):
+                    return cand
+            except OSError:
+                continue
+    return None
+
+
+def relink_source(p: Project, path: str | Path) -> Path:
+    """Nối dự án với video gốc ở chỗ mới – giữ nguyên phụ đề, bản dịch, lồng tiếng. Video khác hẳn độ dài -> báo lỗi
+    (phụ đề / lồng tiếng sẽ lệch)."""
+    path = Path(path).expanduser().resolve()
+    info = ff.probe(path)
+    if not info.has_video and not info.has_audio:
+        raise ValueError("File không phải video/âm thanh hợp lệ.")
+    want = float(p.data.get("info", {}).get("duration", 0) or 0)
+    if want and abs(info.duration - want) > max(1.5, want * 0.01):
+        def mmss(x: float) -> str:
+            return f"{int(x // 60)}:{int(x % 60):02d}"
+        raise ValueError(f"Video này dài {mmss(info.duration)}, video gốc của dự án dài {mmss(want)} – không phải cùng "
+                         "video (phụ đề, lồng tiếng sẽ lệch). Chọn đúng file video đã dùng khi tạo dự án.")
+    p.data["source"] = str(path)
+    p.data["info"] = info.to_dict()
+    p.save()
+    return path
+
+
 def make_preview(p: Project, progress: Prog | None = None, cancel=None) -> Path:
     """Tạo bản xem trước nhẹ (H.264 ≤720p) để phát được trong trình duyệt. Không ảnh hưởng chất lượng xuất."""
     out = p.work / "preview.mp4"

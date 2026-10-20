@@ -39,7 +39,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
   Chụp ảnh kiểm tra giao diện phải nạp theme như `run()`: `theme.load_fonts(); app.setFont(theme.font(10));
   app.setStyleSheet(theme.stylesheet())`.
-- `tests/test_core.py` – `python -m pytest -q tests` (76 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (77 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -501,6 +501,16 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `relayout` ngay (màu / tốc độ tính lại theo mốc mới, không đọc lại); `diarize` tách câu -> bỏ giọng nửa câu + xếp lại.
   Tốc độ đặt tay (`speed`), giọng riêng, cách xếp riêng vẫn giữ. Lưu ý: ô "Tốc độ đọc" (Chậm/Bình thường/Nhanh) ở mục 3
   là tốc độ BỘ ĐỌC khi đọc (nằm trong mã hash file giọng) -> đổi rồi Tạo bản lồng tiếng = đọc lại mọi câu.
+
+- 2.0.44: lỗi "Tạo bản xem trước: FFmpegError … Error opening input file C:\Users\daole\Downloads\<tên>.mp4 … No such
+  file or directory". Dự án chỉ LƯU ĐƯỜNG DẪN video gốc (không chép vào dự án) – file đã bị chuyển / đổi tên / xoá ->
+  trình phát không mở được -> `_media_error` tưởng định dạng lạ -> tạo bản xem trước -> FFmpeg lỗi khó hiểu. Sửa:
+  `pipeline.source_missing`, `find_moved_source` (file CÙNG TÊN + cùng độ dài ±max(1,5 s; 1 %) ở thư mục cũ, thư mục
+  tool, Downloads/Desktop/Videos/Documents/OneDrive + thư mục con 1 cấp), `relink_source` (khác độ dài -> ValueError,
+  giữ phụ đề / dịch / lồng tiếng), `VIDEO_EXTS`. GUI: `_load_media` tự tìm + nối lại (toast), không thấy -> nút đỏ
+  "Tìm lại video gốc…" (`relink_btn`, `_relink_source`, QFileDialog) trên thanh đầu; `_media_error`, `_grab_frame`,
+  `_load_timeline_assets` bỏ qua khi mất video. `ff.run`: `-i` là đường dẫn tuyệt đối không tồn tại -> FFmpegError
+  "Không tìm thấy file … bấm 'Tìm lại video gốc…'" (mọi tác vụ: tách giọng, nghe, xuất…).
 
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
