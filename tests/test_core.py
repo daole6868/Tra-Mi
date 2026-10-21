@@ -2481,3 +2481,40 @@ def test_one_speaker_and_auto_tab_follow_settings(sample_video, monkeypatch):
     s2 = config.load_settings()
     assert s2["diarize"] is True and s2["sep_model"] == ENSEMBLE and s2["sep_before_asr"] is False
     win.close()
+
+
+def test_ticks_follow_sentences_after_merge_delete(sample_video):
+    """Tích câu rồi gộp / xoá câu: dấu tích đi theo đúng câu (trước đây giữ số thứ tự cũ -> IndexError khi Tạo lại giọng)."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        pytest.skip(str(e))
+    from trami import pipeline
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    p = Project.create("ticks")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [Segment(i * 0.5, i * 0.5 + 0.4, f"句{i}", f"câu {i}") for i in range(6)]
+    p.save()
+    win = MainWindow()
+    win.open_project(p.id)
+    pp, m = win.project_page, win.project_page.model
+    m.set_picked([4, 5])
+    pp._sub_op("merge", [0, 1])                       # gộp 2 câu đầu -> các câu sau lùi lên 1
+    assert [m.segs[r].trans for r in sorted(m.selected)] == ["câu 4", "câu 5"] and m.selected == {3, 4}
+    pp._sub_op("delete", [4])                         # xoá câu đang tích cuối cùng
+    assert m.selected == {3} and m.segs[3].trans == "câu 4"
+    m.set_picked([1])
+    pp._sub_op("merge", [0, 1])                       # gộp câu chưa tích với câu đã tích -> câu gộp vẫn tích
+    assert m.selected == {0, 2} and m.segs[2].trans == "câu 4"
+    calls = []
+    pp.submit = lambda *a, **k: calls.append(a)       # không chạy lồng tiếng thật
+    pp._redub_picked()                                # trước đây: IndexError
+    pp.flush()                                        # lưu ngay (bình thường lưu sau 0,x giây)
+    pp.reload()                                       # đọc lại dự án (vd. xong tác vụ): cùng số câu -> giữ tích
+    assert m.selected == {0, 2}
+    win.close()

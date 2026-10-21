@@ -82,20 +82,42 @@ class SubsModel(QAbstractTableModel):
         super().__init__()
         self.segs: list[Segment] = segs or []
         self.active = -1
-        self.selected: set[int] = set()        # câu đã tích (chỉ trong phiên làm việc, không lưu)
+        # câu đã tích (chỉ trong phiên làm việc, không lưu) – nhớ theo ĐÚNG CÂU (id đối tượng -> câu), không theo số thứ
+        # tự: gộp / tách / thêm / xoá câu làm số thứ tự đổi; trước 2.0.54 tích giữ số cũ -> trỏ sai câu / ra ngoài danh sách
+        # (IndexError ở "Tạo lại giọng các câu đã tích" sau khi gộp câu)
+        self._picked: dict[int, Segment] = {}
         self.voice_names: dict[str, str] = {}  # mã giọng -> tên hiển thị
+
+    @property
+    def selected(self) -> set[int]:
+        """Số thứ tự (hiện tại) của các câu đã tích."""
+        return {i for i, s in enumerate(self.segs) if id(s) in self._picked}
+
+    def is_picked(self, row: int) -> bool:
+        return 0 <= row < len(self.segs) and id(self.segs[row]) in self._picked
 
     def set_segments(self, segs: list[Segment]):
         self.beginResetModel()
-        if len(segs) != len(self.segs):       # danh sách câu đổi hẳn -> bỏ tích
-            self.selected = set()
+        if segs is self.segs:
+            # thêm / gộp / tách / xoá câu ngay trong danh sách: tích đi theo câu, câu đã xoá thì bỏ
+            alive = {id(x) for x in segs}
+            self._picked = {k: v for k, v in self._picked.items() if k in alive}
+        elif len(segs) == len(self.segs):     # đọc lại dự án (cùng các câu, đối tượng mới): giữ tích theo số thứ tự
+            self._picked = {id(segs[r]): segs[r] for r in self.selected}
+        else:                                 # danh sách câu đổi hẳn -> bỏ tích
+            self._picked = {}
         self.segs = segs
         self.endResetModel()
         self.picked.emit()
 
     def set_picked(self, rows, on: bool = True):
-        rows = {r for r in rows if 0 <= r < len(self.segs)}
-        self.selected = (self.selected | rows) if on else (self.selected - rows)
+        for r in rows:
+            if 0 <= r < len(self.segs):
+                seg = self.segs[r]
+                if on:
+                    self._picked[id(seg)] = seg
+                else:
+                    self._picked.pop(id(seg), None)
         if self.segs:
             self.dataChanged.emit(self.index(0, C_SEL), self.index(len(self.segs) - 1, C_SEL))
         self.picked.emit()
@@ -157,7 +179,7 @@ class SubsModel(QAbstractTableModel):
             if c == C_NODUB:
                 return Qt.CheckState.Checked if s.extra.get("nodub") else Qt.CheckState.Unchecked
             if c == C_SEL:
-                return Qt.CheckState.Checked if idx.row() in self.selected else Qt.CheckState.Unchecked
+                return Qt.CheckState.Checked if self.is_picked(idx.row()) else Qt.CheckState.Unchecked
         if role == Qt.ItemDataRole.ForegroundRole:
             if c == C_VOICE:
                 return QColor("#FF8A3D" if s.extra.get("voice") else theme.MUTED)   # cam = câu có giọng riêng

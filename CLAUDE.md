@@ -58,7 +58,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (link điện thoại / rút gọn -> dạng yt-dlp có bộ tải riêng), đăng nhập Bilibili
   bằng mã QR (`bili_qr_start/poll/status`, cookie Netscape `data/cookies/bilibili.txt`), `BROWSERS` cho cookie
   trình duyệt; hộp mã QR `gui/link_login.py`; `pipeline.download_video` / `update_ytdlp` / `ytdlp_version`.
-- `tests/test_core.py` – `python -m pytest -q tests` (91 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (92 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -711,6 +711,15 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `diarize_speakers == 1` -> gán hết S1, không gọi diarize (không đo giọng, không tách câu); `pipeline.diarize` cũng vậy.
   Thông báo sau bước 1 ghi rõ đã chạy theo gì: `sep_model_name` (đọc work/stems/model.txt – mô hình thật đã chạy) +
   `speaker_note` ("phân biệt người nói: tắt" / "1 người nói (gán hết S1…)" / "người nói: N (tự đoán / đặt N)").
+
+- 2.0.54: "sau khi gộp câu lỗi IndexError: list index out of range ở `_redub_rows`" (Tạo lại giọng các câu đã tích).
+  `SubsModel.selected` (câu đã tích) nhớ theo SỐ THỨ TỰ; gộp / tách / thêm / xoá câu sửa thẳng `model.segs` rồi gọi
+  `set_segments(cùng danh sách)` -> điều kiện "số câu đổi thì bỏ tích" so danh sách với chính nó -> không bao giờ bỏ ->
+  tích trỏ ra ngoài danh sách (IndexError) hoặc TRỎ SAI CÂU (đặt tốc độ / dịch lại / tạo lại giọng nhầm câu, không báo
+  lỗi). Sửa: tích nhớ theo đúng câu `_picked` {id(câu): câu}; `selected` là property tính số thứ tự hiện tại; `is_picked`;
+  `set_segments`: cùng danh sách (sửa tại chỗ) -> giữ tích của câu còn lại, danh sách mới cùng số câu (đọc lại dự án sau
+  tác vụ) -> giữ theo số thứ tự, khác -> bỏ. Gộp có câu đã tích -> câu gộp vẫn tích (`_sub_op` / `_seg_op`).
+  `_redub_rows` lọc số thứ tự hợp lệ.
 
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.

@@ -2129,11 +2129,14 @@ class ProjectPage(QWidget):
             return self.win.toast("Chọn câu trên dòng Phụ đề trước", "warn")
         elif op == "merge":
             lo, hi = rows[0], rows[-1]
+            picked = any(self.model.is_picked(r) for r in range(lo, max(hi, lo + 1) + 1))
             if lo == hi:
                 st.merge(segs, lo)
             else:
                 for _ in range(hi - lo):
                     st.merge(segs, lo)
+            if picked:   # gộp câu đã tích -> câu gộp vẫn được tích
+                self.model.set_picked([lo])
             focus = lo
         elif op == "delete":
             for r in sorted(rows, reverse=True):
@@ -2282,7 +2285,10 @@ class ProjectPage(QWidget):
         elif i < 0:
             return self.win.toast("Hãy chọn 1 câu trong bảng trước", "warn")
         elif op == "merge":
+            picked = self.model.is_picked(i) or self.model.is_picked(i + 1)
             st.merge(segs, i)
+            if picked:
+                self.model.set_picked([i])
         elif op == "split":
             st.split(segs, i, self.player.position())
         elif op == "delete":
@@ -2878,6 +2884,9 @@ class ProjectPage(QWidget):
 
     def _redub_rows(self, rows: list[int]):
         self.inspector._flush()
+        rows = [r for r in rows if 0 <= r < len(self.model.segs)]
+        if not rows:
+            return self.win.toast("Chưa chọn câu nào", "warn")
         empty = [r + 1 for r in rows if not self.model.segs[r].trans.strip()]
         if empty:
             return self.win.toast(f"Câu {', '.join(map(str, empty[:5]))} chưa có lời tiếng Việt", "warn")
