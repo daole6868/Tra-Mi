@@ -269,8 +269,10 @@ class Translator:
     # ------------------------------------------------------------- public
     def translate_segments(self, segs: list[Segment], progress: ProgressCB | None = None,
                            cancel: Callable[[], bool] | None = None, only_empty: bool = False,
-                           auto_terms: bool = True, summary: str = "") -> list[Segment]:
-        idx = [i for i, s in enumerate(segs) if s.text.strip() and (not only_empty or not s.trans.strip())]
+                           auto_terms: bool = True, summary: str = "", rows: set[int] | None = None) -> list[Segment]:
+        """rows: chỉ dịch các câu này (None = mọi câu)."""
+        idx = [i for i, s in enumerate(segs) if s.text.strip() and (not only_empty or not s.trans.strip())
+               and (rows is None or i in rows)]
         if not idx:
             return segs
         if self.llm and auto_terms:

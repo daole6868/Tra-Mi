@@ -39,7 +39,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
   Chụp ảnh kiểm tra giao diện phải nạp theme như `run()`: `theme.load_fonts(); app.setFont(theme.font(10));
   app.setStyleSheet(theme.stylesheet())`.
-- `tests/test_core.py` – `python -m pytest -q tests` (78 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (79 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -525,6 +525,16 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     không làm lại). GUI `_shorten_rows`: rút gọn rồi `redub` ĐÚNG các câu đổi lời (đã có bản lồng), job kind "redub",
     kết quả `pick` -> `job_finished` tích sẵn các câu đó; nút "Bỏ rút gọn" (`_unshorten_rows`); "Tích câu ⚠ quá dài" dùng
     `needs_shorten`. Thử GUI (AI + Edge giả): tích 5 câu -> rút gọn + đọc lại đúng 2 câu dài, câu bị đẩy giữ nguyên.
+
+- 2.0.46: "tách phụ đề Trung rồi dịch ở tab Lồng tiếng hay Phụ đề được không". Tab Phụ đề có Dịch dòng trống / Dịch lại tất
+  cả / Dịch câu chọn; tab Lồng tiếng chưa có -> thêm hàng "Dịch": "Dịch câu chưa dịch" + "Dịch lại câu đã tích"
+  (`project_page._translate_rows`): dịch rồi, nếu đã có bản lồng (`has_dub`), `redub` ĐÚNG các câu đổi lời, tích sẵn chúng;
+  nhãn `d_engine_lbl` "bằng: <công cụ>". `pipeline.translate(rows=)` + `Translator.translate_segments(rows=)`: chỉ dịch các
+  câu đó; dịch LẠI (rows, không only_empty) xoá bản dịch nhớ sẵn của các câu đó trong `p.data["cache"]` (khoá
+  "engine|style|câu gốc" có / không `⟪≤N tiếng⟫`). Lỗi tìm ra: nút Dịch dùng ô `a_engine` (tab Tự động, chỉ đọc Cài đặt
+  lúc dựng trang) còn AI rút gọn dùng `translate_engine` trong Cài đặt -> đổi Cài đặt giữa phiên thì nút Dịch vẫn dùng
+  công cụ cũ. Sửa: `sync_engine()` (mở dự án + `SettingsPage.save`), đổi ô tab Tự động -> `_engine_changed` lưu
+  `translate_engine` / `translate_style` vào Cài đặt ("Không dịch" không lưu).
 
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.

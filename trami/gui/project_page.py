@@ -231,6 +231,9 @@ class ProjectPage(QWidget):
         self.a_method.currentIndexChanged.connect(
             lambda: (self.a_asr.setEnabled(self.a_method.currentData() == "asr"),
                      self.a_ocrfps.setEnabled(self.a_method.currentData() == "ocr")))
+        # 1 công cụ dịch cho cả tool: đổi ở đây = đổi ở Cài đặt (nút Dịch, AI rút gọn, dịch lại đều dùng chung)
+        self.a_engine.currentIndexChanged.connect(self._engine_changed)
+        self.a_style.currentIndexChanged.connect(self._engine_changed)
         card.add(f)
         go = GradientButton("Bắt đầu dịch tự động", "bolt", big=True)
         go.clicked.connect(self.run_auto)
@@ -844,6 +847,14 @@ class ProjectPage(QWidget):
                          "tiếng đang dùng (không đọc lại cả video)")
         regen.clicked.connect(self._redub_picked)
         spk.add(regen)
+        self.d_engine_lbl = label("", "muted")
+        spk.add(flow(label("Dịch", "muted"),
+                     button("Dịch câu chưa dịch", "globe", "Dịch các câu chưa có lời tiếng Việt – đã có bản lồng thì "
+                            "đọc luôn giọng các câu này", on_click=lambda: self._translate_rows(None, True)),
+                     button("Dịch lại câu đã tích", "refresh", "Dịch lại các câu đã tích (ra bản dịch mới) rồi tạo lại "
+                            "giọng đúng các câu đó",
+                            on_click=lambda: self._translate_rows(sorted(self.model.selected), False)),
+                     self.d_engine_lbl))
         spk.add(flow(label("Phụ đề", "muted"),
                      button("Xuất SRT gốc (chưa dịch)", "upload", "Lấy lời gốc đã tách câu để dịch ở phần mềm khác",
                             on_click=lambda: self._export_sub("srt", "source")),
@@ -1021,6 +1032,7 @@ class ProjectPage(QWidget):
             self._fill_edit()
             self._fill_speakers()
             self._fill_dub_layout()
+            self.sync_engine()
             self._fill_outputs()
             self._update_summary()
             self._update_timeline()
@@ -1451,6 +1463,68 @@ class ProjectPage(QWidget):
                     msg = "⚠ " + p.data["ocr_warning"]
             return {"message": msg}
         self.submit("recognize", "Lấy phụ đề", fn)
+
+    def sync_engine(self):
+        """Ô công cụ dịch / văn phong (tab Tự động) theo Cài đặt – gọi khi mở dự án và khi lưu Cài đặt."""
+        st = self.settings
+        was, self.loading = self.loading, True
+        try:
+            if self.a_engine.currentData() != pipeline.NO_TRANSLATE:
+                set_combo(self.a_engine, st.get("translate_engine", "google"))
+            set_combo(self.a_style, st.get("translate_style", "auto"))
+        finally:
+            self.loading = was
+        self._update_engine_label()
+
+    def _engine_changed(self, *_):
+        self._update_engine_label()
+        if self.loading:
+            return
+        eng = self.a_engine.currentData()
+        from ..config import save_settings
+
+        save_settings({"translate_style": self.a_style.currentData(),
+                       **({"translate_engine": eng} if eng != pipeline.NO_TRANSLATE else {})})
+        self.settings = load_settings()
+
+    def _update_engine_label(self):
+        if getattr(self, "d_engine_lbl", None) is not None:
+            self.d_engine_lbl.setText("bằng: " + self.a_engine.currentText().split(" – ")[0] +
+                                      " (đổi ở Cài đặt hoặc tab Tự động)")
+
+    def _translate_rows(self, rows: list[int] | None, only_empty: bool):
+        """Dịch ngay ở tab Lồng tiếng: câu chưa dịch (rows None) / dịch lại câu đã tích; đã có bản lồng thì đọc luôn
+        giọng ĐÚNG các câu vừa đổi lời; các câu đó được tích sẵn."""
+        eng, sty = self.a_engine.currentData(), self.a_style.currentData()
+        if eng == pipeline.NO_TRANSLATE:
+            return self.win.toast("Đang chọn 'Không dịch' ở tab Tự động – chọn công cụ dịch trước", "warn")
+        if rows is not None and not rows:
+            return self.win.toast("Tích chọn câu cần dịch lại ở cột Chọn trước", "warn")
+        segs = self.model.segs
+        if rows is None and not any(x.text.strip() and not x.trans.strip() for x in segs):
+            return self.win.toast("Câu nào cũng đã có lời tiếng Việt", "info")
+        self.inspector._flush()
+        before = [x.trans for x in segs]
+        tts_eng, rate = self.d_engine.currentData(), self.d_rate.currentData()
+        st = dict(load_settings())
+        st["dub_skip_songs"] = self.d_skipsong.isChecked()
+        self._replay_row = None
+
+        def fn(j, p):
+            pipeline.translate(p, eng, sty, only_empty, None, lambda x, m="": j.update(0.6 * x, m), j.cancelled,
+                               rows=rows)
+            new = p.segments
+            changed = [k for k, x in enumerate(new) if k < len(before) and x.trans.strip() and x.trans != before[k]]
+            msg = f"Đã dịch {len(changed)} câu"
+            w = p.data.get("translate_warning")
+            if changed and pipeline.has_dub(p):
+                pipeline.redub(p, changed, rate, st, lambda x, m="": j.update(0.6 + 0.4 * x, m), j.cancelled, tts_eng)
+                msg += " và đã tạo giọng các câu đó – trình phát đang dùng bản mới"
+            elif changed:
+                msg += " – bấm 'Tạo bản lồng tiếng' để đọc"
+            return {"message": msg + (f" – ⚠ {w}" if w else ""), "pick": changed}
+        self.submit("redub" if pipeline.has_dub(self.p) else "translate",
+                    "Dịch câu chưa dịch" if rows is None else f"Dịch lại {len(rows)} câu", fn)
 
     def run_translate(self, only_empty: bool):
         eng, sty = self.a_engine.currentData(), self.a_style.currentData()

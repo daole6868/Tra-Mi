@@ -1824,3 +1824,24 @@ def test_moved_source_video_found_or_relinked(sample_video, tmp_path, monkeypatc
     pipeline.relink_source(p, moved)
     q = Project(p.id)
     assert not pipeline.source_missing(q) and q.source == moved.resolve() and q.segments[0].trans == "Xin chào"
+
+
+def test_translate_only_chosen_rows_without_cache(monkeypatch):
+    """Dịch ở tab Lồng tiếng: chỉ dịch đúng các câu chọn; dịch LẠI thì không lấy bản dịch cũ đã nhớ."""
+    from trami import pipeline, translate
+    from trami.project import Project
+
+    calls = []
+
+    def fake(self, lines, progress=None, cancel=None, summary=""):
+        calls.append(list(lines))
+        return [f"mới {len(calls)}" for _ in lines]
+    monkeypatch.setattr(translate.Translator, "translate_lines", fake)
+    p = Project.create("dich_cau_chon")
+    p.segments = [Segment(0, 1, "你好", "Xin chào"), Segment(2, 3, "走吧", ""), Segment(4, 5, "等等", "Đợi đã")]
+    p.data["cache"] = {"google|auto|你好": "Xin chào"}
+    p.save()
+    pipeline.translate(p, "google", "auto", True, {"translate_engine": "google"}, rows=None)
+    assert [s.trans for s in p.segments] == ["Xin chào", "mới 1", "Đợi đã"] and calls == [["走吧"]]
+    pipeline.translate(p, "google", "auto", False, {"translate_engine": "google"}, rows=[0])
+    assert p.segments[0].trans == "mới 2" and p.segments[2].trans == "Đợi đã" and calls[-1] == ["你好"]

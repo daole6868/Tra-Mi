@@ -633,8 +633,10 @@ def _drop_char_times(p: Project) -> None:
 # ------------------------------------------------------------------ dịch
 
 def translate(p: Project, engine: str | None = None, style: str | None = None, only_empty: bool = False,
-              settings: dict | None = None, progress: Prog | None = None, cancel=None) -> int:
-    from .translate import Translator, glossary_text, parse_glossary
+              settings: dict | None = None, progress: Prog | None = None, cancel=None,
+              rows: list[int] | None = None) -> int:
+    """Dịch phụ đề. rows: chỉ các câu này (dịch LẠI: bỏ bản dịch nhớ sẵn của chúng để ra bản mới)."""
+    from .translate import BUDGET_RE, Translator, glossary_text, parse_glossary
 
     settings = settings or load_settings()
     segs = p.segments
@@ -644,6 +646,12 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
         raise ValueError("Đang chọn 'Không dịch'. Chọn công cụ dịch ở tab Tự động, hoặc nạp file SRT đã dịch "
                          "ở tab Lồng tiếng / Phụ đề.")
     cache = p.data.setdefault("cache", {})
+    if rows is not None and not only_empty:   # dịch lại câu chọn: không lấy lại bản dịch cũ đã nhớ
+        texts = {segs[i].text for i in rows if 0 <= i < len(segs)}
+        for key in list(cache):
+            parts = key.split("|", 2)
+            if len(parts) == 3 and BUDGET_RE.sub("", parts[2]).strip() in texts:
+                del cache[key]
     tr = Translator(settings, engine, style, parse_glossary(p.data.get("glossary", "")), cache)
 
     last_save = [time.time()]
@@ -655,7 +663,8 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
             p.save()
             last_save[0] = time.time()
 
-    tr.translate_segments(segs, prog, cancel, only_empty=only_empty, summary=p.data.get("summary", ""))
+    tr.translate_segments(segs, prog, cancel, only_empty=only_empty, summary=p.data.get("summary", ""),
+                          rows=set(rows) if rows is not None else None)
     # ghi lại thuật ngữ AI tìm được để người dùng xem/sửa
     user_g = parse_glossary(settings.get("glossary", ""))
     proj_g = parse_glossary(p.data.get("glossary", ""))

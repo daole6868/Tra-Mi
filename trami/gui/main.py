@@ -741,6 +741,10 @@ class SettingsPage(QWidget):
     def save(self):
         save_settings(self.collect())
         self.win.project_page.settings = load_settings()
+        try:   # nút Dịch / AI rút gọn ở trang dự án dùng đúng công cụ dịch vừa chọn
+            self.win.project_page.sync_engine()
+        except Exception:  # noqa: BLE001
+            pass
         self.win.toast("Đã lưu cài đặt", "ok")
         self.load()
 
