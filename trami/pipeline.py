@@ -70,8 +70,13 @@ def _dl_error(e: BaseException, url: str, used_cookies: bool) -> str:
     if "fresh cookies" in low:
         return ("Douyin cần cookie trình duyệt: ở Trang chủ, mục 'Trang khác lấy đăng nhập từ' chọn Firefox (mở "
                 f"douyin.com trên Firefox 1 lần trước) hoặc chọn file cookies.txt.\n({msg[:200]})")
-    if "unsupported url" in low:
-        return f"Link này không được hỗ trợ hoặc sai link – mở thử trên trình duyệt xem có phát được không.\n({msg[:200]})"
+    if "unsupported url" in low or "is unusual and will be skipped" in low:
+        # bộ tải chung nhận về trang web chứ không phải video: link không phải trang phát video / trang chưa hỗ trợ
+        return ("Tool không tìm thấy video ở link này (nhận về trang web, không phải video).\n"
+                f"Link đã thử: {url}\n"
+                "Mở video trên trình duyệt MÁY TÍNH, chép link ở thanh địa chỉ khi video đang phát (Bilibili dạng "
+                "https://www.bilibili.com/video/BV…, Douyin dạng https://www.douyin.com/video/…) rồi dán lại. "
+                f"Link trang cá nhân / danh sách / ảnh không tải được.\n({msg[:160]})")
     if any(x in low for x in ("not available in your country", "geo restrict", "地区")):
         return f"Video bị giới hạn khu vực, không tải được từ Việt Nam.\n({msg[:200]})"
     if any(x in low for x in ("premium", "大会员", "vip", "paid", "purchase")):
@@ -99,6 +104,10 @@ def download_video(url: str, dest_dir: Path, progress: Prog | None = None, cance
     url = sitelogin.extract_url(url)
     if not url:
         raise ValueError(f"Không tìm thấy link trong: {raw[:120]}")
+    if progress:
+        progress(0.0, "Đang mở link…")
+    # m.bilibili.com / b23.tv / v.douyin.com… -> dạng yt-dlp nhận ra (không thì rơi vào bộ tải chung -> lỗi 'html')
+    url = sitelogin.normalize_url(url)
     settings = settings if settings is not None else load_settings()
     bili = sitelogin.is_bilibili(url)
     cookie_opts: dict = {}

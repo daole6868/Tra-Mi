@@ -54,7 +54,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (đứng 45 s -> ghi `data/hf_no_xet.txt`, `config` đặt `HF_HUB_DISABLE_XET=1`) -> HuggingFace tải thường (60 s) ->
   ModelScope chính hãng (`MS_MIRRORS`, tải thẳng vào kho HF: snapshot `ms_commit` + `refs/main`; được thì ghi
   `data/hf_prefer_modelscope.txt` -> lần sau ModelScope trước). `models._hf_snapshot` ưu tiên snapshot theo refs/main.
-- `trami/sitelogin.py` – tải video từ link: `extract_url` (link / dòng chia sẻ của app / mã BV), đăng nhập Bilibili
+- `trami/sitelogin.py` – tải video từ link: `extract_url` (link / dòng chia sẻ của app / mã BV), `normalize_url`
+  (link điện thoại / rút gọn -> dạng yt-dlp có bộ tải riêng), đăng nhập Bilibili
   bằng mã QR (`bili_qr_start/poll/status`, cookie Netscape `data/cookies/bilibili.txt`), `BROWSERS` cho cookie
   trình duyệt; hộp mã QR `gui/link_login.py`; `pipeline.download_video` / `update_ytdlp` / `ytdlp_version`.
 - `tests/test_core.py` – `python -m pytest -q tests` (90 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
@@ -688,6 +689,17 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   * Sửa `timeline.mouseMoveEvent` IndexError khi rê chuột qua dòng Video / Tiếng gốc lúc chưa biết độ dài video.
   * Đã chạy thật: yt-dlp 2026.08.19 tải từ máy chủ trên máy (dòng chia sẻ, cookie chrome lỗi -> tải không cookie), hộp mã
     QR (giải mã lại bằng cv2.QRCodeDetector ra đúng link), trạng thái đăng nhập, xoá dự án trống. Bilibili thật chưa chạy.
+
+- 2.0.52: bấm Cập nhật trình tải vẫn lỗi "ERROR: The extracted extension ('html') is unusual and will be skipped for safety
+  reasons". Nguyên nhân: yt-dlp chỉ có bộ tải Bilibili cho `(www.)bilibili.com/video/BV…` (+ bangumi / av), Douyin cho
+  `www.douyin.com/video/<số>`; link điện thoại `m.bilibili.com/video/BV…`, link rút gọn `b23.tv` (không có bộ tải riêng),
+  `v.douyin.com` -> `iesdouyin.com/share/video/…`, `douyin.com/?modal_id=…` rơi vào bộ tải CHUNG -> nhận trang web, coi
+  là file ".html" -> lỗi trên (đã kiểm bằng `IE.suitable` của yt-dlp 2026.08.19). Sửa: `sitelogin.normalize_url`
+  (`resolve_short` đi theo chuyển hướng của b23.tv / bili2233.cn / v.douyin.com / v.kuaishou.com / xhslink.com; Bilibili:
+  có BV / av ở bất kỳ đâu -> `https://www.bilibili.com/video/BV…[?p=N]`, m. -> www. cho bangumi; Douyin: id số từ
+  /video/, /share/video/, modal_id / vid / aweme_id -> `https://www.douyin.com/video/<id>`), gọi trong `download_video`
+  sau `extract_url`. `_dl_error`: lỗi "html unusual" / "Unsupported URL" -> giải thích + in "Link đã thử" + cách chép
+  link đúng (trình duyệt máy tính, thanh địa chỉ khi video đang phát). Douyin chuẩn hoá xong vẫn cần cookie (Firefox).
 
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.

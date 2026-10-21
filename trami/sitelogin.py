@@ -53,9 +53,56 @@ def extract_url(text: str) -> str:
     return ""
 
 
+def _host(url: str) -> str:
+    return re.sub(r"^https?://", "", url or "", flags=re.I).split("/")[0].split("?")[0].lower()
+
+
 def is_bilibili(url: str) -> bool:
-    host = re.sub(r"^https?://", "", url or "", flags=re.I).split("/")[0].lower()
+    host = _host(url)
     return any(host == h or host.endswith("." + h) for h in BILI_HOSTS)
+
+
+SHORT_HOSTS = ("b23.tv", "bili2233.cn", "v.douyin.com", "v.kuaishou.com", "xhslink.com")
+_AV = re.compile(r"/video/av(\d+)", re.I)
+_DY_ID = re.compile(r"(?:/video/|/share/video/|[?&](?:modal_id|vid|aweme_id)=)(\d{8,})")
+
+
+def resolve_short(url: str, timeout: float = 10) -> str:
+    """Link rút gọn (b23.tv, v.douyin.com…) -> link thật (đi theo chuyển hướng). Lỗi mạng -> giữ nguyên."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": UA}, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.geturl() or url
+    except Exception as e:  # noqa: BLE001
+        loc = getattr(e, "headers", None) and e.headers.get("Location")   # type: ignore[union-attr]
+        return loc or url
+
+
+def normalize_url(url: str, resolve=resolve_short) -> str:
+    """Đưa link về dạng yt-dlp nhận ra. yt-dlp chỉ có bộ tải Bilibili cho www.bilibili.com/video/BV…, Douyin cho
+    www.douyin.com/video/<số>; link khác (m.bilibili.com, b23.tv trỏ sang trang lạ, v.douyin.com -> iesdouyin.com/share,
+    www.douyin.com/?modal_id=…) rơi vào bộ tải chung -> nhận về trang web -> lỗi "extracted extension ('html') is unusual"."""
+    url = (url or "").strip()
+    if _host(url) in SHORT_HOSTS:
+        url = resolve(url) or url
+    host = _host(url)
+    if is_bilibili(url) and host not in ("space.bilibili.com", "live.bilibili.com"):
+        page = re.search(r"[?&]p=(\d+)", url)
+        suffix = f"?p={page.group(1)}" if page and page.group(1) != "1" else ""
+        m = _BV.search(url)
+        if m:
+            return f"https://www.bilibili.com/video/{m.group(1)}{suffix}"
+        m = _AV.search(url)
+        if m:
+            return f"https://www.bilibili.com/video/av{m.group(1)}{suffix}"
+        if host.startswith("m."):   # bangumi / cheese trên trang điện thoại
+            return re.sub(r"^(https?://)m\.bilibili\.com", r"\1www.bilibili.com", url, flags=re.I)
+        return url
+    if host.endswith("douyin.com") or host.endswith("iesdouyin.com"):
+        m = _DY_ID.search(url)
+        if m:
+            return f"https://www.douyin.com/video/{m.group(1)}"
+    return url
 
 
 # ------------------------------------------------------------------ cookie file (định dạng Netscape cho yt-dlp)

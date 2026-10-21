@@ -2265,6 +2265,32 @@ def test_link_parse_and_bilibili_qr_login(tmp_path, monkeypatch):
     assert sl.is_bilibili("https://b23.tv/x") and sl.is_bilibili("https://m.bilibili.com/video/BV1")
     assert not sl.is_bilibili("https://www.youtube.com/watch?v=1") and not sl.is_bilibili("https://notbilibili.com/")
 
+    # link điện thoại / rút gọn / chia sẻ -> dạng yt-dlp có bộ tải riêng (không thì rơi vào bộ tải chung -> lỗi "html")
+    short = {"https://b23.tv/AbC": "https://m.bilibili.com/video/BV1xx411c7mD?share_source=copy&p=2",
+             "https://v.douyin.com/iRN/": "https://www.iesdouyin.com/share/video/7312345678901234567/?region=VN"}
+    norm = {"https://m.bilibili.com/video/BV1xx411c7mD?spm=1": "https://www.bilibili.com/video/BV1xx411c7mD",
+            "https://b23.tv/AbC": "https://www.bilibili.com/video/BV1xx411c7mD?p=2",
+            "https://www.bilibili.com/list/watchlater?bvid=BV1xx411c7mD&oid=1":
+                "https://www.bilibili.com/video/BV1xx411c7mD",
+            "https://m.bilibili.com/bangumi/play/ep123": "https://www.bilibili.com/bangumi/play/ep123",
+            "https://www.bilibili.com/video/av170001?p=3": "https://www.bilibili.com/video/av170001?p=3",
+            "https://v.douyin.com/iRN/": "https://www.douyin.com/video/7312345678901234567",
+            "https://www.douyin.com/jingxuan?modal_id=7312345678901234567":
+                "https://www.douyin.com/video/7312345678901234567",
+            "https://www.youtube.com/watch?v=abc": "https://www.youtube.com/watch?v=abc"}
+    for raw, want in norm.items():
+        assert sl.normalize_url(raw, lambda u: short.get(u, u)) == want, raw
+    try:
+        from yt_dlp.extractor import gen_extractor_classes
+    except ImportError:
+        gen_extractor_classes = None
+    if gen_extractor_classes:
+        def ie(u):
+            return next((e.IE_NAME for e in gen_extractor_classes() if e.suitable(u) and e.IE_NAME != "generic"),
+                        "generic")
+        assert ie("https://m.bilibili.com/video/BV1xx411c7mD") == "generic"      # nguyên nhân lỗi cũ
+        assert {ie(v) for k, v in norm.items() if "youtube" not in k} <= {"BiliBili", "BiliBiliBangumi", "Douyin"}
+
     monkeypatch.setattr(sl, "BILI_FILE", tmp_path / "bili.txt")
     replies = iter([({"code": 0, "data": {"code": 86101}}, None), ({"code": 0, "data": {"code": 86090}}, None)])
     monkeypatch.setattr(sl, "_get", lambda url, *a, **k: next(replies))
