@@ -2426,3 +2426,58 @@ def test_link_login_gui(tmp_path, monkeypatch):
     win._drop_empty_project(q.id)
     assert q.dir.exists()
     win.close()
+
+
+def test_one_speaker_and_auto_tab_follow_settings(sample_video, monkeypatch):
+    """Cài đặt 'Số người nói = 1' -> gán hết S1, không đo giọng / không tách câu; công tắc tab Tự động = Cài đặt."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from trami import asr, asr_funasr, config, diarize as dz, pipeline
+    from trami.project import Project
+
+    monkeypatch.setattr(asr_funasr, "available", lambda: True)
+    monkeypatch.setattr(asr_funasr, "transcribe_sensevoice",
+                        lambda *a, **k: [Segment(0.5, 2.0, "你好。"), Segment(2.5, 4.0, "朋友。")])
+    monkeypatch.setattr(asr, "transcribe", lambda *a, **k: [])
+    monkeypatch.setattr(dz, "assign_speakers", lambda *a, **k: (_ for _ in ()).throw(AssertionError("không được đo giọng")))
+    p = Project.create("one")
+    pipeline.attach_source(p, sample_video)
+    st = {"asr_engine": "sensevoice", "sep_before_asr": False, "diarize": True, "diarize_speakers": 1,
+          "asr_max_chars": 22}
+    pipeline.recognize(Project(p.id), "asr", "zh", settings=st)
+    pr = Project(p.id)
+    assert [s.speaker for s in pr.segments] == ["S1", "S1"]
+    assert "1 người nói" in pipeline.speaker_note(pr, st)
+    assert pipeline.diarize(pr, st) == 1   # nút Phân biệt người nói cũng vậy
+    assert pipeline.speaker_note(pr, {"diarize": False}) == "phân biệt người nói: tắt"
+    (pr.work / "stems").mkdir(parents=True, exist_ok=True)
+    from trami.separate import ENSEMBLE
+
+    (pr.work / "stems" / "model.txt").write_text(ENSEMBLE, "utf-8")
+    assert pipeline.sep_model_name(pr) == "Kết hợp BS + Mel-RoFormer"
+
+    pytest.importorskip("PySide6")
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        pytest.skip(str(e))
+    from trami.gui.main import MainWindow
+    from trami.separate import BS_ROFORMER
+
+    app = QApplication.instance() or QApplication([])
+    config.save_settings({"diarize": True, "sep_before_asr": True})
+    win = MainWindow()
+    win.open_project(pr.id)
+    pp = win.project_page
+    assert pp.a_spk.isChecked() and pp.a_sep.isChecked()
+    # đổi ở Cài đặt khi tool đang mở -> tab Tự động theo ngay (trước đây giữ giá trị lúc mở tool)
+    config.save_settings({"diarize": False, "sep_before_asr": False, "sep_model": BS_ROFORMER})
+    pp.settings = config.load_settings()
+    pp.sync_engine()
+    assert not pp.a_spk.isChecked() and not pp.a_sep.isChecked() and pp.d_sepmodel.currentData() == BS_ROFORMER
+    assert config.load_settings()["diarize"] is False
+    # bật ở tab Tự động -> Cài đặt đổi theo
+    pp.a_spk.setChecked(True)
+    pp.d_sepmodel.setCurrentIndex(pp.d_sepmodel.findData(ENSEMBLE))
+    s2 = config.load_settings()
+    assert s2["diarize"] is True and s2["sep_model"] == ENSEMBLE and s2["sep_before_asr"] is False
+    win.close()

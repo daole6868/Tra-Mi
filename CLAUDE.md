@@ -58,7 +58,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (link điện thoại / rút gọn -> dạng yt-dlp có bộ tải riêng), đăng nhập Bilibili
   bằng mã QR (`bili_qr_start/poll/status`, cookie Netscape `data/cookies/bilibili.txt`), `BROWSERS` cho cookie
   trình duyệt; hộp mã QR `gui/link_login.py`; `pipeline.download_video` / `update_ytdlp` / `ytdlp_version`.
-- `tests/test_core.py` – `python -m pytest -q tests` (90 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (91 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -700,6 +700,17 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   /video/, /share/video/, modal_id / vid / aweme_id -> `https://www.douyin.com/video/<id>`), gọi trong `download_video`
   sau `extract_url`. `_dl_error`: lỗi "html unusual" / "Unsupported URL" -> giải thích + in "Link đã thử" + cách chép
   link đúng (trình duyệt máy tính, thanh địa chỉ khi video đang phát). Douyin chuẩn hoá xong vẫn cần cookie (Firefox).
+
+- 2.0.53: người dùng hỏi Cài đặt "Tách giọng & người nói" (Kết hợp BS + Mel-RoFormer, tách giọng trước khi nhận dạng bật,
+  tự phân biệt người nói tắt, số người nói 1) thì "1. Nghe & tách câu" có chạy đúng không. Tìm ra: `run_recognize` / chạy
+  trọn gói lấy "Tách giọng khỏi nhạc trước" + "Phân biệt người nói" từ 2 công tắc tab Tự động (ghi đè Cài đặt), mà 2 công
+  tắc này chỉ đọc Cài đặt LÚC MỞ TOOL -> đổi Cài đặt khi tool đang mở thì bước 1 vẫn chạy theo giá trị cũ (cùng kiểu lỗi
+  2.0.46); ô mô hình tách ở tab Lồng tiếng (`d_sepmodel`) cũng vậy. Và "Số người nói = 1" + bật phân biệt người nói vẫn đo
+  ECAPA + `split_speaker_changes` (có thể cắt đôi câu). Sửa: `sync_engine` đặt cả `a_sep` / `a_spk` / `d_sepmodel` theo Cài
+  đặt (mở dự án + Lưu cài đặt); đổi 3 ô này -> `_audio_opts_changed` lưu vào Cài đặt (1 giá trị chung). `recognize`:
+  `diarize_speakers == 1` -> gán hết S1, không gọi diarize (không đo giọng, không tách câu); `pipeline.diarize` cũng vậy.
+  Thông báo sau bước 1 ghi rõ đã chạy theo gì: `sep_model_name` (đọc work/stems/model.txt – mô hình thật đã chạy) +
+  `speaker_note` ("phân biệt người nói: tắt" / "1 người nói (gán hết S1…)" / "người nói: N (tự đoán / đặt N)").
 
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.

@@ -218,7 +218,10 @@ class ProjectPage(QWidget):
         self.a_lang = f.row("Ngôn ngữ gốc", combo(C.LANGS, "zh"))
         self.a_sep = f.row("Tách giọng khỏi nhạc trước", Switch(bool(s.get("sep_before_asr", True))),
                            "Nhận dạng chính xác hơn với video có nhạc nền; cũng dùng để lồng tiếng giữ nhạc gốc")
-        self.a_spk = f.row("Phân biệt người nói", Switch(bool(s.get("diarize", True))))
+        self.a_spk = f.row("Phân biệt người nói", Switch(bool(s.get("diarize", True))),
+                           "Cùng 1 công tắc với Cài đặt → Tự phân biệt người nói. Số người nói / độ nhạy ở Cài đặt")
+        self.a_sep.toggled.connect(self._audio_opts_changed)
+        self.a_spk.toggled.connect(self._audio_opts_changed)
         self.a_engine = f.row("Công cụ dịch", combo(C.ENGINES + [(pipeline.NO_TRANSLATE, "Không dịch – chỉ nghe & tách câu, "
                                                                  "xuất SRT gốc (dịch ở phần mềm khác)")],
                                                     s.get("translate_engine")))
@@ -813,6 +816,7 @@ class ProjectPage(QWidget):
 
         self.d_sepmodel = combo([(m, t) for m, t in SEP_MODELS], self.settings.get("sep_model"))
         self.d_sepmodel.setMinimumContentsLength(10)
+        self.d_sepmodel.currentIndexChanged.connect(self._audio_opts_changed)
         self.d_sepstatus = label("Chưa tách", "muted")
         sep.add(hbox(self.d_sepmodel, button("Tách ngay", "layers", on_click=self.run_separate)))
         sep.lay.itemAt(sep.lay.count() - 1).layout().setStretch(0, 1)
@@ -1585,7 +1589,9 @@ class ProjectPage(QWidget):
             if o["method"] != "ocr" and p.data.get("sep_warning"):
                 msg += "  ⚠ " + p.data["sep_warning"]
             elif o["method"] != "ocr" and o["separate"] and pipeline.stems(p):
-                msg += " · đã tách giọng / nhạc nền (dùng được ở tab Âm thanh)"
+                msg += f" · đã tách giọng / nhạc nền bằng {pipeline.sep_model_name(p)} (dùng được ở tab Âm thanh)"
+            if o["method"] != "ocr":
+                msg += " · " + pipeline.speaker_note(p, st)
             if o["method"] == "ocr":
                 ost = p.data.get("ocr_stats") or {}
                 if ost.get("frames"):
@@ -1605,9 +1611,24 @@ class ProjectPage(QWidget):
             set_combo(self.a_style, st.get("translate_style", "auto"))
             if self.p is not None:
                 set_combo(self.a_target, pipeline.target_lang(self.p, st))
+            # tách giọng / phân biệt người nói / mô hình tách: 1 giá trị chung với Cài đặt (trước 2.0.53 các ô này chỉ
+            # đọc Cài đặt lúc mở tool -> đổi Cài đặt giữa chừng thì "1. Nghe & tách câu" vẫn chạy theo giá trị cũ)
+            self.a_sep.setChecked(bool(st.get("sep_before_asr", True)))
+            self.a_spk.setChecked(bool(st.get("diarize", True)))
+            set_combo(self.d_sepmodel, st.get("sep_model"))
         finally:
             self.loading = was
         self._update_engine_label()
+
+    def _audio_opts_changed(self, *_):
+        """Đổi công tắc tách giọng / phân biệt người nói (tab Tự động) hay mô hình tách (tab Lồng tiếng) -> lưu vào Cài
+        đặt, để mọi nơi (Cài đặt, Nghe & tách câu, Tách ngay, chạy trọn gói) dùng cùng 1 giá trị."""
+        if getattr(self, "loading", True) or not hasattr(self, "d_sepmodel"):
+            return
+        from ..config import save_settings
+
+        self.settings = save_settings({"sep_before_asr": self.a_sep.isChecked(), "diarize": self.a_spk.isChecked(),
+                                       "sep_model": self.d_sepmodel.currentData() or self.settings.get("sep_model")})
 
     def _engine_changed(self, *_):
         self._update_engine_label()

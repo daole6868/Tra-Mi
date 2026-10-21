@@ -410,6 +410,32 @@ def stems(p: Project) -> dict:
     return {}
 
 
+def sep_model_name(p: Project) -> str:
+    """Tên mô hình đã dùng để tách giọng của dự án (theo work/stems/model.txt – đúng cái thật sự đã chạy)."""
+    from .separate import SEP_MODELS
+
+    try:
+        used = (p.work / "stems" / "model.txt").read_text("utf-8").strip()
+    except OSError:
+        return "?"
+    names = dict(SEP_MODELS)
+    if used == "external":
+        return "file bạn nạp vào"
+    return names.get(used, used).split(" – ")[0]
+
+
+def speaker_note(p: Project, settings: dict) -> str:
+    """Phân biệt người nói đã chạy theo lựa chọn nào (ghi vào thông báo sau bước 1)."""
+    if not settings.get("diarize", True):
+        return "phân biệt người nói: tắt"
+    n_set = int(settings.get("diarize_speakers", 0) or 0)
+    found = len({s.speaker for s in p.segments if s.speaker})
+    if n_set == 1:
+        return "1 người nói (gán hết S1, không tách câu theo giọng)"
+    return (f"người nói: {found}" + (f" (đặt {n_set})" if n_set else " (tự đoán)")
+            + (f", tách thêm {p.data['speaker_splits']} câu đổi giọng" if p.data.get("speaker_splits") else ""))
+
+
 def diarize(p: Project, settings: dict | None = None, progress: Prog | None = None, cancel=None) -> int:
     from .diarize import assign_speakers
 
@@ -417,6 +443,15 @@ def diarize(p: Project, settings: dict | None = None, progress: Prog | None = No
     segs = p.segments
     if not segs:
         raise ValueError("Chưa có phụ đề để phân biệt người nói.")
+    if int(settings.get("diarize_speakers", 0) or 0) == 1:
+        # đặt "1 người nói": gán hết S1, KHÔNG tách câu ở chỗ "đổi giọng" (vô nghĩa khi chỉ có 1 người – trước đây
+        # vẫn đo ECAPA và có thể cắt đôi câu ở chỗ giọng đổi sắc thái)
+        for s in segs:
+            s.speaker = "S1"
+        p.data["speaker_splits"] = 0
+        p.segments = segs
+        p.save()
+        return 1
     audio = stems(p).get("vocals") or str(p.source)
     old_texts = {s.text for s in segs}
     for s in segs:
@@ -759,7 +794,12 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
 
             mark_songs(segs)
     segs = normalize(segs)
-    want_dz = want_spk and not spk_from_asr and bool(segs)
+    one_spk = want_spk and int(settings.get("diarize_speakers", 0) or 0) == 1
+    if one_spk:   # đặt "1 người nói": gán hết S1, không đo giọng / không tách câu theo chỗ đổi giọng
+        for s in segs:
+            s.speaker = "S1"
+        p.data["speaker_splits"] = 0
+    want_dz = want_spk and not spk_from_asr and not one_spk and bool(segs)
     if not want_dz:
         from .align import drop_char_times
 
