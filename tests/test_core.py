@@ -2518,3 +2518,142 @@ def test_ticks_follow_sentences_after_merge_delete(sample_video):
     pp.reload()                                       # đọc lại dự án (vd. xong tác vụ): cùng số câu -> giữ tích
     assert m.selected == {0, 2}
     win.close()
+
+
+def test_skills_cleanup_is_validated():
+    """AI sửa lỗi nghe & nối câu: chỉ áp dụng chỗ sửa gần chữ cũ, chỉ gộp 2–4 dòng liền nhau, nghỉ ≤ 1,5 s."""
+    from trami import skills
+
+    segs = [Segment(0, 0.5, "真", "Thật"), Segment(0.6, 1.5, "的假的", "giả"), Segment(2, 3, "我可是最强"),
+            Segment(3.1, 4, "AI。你先别走"), Segment(5, 6, "北京雄起"), Segment(10, 11, "远的"), Segment(20, 21, "好")]
+    res = {"fix": {1: "真的假的", 3: "我可是最强AI。", 4: "你先别走", 5: "北极熊骑", 6: "今天天气很好很好很好"},
+           "merge": [[1, 2], [6, 7], [2, 3, 4, 5, 6]], "unsure": {5: "đoán theo hình"}}
+    new, stats = skills.apply_cleanup(segs, res)
+    assert [s.text for s in new] == ["真的假的", "我可是最强AI。", "你先别走", "北极熊骑", "远的", "好"]
+    assert (new[0].start, new[0].end, new[0].trans) == (0, 1.5, "Thật giả")
+    assert new[0].extra["src_before"] == "真 | 的假的" and new[3].extra["src_unsure"] == "đoán theo hình"
+    assert stats["merged"] == 1 and stats["fixed"] == 3 and stats["changed"] == [0, 1, 2, 3] and stats["unsure"] == [3]
+    assert "src_before" not in new[4].extra       # câu khác hẳn -> bỏ qua; gộp 2 dòng cách 9 s / 5 dòng -> bỏ qua
+    assert skills.skill_text({"translate_skill": "meme"}).startswith("- Video hài")
+    own = {"translate_skills": [{"id": "u1", "name": "Của tôi", "text": "- 小克 -> Claude"}], "translate_skill": "u1"}
+    assert skills.skill_text(own) == "- 小克 -> Claude" and len(skills.all_skills(own)) == len(skills.BUILTIN) + 1
+    assert "小克 -> Claude" in skills.with_skill("SYS", "- 小克 -> Claude") and skills.with_skill("SYS", "") == "SYS"
+
+
+def test_ai_skills_in_translate_pipeline(monkeypatch):
+    """Dịch cả phim bằng AI (bất kỳ API nào): sửa lỗi nghe & nối câu -> hồ sơ phim -> dịch (kèm kỹ năng) -> kiểm tra."""
+    from trami.translate import parse_glossary
+    from trami import pipeline
+    from trami import translate as tr
+    from trami.project import Project
+
+    calls = []
+
+    def fake_chat(self, system, user, max_tokens=8000, temperature=0.3):
+        kind = ("clean" if "biên tập viên phụ đề tiếng Trung" in system else "review" if "kiểm tra bản dịch" in system
+                else "profile" if 'lập "HỒ SƠ PHIM"' in system else "translate")
+        calls.append((kind, system, user))
+        if kind == "clean":
+            return json.dumps({"fix": {"1": "真的假的", "3": "D神你好"}, "merge": [[1, 2]], "unsure": {}})
+        if kind == "profile":
+            return json.dumps({"the_loai": "hoạt hình hài về AI", "nhan_vat": ["D神 -> Thần D – cá voi"],
+                               "xung_ho": ["các AI: tớ – cậu"], "thuat_ngu": {"D神": "Thần D"}}, ensure_ascii=False)
+        payload = json.loads(user[user.index("{"):])
+        if kind == "review":
+            first = min(payload, key=int)
+            return json.dumps({first: {"sua": "Thật hay đùa vậy?", "ly_do": "tự nhiên hơn"}}, ensure_ascii=False)
+        return json.dumps({k: f"Câu {k}" for k in payload}, ensure_ascii=False)
+
+    monkeypatch.setattr(tr.LLMClient, "chat", fake_chat)
+    st_ = {"translate_engine": "openai", "openai_api_key": "x", "openai_base_url": "https://api.example.com/v1",
+           "dub_fit": False, "translate_skill": "meme", "ai_clean_before_translate": True,
+           "ai_review_after_translate": True}
+    p = Project.create("ky_nang")
+    p.segments = [Segment(0, 0.5, "真"), Segment(0.6, 1.5, "的假的"), Segment(2, 3, "地神你好")]
+    p.save()
+    pipeline.translate(p, "openai", "auto", False, st_)
+    kinds = [k for k, _, _ in calls]
+    assert kinds[0] == "clean" and kinds[1] == "profile" and "translate" in kinds and kinds[-1] == "review"
+    assert all("Ủa alo" in sysp for _, sysp, _ in calls)                    # kỹ năng gắn vào mọi lời nhắc
+    assert any("Thần D" in u for k, _, u in calls if k == "translate")     # hồ sơ phim đi kèm khi dịch
+    segs = p.segments
+    assert [s.text for s in segs] == ["真的假的", "D神你好"] and segs[0].extra["src_before"] == "真 | 的假的"
+    assert segs[0].trans == "Thật hay đùa vậy?" and segs[0].extra["review_note"] == "tự nhiên hơn"
+    assert segs[0].extra["trans_before_review"] == "Câu 1" and segs[1].trans == "Câu 2"
+    assert "Thần D" in p.data["film_profile"] and parse_glossary(p.data["glossary"]) == {"D神": "Thần D"}
+    assert "nối 1" in p.data["skill_note"] and "kiểm tra và sửa 1" in p.data["skill_note"]
+    # dịch lại cả phim: không sửa lỗi nghe lần 2, không lập lại hồ sơ phim (dùng lại bản đã lưu / đã sửa)
+    calls.clear()
+    pipeline.translate(p, "openai", "auto", False, st_)
+    assert "clean" not in [k for k, _, _ in calls] and "profile" not in [k for k, _, _ in calls]
+    # câu sửa tay: AI kiểm tra không đụng tới
+    segs = p.segments
+    segs[0].trans, segs[0].extra["trans_user"] = "Tớ tự sửa", True
+    p.segments = segs
+    p.save()
+    assert pipeline.ai_review(p, st_, "openai") == [1] and p.segments[0].trans == "Tớ tự sửa"
+    # hoàn tác sửa lỗi nghe -> về 3 câu gốc
+    assert pipeline.undo_cleanup(p, st_) == 3 and [s.text for s in p.segments] == ["真", "的假的", "地神你好"]
+    # Google / Hy-MT2: không phải AI hội thoại -> không có kỹ năng, báo rõ khi bấm nút
+    with pytest.raises(ValueError, match="cần công cụ dịch AI"):
+        pipeline.ai_cleanup(p, st_, "google")
+    calls.clear()
+    monkeypatch.setattr(tr.Translator, "translate_lines", lambda self, lines, *a, **k: ["x"] * len(lines))
+    pipeline.translate(p, "google", "auto", False, dict(st_, translate_engine="google"))
+    assert not calls
+
+
+def test_skills_gui(monkeypatch):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        pytest.skip(str(e))
+    from trami import config
+    from trami.gui.main import MainWindow
+    from trami.gui.skills_dialog import SkillsDialog
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    config.save_settings({"translate_engine": "deepseek", "translate_skills": [], "translate_skill": ""})
+    dlg = SkillsDialog(None, "meme")
+    assert dlg.text.isReadOnly() and not dlg.b_save.isEnabled()      # kỹ năng có sẵn: chỉ đọc
+    dlg._copy()                                                       # chép thành kỹ năng của tôi -> sửa được
+    assert not dlg.text.isReadOnly()
+    dlg.name.setText("Phim AI của tôi")
+    dlg.text.setPlainText("- 小克 -> Claude")
+    dlg._save()
+    dlg._use()
+    st_ = config.load_settings()
+    own = st_["translate_skills"]
+    assert len(own) == 1 and own[0]["name"] == "Phim AI của tôi" and st_["translate_skill"] == own[0]["id"]
+    dlg.deleteLater()
+
+    p = Project.create("ky_nang_gui")
+    p.segments = [Segment(0, 1, "真"), Segment(1.1, 2, "的假的")]
+    p.data["film_profile"] = "Thể loại: hài"
+    p.save()
+    win = MainWindow()
+    win.open_project(p.id)
+    pp = win.project_page
+    assert pp.a_skill.currentData() == own[0]["id"] and pp.profile_edit.toPlainText() == "Thể loại: hài"
+    pp.a_review.setChecked(True)
+    assert config.load_settings()["ai_review_after_translate"] is True
+    pp.profile_edit.setPlainText("Thể loại: hài meme")
+    pp._save_edit_now()
+    assert Project(p.id).data["film_profile"] == "Thể loại: hài meme"
+    jobs = []
+    pp.submit = lambda *a, **k: jobs.append(a[0])
+    pp.run_ai_clean()
+    pp.run_profile()
+    assert jobs == ["clean", "profile"]
+    toasts = []
+    monkeypatch.setattr(win, "toast", lambda msg, kind="info", *a, **k: toasts.append(msg))
+    from trami.gui.widgets import set_combo
+    set_combo(pp.a_engine, "google")
+    pp.run_ai_review()
+    assert jobs == ["clean", "profile"] and "cần công cụ dịch AI" in toasts[-1]
+    config.save_settings({"translate_skill": "", "translate_skills": [], "ai_review_after_translate": False,
+                          "translate_engine": "google"})
+    win.close()

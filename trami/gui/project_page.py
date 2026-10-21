@@ -194,6 +194,17 @@ class ProjectPage(QWidget):
             bottom = max(need, int(min(320, H * 0.32)))
             self.v_split.setSizes([max(300, H - bottom), bottom])
             self._show_inspector(W >= 1600)
+            self._show_profile(H >= 1300)   # mở đầu ẩn 2 ô hồ sơ phim / tên riêng để bảng câu đủ cao (nút trên thẻ)
+
+    def _show_profile(self, on: bool | None):
+        """Hiện / ẩn 2 ô Hồ sơ phim + Bảng tên riêng ở tab Phụ đề (None = đảo trạng thái)."""
+        on = (not self.sk_more.isVisible()) if on is None else on
+        self.sk_more.setVisible(on)
+        self.sk_toggle.setText("Ẩn hồ sơ phim / tên riêng" if on else "Hồ sơ phim / tên riêng")
+        sizes = self.subs_split.sizes()
+        if len(sizes) == 2 and sum(sizes) > 0:
+            card = self.subs_split.widget(1).sizeHint().height()
+            self.subs_split.setSizes([max(60, sum(sizes) - card), card])
 
     def _show_inspector(self, on: bool):
         """Hiện / ẩn khung "Câu đang chọn" và chia lại chiều ngang (màn hẹp mở đầu ẩn)."""
@@ -230,6 +241,22 @@ class ProjectPage(QWidget):
                               "tiếng này. Edge / OmniVoice đọc được cả 5 tiếng; VieNeu chỉ đọc tiếng Việt")
         self.a_target.currentIndexChanged.connect(self._target_changed)
         self.a_style = f.row("Thể loại / văn phong", combo(C.STYLES, s.get("translate_style")))
+        self.a_skill = combo(self._skill_items(s), s.get("translate_skill", ""))
+        self.a_skill.currentIndexChanged.connect(self._skill_changed)
+        sk_row = hbox(self.a_skill, button("Sửa / thêm…", "wand", "Xem, thêm, sửa kỹ năng dịch của bạn",
+                                           on_click=self._edit_skills))
+        sk_row.setStretch(0, 1)
+        f.row("Kỹ năng dịch AI", sk_row,
+              "Luật riêng gắn vào lời nhắc của MỌI công cụ dịch AI (DeepSeek / Claude / GPT / Gemini / Ollama / API "
+              "tương thích OpenAI). Không dùng với Google / Hy-MT2")
+        self.a_clean = f.row("AI sửa lỗi nghe & nối câu trước khi dịch", Switch(bool(s.get("ai_clean_before_translate", True))),
+                             "Trước khi dịch cả phim lần đầu: AI sửa chữ máy nghe nhầm (đồng âm) và nối câu bị cắt sai "
+                             "chỗ. Có nút Hoàn tác ở tab Phụ đề")
+        self.a_review = f.row("AI kiểm tra lại bản dịch", Switch(bool(s.get("ai_review_after_translate", False))),
+                              "Sau khi dịch cả phim: AI soát sai nghĩa, xưng hô / tên không thống nhất, câu quá dài, còn "
+                              "chữ Hán rồi sửa (tốn thêm ~1 lần gọi AI)")
+        self.a_clean.toggled.connect(self._ai_switch_changed)
+        self.a_review.toggled.connect(self._ai_switch_changed)
         self.a_hardsub = f.row("Phụ đề Trung cũ", combo(C.HARDSUB, "none"))
         self.a_which = f.row("Ghép phụ đề vào video", combo(C.WHICH, "trans"))
         self.a_dub = f.row("Lồng tiếng (đọc bản dịch)", Switch(False))
@@ -331,12 +358,49 @@ class ProjectPage(QWidget):
                     button("Căn khớp thoại", "wand", "Căn mốc từng câu sát lời thoại thật, tách câu ở chỗ nghỉ "
                            "(dùng cho phụ đề đã nhận dạng từ bản cũ)", on_click=self.run_realign),
                     button("Tìm && thay", "search", on_click=self._replace))
+        self.profile_edit = QPlainTextEdit()
+        self.profile_edit.setPlaceholderText(
+            "AI tự lập khi dịch lần đầu: thể loại, nhân vật, xưng hô, tên riêng / meme. Sửa được – AI dùng cho mọi lần "
+            "dịch / kiểm tra sau. VD:\n- 小克 -> Claude – AI bạn của Thần D\n- các AI: tớ – cậu")
+        self.profile_edit.setMinimumHeight(64)
+        self.profile_edit.textChanged.connect(lambda: self._save_edit_timer.start())
         self.glossary = QPlainTextEdit()
         self.glossary.setPlaceholderText("Mỗi dòng: 中文=Tiếng Việt   (VD: 李逍遥=Lý Tiêu Dao). AI tự điền khi dịch.")
-        self.glossary.setFixedHeight(90)
+        self.glossary.setMinimumHeight(64)
         self.glossary.textChanged.connect(lambda: self._save_edit_timer.start())
-        gl = SectionCard("Bảng tên riêng / thuật ngữ của dự án", "list")
-        gl.add(self.glossary)
+        # 1 thẻ chung: kỹ năng dịch AI + hồ sơ phim + bảng tên riêng (2 ô cạnh nhau) – kéo vách trên để đổi chiều cao
+        sk = SectionCard("Kỹ năng dịch AI · hồ sơ phim · tên riêng", "sparkle")
+        self.sk_toggle = button("Ẩn hồ sơ phim / tên riêng", "chev_down", "Hiện / ẩn 2 ô Hồ sơ phim và Bảng tên riêng "
+                                "(ẩn để bảng câu cao hơn)", flat=True, on_click=lambda: self._show_profile(None))
+        sk.head.addWidget(self.sk_toggle)
+        sk.add(flow(button("AI sửa lỗi nghe && nối câu", "wand", "Sửa chữ máy nghe nhầm (đồng âm) + nối câu bị cắt sai "
+                           "chỗ. Giữ bản cũ để Hoàn tác; câu AI sửa được tích sẵn, rê chuột vào câu gốc để xem trước / "
+                           "sau", on_click=self.run_ai_clean),
+                    button("Hoàn tác sửa", "refresh", flat=True, on_click=self.run_undo_clean),
+                    button("AI kiểm tra bản dịch", "check", "Soát và sửa câu dịch sai nghĩa / xưng hô, tên không thống "
+                           "nhất / quá dài / còn chữ Hán. Câu bạn sửa tay không bị đụng tới", on_click=self.run_ai_review),
+                    button("AI lập lại hồ sơ phim", "users", flat=True, on_click=self.run_profile)))
+        col1, col2 = QVBoxLayout(), QVBoxLayout()
+        col1.setSpacing(4)
+        col2.setSpacing(4)
+        col1.addWidget(label("Hồ sơ phim (AI đọc khi dịch)", "muted"))
+        col1.addWidget(self.profile_edit, 1)
+        col2.addWidget(label("Bảng tên riêng / thuật ngữ của dự án", "muted"))
+        col2.addWidget(self.glossary, 1)
+        self.sk_more = QWidget()
+        more = hbox(col1, col2, spacing=theme.GAP)
+        self.sk_more.setLayout(more)
+        sk.add(self.sk_more)
+        tv.setMinimumHeight(170)   # màn thấp: cả tab cuộn dọc thay vì ép bảng câu còn 1 dòng
+        split = QSplitter(Qt.Orientation.Vertical)
+        split.setHandleWidth(theme.GAP)
+        split.addWidget(tv)
+        split.addWidget(sk)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 0)
+        split.setCollapsible(0, False)
+        split.setSizes([10000, 230])
+        self.subs_split = split
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
@@ -344,9 +408,8 @@ class ProjectPage(QWidget):
         v.addWidget(bar1)
         v.addWidget(bar2)
         v.addLayout(hbox(self.search, self.seg_count, label("Tự cuộn", "muted"), self.follow))
-        v.addWidget(tv, 1)
-        v.addWidget(gl)
-        return w
+        v.addWidget(split, 1)
+        return scroll(w)
 
     # ================================================================== TAB: Xoá phụ đề cũ
     TAB_HARDSUB, TAB_STYLE, TAB_DUB, TAB_AUDIO, TAB_MODELS, TAB_EXPORT = 2, 4, 5, 6, 7, 8
@@ -1123,6 +1186,8 @@ class ProjectPage(QWidget):
             self._update_count()
             self._apply_target(pipeline.target_lang(p, self.settings))
             self._fill_edit()
+            if self.profile_edit.toPlainText() != (p.data.get("film_profile") or ""):
+                self.profile_edit.setPlainText(p.data.get("film_profile") or "")
             self._fill_speakers()
             self._fill_dub_layout()
             self.sync_engine()
@@ -1468,6 +1533,7 @@ class ProjectPage(QWidget):
         cur.update(ed)
         self.p.data["edit"] = cur
         self.p.data[pipeline.glossary_key(pipeline.target_lang(self.p, self.settings))] = self.glossary.toPlainText()
+        self.p.data["film_profile"] = self.profile_edit.toPlainText()
         self.p.data["tts_engine"] = self.d_engine.currentData()
         self.p.save()
         self._update_summary()
@@ -1616,9 +1682,129 @@ class ProjectPage(QWidget):
             self.a_sep.setChecked(bool(st.get("sep_before_asr", True)))
             self.a_spk.setChecked(bool(st.get("diarize", True)))
             set_combo(self.d_sepmodel, st.get("sep_model"))
+            self._fill_skills(st)
+            self.a_clean.setChecked(bool(st.get("ai_clean_before_translate", True)))
+            self.a_review.setChecked(bool(st.get("ai_review_after_translate", False)))
         finally:
             self.loading = was
         self._update_engine_label()
+
+    # ------------------------------------------------------------------ kỹ năng dịch AI
+    @staticmethod
+    def _skill_items(st: dict) -> list[tuple[str, str]]:
+        from .. import skills
+
+        return [("", "Không dùng")] + [(x["id"], ("🔒 " if x.get("builtin") else "✎ ") + x["name"])
+                                       for x in skills.all_skills(st)]
+
+    def _fill_skills(self, st: dict):
+        was, self.loading = self.loading, True
+        try:
+            self.a_skill.clear()
+            for val, text in self._skill_items(st):
+                self.a_skill.addItem(text, val)
+            set_combo(self.a_skill, st.get("translate_skill", ""))
+        finally:
+            self.loading = was
+
+    def _skill_changed(self, *_):
+        if self.loading:
+            return
+        from ..config import save_settings
+
+        self.settings = save_settings({"translate_skill": self.a_skill.currentData() or ""})
+
+    def _ai_switch_changed(self, *_):
+        if getattr(self, "loading", True):
+            return
+        from ..config import save_settings
+
+        self.settings = save_settings({"ai_clean_before_translate": self.a_clean.isChecked(),
+                                       "ai_review_after_translate": self.a_review.isChecked()})
+
+    def _edit_skills(self):
+        from .skills_dialog import SkillsDialog
+
+        dlg = SkillsDialog(self, self.a_skill.currentData() or "")
+        dlg.exec()
+        dlg.deleteLater()
+        self.settings = load_settings()
+        self._fill_skills(self.settings)
+
+    def _ai_engine_or_warn(self) -> str | None:
+        from ..translate import LOCAL_ENGINES
+
+        eng = self.a_engine.currentData()
+        if eng in LOCAL_ENGINES or eng == pipeline.NO_TRANSLATE:
+            self.win.toast("Kỹ năng dịch AI cần công cụ dịch AI (DeepSeek / Claude / GPT / Gemini / Ollama…) – đổi Công "
+                           "cụ dịch ở tab Tự động", "warn")
+            return None
+        if not self.model.segs:
+            self.win.toast("Chưa có phụ đề – làm bước 1 (Nghe && tách câu) trước", "warn")
+            return None
+        self.flush()
+        return eng
+
+    def run_ai_clean(self):
+        eng = self._ai_engine_or_warn()
+        if not eng:
+            return
+        if any(x.trans.strip() for x in self.model.segs) and QMessageBox.question(
+                self, "AI sửa lỗi nghe & nối câu", "Đã có bản dịch. AI sửa câu gốc / nối câu thì các câu đó cần dịch lại "
+                "(câu được tích sẵn). Tiếp tục?") != QMessageBox.StandardButton.Yes:
+            return
+
+        def fn(j, p):
+            st = pipeline.ai_cleanup(p, None, eng, j.update, j.cancelled)
+            if not st["changed"]:
+                return {"message": "AI không thấy chỗ nào cần sửa"}
+            msg = f"AI sửa lỗi nghe {st['fixed']} câu, nối {st['merged']} câu bị cắt"
+            if st["unsure"]:
+                msg += f" · {len(st['unsure'])} chỗ chưa chắc (rê chuột vào câu gốc để xem)"
+            if any(p.segments[k].trans.strip() for k in st["changed"]):
+                msg += " · câu đổi được tích sẵn – bấm 'Dịch lại câu đã tích' ở tab Lồng tiếng"
+            return {"message": msg + " · bấm 'Hoàn tác sửa' nếu không ưng", "pick": st["changed"]}
+        self.submit("clean", "AI sửa lỗi nghe & nối câu", fn)
+
+    def run_undo_clean(self):
+        if not self.p or not self.p.data.get("cleanup_backup"):
+            return self.win.toast("Chưa có lần AI sửa lỗi nghe nào để hoàn tác", "info")
+        self.flush()
+        n = pipeline.undo_cleanup(self.p, self.settings)
+        self.reload()
+        self.win.toast(f"Đã về bản trước khi AI sửa ({n} câu)", "ok")
+
+    def run_ai_review(self):
+        eng = self._ai_engine_or_warn()
+        if not eng:
+            return
+        if not any(x.trans.strip() for x in self.model.segs):
+            return self.win.toast("Chưa có bản dịch để kiểm tra – bấm Dịch trước", "warn")
+        tts_eng, rate = self.d_engine.currentData(), self.d_rate.currentData()
+        st = dict(load_settings())
+        st["dub_skip_songs"] = self.d_skipsong.isChecked()
+
+        def fn(j, p):
+            rows = pipeline.ai_review(p, None, eng, lambda x, m="": j.update(0.6 * x, m), j.cancelled)
+            if not rows:
+                return {"message": "AI kiểm tra xong – không câu nào cần sửa"}
+            msg = f"AI kiểm tra và sửa {len(rows)} câu (rê chuột vào câu để xem lý do; câu được tích sẵn)"
+            if pipeline.has_dub(p):
+                pipeline.redub(p, rows, rate, st, lambda x, m="": j.update(0.6 + 0.4 * x, m), j.cancelled, tts_eng)
+                msg += " và đã tạo lại giọng các câu đó"
+            return {"message": msg, "pick": rows}
+        self.submit("redub" if pipeline.has_dub(self.p) else "review", "AI kiểm tra bản dịch", fn)
+
+    def run_profile(self):
+        eng = self._ai_engine_or_warn()
+        if not eng:
+            return
+
+        def fn(j, p):
+            j.update(0.1, "AI đang đọc kịch bản, lập hồ sơ phim…")
+            pipeline.film_profile(p, None, eng, force=True)
+            return {"message": "Đã lập hồ sơ phim – xem / sửa ở tab Phụ đề (khung Kỹ năng dịch AI)"}
+        self.submit("profile", "AI lập hồ sơ phim", fn)
 
     def _audio_opts_changed(self, *_):
         """Đổi công tắc tách giọng / phân biệt người nói (tab Tự động) hay mô hình tách (tab Lồng tiếng) -> lưu vào Cài
@@ -1758,8 +1944,9 @@ class ProjectPage(QWidget):
 
         def fn(j, p):
             n = pipeline.translate(p, eng, sty, only_empty, None, j.update, j.cancelled)
-            w = p.data.get("translate_warning")
-            return {"message": f"Đã dịch {n} câu" + (f" – ⚠ {w}" if w else "")}
+            w = " · ".join(x for x in (p.data.get("translate_warning"), p.data.get("skill_warning")) if x)
+            note = p.data.get("skill_note") if not only_empty or n else ""
+            return {"message": f"Đã dịch {n} câu" + (f" · {note}" if note else "") + (f" – ⚠ {w}" if w else "")}
         self.submit("translate", "Dịch phụ đề", fn)
 
     def run_separate(self):

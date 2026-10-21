@@ -95,6 +95,11 @@ DEFAULT_SETTINGS: dict = {
     "dub_level_match": True,          # câu lồng tiếng nhỏ hơn hẳn các câu khác -> tăng lên cho đều
     "omnivoice_model": "k2-fsa/OmniVoice",   # hoặc g-group-ai-lab/g-omnivoice (tối ưu tiếng Việt, cần HF token)
     "hf_token": "",                           # token HuggingFace cho mô hình cần đồng ý điều khoản
+    # Kỹ năng dịch AI (skills.py) – dùng với mọi công cụ dịch AI
+    "translate_skill": "",                    # kỹ năng đang dùng ("" = không; id kỹ năng có sẵn / của bạn)
+    "translate_skills": [],                   # kỹ năng của bạn: [{"id", "name", "text"}]
+    "ai_clean_before_translate": True,        # AI sửa lỗi nghe & nối câu bị cắt trước khi dịch cả phim lần đầu
+    "ai_review_after_translate": False,       # AI kiểm tra lại bản dịch sau khi dịch cả phim (tốn thêm ~1 lần gọi AI)
     # Tải video từ link: Bilibili đăng nhập bằng mã QR (sitelogin); trang khác lấy cookie từ trình duyệt / file
     "dl_browser": "",                         # "" / firefox / edge / chrome / brave / opera / vivaldi
     "dl_cookie_file": "",                     # file cookies.txt (Netscape) người dùng xuất từ trình duyệt

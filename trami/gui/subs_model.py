@@ -188,7 +188,7 @@ class SubsModel(QAbstractTableModel):
             if c == C_SPK:
                 return QColor(spk_color(s.speaker))
             if c == C_ZH:
-                return QColor("#C3CAD6")
+                return QColor("#E8C26A" if s.extra.get("src_unsure") else "#C3CAD6")   # vàng = AI sửa mà chưa chắc
             if c == C_FIT:
                 return QColor(FIT_COLOR.get(s.extra.get("fit"), theme.MUTED))
         if role == Qt.ItemDataRole.BackgroundRole:
@@ -202,8 +202,16 @@ class SubsModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.ToolTipRole:
             if c == C_VI:
                 cps = len(s.trans) / max(0.05, s.duration)
-                return (f"Gốc: {s.text}\n" if s.text else "") + f"{s.duration:.1f}s · {cps:.0f} ký tự/giây" + \
+                tip = (f"Gốc: {s.text}\n" if s.text else "") + f"{s.duration:.1f}s · {cps:.0f} ký tự/giây" + \
                     (" – hơi nhanh, khó đọc kịp" if cps > 20 else "")
+                if s.extra.get("review_note") and s.extra.get("trans_before_review") is not None:
+                    tip += f"\nAI kiểm tra đã sửa: {s.extra['review_note']}\nTrước khi sửa: {s.extra['trans_before_review']}"
+                return tip
+            if c == C_ZH and (s.extra.get("src_before") or s.extra.get("src_unsure")):
+                tip = f"AI sửa lỗi nghe – trước: {s.extra['src_before']}" if s.extra.get("src_before") else ""
+                if s.extra.get("src_unsure"):
+                    tip += ("\n" if tip else "") + f"Chưa chắc: {s.extra['src_unsure']}"
+                return tip
             if c == C_SONG:
                 return "Câu đang hát – khi lồng tiếng sẽ giữ nguyên giọng hát gốc"
             if c == C_NODUB:
@@ -242,6 +250,7 @@ class SubsModel(QAbstractTableModel):
                 s.speaker = v if not v or v.startswith("S") else "S" + v
             elif c == C_ZH:
                 s.text = " ".join(v.split())
+                s.extra.pop("src_unsure", None)   # người dùng đã xem / sửa
             elif c == C_VI:
                 s.trans = " ".join(v.split())
                 s.extra.pop("fit", None)   # bản dịch đổi -> cần tạo lại bản lồng để đo lại

@@ -892,6 +892,122 @@ def source_lang(p: Project) -> str:
     return lang if lang in ("zh", "yue", "en", "ja", "ko") else "zh"
 
 
+def _skill(settings: dict) -> str:
+    """Kỹ năng dịch đang chọn (gắn vào lời nhắc AI khi dịch / rút gọn / sửa lỗi nghe / kiểm tra)."""
+    from . import skills
+
+    return skills.skill_text(settings)
+
+
+def ai_engine(settings: dict, engine: str | None = None) -> str:
+    """Công cụ dịch AI đang chọn; Google / Hy-MT2 / Không dịch -> lỗi rõ (kỹ năng AI cần AI hội thoại)."""
+    from .translate import LOCAL_ENGINES
+
+    eng = engine or settings.get("translate_engine", "google")
+    if eng in LOCAL_ENGINES or eng == NO_TRANSLATE:
+        raise ValueError("Kỹ năng dịch AI cần công cụ dịch AI (DeepSeek / Claude / GPT / Gemini / Ollama / API tương "
+                         "thích OpenAI). Google và Hy-MT2 không làm được – đổi Công cụ dịch ở tab Tự động.")
+    return eng
+
+
+def film_profile(p: Project, settings: dict | None = None, engine: str | None = None, force: bool = False) -> str:
+    """Hồ sơ phim (thể loại, nhân vật, xưng hô, tên riêng / meme) – AI lập 1 lần, lưu trong dự án, sửa được; mọi lần dịch
+    / kiểm tra sau dùng lại. Thuật ngữ tìm được thêm vào bảng tên riêng của dự án (không đè chỗ bạn đã sửa)."""
+    from . import langs, skills
+    from .translate import LLMClient, glossary_text, parse_glossary
+
+    settings = settings or load_settings()
+    if p.data.get("film_profile", "").strip() and not force:
+        return p.data["film_profile"]
+    eng = ai_engine(settings, engine)
+    texts = [x.text for x in p.segments if x.text.strip()]
+    if not texts:
+        raise ValueError("Chưa có phụ đề gốc để AI đọc.")
+    target = target_lang(p, settings)
+    text, terms = skills.make_profile(LLMClient(settings, eng), texts, langs.INFO[target]["name"].lower(),
+                                      skills.skill_text(settings))
+    gkey = glossary_key(target)
+    g = parse_glossary(p.data.get(gkey, ""))
+    for k, v in terms.items():
+        g.setdefault(k, v)
+    p.data[gkey] = glossary_text(g)
+    p.data["film_profile"] = text
+    p.save()
+    return text
+
+
+def ai_cleanup(p: Project, settings: dict | None = None, engine: str | None = None, progress: Prog | None = None,
+               cancel=None) -> dict:
+    """Kỹ năng 1: AI sửa chữ nghe nhầm + nối câu bị cắt sai chỗ (giữ bản cũ để Hoàn tác). Trả về thống kê của
+    `skills.apply_cleanup` (changed / unsure = số thứ tự câu sau khi sửa)."""
+    from . import skills
+    from .translate import LLMClient
+
+    settings = settings or load_settings()
+    eng = ai_engine(settings, engine)
+    segs = p.segments
+    if not segs:
+        raise ValueError("Chưa có phụ đề gốc để sửa.")
+    res = skills.clean_lines(LLMClient(settings, eng), segs, p.data.get("film_profile", ""),
+                             skills.skill_text(settings), progress, cancel)
+    new, stats = skills.apply_cleanup(segs, res)
+    if stats["changed"]:
+        p.data["cleanup_backup"] = [x.to_dict() for x in segs]
+        lost = forget_stale_voice({x.text for x in segs}, new, moved=len(new) != len(segs))
+        p.segments = new
+        p.save()
+        if lost and has_dub(p):   # câu đổi lời / gộp: bỏ giọng cũ khỏi bản lồng (không đọc lại câu nào)
+            relayout(p, settings)
+    p.data["asr_cleaned"] = True
+    p.save()
+    return stats
+
+
+def undo_cleanup(p: Project, settings: dict | None = None) -> int:
+    """Hoàn tác lần AI sửa lỗi nghe & nối câu gần nhất. Trả về số câu sau khi hoàn tác (0 = không có gì để hoàn tác)."""
+    from .subtitle import Segment
+
+    back = p.data.pop("cleanup_backup", None)
+    if not back:
+        return 0
+    p.segments = [Segment.from_dict(d) for d in back]
+    p.data["asr_cleaned"] = False
+    p.save()
+    if has_dub(p):
+        relayout(p, settings or load_settings())
+    return len(back)
+
+
+def ai_review(p: Project, settings: dict | None = None, engine: str | None = None, progress: Prog | None = None,
+              cancel=None, rows: list[int] | None = None) -> list[int]:
+    """Kỹ năng 3: AI kiểm tra bản dịch (sai nghĩa, xưng hô / tên không thống nhất, quá dài, còn chữ Hán…) và sửa. Câu bạn
+    sửa tay không đụng tới. Bản cũ giữ ở extra["trans_before_review"], lý do ở extra["review_note"]. Trả về câu đã sửa."""
+    from . import langs, skills
+    from .translate import LLMClient, budget_for
+
+    settings = settings or load_settings()
+    eng = ai_engine(settings, engine)
+    segs = p.segments
+    target = target_lang(p, settings)
+    L = langs.INFO[target]
+    items = [(i, x.text, x.trans, budget_for(x.duration, 1.1, target)) for i, x in enumerate(segs)
+             if x.trans.strip() and x.text.strip() and not x.extra.get("trans_user") and (rows is None or i in rows)]
+    if not items:
+        return []
+    src = {"zh": "tiếng Trung", "yue": "tiếng Quảng Đông"}.get(source_lang(p), "tiếng gốc")
+    fixes = skills.review_lines(LLMClient(settings, eng), items, p.data.get("film_profile", ""),
+                                skills.skill_text(settings), src, L["name"].lower(), L["unit_vi"], target,
+                                progress, cancel)
+    for i, (new, why) in fixes.items():
+        segs[i].extra["trans_before_review"] = segs[i].trans
+        segs[i].extra["review_note"] = why
+        segs[i].trans = new
+    if fixes:
+        p.segments = segs
+        p.save()
+    return sorted(fixes)
+
+
 def translate(p: Project, engine: str | None = None, style: str | None = None, only_empty: bool = False,
               settings: dict | None = None, progress: Prog | None = None, cancel=None,
               rows: list[int] | None = None) -> int:
@@ -917,19 +1033,59 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
     if old_lang != target and rows is None:
         # đổi tiếng đích: bản dịch cũ (tiếng khác) không dùng được -> "chỉ dịch dòng trống" cũng dịch lại mọi câu
         only_empty = False
+    from . import skills
+    from .translate import LOCAL_ENGINES
+
+    eng = engine or settings.get("translate_engine", "google")
+    is_ai = eng not in LOCAL_ENGINES
+    whole = rows is None
+    # Kỹ năng dịch AI: 1) sửa lỗi nghe & nối câu (chỉ khi dịch cả phim lần đầu – chưa câu nào có bản dịch), 2) hồ sơ
+    # phim (lập 1 lần, dùng lại), 3) kiểm tra bản dịch sau khi dịch cả phim. Kỹ năng riêng gắn vào mọi lời nhắc.
+    do_clean = (is_ai and whole and settings.get("ai_clean_before_translate", True) and not p.data.get("asr_cleaned")
+                and not any(x.trans.strip() for x in segs))
+    do_review = is_ai and whole and bool(settings.get("ai_review_after_translate", False))
+    a0 = 0.0
+    p.data.pop("skill_warning", None)
+    if whole:
+        p.data.pop("skill_note", None)
+    if do_clean:
+        try:
+            st = ai_cleanup(p, settings, eng, _sub(progress, 0.0, 0.18), cancel)
+            segs = p.segments
+            if st["changed"]:
+                p.data["skill_note"] = (f"AI sửa lỗi nghe {st['fixed']} câu, nối {st['merged']} câu bị cắt"
+                                        + (f" ({len(st['unsure'])} chỗ chưa chắc – xem cột gốc)" if st["unsure"] else ""))
+        except ff.Cancelled:
+            raise
+        except Exception as e:  # noqa: BLE001 – không chặn việc dịch
+            log_error("AI sửa lỗi nghe & nối câu")
+            p.data["skill_warning"] = f"Bỏ qua bước AI sửa lỗi nghe ({err_text(e)[:120]})"
+        a0 = 0.18
+    profile = p.data.get("film_profile", "") or p.data.get("summary", "")
+    if is_ai and not profile.strip():
+        if progress:
+            progress(a0, "AI đang đọc kịch bản, lập hồ sơ phim (nhân vật, xưng hô, tên riêng)…")
+        try:
+            profile = film_profile(p, settings, eng)
+        except ff.Cancelled:
+            raise
+        except Exception:  # noqa: BLE001 – không lập được thì dịch như cũ (AI tự đọc kịch bản)
+            log_error("Lập hồ sơ phim")
+            profile = ""
+        a0 += 0.05
     tr = Translator(settings, engine, style, parse_glossary(p.data.get(gkey, "")), cache, target=target,
-                    source=source_lang(p))
+                    source=source_lang(p), skill=skills.skill_text(settings) if is_ai else "")
 
     last_save = [time.time()]
+    tr_prog = _sub(progress, a0, 0.85 if do_review else 1.0)
 
     def prog(x, m):
-        if progress:
-            progress(x, m)
+        tr_prog(x, m)
         if time.time() - last_save[0] > 20:  # lưu định kỳ để không mất công khi video dài
             p.save()
             last_save[0] = time.time()
 
-    tr.translate_segments(segs, prog, cancel, only_empty=only_empty, summary=p.data.get("summary", ""),
+    tr.translate_segments(segs, prog, cancel, only_empty=only_empty, summary=profile, auto_terms=not profile,
                           rows=set(rows) if rows is not None else None)
     # ghi lại thuật ngữ AI tìm được để người dùng xem/sửa
     user_g = parse_glossary(settings.get("glossary", "")) if target == "vi" else {}
@@ -951,7 +1107,20 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
     p.data["translate_warning"] = ". ".join(warn)
     p.segments = segs
     p.save()
-    return sum(1 for s in segs if s.trans)
+    if do_review:
+        try:
+            fixed = ai_review(p, settings, eng, _sub(progress, 0.85, 1.0), cancel)
+            if fixed:
+                p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + \
+                    f"AI kiểm tra và sửa {len(fixed)} câu dịch"
+                p.save()
+        except ff.Cancelled:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log_error("AI kiểm tra bản dịch")
+            p.data["skill_warning"] = f"Bỏ qua bước AI kiểm tra bản dịch ({err_text(e)[:120]})"
+            p.save()
+    return sum(1 for s in p.segments if s.trans)
 
 
 # ------------------------------------------------------------------ lồng tiếng
@@ -1029,7 +1198,7 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
             progress(0.86, f"AI đang rút gọn {len(long_)} câu đọc quá dài so với thời gian nhân vật nói…")
         try:
             lg = trans_lang(p)
-            tr = Translator(settings, target=lg, source=source_lang(p))
+            tr = Translator(settings, target=lg, source=source_lang(p), skill=_skill(settings))
             items = []
             for k, need, have in long_:
                 cur = segs[k].trans
@@ -1278,7 +1447,7 @@ def shorten_lines(p: Project, rows: list[int], settings: dict | None = None) -> 
     res = {"changed": [], "fit": fits, "same": []}
     if not items:
         return res
-    new = Translator(settings, target=lg, source=source_lang(p)).shorten([x for _, x in items])
+    new = Translator(settings, target=lg, source=source_lang(p), skill=_skill(settings)).shorten([x for _, x in items])
     for (k, _), t in zip(items, new):
         if t and t != segs[k].trans:
             segs[k].extra.setdefault("trans_long", segs[k].trans)
@@ -1788,7 +1957,9 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
         result["message"] = "Hoàn tất! " + (f"Video: {Path(result['video']).name}" if result.get("video") else "")
     if opts.get("dub") and not no_tr:
         result["message"] += "  · " + dub_summary(p)
-    for w in ("dl_warning", "sep_warning", "asr_warning", "ocr_warning", "translate_warning"):
+    if p.data.get("skill_note") and not no_tr:
+        result["message"] = result.get("message", "") + "  · " + p.data["skill_note"]
+    for w in ("dl_warning", "sep_warning", "asr_warning", "ocr_warning", "translate_warning", "skill_warning"):
         if p.data.get(w):
             result["message"] = result.get("message", "") + "  ⚠ " + p.data[w]
     return result

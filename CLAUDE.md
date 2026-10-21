@@ -27,6 +27,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - `trami/asr_qwen.py` + `qwen_asr_worker.py` (Qwen3-ASR + Qwen3-ForcedAligner, tiến trình riêng `--qwen-asr-worker`,
   transformers ≥ 5.13, mặc định từ 2.0.29), `trami/asr.py` (faster-whisper), `asr_funasr.py` (SenseVoice/Paraformer, `mark_songs`), `diarize.py` (ECAPA),
   `separate.py` (audio-separator BS-RoFormer), `lama.py` + `inpaint.py` (xoá chữ), `ocr.py` (RapidOCR),
+  `skills.py` (kỹ năng dịch AI: sửa lỗi nghe & nối câu, hồ sơ phim, kiểm tra bản dịch, kỹ năng riêng – `gui/skills_dialog.py`),
   `translate.py` (`LLMClient` gọi HTTP: anthropic / OpenAI-compatible / gemini / deepseek / ollama; Google gtx;
   Hy-MT2 trên máy qua `hymt_worker.py`), `voicefix.py` (đọc số, phát hiện giọng AI hỏng, cân âm lượng),
   `gender.py` (đoán giọng nam/nữ mỗi người nói), `karaoke.py` (thời điểm từng từ cho phụ đề karaoke),
@@ -58,7 +59,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (link điện thoại / rút gọn -> dạng yt-dlp có bộ tải riêng), đăng nhập Bilibili
   bằng mã QR (`bili_qr_start/poll/status`, cookie Netscape `data/cookies/bilibili.txt`), `BROWSERS` cho cookie
   trình duyệt; hộp mã QR `gui/link_login.py`; `pipeline.download_video` / `update_ytdlp` / `ytdlp_version`.
-- `tests/test_core.py` – `python -m pytest -q tests` (92 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (95 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -721,6 +722,34 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   tác vụ) -> giữ theo số thứ tự, khác -> bỏ. Gộp có câu đã tích -> câu gộp vẫn tích (`_sub_op` / `_seg_op`).
   `_redub_rows` lọc số thứ tự hợp lệ.
 
+- 2.0.55: "thêm bộ skill dịch vào tool, áp dụng khi dịch bằng API của bất kỳ ai". `trami/skills.py` – dùng với MỌI công cụ
+  dịch AI (DeepSeek / Claude / GPT / Gemini / Ollama / API tương thích OpenAI qua `openai_base_url`), không với Google /
+  Hy-MT2 (`pipeline.ai_engine` báo lỗi rõ):
+  * Kỹ năng (luật viết tay) `skill_text` -> `with_skill` gắn cuối lời nhắc hệ thống của dịch (`_llm_batch`), rút gọn
+    (`shorten`, `shorten_lines`, AI tự rút gọn khi lồng), sửa lỗi nghe, hồ sơ phim, kiểm tra. 3 kỹ năng có sẵn (`BUILTIN`,
+    chỉ đọc: hài – meme – AI, lồng tiếng câu ngắn, cổ trang) + kỹ năng của bạn (Cài đặt `translate_skills`
+    [{id,name,text}], đang chọn `translate_skill`). Hộp `gui/skills_dialog.SkillsDialog`: thêm / chép / nạp .txt .md /
+    sửa / xoá / Dùng kỹ năng này.
+  * Sửa lỗi nghe & nối câu (`clean_lines` 80 dòng/lần + 4 dòng sau làm ngữ cảnh -> JSON fix/merge/unsure theo số dòng)
+    -> `apply_cleanup` KIỂM TRA trước khi áp: chữ mới gần chữ cũ (`_close`: chứa nhau / cùng số chữ ≤ 6 – đồng âm /
+    difflib ≥ 0,45), chỉ gộp 2–4 dòng LIỀN NHAU, nghỉ ≤ 1,5 s, câu gộp ≤ 15 s; `extra["src_before"]`, `src_unsure`.
+    `pipeline.ai_cleanup` (lưu `cleanup_backup`, bỏ giọng câu đổi lời + xếp lại nếu đã lồng, `asr_cleaned`),
+    `undo_cleanup`. Tự chạy trong `translate` khi dịch CẢ phim lần đầu (chưa câu nào có bản dịch, chưa sửa lần nào,
+    Cài đặt `ai_clean_before_translate` mặc định bật).
+  * Hồ sơ phim `make_profile` (JSON: thể loại, nhân vật, xưng hô, thuật ngữ, chữ hay nghe nhầm, ghi chú) ->
+    `p.data["film_profile"]` (sửa được ở tab Phụ đề), thuật ngữ thêm vào bảng tên riêng; lập 1 lần khi dịch bằng AI rồi
+    dùng thay `analyze` (THÔNG TIN PHIM của mọi lô dịch). `pipeline.film_profile(force=)`.
+  * Kiểm tra bản dịch `review_lines` (60 câu/lần, câu gốc + bản dịch + độ dài tối đa) -> sửa câu lỗi, `extra
+    ["trans_before_review"]`, `review_note`; bỏ qua câu `trans_user`; bỏ kết quả còn ≥ 2 chữ Hán (trừ tiếng Nhật).
+    `pipeline.ai_review`; tự chạy sau khi dịch cả phim nếu `ai_review_after_translate` (mặc định tắt). Ghi chú kết quả
+    `skill_note` / lỗi bước phụ `skill_warning` (không chặn việc dịch) -> thông báo Dịch + `auto`.
+  * GUI: tab Tự động "Kỹ năng dịch AI" (`a_skill` + "Sửa / thêm…"), công tắc "AI sửa lỗi nghe & nối câu trước khi dịch",
+    "AI kiểm tra lại bản dịch" (lưu Cài đặt, `sync_engine`). Tab Phụ đề: bảng câu + thẻ "Kỹ năng dịch AI · hồ sơ phim ·
+    tên riêng" trong QSplitter dọc (`subs_split`), tab cuộn được khi màn thấp (bảng câu ≥ 170 px): nút AI sửa lỗi nghe &
+    nối câu (job "clean", tích câu đổi) / Hoàn tác sửa / AI kiểm tra bản dịch (đã lồng -> redub đúng câu sửa) / AI lập lại
+    hồ sơ phim; 2 ô Hồ sơ phim + Bảng tên riêng cạnh nhau, mở đầu ẩn (`_show_profile`). Bảng câu: chữ gốc AI sửa mà chưa
+    chắc màu vàng; tooltip câu gốc (trước khi sửa / chưa chắc), câu dịch (lý do + bản trước khi AI kiểm tra).
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -752,5 +781,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.47: chờ người dùng thử dịch + lồng tiếng Anh / Thái / Nhật / Hàn trên máy thật (Edge giọng nước ngoài, OmniVoice
   `language` khác "vi" chưa chạy thật – nếu bản OmniVoice báo lỗi tham số language thì cần đổi mã sang tên tiếng),
   và xác nhận "1. Nghe & tách câu" có báo lỗi tách giọng (nếu có) để biết vì sao tab Âm thanh không có bản tách.
+- 2.0.55: chờ người dùng thử kỹ năng dịch AI với API thật (DeepSeek / GPT / Claude…): AI sửa lỗi nghe có sửa đúng
+  không, số câu bị nối, hồ sơ phim, kiểm tra bản dịch (chỉ thử với AI giả lập ở sandbox).
 - 2.0.42: chờ người dùng nghe thử các cách xếp giọng trên video thật (nhất là Tự động với cụm câu dài, Đọc đè 2 giọng
   cùng lúc) và xem phụ đề chạy theo giọng lồng có dễ theo dõi không.

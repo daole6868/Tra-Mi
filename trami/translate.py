@@ -140,6 +140,12 @@ def cache_line(key: str) -> str:
     return key.split("|", 2)[2] if len(parts) >= 3 else key
 
 
+def with_skill(system: str, skill: str) -> str:
+    from .skills import with_skill as _ws
+
+    return _ws(system, skill)
+
+
 def cache_key(engine: str, style: str, target: str, line: str) -> str:
     """Khoá bộ nhớ bản dịch (tiếng Việt giữ dạng cũ để dùng lại bản dịch đã nhớ của dự án cũ)."""
     target = langs.norm(target)
@@ -325,8 +331,9 @@ def hymt_worker(settings: dict | None = None) -> HymtWorker:
 class Translator:
     def __init__(self, settings: dict, engine: str | None = None, style: str | None = None,
                  glossary: dict[str, str] | None = None, cache: dict | None = None, target: str | None = None,
-                 source: str | None = None):
+                 source: str | None = None, skill: str = ""):
         self.s = settings
+        self.skill = skill or ""   # kỹ năng dịch của người dùng (skills.py) – gắn vào lời nhắc của mọi lần hỏi AI
         self.engine = engine or settings.get("translate_engine", "google")
         self.style = style or settings.get("translate_style", "auto")
         self.target = langs.norm(target or settings.get("target_lang"))
@@ -384,7 +391,7 @@ class Translator:
             sysp = SHORTEN_PROMPT_EN.format(lang=L["english"], unit=L["unit_ai"])
             user = "SHORTEN THESE TRANSLATIONS:\n" + json.dumps(payload, ensure_ascii=False, indent=0)
         try:
-            d = _extract_json(self.llm.chat(sysp, user))
+            d = _extract_json(self.llm.chat(with_skill(sysp, self.skill), user))
         except Exception:  # noqa: BLE001
             return [vi for _, vi, _ in items]
         out = []
@@ -514,7 +521,7 @@ class Translator:
         parts.append(ask + "\n" + json.dumps(payload, ensure_ascii=False, indent=0))
         user = "\n\n".join(parts)
         try:
-            d = _extract_json(self.llm.chat(system_prompt(self.target, self.source), user))
+            d = _extract_json(self.llm.chat(with_skill(system_prompt(self.target, self.source), self.skill), user))
         except (PermissionError, ApiError, ValueError) as e:
             if isinstance(e, ValueError) and "JSON" in str(e):
                 d = None  # AI trả về sai định dạng -> chia nhỏ lô rồi thử lại

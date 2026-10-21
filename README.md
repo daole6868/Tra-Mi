@@ -89,7 +89,7 @@ Muốn dịch nhanh không cần mở giao diện, kéo thả video vào `DichNh
 | Tab | Chức năng |
 |---|---|
 | **Tự động** | Chạy trọn gói các bước: tải video → tách giọng → nhận dạng → phân biệt người nói → dịch → lồng tiếng → xoá phụ đề cũ → xuất video |
-| **Phụ đề** | Bảng sửa trực tiếp câu Trung, câu Việt, thời gian và người nói. Bấm vào một dòng để tua video tới câu đó; video tự cuộn theo câu đang phát. Gộp, tách, thêm, xoá câu. Dời giờ, tìm & thay, dịch lại 1 câu, dịch các dòng trống. Nhập SRT/ASS. Cột 🎵 đánh dấu câu đang hát; cột "Bỏ lồng" để không lồng tiếng câu đó. Có bảng tên riêng Hán Việt do AI tự điền |
+| **Phụ đề** | Bảng sửa trực tiếp câu Trung, câu Việt, thời gian và người nói. Thẻ **Kỹ năng dịch AI**: AI sửa lỗi nghe & nối câu, AI kiểm tra bản dịch, hồ sơ phim. Bấm vào một dòng để tua video tới câu đó; video tự cuộn theo câu đang phát. Gộp, tách, thêm, xoá câu. Dời giờ, tìm & thay, dịch lại 1 câu, dịch các dòng trống. Nhập SRT/ASS. Cột 🎵 đánh dấu câu đang hát; cột "Bỏ lồng" để không lồng tiếng câu đó. Có bảng tên riêng Hán Việt do AI tự điền |
 | **Xoá phụ đề** | Khoanh vùng chữ ngay trên video (hoặc trên ảnh chụp khung), được nhiều vùng; kéo 4 chấm trên 4 cạnh để đổi cao / thấp / dài / ngắn, kéo giữa để di chuyển. Tự dò vùng phụ đề. **Xoá sạch**: chỗ bị chữ che được lấp bằng **nền thật lấy từ các khung trước / sau** (lúc chữ đổi câu, máy quay lia – có đo chuyển động), phần chưa từng lộ ra mới để AI LaMa vẽ → nét, không nhoè, không nhấp nháy; nhận chữ mọi màu. **Gỡ logo cố định** (khoanh riêng ở mục "Logo cố định"): tool đo logo trên ~200 khung rồi tính ngược lớp logo trong suốt → nền thật phía sau hiện lại. Cách khác: vá nền, làm mờ (mờ thường / mờ mịn / khảm ô vuông, **bo góc, viền mờ dần, phủ tối**), che dải màu (bo góc), delogo. Xem thử 1 khung; nút **Chạy xoá (cả video)** xoá ngay, trình phát chiếu bản đã xoá và lúc xuất dùng lại |
 | **Chỉnh sửa** | Cắt đầu/cuối và xoá nhiều đoạn giữa, xem trên thanh thời gian. Crop, xoay, lật gương, zoom, tốc độ 0.5–2×. Đổi khung 9:16 / 16:9 / 1:1 / 4:5 với nền mờ. Độ phân giải tới 4K. Chỉnh màu, làm nét, khử nhiễu. Logo, chữ tĩnh hoặc chữ chạy, mờ dần đầu/cuối |
 | **Kiểu chữ** | Font (có **Bangers** kiểu truyện tranh), cỡ, màu, viền, bóng, nền hộp (ôm từng dòng / 1 khối / dải cố định, **bo góc**), vị trí, VIẾT HOA, song ngữ. **Độ dài dòng**: đo chữ thật, chỉ xuống dòng khi câu thật sự dài hơn *Độ dài tối đa của dòng* (% khung); chọn số dòng tối đa, hoặc *thu nhỏ chữ câu đó cho vừa 1 dòng*. **Karaoke**: từng từ đổi màu đúng lúc được đọc (chạy theo giọng lồng tiếng), chọn màu, quét mượt hoặc đổi từng từ, dùng được với mọi font. Xem trước trực tiếp trên video, đúng cỡ và chỗ như video xuất. Kéo phụ đề trên video để đặt chỗ; nền hộp ôm chữ hoặc dải cố định, kéo 4 chấm trên cạnh nền để đổi chiều cao / độ dài. Có sẵn 5 mẫu nhanh, gồm *Karaoke vàng* |
@@ -120,6 +120,16 @@ VieNeu chỉ đọc tiếng Việt nên câu tiếng khác tự đọc bằng Mi
 - Video chỉ có tiếng: bật **Tách giọng khỏi nhạc trước**, rồi dùng **Qwen3-ASR** (hoặc SenseVoice). Mỗi dòng phụ đề là
   1 câu trọn nghĩa: chỉ tách ở cuối câu (。！？) hoặc chỗ nghỉ thật; dấu phẩy nói liền không bị tách. Có tách giọng thì tool còn **nghe lại các đoạn có tiếng bị bộ chia đoạn bỏ sót**, nên không còn câu bị bỏ không dịch.
 - Dùng **AI dịch** và chọn đúng **thể loại**. Sau lần dịch đầu, sửa bảng tên riêng nếu cần rồi bấm **Dịch lại tất cả**. Bản dịch cũ được lưu sẵn, nên dịch lại không tốn thêm tiền cho những câu không đổi.
+- **Kỹ năng dịch AI** (dùng với mọi công cụ dịch AI: DeepSeek, Claude, GPT, Gemini, Ollama hoặc bất kỳ API tương thích
+  OpenAI nào – điền *OpenAI base URL* + *OpenAI API key* ở Cài đặt):
+  - *AI sửa lỗi nghe & nối câu* trước khi dịch: sửa chữ máy nghe nhầm (đồng âm) và nối câu bị cắt ngang; tool kiểm tra
+    từng chỗ sửa (chỉ nhận sửa gần chữ cũ, chỉ nối câu liền nhau), có nút *Hoàn tác sửa*.
+  - *Hồ sơ phim*: AI đọc cả kịch bản 1 lần, ghi thể loại, nhân vật, cách xưng hô, tên riêng / meme – mọi lần dịch sau
+    dùng chung, sửa được ở tab Phụ đề.
+  - *AI kiểm tra bản dịch*: soát câu sai nghĩa, xưng hô / tên không thống nhất, câu quá dài, còn chữ Hán rồi sửa (rê
+    chuột vào câu để xem lý do). Câu bạn tự sửa không bị đụng tới.
+  - *Kỹ năng của bạn*: tab Tự động → *Kỹ năng dịch AI* → *Sửa / thêm…*: viết luật riêng (xưng hô, cách dịch meme…) hoặc
+    nạp file .txt / .md; có sẵn 3 kỹ năng mẫu (hài – meme – AI, lồng tiếng câu ngắn, cổ trang).
 - Lồng tiếng tự nhiên nhất: **Tách giọng → Phân biệt người nói → Tự gán giọng**, hoặc chọn *Nhái giọng*.
 
 ## 5. Dòng lệnh
@@ -135,7 +145,7 @@ python TraMi.py dich phim.mp4 --dich-sang en --long-tieng      # dịch + lồng
 TraMi/
 ├─ TraMi.py            mở phần mềm
 ├─ trami/              phần xử lý: asr, asr_funasr, ocr, translate, separate, diarize,
-│  │                   tts, lama, inpaint, video, pipeline, jobs, project
+│  │                   skills, tts, lama, inpaint, video, pipeline, jobs, project
 │  └─ gui/             giao diện PySide6 vẽ bằng QPainter (theme, icons, widgets,
 │                      player, editors, project_page, main)
 ├─ fonts/  assets/     font Be Vietnam Pro + Bangers (giấy phép SIL OFL), icon
