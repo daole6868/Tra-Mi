@@ -1,6 +1,7 @@
 """Mô hình phụ đề và đọc/ghi SRT, VTT, ASS, TXT."""
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from dataclasses import dataclass, field, asdict
@@ -309,6 +310,98 @@ def _ass_color_alpha(color: str, opacity: float) -> tuple[str, str]:
     return f"&H{full[4:]}&", f"&H{full[2:4]}&"
 
 
+LINE_WIDTH = 0.9        # dòng phụ đề dài tối đa 90 % bề rộng khung (mặc định)
+
+
+def line_avail(st: dict, width: float) -> float:
+    """Bề rộng tối đa 1 dòng phụ đề (điểm ảnh)."""
+    lw = min(1.0, max(0.3, float(st.get("line_width") or LINE_WIDTH)))
+    return width * lw
+
+
+def drawn_box(st: dict) -> bool:
+    """Nền tự vẽ bằng hình (bo góc / 1 khối chung / dải cố định) thay cho nền vuông có sẵn của libass."""
+    return bool(st.get("box")) and (bool(st.get("box_fixed")) or bool(st.get("box_block"))
+                                    or float(st.get("box_radius") or 0) > 0)
+
+
+def layout_event(parts: list[tuple[str, str]], st: dict, width: int, height: int) -> dict | None:
+    """Xếp 1 câu phụ đề đúng như khi xuất – dùng chung cho video xuất (`to_ass`) và khung xem trước.
+    parts: [(chữ, "vi" bản dịch | "zh" dòng Trung nhỏ của song ngữ | "src" chỉ chữ Trung)].
+    Trả về các dòng [(chữ, font, cỡ, loại)], bề rộng từng dòng, tâm ngang, chân / đỉnh khối chữ, các ô nền
+    [(x, y, rộng, cao)] và bán kính bo góc (điểm ảnh khung xuất)."""
+    from . import textfit
+
+    size = sub_size(st, width, height)
+    src_size = int(size * SOURCE_SCALE)
+    bold = bool(st.get("bold", True))
+    avail = line_avail(st, width)
+    rows: list[tuple[str, str, int, str]] = []
+    for text, kind in parts:
+        text = (text or "").strip()
+        if not text:
+            continue
+        if kind == "vi":
+            if st.get("uppercase"):
+                text = text.upper()
+            font = line_font(text, st)
+            lines, fs = textfit.fit_lines(text, font, bold, size, avail, int(st.get("max_lines") or 2),
+                                          st.get("line_fit") or "wrap", float(st.get("min_scale") or 0.7))
+            rows += [(ln, font, fs, kind) for ln in lines if ln]
+        else:
+            fs = src_size if kind == "zh" else size
+            rows += [(ln.strip(), cjk_font_name(st), fs, kind) for ln in text.split("\n") if ln.strip()]
+    if not rows:
+        return None
+    widths = [textfit.width(r[0], r[1], bold, r[2]) for r in rows]
+    block_h = float(sum(r[2] for r in rows))
+    cx, bottom = block_anchor(st, width, height, block_h)
+    top = bottom - block_h
+    boxes: list[tuple[float, float, float, float]] = []
+    radius = 0.0
+    rr = max(0.0, min(0.5, float(st.get("box_radius") or 0)))
+    if st.get("box"):
+        if st.get("box_fixed"):
+            x, y, bw, bh = fixed_box(st, width, height, cx, bottom - block_h / 2)
+            boxes = [(x, y, bw, bh)]
+            radius = rr * min(bh, bw)
+        else:
+            px, py = box_pads(st, size)
+            radius = rr * (size + 2 * py)
+            if st.get("box_block"):     # 1 khối chung cho mọi dòng
+                mw = max(widths)
+                boxes = [(cx - mw / 2 - px, top - py, mw + 2 * px, block_h + 2 * py)]
+            else:
+                drawn = drawn_box(st)
+                y = top
+                for k, (r, w) in enumerate(zip(rows, widths)):
+                    lh = r[2]
+                    if drawn:   # nền từng dòng nối liền nhau, không chồng lên nhau (chồng -> chỗ chồng đậm hơn)
+                        y0 = round(y - (py if k == 0 else 0))
+                        y1 = round(y + lh + (py if k == len(rows) - 1 else 0))
+                    else:
+                        y0, y1 = y - py, y + lh + py
+                    boxes.append((cx - w / 2 - px, y0, w + 2 * px, y1 - y0))
+                    y += lh
+    return {"rows": rows, "widths": widths, "size": size, "src_size": src_size, "cx": cx, "bottom": bottom,
+            "top": top, "block_h": block_h, "boxes": boxes, "radius": radius}
+
+
+def rounded_rect_path(x: float, y: float, w: float, h: float, r: float) -> str:
+    """Hình chữ nhật bo góc bằng lệnh vẽ ASS (đường cong Bézier bậc 3)."""
+    r = max(0.0, min(r, w / 2, h / 2))
+
+    def f(v: float) -> str:
+        return f"{v:.1f}".rstrip("0").rstrip(".")
+    if r < 0.5:
+        return f"m {f(x)} {f(y)} l {f(x + w)} {f(y)} {f(x + w)} {f(y + h)} {f(x)} {f(y + h)}"
+    k = r * 0.4477          # điểm điều khiển: 1 − 0,5523 (xấp xỉ cung tròn)
+    return (f"m {f(x + r)} {f(y)} l {f(x + w - r)} {f(y)} b {f(x + w - k)} {f(y)} {f(x + w)} {f(y + k)} {f(x + w)} {f(y + r)} "
+            f"l {f(x + w)} {f(y + h - r)} b {f(x + w)} {f(y + h - k)} {f(x + w - k)} {f(y + h)} {f(x + w - r)} {f(y + h)} "
+            f"l {f(x + r)} {f(y + h)} b {f(x + k)} {f(y + h)} {f(x)} {f(y + h - k)} {f(x)} {f(y + h - r)} "
+            f"l {f(x)} {f(y + r)} b {f(x)} {f(y + k)} {f(x + k)} {f(y)} {f(x + r)} {f(y)}")
+
+
 def to_ass(segs: list[Segment], style: dict, width: int = 1920, height: int = 1080, which: str = "trans") -> str:
     st = dict(style or {})
     width, height = max(16, int(width or 1920)), max(16, int(height or 1080))
@@ -319,9 +412,9 @@ def to_ass(segs: list[Segment], style: dict, width: int = 1920, height: int = 10
     custom = is_custom_pos(st)
     align = {"bottom": 2, "top": 8, "middle": 5}.get(pos, 2)   # "auto" = canh đáy theo vùng phụ đề cũ
     margin_v = margin_v_px(st, width, height)
-    margin_h = int(width * 0.05)
+    margin_h = max(0, round(width * (1 - line_avail(st, 1.0)) / 2))
     box = bool(st.get("box"))
-    fixed = box and bool(st.get("box_fixed"))
+    drawn = drawn_box(st)          # nền tự vẽ (bo góc / 1 khối / dải cố định): chữ không viền ở lớp trên
     primary = _hex_to_ass(st.get("color", "#FFFFFF"))
     secondary = _hex_to_ass(st.get("secondary_color", "#FFE14D"))
     src_col = secondary
@@ -335,16 +428,16 @@ def to_ass(segs: list[Segment], style: dict, width: int = 1920, height: int = 10
         main_second = primary
         primary = _hex_to_ass(st.get("karaoke_color") or DEFAULT_COLOR)
     bord = ""
-    if box and not fixed:
-        # nền hộp ôm từng dòng: libass vẽ hộp = chữ + \xbord (trái/phải) + \ybord (trên/dưới)
+    if box and not drawn:
+        # nền hộp vuông ôm từng dòng: libass vẽ hộp = chữ + \xbord (trái/phải) + \ybord (trên/dưới)
         border_style = 3
         outline_c = _hex_to_ass(st.get("box_color", "#000000"), 1 - float(st.get("box_opacity", 0.55)))
         back = outline_c
         pad_x, pad_y = box_pads(st, size)
         outline_v = pad_y
         bord = f"\\xbord{pad_x:.1f}\\ybord{pad_y:.1f}"
-    elif fixed:
-        # dải nền cố định vẽ riêng (lớp 0), chữ không viền ở lớp 1
+    elif drawn:
+        # nền vẽ riêng (lớp 0), chữ không viền ở lớp 1
         border_style = 1
         outline_c = _hex_to_ass(st.get("outline_color", "#000000"))
         back = _hex_to_ass("#000000", 0.4)
@@ -359,19 +452,11 @@ def to_ass(segs: list[Segment], style: dict, width: int = 1920, height: int = 10
     cjk_font = cjk_font_name(st)
     if which == "source":
         font = cjk_font
-    max_chars = int(width / (size * 0.55)) if size else 42
     src_size = int(size * SOURCE_SCALE)
 
-    def fn(text: str) -> str:
-        """Thẻ đổi font cho dòng tiếng Thái / Nhật / Hàn (rỗng nếu dùng font đã chọn)."""
-        if which == "source":
-            return ""
-        f = line_font(text, st)
-        return "{\\fn" + f + "}" if f != font else ""
-
-    # karaoke + nền ôm chữ: libass vẽ nền riêng cho TỪNG TỪ (chồng lên nhau thành sọc tối) -> nền vẽ ở lớp 0 từ câu
-    # không có thẻ karaoke (chữ trong suốt), chữ karaoke vẽ ở lớp 1 bằng kiểu không nền
-    kara_box = kara and box and not fixed
+    # karaoke + nền vuông của libass: libass vẽ nền riêng cho TỪNG TỪ (chồng lên nhau thành sọc tối) -> nền vẽ ở lớp 0
+    # từ câu không có thẻ karaoke (chữ trong suốt), chữ karaoke vẽ ở lớp 1 bằng kiểu không nền
+    kara_box = kara and box and not drawn
     kara_styles = ""
     if kara_box:
         kara_styles = (f"Style: Kara,{font},{size},{primary},{main_second},{outline_c},{back},{bold},0,0,0,100,100,0,0,"
@@ -398,54 +483,56 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     pos_tag = f"\\an2\\pos({float(st['pos_x']) * width:.0f},{float(st['pos_y']) * height:.0f})" if custom else ""
     tag = pos_tag + bord
     pre = "{" + tag + "}" if tag else ""
-    layer = 1 if fixed else 0
+    layer = 1 if drawn else 0
+    box_c, box_a = _ass_color_alpha(st.get("box_color", "#000000"), float(st.get("box_opacity", 0.55)))
 
-    def emit(s: Segment, txt: str, n_main: int, n_src: int, plain: str = "", zh: str = ""):
+    def head_tags(f: str, fs: int) -> str:
+        """Đổi font (câu Thái / Nhật / Hàn) và cỡ chữ (câu thu nhỏ cho vừa dòng) riêng cho câu này."""
+        t = ("\\fn" + f if f != font else "") + (f"\\fs{fs}" if fs != size else "")
+        return "{" + t + "}" if t else ""
+
+    for s in segs:
+        if which == "both":
+            parts = [(s.trans, "vi"), (s.text, "zh")]
+        elif which == "source":
+            parts = [(s.text, "src")]
+        else:
+            parts = [(_pick(s, "trans"), "vi")]
+        lay = layout_event(parts, st, width, height)
+        if not lay:
+            continue
         t0, t1 = fmt_ass_time(s.start), fmt_ass_time(s.end)
-        if kara_box:
+        rows = lay["rows"]
+        vi_rows = [r for r in rows if r[3] == "vi"]
+        zh_rows = [r for r in rows if r[3] != "vi"]
+        vi = "\n".join(r[0] for r in vi_rows)
+        zh = "\n".join(r[0] for r in zh_rows)
+        if drawn and lay["boxes"]:
+            # nền vẽ bằng hình (bo góc): lớp 0, toạ độ tuyệt đối trên khung xuất
+            bx0 = math.floor(min(b[0] for b in lay["boxes"]))
+            by0 = math.floor(min(b[1] for b in lay["boxes"]))
+            path = " ".join(rounded_rect_path(b[0] - bx0, b[1] - by0, b[2], b[3], lay["radius"])
+                            for b in lay["boxes"])
+            lines.append(f"Dialogue: 0,{t0},{t1},Default,,0,0,0,,{{\\an7\\pos({bx0:.0f},{by0:.0f})\\bord0\\shad0"
+                         f"\\1c{box_c}\\1a{box_a}\\p1}}{path}{{\\p0}}\n")
+        if which == "source":
+            body = zh
+            lines.append(f"Dialogue: {layer},{t0},{t1},Default,,0,0,0,,{pre}{_ass_escape(body)}\n")
+            continue
+        ft = head_tags(vi_rows[0][1], vi_rows[0][2]) if vi_rows else ""
+        txt = ft + (kara_text(vi, s.start, s.end, s.extra.get("kv"), kara_mode) if kara else _ass_escape(vi)) \
+            if vi else ""
+        if kara_box and vi:
             hide = "{\\1a&HFF&\\2a&HFF&}"
-            back_txt = (hide + plain if plain else "") + ("\\N" if plain and zh else "") + \
-                ("{\\rSource" + bord + "}" + _ass_escape(zh) if zh else "")
+            back_txt = hide + ft + _ass_escape(vi) + \
+                ("\\N{\\rSource" + bord + "}" + _ass_escape(zh) if zh else "")
             lines.append(f"Dialogue: 0,{t0},{t1},Default,,0,0,0,,{pre}{back_txt}\n")
             front = "{\\rKara" + pos_tag + "}" + txt + ("\\N{\\rKaraSrc\\1a&HFF&}" + _ass_escape(zh) if zh else "")
             lines.append(f"Dialogue: 1,{t0},{t1},Default,,0,0,0,,{front}\n")
-            return
-        if fixed:
-            block_h = n_main * size + n_src * src_size
-            cx, bottom = block_anchor(st, width, height, block_h)
-            x, y, bw, bh = fixed_box(st, width, height, cx, bottom - block_h / 2)
-            c, a = _ass_color_alpha(st.get("box_color", "#000000"), float(st.get("box_opacity", 0.55)))
-            lines.append(f"Dialogue: 0,{t0},{t1},Default,,0,0,0,,{{\\an7\\pos({x:.0f},{y:.0f})\\bord0\\shad0"
-                         f"\\1c{c}\\1a{a}\\p1}}m 0 0 l {bw:.0f} 0 {bw:.0f} {bh:.0f} 0 {bh:.0f}{{\\p0}}\n")
+            continue
+        if zh:
+            txt += ("\\N" if txt else "") + "{\\rSource" + bord + "}" + _ass_escape(zh)
         lines.append(f"Dialogue: {layer},{t0},{t1},Default,,0,0,0,,{pre}{txt}\n")
-
-    for s in segs:
-        body = _pick(s, "source" if which == "source" else "trans").strip()
-        if which == "both":
-            vi = wrap_line(s.trans.strip(), max_chars)
-            zh = s.text.strip()
-            if st.get("uppercase"):
-                vi = vi.upper()
-            if not vi and not zh:
-                continue
-            ft = fn(vi) if vi else ""
-            txt = ft + (kara_text(vi, s.start, s.end, s.extra.get("kv"), kara_mode) if kara else _ass_escape(vi))
-            if kara_box and vi:
-                emit(s, txt, 0, 0, ft + _ass_escape(vi), zh)
-                continue
-            if zh:
-                txt += "\\N{\\rSource" + bord + "}" + _ass_escape(zh)
-            emit(s, txt, vi.count("\n") + 1 if vi else 0, zh.count("\n") + 1 if zh else 0)
-            continue
-        if not body:
-            continue
-        if which != "source":
-            body = wrap_line(body, max_chars)
-        if st.get("uppercase"):
-            body = body.upper()
-        ft = fn(body)
-        txt = ft + (kara_text(body, s.start, s.end, s.extra.get("kv"), kara_mode) if kara else _ass_escape(body))
-        emit(s, txt, body.count("\n") + 1, 0, ft + _ass_escape(body))
     return "".join(lines)
 
 

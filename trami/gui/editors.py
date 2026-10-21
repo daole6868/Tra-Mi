@@ -78,6 +78,10 @@ class RegionEditor(QWidget):
         self.multi = multi
         self.pix: QPixmap | None = None
         self.regions: list[dict] = []
+        self.extra: list[dict] = []          # danh sách còn lại (vùng phụ đề / logo) – chỉ vẽ mờ để biết vị trí
+        self.color = theme.ACCENT2
+        self.label = "Vùng"
+        self.extra_label = "Logo"
         self.overlay: QPixmap | None = None
         self.drag = None
         self.setMouseTracking(True)
@@ -191,10 +195,19 @@ class RegionEditor(QWidget):
             return
         ir = self.img_rect()
         p.drawPixmap(ir.toRect(), self.overlay or self.pix)
+        dim = QPen(QColor(theme.MUTED), 1.2, Qt.PenStyle.DotLine)
+        for i, reg in enumerate(self.extra):
+            rr = self._rect_of(reg)
+            p.setPen(dim)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(rr, 4, 4)
+            p.setFont(theme.font(8.5, QFont.Weight.Bold))
+            p.drawText(QRectF(rr.left() + 6, rr.top() + 3, 120, 16), Qt.AlignmentFlag.AlignLeft,
+                       f"{self.extra_label} {i + 1}")
         for i, reg in enumerate(self.regions):
             rr = self._rect_of(reg)
-            p.setBrush(theme.c(theme.ACCENT2, 45))
-            p.setPen(QPen(QColor(theme.ACCENT2), 2))
+            p.setBrush(theme.c(self.color, 45))
+            p.setPen(QPen(QColor(self.color), 2))
             p.drawRoundedRect(rr, 4, 4)
             # nút xoá
             close = QRectF(rr.right() - 18, rr.top(), 18, 18)
@@ -203,11 +216,11 @@ class RegionEditor(QWidget):
             p.drawRoundedRect(close, 4, 4)
             icons.paint_icon(p, "x", close.adjusted(3, 3, -3, -3), "#FFFFFF", 2.4)
             # 4 chấm giữa 4 cạnh: kéo để đổi cao / thấp / dài / ngắn
-            paint_handles(p, rr, theme.ACCENT2)
+            paint_handles(p, rr, self.color)
             p.setPen(QColor("#FFFFFF"))
             p.setFont(theme.font(8.5, QFont.Weight.Bold))
             p.drawText(QRectF(rr.left() + 6, rr.top() + 3, 120, 16), Qt.AlignmentFlag.AlignLeft,
-                       f"Vùng {i + 1}" if self.multi else "Vùng giữ lại")
+                       f"{self.label} {i + 1}" if self.multi else "Vùng giữ lại")
 
 
 class Timeline(QWidget):

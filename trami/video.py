@@ -108,20 +108,85 @@ def patch_feather(w: int, h: int) -> int:
     return max(2, min(w, h) // 5)
 
 
+BLUR_KINDS = (("box", "Mờ thường"), ("gauss", "Mờ mịn (kính mờ)"), ("pixel", "Khảm ô vuông (pixel)"))
+
+
+def shape_px(hs: dict, w: int, h: int) -> tuple[float, float]:
+    """(bán kính bo góc, độ rộng viền mờ dần) điểm ảnh của 1 vùng che / làm mờ: tính theo cạnh ngắn của vùng
+    (0,5 = tròn hẳn 2 đầu / mờ dần tới tận giữa)."""
+    m = min(w, h)
+    r = max(0.0, min(0.5, float(hs.get("round") or 0))) * m
+    f = max(0.0, min(0.5, float(hs.get("feather") or 0))) * m
+    return r, f
+
+
+def _sdf_terms(w: int, h: int, r: float) -> tuple[float, float, float, float]:
+    return w / 2, h / 2, max(0.0, w / 2 - r), max(0.0, h / 2 - r)
+
+
+def mask_expr(w: int, h: int, r: float, f: float, scale: float = 255.0) -> str:
+    """Biểu thức geq của FFmpeg: mặt nạ hình chữ nhật bo góc r, viền mờ dần f (điểm ảnh). Cùng công thức với
+    `round_mask` (xem trước)."""
+    cx, cy, ax, ay = _sdf_terms(w, h, r)
+    qx, qy = f"(abs(X+0.5-{cx:.2f})-{ax:.2f})", f"(abs(Y+0.5-{cy:.2f})-{ay:.2f})"
+    d = f"(hypot(max({qx},0),max({qy},0))+min(max({qx},{qy}),0)-{r:.2f})"
+    return f"{scale:.2f}*clip(-{d}/{max(1.0, f):.2f},0,1)"
+
+
+def round_mask(w: int, h: int, r: float, f: float):
+    """Mặt nạ 0..1 (h × w) giống hệt `mask_expr` – cho khung xem trước / Xem thử 1 khung."""
+    import numpy as np
+
+    cx, cy, ax, ay = _sdf_terms(w, h, r)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    qx, qy = np.abs(xx + 0.5 - cx) - ax, np.abs(yy + 0.5 - cy) - ay
+    d = np.hypot(np.maximum(qx, 0), np.maximum(qy, 0)) + np.minimum(np.maximum(qx, qy), 0) - r
+    return np.clip(-d / max(1.0, f), 0, 1).astype(np.float32)
+
+
+def blur_filter(hs: dict, w: int, h: int) -> str:
+    """Chuỗi lọc FFmpeg làm mờ 1 vùng w × h theo kiểu mờ + độ mờ + phủ tối."""
+    st = int(hs.get("blur_strength", 20))
+    kind = hs.get("blur_kind") or "box"
+    if kind == "pixel":
+        n = max(2, st // 2)
+        out = f"scale={max(1, w // n)}:{max(1, h // n)}:flags=area,scale={w}:{h}:flags=neighbor"
+    elif kind == "gauss":
+        out = f"gblur=sigma={max(1.0, st * 0.6):.1f}:steps=3"
+    else:
+        lr = max(1, min(st, min(w, h) // 2 - 1))
+        cr = max(1, min(st, min(w, h) // 4 - 1))  # kênh màu có độ phân giải 1/2
+        out = f"boxblur=luma_radius={lr}:luma_power=3:chroma_radius={cr}:chroma_power=3"
+    dk = max(0.0, min(0.8, float(hs.get("darken") or 0)))
+    if dk > 0.005:
+        out += f",lutyuv=y=val*{1 - dk:.3f}"
+    return out
+
+
+def needs_clean(hs: dict) -> bool:
+    """Có phần phải xử lý trước bằng Python (tạo video trung gian): xoá phụ đề bằng AI / nền khung khác, gỡ logo."""
+    return bool(hs.get("logos")) or (hs.get("mode") == "inpaint" and bool(hs.get("regions")))
+
+
 def inpaint_key(src: str | Path, hs: dict, settings: dict) -> str:
-    """Mã của 1 lần xoá phụ đề bằng AI: đổi video gốc / vùng / công nghệ / độ mạnh / file OCR -> mã khác."""
+    """Mã của 1 lần xoá: đổi video gốc / vùng / logo / công nghệ / độ mạnh / file OCR / tuỳ chọn -> mã khác."""
     import hashlib
 
     src = Path(src)
     st = src.stat() if src.exists() else None
-    boxes = hs.get("boxes_file")
+    sub = hs.get("mode") == "inpaint"
+    boxes = hs.get("boxes_file") if sub else None
     bst = Path(boxes).stat() if boxes and Path(boxes).exists() else None
+
+    def rr(lst):
+        return [[round(float(r[k]), 4) for k in ("x", "y", "w", "h")] for r in lst or []]
     key = {"src": str(src), "size": st.st_size if st else 0, "mtime": int(st.st_mtime) if st else 0,
-           "regions": [[round(float(r[k]), 4) for k in ("x", "y", "w", "h")] for r in hs.get("regions") or []],
+           "regions": rr(hs.get("regions")) if sub else [], "logos": rr(hs.get("logos")),
            "backend": hs.get("backend") or settings.get("inpaint_backend", "lama"),
            "strength": hs.get("strength", "normal"),
            "boxes": [str(boxes), bst.st_size, int(bst.st_mtime)] if bst else None,
-           "codec": settings.get("video_codec"), "crf": min(18, int(settings.get("video_crf", 20)))}
+           "temporal": hs.get("temporal", True) is not False, "cover": bool(hs.get("cover_box")),
+           "algo": 2, "codec": settings.get("video_codec"), "crf": min(18, int(settings.get("video_crf", 20)))}
     return hashlib.sha1(json.dumps(key, sort_keys=True).encode()).hexdigest()[:12]
 
 
@@ -131,8 +196,8 @@ def inpainted_file(src: str | Path, hs: dict, settings: dict, work: str | Path) 
 
 def inpaint_cached(src: str | Path, hs: dict, settings: dict, work: str | Path,
                    progress: ProgressCB | None = None, cancel: Callable[[], bool] | None = None) -> Path:
-    """Xoá phụ đề cũ bằng AI cho cả video, lưu lại để xem trước / xuất nhiều lần không phải chạy lại.
-    Chỉ giữ 1 bản (bản cũ của vùng khác bị xoá cho đỡ tốn ổ đĩa)."""
+    """Xoá phụ đề cũ (AI / nền khung khác) + gỡ logo cố định cho cả video, lưu lại để xem trước / xuất nhiều lần không
+    phải chạy lại. Chỉ giữ 1 bản (bản cũ của vùng khác bị xoá cho đỡ tốn ổ đĩa)."""
     from .inpaint import inpaint_video
 
     work = Path(work)
@@ -144,8 +209,11 @@ def inpaint_cached(src: str | Path, hs: dict, settings: dict, work: str | Path,
     st_inp = dict(settings)
     if hs.get("backend"):
         st_inp["inpaint_backend"] = hs["backend"]
-    inpaint_video(src, tmp, hs["regions"], st_inp, boxes_file=hs.get("boxes_file"),
-                  progress=progress, cancel=cancel, strength=hs.get("strength", "normal"))
+    sub = hs.get("mode") == "inpaint"
+    inpaint_video(src, tmp, hs.get("regions") if sub else [], st_inp,
+                  boxes_file=hs.get("boxes_file") if (sub and hs.get("use_ocr_boxes", True)) else None,
+                  progress=progress, cancel=cancel, strength=hs.get("strength", "normal"), logos=hs.get("logos"),
+                  temporal=hs.get("temporal", True) is not False, cover_box=bool(hs.get("cover_box")), work=work)
     tmp.replace(out)
     for old in list(work.glob("inpainted*.mp4")):
         if old != out:
@@ -178,11 +246,11 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
 
     # Tiền xử lý: xoá phụ đề bằng AI inpaint (tạo video trung gian; đã chạy với đúng vùng/tuỳ chọn -> dùng lại)
     hs = spec.get("hardsub") or {}
-    if hs.get("mode") == "inpaint" and hs.get("regions"):
+    if needs_clean(hs):
         cached = inpainted_file(src, hs, settings, work)
         if cached.exists():
             if progress:
-                progress(0.0, "Dùng lại video đã xoá phụ đề bằng AI")
+                progress(0.0, "Dùng lại video đã xoá phụ đề / logo")
             src = cached
             base_p, span_p = 0.0, 1.0
         else:
@@ -240,7 +308,16 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
             x, y = int(float(r["x"]) * W), int(float(r["y"]) * H)
             w, h = _even(float(r["w"]) * W), _even(float(r["h"]) * H)
             w, h = min(w, W - x), min(h, H - y)
-            if mode == "box":
+            rad, fea = shape_px(hs, w, h)
+            shaped = rad >= 0.5 or fea >= 0.5      # bo góc / viền mờ dần: phủ qua mặt nạ alpha
+            if mode == "box" and shaped:
+                col = _hex(hs.get("box_color", "#000000"))
+                op = float(hs.get("box_opacity", 1.0))
+                fc.append(f"[{v}]split[hm{k}][hc{k}];[hc{k}]crop={w}:{h}:{x}:{y},drawbox=x=0:y=0:w=iw:h=ih:"
+                          f"color={col}@1:t=fill,format=yuva420p,split[ba{k}][bb{k}];"
+                          f"[bb{k}]format=gray,geq=lum='{mask_expr(w, h, rad, fea, 255 * op)}'[bm{k}];"
+                          f"[ba{k}][bm{k}]alphamerge[bl{k}];[hm{k}][bl{k}]overlay={x}:{y}[hb{k}]")
+            elif mode == "box":
                 col = _hex(hs.get("box_color", "#000000"))
                 op = float(hs.get("box_opacity", 1.0))
                 fc.append(f"[{v}]drawbox=x={x}:y={y}:w={w}:h={h}:color={col}@{op:.2f}:t=fill[hb{k}]")
@@ -256,12 +333,13 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
                 x1, y1 = max(1, x), max(1, y)
                 w1, h1 = min(w, W - x1 - 1), min(h, H - y1 - 1)
                 fc.append(f"[{v}]delogo=x={x1}:y={y1}:w={w1}:h={h1}[hb{k}]")
+            elif shaped:     # làm mờ bo góc / viền mờ dần hoà vào hình xung quanh
+                fc.append(f"[{v}]split[hm{k}][hc{k}];[hc{k}]crop={w}:{h}:{x}:{y},{blur_filter(hs, w, h)},"
+                          f"format=yuva420p,split[ba{k}][bb{k}];"
+                          f"[bb{k}]format=gray,geq=lum='{mask_expr(w, h, rad, fea)}'[bm{k}];"
+                          f"[ba{k}][bm{k}]alphamerge[bl{k}];[hm{k}][bl{k}]overlay={x}:{y}[hb{k}]")
             else:
-                st = int(hs.get("blur_strength", 20))
-                lr = max(1, min(st, min(w, h) // 2 - 1))
-                cr = max(1, min(st, min(w, h) // 4 - 1))  # kênh màu có độ phân giải 1/2
-                fc.append(f"[{v}]split[hm{k}][hc{k}];[hc{k}]crop={w}:{h}:{x}:{y},"
-                          f"boxblur=luma_radius={lr}:luma_power=3:chroma_radius={cr}:chroma_power=3[hbl{k}];"
+                fc.append(f"[{v}]split[hm{k}][hc{k}];[hc{k}]crop={w}:{h}:{x}:{y},{blur_filter(hs, w, h)}[hbl{k}];"
                           f"[hm{k}][hbl{k}]overlay={x}:{y}[hb{k}]")
             v = f"hb{k}"
 

@@ -42,7 +42,14 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - `trami/langs.py` – tiếng đích (vi/en/th/ja/ko): tên, mã Google, tên cho Hy-MT2, giọng Edge, tốc độ nói (`budget`),
   `units` (từ / chữ), `detect` (tiếng của 1 câu theo chữ viết), font phụ đề Thái/Nhật/Hàn (`subtitle_font`).
   `pipeline.target_lang(p)` (dự án `p.data["target_lang"]`, chưa có -> Cài đặt), `trans_lang(p)` (tiếng của bản dịch đang có).
-- `tests/test_core.py` – `python -m pytest -q tests` (82 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `trami/textfit.py` – đo bề rộng chữ phụ đề như libass (Qt khi có giao diện, không thì Pillow+fontTools, không thì ước
+  lượng) + `fit_lines` (xếp câu vào dòng: % bề rộng, số dòng tối đa, thu nhỏ chữ). `subtitle.layout_event` dùng chung
+  cho `to_ass` và khung xem trước (`player.SubtitleItem._layout`) -> xuống dòng / cỡ chữ / ô nền giống hệt.
+- `trami/vfill.py` – xoá chữ bằng NỀN THẬT từ khung trước / sau (`BandFiller`: đo chuyển động bằng tương quan pha trên
+  dải hình quanh vùng, so viền rồi lấp, khung đã lấp làm nguồn tiếp, cảnh đứng yên giữ phần đã vẽ; `subtitle_mask` mặt nạ
+  chữ mọi màu). `trami/logo.py` – gỡ logo cố định (tính ngược lớp logo trong suốt từ ~200 khung). `inpaint.inpaint_video`
+  ghép cả hai (`_Job`, 2 tiến trình giải mã: dải hình + khung đầy đủ).
+- `tests/test_core.py` – `python -m pytest -q tests` (86 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -581,6 +588,49 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     `auto(opts["target"])`. Nạp SRT đã dịch tiếng khác (`pipeline.note_trans_lang` / `guess_trans_lang`) -> tự đổi "Dịch
     sang" theo (không thì bấm Dịch sẽ dịch đè mất bản vừa nạp); dòng tiếng Nhật có kana không bị coi là dòng Trung.
 
+- 2.0.48: "làm mờ chỉnh được bo góc; nền phụ đề bo góc; cỡ chữ 30 bị xuống 2 dòng – cho tuỳ chỉnh; công cụ che / xoá logo,
+  phụ đề đẹp hơn; logo cố định 1 chỗ xoá thế nào là chuẩn nhất; lấy nền từ khung trên / dưới chưa ổn".
+  * Xuống dòng: công thức cũ `max_chars = bề rộng / (0,55 × cỡ chữ)` đoán mỗi ký tự 16,5 px ở cỡ 30, chữ thật ~10,3 px
+    (Be Vietnam Pro, em = 0,655 × cỡ) -> xuống dòng khi mới dùng ~2/3 khung (video dọc 1080: 65 ký tự thay vì ~94). Giờ
+    đo chữ thật (`textfit`), cài đặt kiểu chữ: `line_width` (mặc định 0,9 khung; lề trái phải ASS theo đó), `max_lines`
+    (1–3), `line_fit` wrap / shrink (thu nhỏ chữ riêng câu cho vừa 1 dòng tới `min_scale`, `{\fsN}`), dài quá số dòng tối
+    đa -> tự nhỏ lại. Chia dòng `split_balanced` (quy hoạch động, dòng dài nhất ngắn nhất, ưu tiên sau dấu câu / trợ từ
+    Nhật, tránh dòng 1 từ). Đã đo libass: bề rộng đo 669 px, mực in 671 px.
+  * Nền phụ đề bo góc: `box_radius` (0..0,5 chiều cao 1 dòng nền), `box_block` (1 khối chung). libass không bo được nền
+    BorderStyle 3 -> nền tự vẽ lớp 0 (`\an7\pos` + `\p1`, `subtitle.rounded_rect_path` Bézier), chữ lớp 1 không viền
+    (như dải cố định); nền từng dòng nối liền không chồng (chồng -> chỗ chồng đậm hơn). Bo góc 0 + từng dòng: giữ cách cũ.
+    Karaoke + nền tự vẽ: không cần mẹo 2 lớp cũ. Xem trước vẽ `drawRoundedRect` theo cùng ô nền.
+  * Làm mờ / dải che: `round`, `feather` (theo cạnh ngắn vùng), `blur_kind` box / gauss (gblur) / pixel (scale area ->
+    neighbor), `darken` (lutyuv). Xuất: crop -> mờ -> alphamerge mặt nạ geq (`video.mask_expr` = `round_mask` numpy,
+    khoảng cách tới hình chữ nhật bo góc) -> overlay; không bo / không mờ viền thì giữ lọc cũ. Xem trước
+    `HardsubOverlay._shape_mask` + Xem thử 1 khung (`inpaint.preview_frame(hs=)`).
+  * Xoá sạch: lấy NỀN THẬT từ khung trước / sau (`vfill.BandFiller`, bật mặc định `hs["temporal"]`): lượt 1 điểm nền thật
+    chưa bị che ở khung khác (dày gần: ±1..8, thưa dần tới ±128 khung; tránh lỡ quãng ngắt ngắn giữa 2 câu), lượt 2 khung
+    trước đã lấp (không bù sáng – bù mãi qua chuỗi khung sẽ trôi màu); chuyển động: tương quan pha từng cặp khung liền +
+    đo thẳng với khung xa > 8; lấy mẫu lệch lẻ điểm ảnh; kiểm tra vòng cách mép mặt nạ 3–8 px (sai số ≤ 9, bù sáng trung
+    vị nếu ≥ 4); còn sót: cảnh đứng yên dùng lại phần khung trước đã vẽ, không thì LaMa / OpenCV (`_fill_mask`). Mặt nạ
+    `subtitle_mask`: nét chữ mọi màu (Lab so trung vị lân cận, Otsu) ∪ cách cũ, có khung OCR thì trong khung (khung OCR
+    trống ở khung nào -> tự dò để bắt câu OCR đọc sót), `cover_box` xoá cả khung chữ. LỖI TÌM RA: cắt dải YUV 4:2:0 ở
+    toạ độ / chiều cao lẻ bị FFmpeg làm tròn -> khung đọc ra lệch hàng dần; giờ `format=bgr24,crop` (đã kiểm khớp từng
+    điểm ảnh). Video thử (OpenCV): nền nhiều chi tiết, phụ đề Trung đổi câu, máy lia + đứng yên: cách cũ sai số 17,6 ->
+    mới 3,6 (lia) / 2,6 (đứng yên), không nhấp nháy.
+  * Gỡ logo cố định (`trami/logo.py`, `hs["logos"]` – danh sách vùng riêng): ~200 khung rải khắp video (khung khoá, ít
+    thì fps), viền logo = trung vị đạo hàm qua các khung (lấp lòng hình), hồi quy theo thời gian từng điểm trên YCrCb
+    I = α·L + (1−α)·Ĵ với Ĵ = nền nội suy từ quanh logo -> (1−α), α·L; tính ngược J = (I − α·L)/(1−α); α > 0,88 hoặc nền
+    không đổi -> "đặc" -> lấp bằng nền khung khác / AI; kênh màu bị phủ gần hết (β < 0,25) -> màu nội suy, độ sáng vẫn
+    tính ngược. Toàn bộ logo còn là "soft" trong BandFiller: máy lia làm nền lộ ra thì dùng nền thật, không thì giữ bản
+    tính ngược. Lưu mô hình `work/render/logo_<mã>.npz`. Thử: logo chữ trong suốt 60 % + bóng: sai số 30–40 -> ~5;
+    logo khối 55 %: 86–102 -> 4–23; máy lia: logo sai số 4 (= nhiễu nén). Đã thử các cách khác: đo theo độ biến
+    thiên (sai khi nền không đồng đều), sửa viền bằng Telea (nhoè nền chi tiết), lan độ đục từ mép (hỏng logo chữ).
+  * `video.needs_clean(hs)` (xoá sạch hoặc có logo) -> bản trung gian `inpainted_<mã>.mp4` (mã thêm logos, temporal, cover,
+    algo 2); các cách làm mờ / dải / vá nền / delogo vẫn áp lên trên khi xuất. GUI tab Xoá phụ đề: PillTabs "Phụ đề cũ /
+    Logo cố định" (`_hs_lists`, `_hs_target`; RegionEditor `extra` vẽ mờ danh sách kia; HardsubOverlay `target`,
+    `LOGO_COLOR`), ô mới: Lấy nền thật từ khung trước / sau, Dùng khung chữ OCR, Xoá cả khung chữ, Kiểu mờ, Phủ tối, Bo
+    góc, Viền mờ dần; nút "Chạy xoá (cả video)" hiện khi Xoá sạch hoặc có logo. Tab Kiểu chữ: Độ dài tối đa của dòng, Số
+    dòng tối đa, Khi câu dài hơn 1 dòng, Thu nhỏ tối đa còn, Kiểu nền (từng dòng / 1 khối / dải cố định), Bo góc nền.
+  * Đã xem: video-subtitle-remover (Apache-2.0, dùng STTN / LaMa / ProPainter) – không lấy mã; ProPainter (S-Lab,
+    phi thương mại) / E2FGVI (CC BY-NC) không dùng được cho video kiếm tiền.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -605,6 +655,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.38: chờ người dùng xác nhận hết mất chữ cuối khi nghe trong tool; nếu file bản lồng vẫn thiếu chữ -> làm kiểm tra lời đọc.
 - 2.0.39: chờ người dùng xác nhận đổi cỡ chữ không còn làm giật giọng lồng khi phát.
 - 2.0.40: chờ người dùng thử timeline mới (chọn nhiều, khoảng trống, công cụ theo dòng, chèn video) + tốc độ đọc.
+- 2.0.48: chờ người dùng thử Xoá sạch (nền khung trước / sau) + Gỡ logo cố định trên video thật 1080p (tốc độ CPU:
+  sandbox ~0,05 s / khung dải 640×130; LaMa chỉ còn vẽ phần chưa từng lộ ra), bo góc làm mờ / nền phụ đề, độ dài dòng.
 - 2.0.47: chờ người dùng thử dịch + lồng tiếng Anh / Thái / Nhật / Hàn trên máy thật (Edge giọng nước ngoài, OmniVoice
   `language` khác "vi" chưa chạy thật – nếu bản OmniVoice báo lỗi tham số language thì cần đổi mã sang tên tiếng),
   và xác nhận "1. Nghe & tách câu" có báo lỗi tách giọng (nếu có) để biết vì sao tab Âm thanh không có bản tách.

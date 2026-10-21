@@ -21,38 +21,7 @@ def fmt(t: float, ms: bool = True) -> str:
     return base + (f"{s:06.3f}" if ms else f"{int(s):02d}")
 
 
-_ASS_METRICS: dict = {}
-REF_PX = 200        # vẽ chữ ở cỡ chuẩn rồi phóng theo tỉ lệ -> cỡ chữ lẻ vẫn chính xác
-
-
-def ass_font(family: str, bold: bool) -> tuple[QFont, float, float]:
-    """Font Qt + hệ số để vẽ đúng cỡ như libass khi xuất. libass coi Fontsize = winAscent + winDescent
-    (bảng OS/2) nên chữ nhỏ hơn cỡ điểm ảnh cùng số (Be Vietnam Pro: ~0,65 lần).
-    Trả về (font cỡ REF_PX, em / Fontsize, phần trên đường chân chữ / chiều cao dòng)."""
-    key = (family, bold)
-    f = QFont(family)
-    f.setBold(bold)
-    f.setPixelSize(REF_PX)
-    if key not in _ASS_METRICS:
-        k, asc = 0.8, 0.8
-        try:
-            import struct
-
-            from PySide6.QtGui import QRawFont
-
-            raw = QRawFont.fromFont(f)
-            os2 = bytes(raw.fontTable("OS/2"))
-            wa, wd = struct.unpack(">hh", os2[74:78]) if len(os2) >= 78 else (0, 0)
-            if wa + wd > 0:
-                k, asc = raw.unitsPerEm() / (wa + wd), wa / (wa + wd)
-            else:
-                fm = QFontMetricsF(f)
-                k, asc = REF_PX / (fm.ascent() + fm.descent()), fm.ascent() / (fm.ascent() + fm.descent())
-        except Exception:  # noqa: BLE001
-            pass
-        _ASS_METRICS[key] = (k, asc)
-    k, asc = _ASS_METRICS[key]
-    return f, k, asc
+from ..textfit import REF_PX, qt_font as ass_font   # noqa: E402 – đo chữ như libass, dùng chung với video xuất
 
 
 class SubtitleItem(QGraphicsItem):
@@ -116,8 +85,7 @@ class SubtitleItem(QGraphicsItem):
 
     # ------------------------------------------------------------ hình học (giống libass)
     def _layout(self):
-        from ..subtitle import (SOURCE_SCALE, block_anchor, box_pads, cjk_font_name, fixed_box, line_font, sub_size,
-                                wrap_line)
+        from ..subtitle import layout_event
 
         fr = self.box
         if fr.height() <= 2 or fr.width() <= 2:
@@ -128,24 +96,17 @@ class SubtitleItem(QGraphicsItem):
         st = {**self.style, **self._ovr}
         sc = fr.height() / self.video_h
         W, H = fr.width() / sc, float(self.video_h)
-        size = sub_size(st, int(W), int(H))
-        max_chars = int(W / (size * 0.55)) if size else 42
+        # cùng cách xếp dòng / cỡ chữ / nền như khi xuất (subtitle.layout_event, đo chữ bằng font thật)
+        lay = layout_event(parts, {**st, "font": st.get("font") or theme.FONT_FAMILY}, round(W), round(H))
+        if not lay:
+            return None
+        size = lay["size"]
         bold = bool(st.get("bold", True))
         kara = self.kara if st.get("karaoke") and self.parts else None
-        rows = []
-        for text, kind in parts:
-            if kind == "vi":
-                t = wrap_line(text.strip(), max_chars)
-                fam = line_font(text, {**st, "font": st.get("font") or theme.FONT_FAMILY})   # Thái / Nhật / Hàn
-                rows += [(ln.upper() if st.get("uppercase") else ln, fam, size,
-                          st.get("color", "#FFFFFF"), kara is not None) for ln in t.split("\n")]
-            else:   # song ngữ: dòng Trung nhỏ, màu vàng (kiểu "Source" khi xuất)
-                fs, col = (int(size * SOURCE_SCALE), st.get("secondary_color", "#FFE14D")) if kind == "zh" else \
-                    (size, st.get("color", "#FFFFFF"))
-                rows += [(ln, cjk_font_name(st), fs, col, kind == "src" and kara is not None)
-                         for ln in text.strip().split("\n")]
-        block_h = sum(r[2] for r in rows)
-        cx, bottom = block_anchor(st, W, H, block_h)
+        rows = [(text, fam, fs, st.get("secondary_color", "#FFE14D") if kind == "zh" else st.get("color", "#FFFFFF"),
+                 kind != "zh" and kara is not None) for text, fam, fs, kind in lay["rows"]]
+        block_h = lay["block_h"]
+        cx, bottom = lay["cx"], lay["bottom"]
         X, top = fr.left() + cx * sc, fr.top() + (bottom - block_h) * sc
         lines, y, maxw, word_i = [], top, 1.0, 0
         for text, fam, fs, col, is_kara in rows:
@@ -173,20 +134,12 @@ class SubtitleItem(QGraphicsItem):
             maxw = max(maxw, w)
             y += lh
         block = QRectF(X - maxw / 2, top, maxw, block_h * sc)
-        boxes = []
-        if st.get("box"):
-            if st.get("box_fixed"):
-                bx, by, bw, bh = fixed_box(st, W, H, cx, bottom - block_h / 2)
-                boxes = [QRectF(fr.left() + bx * sc, fr.top() + by * sc, bw * sc, bh * sc)]
-            else:
-                px, py = box_pads(st, size)
-                boxes = [QRectF(x - px * sc, ly - py * sc, w + 2 * px * sc, lh + 2 * py * sc)
-                         for text, _f, _k, x, ly, w, lh, *_ in lines if text.strip()]
+        boxes = [QRectF(fr.left() + bx * sc, fr.top() + by * sc, bw * sc, bh * sc) for bx, by, bw, bh in lay["boxes"]]
         outer = QRectF(block)
         for b in boxes:
             outer = outer.united(b) if not st.get("box_fixed") else b
         return {"st": st, "sc": sc, "size": size, "lines": lines, "block": block, "boxes": boxes, "outer": outer,
-                "anchor": QPointF(X, top + block_h * sc), "sample": not self.parts}
+                "radius": lay["radius"] * sc, "anchor": QPointF(X, top + block_h * sc), "sample": not self.parts}
 
     def _geometry(self):
         if self._geo is None:
@@ -291,8 +244,12 @@ class SubtitleItem(QGraphicsItem):
             bc.setAlphaF(max(0.0, min(1.0, float(st.get("box_opacity", 0.55)))))
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(bc)
+            r = g.get("radius", 0.0)
             for b in g["boxes"]:
-                p.drawRect(b)
+                if r >= 0.5:
+                    p.drawRoundedRect(b, min(r, b.width() / 2), min(r, b.height() / 2))
+                else:
+                    p.drawRect(b)
         dev = p.device()
         spr = self._sprite(g, dev.devicePixelRatioF() if dev is not None else 1.0)
         if spr:
@@ -452,6 +409,9 @@ class ColorEffect(QGraphicsEffect):
         painter.restore()
 
 
+LOGO_COLOR = "#2BB3FF"     # vùng logo cố định (khác màu vùng phụ đề)
+
+
 class HardsubOverlay(QGraphicsItem):
     """Vẽ hiệu ứng xoá / che phụ đề cũ lên video ngay khi chỉnh (gắn vào video nên theo cả crop, lật, phóng to).
     Che dải màu: đúng như khi xuất. Làm mờ / xoá AI / delogo: làm mờ gần đúng từ khung hình đang hiện."""
@@ -463,6 +423,7 @@ class HardsubOverlay(QGraphicsItem):
         self.show_outline = False
         self.clean = False        # trình phát đang chiếu video đã xoá bằng AI -> không vẽ hiệu ứng gần đúng nữa
         self.on_changed = None    # thả chuột sau khi kéo / vẽ / xoá vùng -> on_changed(danh sách vùng)
+        self.target = "regions"   # đang khoanh: "regions" (phụ đề) | "logos" (logo cố định)
         self._drag = None
         self._hover = (-1, "")
         self._frame = None
@@ -487,7 +448,7 @@ class HardsubOverlay(QGraphicsItem):
         self.prepareGeometryChange()
         hs = dict(hs or {})
         if self._drag:      # đang kéo: giữ vùng đang kéo, không để bản lưu cũ ghi đè
-            hs["regions"] = self.hs.get("regions") or []
+            hs[self.target] = self.hs.get(self.target) or []
         self.hs = hs
         need = self.hs.get("mode") in ("blur", "inpaint", "delogo", "patch") and bool(self.hs.get("regions"))
         if need and not self._sink_connected:
@@ -547,6 +508,37 @@ class HardsubOverlay(QGraphicsItem):
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             p.drawImage(r, part)
 
+    def _src_size(self, reg: dict, img, r: QRectF) -> tuple[int, int]:
+        """Cỡ vùng tính bằng điểm ảnh video gốc (bo góc / viền mờ tính theo đó, như khi xuất)."""
+        if img is not None:
+            return max(1, round(float(reg["w"]) * img.width())), max(1, round(float(reg["h"]) * img.height()))
+        return max(1, round(r.width())), max(1, round(r.height()))
+
+    def _shape_mask(self, w: int, h: int):
+        """Mặt nạ bo góc + viền mờ dần (QImage alpha) – None nếu vùng vuông, không mờ viền."""
+        from ..video import round_mask, shape_px
+
+        rad, fea = shape_px(self.hs, w, h)
+        if rad < 0.5 and fea < 0.5:
+            return None
+        key = (w, h, round(rad, 1), round(fea, 1))
+        if getattr(self, "_mask_cache", (None,))[0] != key:
+            import numpy as np
+
+            a = (round_mask(w, h, rad, fea) * 255).astype(np.uint8)
+            argb = np.zeros((h, w, 4), np.uint8)
+            argb[..., 3] = a             # đen trong suốt dần (premultiplied: màu 0)
+            img = QImage(argb.data, w, h, w * 4, QImage.Format.Format_ARGB32_Premultiplied).copy()
+            self._mask_cache = (key, img)
+        return self._mask_cache[1]
+
+    @staticmethod
+    def _apply_mask(img: QImage, mask: QImage):
+        q = QPainter(img)
+        q.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+        q.drawImage(QRectF(img.rect()), mask)
+        q.end()
+
     def _rect(self, r: dict) -> QRectF:
         br = self.boundingRect()
         return QRectF(br.width() * float(r["x"]), br.height() * float(r["y"]),
@@ -560,13 +552,14 @@ class HardsubOverlay(QGraphicsItem):
         regs = self.hs.get("regions") or []
         mode = self.hs.get("mode", "none")
         br = self.boundingRect()
-        if not regs:
-            if self.show_outline and br.width() > 40:
-                p.setPen(QColor("#FFFFFF"))
-                p.setFont(theme.font(10, QFont.Weight.Bold))
-                r = QRectF(br.left(), br.top() + 8, br.width(), 28)
-                p.fillRect(QRectF(r.center().x() - 190, r.top(), 380, r.height()), QColor(0, 0, 0, 150))
-                p.drawText(r, Qt.AlignmentFlag.AlignCenter, "Kéo chuột trên video để khoanh vùng chữ cần xoá")
+        if not (self.hs.get(self.target) or []) and self.show_outline and br.width() > 40:
+            p.setPen(QColor("#FFFFFF"))
+            p.setFont(theme.font(10, QFont.Weight.Bold))
+            r = QRectF(br.left(), br.top() + 8, br.width(), 28)
+            p.fillRect(QRectF(r.center().x() - 190, r.top(), 380, r.height()), QColor(0, 0, 0, 150))
+            p.drawText(r, Qt.AlignmentFlag.AlignCenter, "Kéo chuột trên video để khoanh " +
+                       ("logo cố định cần gỡ" if self.target == "logos" else "vùng chữ cần xoá"))
+        if not regs and not self.show_outline:
             return
         rects = [self._rect(r) for r in regs]
         if self.clean and mode == "inpaint":
@@ -574,8 +567,18 @@ class HardsubOverlay(QGraphicsItem):
         elif mode == "box":
             c = QColor(self.hs.get("box_color", "#000000"))
             c.setAlphaF(max(0.0, min(1.0, float(self.hs.get("box_opacity", 1.0)))))
-            for r in rects:
-                p.fillRect(r, c)
+            img = self._frame_image()
+            for reg, r in zip(regs, rects):
+                sw, sh = self._src_size(reg, img, r)
+                mask = self._shape_mask(sw, sh)
+                if mask is None:
+                    p.fillRect(r, c)
+                    continue
+                part = QImage(sw, sh, QImage.Format.Format_ARGB32_Premultiplied)
+                part.fill(c)
+                self._apply_mask(part, mask)
+                p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                p.drawImage(r, part)
         elif mode == "patch":
             img = self._frame_image()
             if img is not None:
@@ -583,7 +586,10 @@ class HardsubOverlay(QGraphicsItem):
         elif mode in ("blur", "inpaint", "delogo"):
             img = self._frame_image()
             if img is not None:
-                k = 24 if mode != "blur" else max(2, int(self.hs.get("blur_strength", 20)) // 2)
+                blur = mode == "blur"
+                k = 24 if not blur else max(2, int(self.hs.get("blur_strength", 20)) // 2)
+                pixel = blur and self.hs.get("blur_kind") == "pixel"
+                dk = max(0.0, min(0.8, float(self.hs.get("darken") or 0))) if blur else 0.0
                 for r in rects:
                     src = QRectF(r.x() / br.width() * img.width(), r.y() / br.height() * img.height(),
                                  r.width() / br.width() * img.width(), r.height() / br.height() * img.height()).toRect()
@@ -593,33 +599,64 @@ class HardsubOverlay(QGraphicsItem):
                     small = part.scaled(max(1, part.width() // k), max(1, part.height() // k),
                                         Qt.AspectRatioMode.IgnoreAspectRatio,
                                         Qt.TransformationMode.SmoothTransformation)
-                    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-                    p.drawImage(r, small)
+                    mask = self._shape_mask(part.width(), part.height()) if blur else None
+                    if mask is None and not pixel and dk <= 0.005:
+                        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                        p.drawImage(r, small)
+                        continue
+                    # khảm ô vuông / phủ tối / bo góc + viền mờ dần: dựng ảnh đúng cỡ vùng rồi dán (như khi xuất)
+                    big = small.scaled(part.width(), part.height(), Qt.AspectRatioMode.IgnoreAspectRatio,
+                                       Qt.TransformationMode.FastTransformation if pixel else
+                                       Qt.TransformationMode.SmoothTransformation
+                                       ).convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+                    if dk > 0.005:
+                        q = QPainter(big)
+                        q.fillRect(big.rect(), QColor(0, 0, 0, int(255 * dk)))
+                        q.end()
+                    if mask is not None:
+                        self._apply_mask(big, mask)
+                    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, not pixel)
+                    p.drawImage(r, big)
         if self.show_outline:
             from .editors import paint_handles
 
-            pen = QPen(QColor(theme.ACCENT), 1.5, Qt.PenStyle.DashLine)
+            # danh sách KHÔNG đang khoanh: chỉ viền mờ để biết vị trí
+            other = "logos" if self.target == "regions" else "regions"
+            pen2 = QPen(QColor(theme.MUTED), 1.2, Qt.PenStyle.DotLine)
+            pen2.setCosmetic(True)
+            for i, reg in enumerate(self.hs.get(other) or []):
+                r = self._rect(reg)
+                p.setPen(pen2)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(r)
+                p.setFont(theme.font(8, QFont.Weight.Bold))
+                p.drawText(QRectF(r.left() + 4, r.top() + 2, 80, 14), Qt.AlignmentFlag.AlignLeft,
+                           f"Logo {i + 1}" if other == "logos" else f"Vùng {i + 1}")
+            col = theme.ACCENT if self.target == "regions" else LOGO_COLOR
+            pen = QPen(QColor(col), 1.5, Qt.PenStyle.DashLine)
             pen.setCosmetic(True)
+            rects = [self._rect(r) for r in (self.hs.get(self.target) or [])]
+            name = "Logo" if self.target == "logos" else "Vùng"
             for i, r in enumerate(rects):
                 p.setPen(pen)
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawRect(r)
-                paint_handles(p, r, theme.ACCENT)
+                paint_handles(p, r, col)
                 if r.width() > 40 and r.height() > 14:
                     d = self._del_rect(r)
                     p.setPen(Qt.PenStyle.NoPen)
-                    p.setBrush(QColor(theme.ACCENT))
+                    p.setBrush(QColor(col))
                     p.drawRoundedRect(d, 3, 3)
                     icons.paint_icon(p, "x", d.adjusted(3, 3, -3, -3), "#FFFFFF", 2.2)
                     p.setPen(QColor("#FFFFFF"))
                     p.setFont(theme.font(8, QFont.Weight.Bold))
-                    p.drawText(QRectF(r.left() + 4, r.top() + 2, 60, 14), Qt.AlignmentFlag.AlignLeft, f"Vùng {i + 1}")
+                    p.drawText(QRectF(r.left() + 4, r.top() + 2, 60, 14), Qt.AlignmentFlag.AlignLeft, f"{name} {i + 1}")
 
     # ------------------------------------------------------------ chỉnh vùng bằng chuột
     def _hit(self, pos):
         from .editors import hit_region
 
-        regs = self.hs.get("regions") or []
+        regs = self.hs.get(self.target) or []
         for i in range(len(regs) - 1, -1, -1):
             rr = self._rect(regs[i])
             if rr.width() > 40 and rr.height() > 14 and self._del_rect(rr).contains(pos):
@@ -646,12 +683,12 @@ class HardsubOverlay(QGraphicsItem):
         if not self.show_outline:
             e.ignore()
             return
-        regs = [dict(r) for r in (self.hs.get("regions") or [])]
+        regs = [dict(r) for r in (self.hs.get(self.target) or [])]
         i, kind = self._hit(e.pos())
         x, y = self._rel(e.pos())
         if kind == "del":
             del regs[i]
-            self.hs = {**self.hs, "regions": regs}
+            self.hs = {**self.hs, self.target: regs}
             self.update()
             if self.on_changed:
                 self.on_changed(regs)
@@ -662,7 +699,7 @@ class HardsubOverlay(QGraphicsItem):
         else:
             regs.append({"x": x, "y": y, "w": 0.0, "h": 0.0})
             self._drag = ("new", len(regs) - 1, None, (x, y))
-        self.hs = {**self.hs, "regions": regs}
+        self.hs = {**self.hs, self.target: regs}
         self.update()
         e.accept()
 
@@ -673,7 +710,7 @@ class HardsubOverlay(QGraphicsItem):
 
         kind, i, r0, (x0, y0) = self._drag
         x, y = self._rel(e.pos())
-        regs = self.hs["regions"]
+        regs = self.hs[self.target]
         if kind == "new":
             regs[i] = {"x": min(x, x0), "y": min(y, y0), "w": abs(x - x0), "h": abs(y - y0)}
         else:
@@ -684,9 +721,9 @@ class HardsubOverlay(QGraphicsItem):
         if not self._drag:
             return
         self._drag = None
-        regs = [{k: round(float(v), 4) for k, v in r.items()} for r in (self.hs.get("regions") or [])
+        regs = [{k: round(float(v), 4) for k, v in r.items()} for r in (self.hs.get(self.target) or [])
                 if float(r["w"]) > 0.01 and float(r["h"]) > 0.01]
-        self.hs = {**self.hs, "regions": regs}
+        self.hs = {**self.hs, self.target: regs}
         self.update()
         if self.on_changed:
             self.on_changed(regs)

@@ -1442,25 +1442,25 @@ def hardsub_spec(p: Project, hs: dict | None = None) -> dict:
 
 
 def inpainted_video(p: Project, hs: dict | None = None, settings: dict | None = None) -> Path | None:
-    """Video đã xoá phụ đề bằng AI với đúng vùng / tuỳ chọn hiện tại (None = chưa chạy hoặc đã đổi)."""
-    from .video import inpainted_file
+    """Video đã xoá phụ đề (AI / nền khung khác) + gỡ logo với đúng vùng / tuỳ chọn hiện tại (None = chưa chạy / đã đổi)."""
+    from .video import inpainted_file, needs_clean
 
     hs = hardsub_spec(p, hs)
-    if hs.get("mode") != "inpaint" or not hs.get("regions") or not p.data.get("source"):
+    if not needs_clean(hs) or not p.data.get("source"):
         return None
     f = inpainted_file(p.source, hs, settings or load_settings(), p.work / "render")
     return f if f.exists() else None
 
 
 def run_inpaint(p: Project, settings: dict | None = None, progress: Prog | None = None, cancel=None) -> Path:
-    """Nút 'Chạy xoá bằng AI': xoá phụ đề cũ cả video ngay (không đợi xuất). Xuất video sau đó dùng lại bản này."""
-    from .video import inpaint_cached
+    """Nút 'Chạy xoá': xoá phụ đề cũ / gỡ logo cả video ngay (không đợi xuất). Xuất video sau đó dùng lại bản này."""
+    from .video import inpaint_cached, needs_clean
 
     hs = hardsub_spec(p)
-    if hs.get("mode") != "inpaint":
-        raise ValueError("Chọn cách xoá 'Xoá sạch (AI)' trước.")
-    if not hs.get("regions"):
-        raise ValueError("Chưa khoanh vùng chữ cần xoá.")
+    if not needs_clean(hs):
+        if hs.get("mode") == "inpaint":
+            raise ValueError("Chưa khoanh vùng chữ cần xoá.")
+        raise ValueError("Chọn cách xoá 'Xoá sạch (AI)' hoặc khoanh logo cố định trước.")
     return inpaint_cached(p.source, hs, settings or load_settings(), p.work / "render", progress, cancel)
 
 

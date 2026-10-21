@@ -102,6 +102,11 @@ DEFAULT_SETTINGS: dict = {
         "box": False,                 # nền hộp mờ sau chữ
         "box_color": "#000000",
         "box_opacity": 0.55,
+        "box_radius": 0.0,            # bo góc nền (0..0,5 chiều cao 1 dòng nền)
+        "line_width": 0.9,            # dòng phụ đề dài tối đa 90 % bề rộng khung (đo chữ thật)
+        "max_lines": 2,
+        "line_fit": "wrap",           # wrap: xuống dòng · shrink: thu nhỏ chữ cho vừa 1 dòng trước
+        "min_scale": 0.7,
         "karaoke": False,             # chữ đổi màu lần lượt theo lời đọc
         "karaoke_color": "#FFEF00",
         "karaoke_mode": "sweep",      # sweep: quét mượt từng chữ / word: đổi màu từng từ

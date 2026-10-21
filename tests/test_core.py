@@ -502,6 +502,7 @@ def test_gui_smoke(sample_video, tmp_path):
     from trami import pipeline
     from trami.gui import theme
     from trami.gui.main import MainWindow
+    from trami.gui.widgets import set_combo
     from trami.project import Project
 
     app = QApplication.instance() or QApplication([])
@@ -537,6 +538,23 @@ def test_gui_smoke(sample_video, tmp_path):
     pp.a_target.setCurrentIndex(pp.a_target.findData("vi"))
     app.processEvents()
     assert pp.model.headerData(5, _Qt.Orientation.Horizontal) == "Tiếng Việt"
+    # tab Xoá phụ đề: khoanh logo cố định riêng với vùng phụ đề; làm mờ bo góc; tab Kiểu chữ: nền bo góc, độ dài dòng
+    pp._regions_edited([{"x": 0.05, "y": 0.8, "w": 0.9, "h": 0.15}])
+    pp.hs_target.set_current(1)
+    assert pp.player.view.hs.target == "logos" and pp.hs_editor.regions == []
+    pp._regions_edited([{"x": 0.8, "y": 0.02, "w": 0.15, "h": 0.08}])
+    pp.hs_round.set(50)
+    pp.st_box.setChecked(True)
+    set_combo(pp.st_bfixed, "block")
+    pp.st_bradius.set(30)
+    pp.st_lwidth.set(80)
+    pp._save_edit_now()
+    e = Project(p.id).edit
+    assert len(e["hardsub"]["regions"]) == 1 and len(e["hardsub"]["logos"]) == 1 and e["hardsub"]["round"] == 0.5
+    sty = e["subtitles"]["style"]
+    assert sty["box_block"] and sty["box_radius"] == 0.3 and sty["line_width"] == 0.8
+    pp.hs_target.set_current(0)
+    assert len(pp.hs_editor.regions) == 1 and len(pp.hs_editor.extra) == 1
     for k in ("batch", "concat", "settings", "home"):
         win.show_page(k)
         app.processEvents()
@@ -1339,7 +1357,7 @@ def test_inpaint_cached_reused(tmp_path, monkeypatch):
     src.write_bytes(b"x" * 100)
     calls = []
 
-    def fake(src_, out, regions, settings, boxes_file=None, progress=None, cancel=None, strength="normal"):
+    def fake(src_, out, regions, settings, boxes_file=None, progress=None, cancel=None, strength="normal", **kw):
         calls.append(regions)
         Path(out).write_bytes(b"done")
     monkeypatch.setattr(inpaint, "inpaint_video", fake)
@@ -1352,6 +1370,12 @@ def test_inpaint_cached_reused(tmp_path, monkeypatch):
     c = video.inpaint_cached(src, hs2, sts, tmp_path / "w")
     assert c != a and len(calls) == 2 and not a.exists()
     assert video.inpainted_file(src, hs2, sts, tmp_path / "w") == c
+    # chỉ gỡ logo (cách xoá phụ đề khác): vẫn cần bản trung gian; vùng phụ đề không ảnh hưởng mã khi không xoá AI
+    hs3 = {"mode": "blur", "regions": hs["regions"], "logos": [{"x": 0.8, "y": 0.02, "w": 0.15, "h": 0.08}]}
+    assert video.needs_clean(hs3) and not video.needs_clean({"mode": "blur", "regions": hs["regions"]})
+    assert video.inpaint_key(src, hs3, sts) == video.inpaint_key(src, {**hs3, "regions": []}, sts)
+    video.inpaint_cached(src, hs3, sts, tmp_path / "w")
+    assert calls[-1] == []          # chỉ gỡ logo, không xoá vùng phụ đề bằng AI
 
 
 def test_vi_numbers_spoken():
@@ -2019,3 +2043,140 @@ def test_subtitle_font_wrap_karaoke_other_languages():
     assert st.wrap_line("Xin chào các bạn", 42) == "Xin chào các bạn"
     toks = tokens("สวัสดี")
     assert [t for t, _ in toks] == ["ส", "วั", "ส", "ดี"]
+
+
+def test_subtitle_line_fit_and_rounded_box():
+    """Xuống dòng theo bề rộng chữ THẬT (không đoán số ký tự), thu nhỏ chữ cho vừa 1 dòng, nền bo góc tự vẽ."""
+    from trami import textfit
+
+    s = "Hôm nay mình sẽ kể cho các bạn nghe một câu chuyện thật thú vị nhé các bạn ơi"
+    w = textfit.width(s, "Be Vietnam Pro", True, 30)
+    assert 600 < w < 1000                          # ~10 px / ký tự ở cỡ 30 (cách cũ đoán 16,5 px)
+    assert textfit.fit_lines(s, "Be Vietnam Pro", True, 30, 0.9 * 1080) == ([s], 30)   # video dọc 1080: vừa 1 dòng
+    lines, fs = textfit.fit_lines(s, "Be Vietnam Pro", True, 30, 0.9 * 720)
+    assert len(lines) == 2 and fs == 30 and " ".join(lines) == s
+    one, fs2 = textfit.fit_lines(s, "Be Vietnam Pro", True, 30, 0.9 * 720, mode="shrink", min_scale=0.6)
+    assert one == [s] and 18 <= fs2 < 30
+    lines3, fs3 = textfit.fit_lines(s * 3, "Be Vietnam Pro", True, 30, 0.9 * 720, max_lines=2)
+    assert len(lines3) == 2 and fs3 < 30          # dài quá 2 dòng: chữ tự nhỏ lại
+    ja = "今日はとても面白いお話をしたいと思います、ゆっくり座って聞いてくださいね。"
+    a, b = textfit.fit_lines(ja, "Noto Sans CJK JP", True, 40, 700)[0]
+    assert a.endswith("、")                        # ưu tiên ngắt sau dấu câu
+    seg = [Segment(0, 2, "a", s)]
+
+    def style_fields(ass):
+        return ass.split("Style: Default,")[1].split("\n")[0].split(",")
+    shrink = st.to_ass(seg, {"size": 30, "line_fit": "shrink", "min_scale": 0.6}, 720, 1280)
+    assert "{\\fs" in shrink and "\\N" not in shrink.split("[Events]")[1]
+    box = st.to_ass(seg, {"size": 30, "box": True, "box_radius": 0.3}, 720, 1280)
+    ev = box.split("[Events]")[1]
+    assert "\\p1}m " in ev and " b " in ev and "Dialogue: 1," in ev      # nền vẽ bo góc ở lớp 0, chữ lớp 1
+    f = style_fields(box)
+    assert f[14] == "1" and float(f[15]) == 0.0                         # chữ không viền (nền đã vẽ riêng)
+    block = st.layout_event([(s, "vi")], {"size": 30, "box": True, "box_block": True}, 720, 1280)
+    hug = st.layout_event([(s, "vi")], {"size": 30, "box": True, "box_radius": 0.2}, 720, 1280)
+    assert len(block["boxes"]) == 1 and len(hug["boxes"]) == 2
+    (x1, y1, w1, h1), (x2, y2, w2, h2) = hug["boxes"]
+    assert abs((y1 + h1) - y2) < 1e-6              # nền từng dòng nối liền, không chồng (chỗ chồng sẽ đậm hơn)
+    assert st.rounded_rect_path(0, 0, 100, 40, 0) == "m 0 0 l 100 0 100 40 0 40"
+    assert style_fields(st.to_ass(seg, {"size": 30, "line_width": 1.0}, 720, 1280))[18:20] == ["0", "0"]  # lề 0
+    assert style_fields(st.to_ass(seg, {"size": 30}, 720, 1280))[18:20] == ["36", "36"]  # mặc định 90 %
+    legacy = st.to_ass(seg, {"size": 30, "box": True}, 720, 1280)
+    assert "\\p1" not in legacy and "\\xbord" in legacy                   # nền vuông cũ giữ nguyên cách làm
+
+
+def test_blur_box_rounded_feather_export(sample_video, tmp_path):
+    """Làm mờ / dải che bo góc + viền mờ dần: mặt nạ khi xuất (FFmpeg geq) khớp mặt nạ xem trước (numpy)."""
+    from trami import video
+    from trami.config import load_settings
+
+    m = video.round_mask(200, 60, 30, 6)
+    assert m[30, 100] == 1.0 and m[0, 0] == 0.0 and 0 < m[30, 2] < 1      # giữa đặc, góc trống, mép mờ dần
+    assert "gblur" in video.blur_filter({"blur_kind": "gauss", "blur_strength": 20}, 200, 60)
+    assert "neighbor" in video.blur_filter({"blur_kind": "pixel", "blur_strength": 20}, 200, 60)
+    assert "lutyuv" in video.blur_filter({"darken": 0.3}, 200, 60)
+    hs = {"mode": "box", "box_color": "#FF0000", "box_opacity": 1.0, "round": 0.5, "feather": 0.0,
+          "regions": [{"x": 0.2, "y": 0.6, "w": 0.6, "h": 0.3}]}
+    out = tmp_path / "o.mp4"
+    video.build_and_render(sample_video, out, {"hardsub": hs, "subtitles": {"burn": False}, "dub": {}},
+                           load_settings(), tmp_path / "w", [], None, None)
+    raw = subprocess.run([ff.ffmpeg_bin(), "-loglevel", "error", "-ss", "0.5", "-i", str(out), "-frames:v", "1",
+                          "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"], capture_output=True).stdout
+    info = ff.probe(out)
+    a = np.frombuffer(raw, np.uint8).reshape(info.height, info.width, 3).astype(int)
+    W, H = info.width, info.height
+    x0, y0, w, h = int(0.2 * W), int(0.6 * H), int(0.6 * W), int(0.3 * H)
+    cx, cy = x0 + w // 2, y0 + h // 2
+    assert a[cy, cx, 0] > 200 and a[cy, cx, 1] < 60                     # giữa dải: đỏ
+    assert not (a[y0 + 1, x0 + 1, 0] > 200 and a[y0 + 1, x0 + 1, 1] < 60)   # góc đã bo: không đỏ
+
+
+def test_temporal_fill_uses_real_background():
+    """Xoá chữ bằng nền thật từ khung khác: máy quay lia (bù chuyển động) và đứng yên (lấp suốt câu dài), không
+    nhấp nháy; chỗ chưa từng lộ ra mới để vẽ."""
+    from trami.vfill import BandFiller
+
+    rng = np.random.default_rng(3)
+    import cv2
+
+    tex = cv2.GaussianBlur((rng.random((90, 900, 3)) * 255).astype(np.float32), (0, 0), 1.5)
+    drawn = []
+
+    def fb(img, m):
+        drawn.append(int((m > 0).sum()))
+        img[m > 0] = 0
+
+    f = BandFiller(fb, lookahead=40, ctx_rows=[(0, 25), (65, 90)])
+    frames, masks, truth = [], [], []
+    for i in range(120):
+        x = min(i * 3, 180) if i < 60 else 180          # lia 3 px/khung rồi đứng yên
+        bg = tex[:, x:x + 600].copy()
+        m = np.zeros((90, 600), bool)
+        if (i // 20) % 2 == 0:                          # chữ hiện 20 khung, tắt 20 khung
+            m[35:55, 150 + (i // 40) * 60:420 + (i // 40) * 60] = True
+        img = bg.copy()
+        img[cv2.erode(m.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0] = 255   # mặt nạ nới rộng hơn chữ như thật
+        frames.append(img.astype(np.uint8))
+        masks.append(m)
+        truth.append(bg)
+    outs = {}
+    for i, (img, m) in enumerate(zip(frames, masks)):
+        f.push(i, img, m)
+        outs.update(dict(f.pop()))
+    outs.update(dict(f.pop(eof=True)))
+    errs = [np.abs(outs[i].astype(float) - truth[i])[masks[i]].mean() for i in range(120) if masks[i].any()]
+    assert len(outs) == 120 and max(errs) < 6.0, (max(errs), np.mean(errs))
+    assert f.stats["temporal"] >= len(errs) - 2 and sum(drawn) == 0
+    flick = np.abs(outs[91].astype(float) - outs[90].astype(float))[masks[90]].mean()   # đứng yên, cùng câu
+    assert flick < 1.0
+
+
+def test_fixed_logo_removed_by_unblending(tmp_path):
+    """Gỡ logo cố định: tính ngược lớp logo trong suốt từ nhiều khung -> nền thật hiện lại."""
+    from trami import logo
+
+    D = tmp_path
+    ffm = ff.ffmpeg_bin()
+    subprocess.run([ffm, "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "mandelbrot=s=320x180:rate=25:end_scale=0.0005,hue=h=t*40", "-t", "8", "-c:v", "libx264",
+                    "-crf", "12", "-pix_fmt", "yuv420p", str(D / "bg.mp4")], check=True)
+    subprocess.run([ffm, "-loglevel", "error", "-y", "-i", str(D / "bg.mp4"), "-vf",
+                    "drawbox=x=220:y=12:w=80:h=26:color=white@0.55:t=fill", "-c:v", "libx264", "-crf", "12",
+                    "-pix_fmt", "yuv420p", str(D / "v.mp4")], check=True)
+    rect = {"x": 212 / 320, "y": 6 / 180, "w": 96 / 320, "h": 38 / 180}
+    m = logo.get_model(D / "v.mp4", rect, 320, 180, 8.0, D)
+    assert m.mask.sum() > 0.7 * 80 * 26 and m.opaque.sum() < 0.1 * m.mask.sum()
+    assert abs(float((1 - m.beta[..., 0])[16:36, 16:84].mean()) - 0.55) < 0.12     # độ đục đo được ≈ 0,55
+    assert logo.model_path(D, D / "v.mp4", rect).exists()                           # lưu lại, lần sau dùng luôn
+
+    def frame(path, t):
+        b = subprocess.run([ffm, "-loglevel", "error", "-ss", str(t), "-i", str(path), "-frames:v", "1", "-f",
+                            "rawvideo", "-pix_fmt", "bgr24", "pipe:1"], capture_output=True).stdout
+        return np.frombuffer(b, np.uint8).reshape(180, 320, 3).copy()
+    for t in (1.5, 5.5):
+        B, V = frame(D / "bg.mp4", t).astype(float), frame(D / "v.mp4", t)
+        sel = ~m.opaque[12:38, 220 - m.x0:300 - m.x0] if m.y0 == 0 else np.ones((26, 80), bool)
+        before = np.abs(V[12:38, 220:300].astype(float) - B[12:38, 220:300])[sel].mean()
+        m.apply(V)
+        after = np.abs(V[12:38, 220:300].astype(float) - B[12:38, 220:300])[sel].mean()
+        assert after < before / 4, (before, after)
