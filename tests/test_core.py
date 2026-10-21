@@ -2180,3 +2180,53 @@ def test_fixed_logo_removed_by_unblending(tmp_path):
         m.apply(V)
         after = np.abs(V[12:38, 220:300].astype(float) - B[12:38, 220:300])[sel].mean()
         assert after < before / 4, (before, after)
+
+
+def test_hf_download_progress_and_xet_fallback(tmp_path, monkeypatch):
+    """Tải HuggingFace: thanh tqdm riêng luôn đếm (kể cả không có cửa sổ đen); Xet đứng im -> tải thường + ghi nhớ."""
+    from trami import config, hf_download as hd
+
+    pytest.importorskip("huggingface_hub")
+    from huggingface_hub.utils.tqdm import _create_progress_bar
+
+    stats = hd.Stats()
+    Track = hd.tracker(stats)
+    files = Track(total=3, desc="Fetching 3 files")
+    net = _create_progress_bar(cls=Track, log_level=30, name="x", desc="Downloading bytes", total=0, unit="B",
+                               unit_scale=True)
+    rec = _create_progress_bar(cls=Track, log_level=30, name="x", desc="Reconstructing", total=0, unit="B",
+                               unit_scale=True)
+    rec.total = 5_000_000
+    rec.update(2_000_000)
+    net.update(1_500_000)
+    files.update(2)
+    s = stats.snapshot()
+    assert s == {"files": [2, 3], "bytes": 2_000_000, "total": 5_000_000, "net": 1_500_000}
+
+    monkeypatch.setattr(config, "NO_XET_FILE", tmp_path / "hf_no_xet.txt")
+    monkeypatch.delenv("HF_HUB_DISABLE_XET", raising=False)
+    monkeypatch.setattr(hd, "xet_enabled", lambda: not (tmp_path / "hf_no_xet.txt").exists())
+    calls = []
+
+    def fake_run(repo, patterns, token, xet, progress, cancel, label, lo, hi):
+        calls.append(xet)
+        return ("stall", "không nhận thêm dữ liệu") if xet else ("ok", str(tmp_path))
+    monkeypatch.setattr(hd, "_run", fake_run)
+    msgs = []
+    assert hd.download("a/b", progress=lambda x, m: msgs.append(m)) == tmp_path
+    assert calls == [True, False] and (tmp_path / "hf_no_xet.txt").exists()
+    assert any("chuyển sang tải thường" in m for m in msgs)
+    assert os.environ.get("HF_HUB_DISABLE_XET") == "1"
+    monkeypatch.delenv("HF_HUB_DISABLE_XET", raising=False)
+
+    # tải thường đứng im 2 lần -> báo lỗi mạng rõ ràng; sai tên kho / cần token -> báo ngay, không thử lại
+    monkeypatch.setattr(hd, "_run", lambda *a: calls.append("h") or ("stall", "đứng im"))
+    calls.clear()
+    with pytest.raises(RuntimeError, match="bị đứng"):
+        hd.download("a/b")
+    assert calls == ["h", "h"]
+    monkeypatch.setattr(hd, "_run", lambda *a: calls.append("g") or ("error", "GatedRepoError: 401 Client Error"))
+    calls.clear()
+    with pytest.raises(RuntimeError, match="401"):
+        hd.download("a/b")
+    assert calls == ["g"]

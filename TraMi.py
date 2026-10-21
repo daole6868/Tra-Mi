@@ -21,6 +21,10 @@ if __name__ == "__main__":
         from trami.hymt_worker import main as mt_main
 
         mt_main(sys.argv[2] if len(sys.argv) > 2 else "tencent/Hy-MT2-1.8B")
+    elif len(sys.argv) > 1 and sys.argv[1] == "--hf-download":   # tiến trình riêng tải mô hình HuggingFace
+        from trami.hf_download import child_main
+
+        child_main(sys.argv[2])
     elif len(sys.argv) > 1:          # có tham số -> chế độ dòng lệnh (VD: python TraMi.py dich video.mp4)
         from trami.config import fix_std_streams
 

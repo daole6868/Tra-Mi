@@ -49,7 +49,10 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   dải hình quanh vùng, so viền rồi lấp, khung đã lấp làm nguồn tiếp, cảnh đứng yên giữ phần đã vẽ; `subtitle_mask` mặt nạ
   chữ mọi màu). `trami/logo.py` – gỡ logo cố định (tính ngược lớp logo trong suốt từ ~200 khung). `inpaint.inpaint_video`
   ghép cả hai (`_Job`, 2 tiến trình giải mã: dải hình + khung đầy đủ).
-- `tests/test_core.py` – `python -m pytest -q tests` (86 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `trami/hf_download.py` – tải mô hình HuggingFace (tab Tài liệu: Qwen3, Hy-MT2, OmniVoice) ở tiến trình riêng
+  `TraMi.py --hf-download <json>`: % / MB / MB/s / số file thật, Huỷ = giết tiến trình, kiểu tải Xet đứng im 45 s
+  -> tải thường + ghi nhớ `data/hf_no_xet.txt` (`config` đặt `HF_HUB_DISABLE_XET=1` cho mọi tiến trình sau).
+- `tests/test_core.py` – `python -m pytest -q tests` (87 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -631,6 +634,18 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   * Đã xem: video-subtitle-remover (Apache-2.0, dùng STTN / LaMa / ProPainter) – không lấy mã; ProPainter (S-Lab,
     phi thương mại) / E2FGVI (CC BY-NC) không dùng được cho video kiếm tiền.
 
+- 2.0.49: "tải Hy-MT2 ở tab Tài liệu đứng ở 0/18, không chạy gì" (cửa sổ đen: "Downloading bytes: 0.00B" + cảnh báo
+  symlink). huggingface_hub ≥ 1.0 tải file lớn qua Xet (hf_xet, máy chủ *.xethub.hf.co): mạng / VPN / tường lửa chặn thì
+  đứng ở 0 byte mãi, không báo lỗi, bấm Huỷ không được (kẹt trong mã Rust); cách khắc phục phổ biến HF_HUB_DISABLE_XET=1.
+  Tool lại không thấy tiến độ: "Fetching 18 files" chỉ tăng khi xong trọn 1 file (file trọng số 3,6 GB), thanh byte của
+  thư viện tự tắt khi không có cửa sổ đen (disable=None + kiểm tra TTY). Sửa: `trami/hf_download.py` tải ở tiến trình
+  riêng với lớp tqdm riêng (kế thừa tqdm gốc để thư viện không ép tắt; gom byte đã ghi / tổng, byte nhận qua mạng, số
+  file -> `@@TRAMI@@` mỗi 0,5 s), hiện "37% · 1.32 GB / 3.60 GB · 8.5 MB/s · 17/18 file", "chờ dữ liệu N s"; Xet đứng
+  im `STALL_XET` 45 s hoặc lỗi Xet -> giết, xoá `blobs/*.incomplete`, tải thường, ghi `data/hf_no_xet.txt`; tải thường
+  đứng im `STALL_HTTP` 90 s -> thử lại 1 lần (nối tiếp) rồi báo lỗi mạng; 401/403/404/gated báo ngay. Cảnh báo symlink
+  Windows tắt (`HF_HUB_DISABLE_SYMLINKS_WARNING`). Đã chạy thật với huggingface_hub 1.33 trên máy chủ HF giả: tải đủ
+  18 file, đứng im -> chuyển cách tải -> xong, Huỷ dừng ngay (không sót tiến trình con), sai tên kho báo ngay.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -655,6 +670,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.38: chờ người dùng xác nhận hết mất chữ cuối khi nghe trong tool; nếu file bản lồng vẫn thiếu chữ -> làm kiểm tra lời đọc.
 - 2.0.39: chờ người dùng xác nhận đổi cỡ chữ không còn làm giật giọng lồng khi phát.
 - 2.0.40: chờ người dùng thử timeline mới (chọn nhiều, khoảng trống, công cụ theo dòng, chèn video) + tốc độ đọc.
+- 2.0.49: chờ người dùng tải lại Hy-MT2 (tắt hẳn tool đang kẹt trước) – xem có chuyển sang tải thường không.
 - 2.0.48: chờ người dùng thử Xoá sạch (nền khung trước / sau) + Gỡ logo cố định trên video thật 1080p (tốc độ CPU:
   sandbox ~0,05 s / khung dải 640×130; LaMa chỉ còn vẽ phần chưa từng lộ ra), bo góc làm mờ / nền phụ đề, độ dài dòng.
 - 2.0.47: chờ người dùng thử dịch + lồng tiếng Anh / Thái / Nhật / Hàn trên máy thật (Edge giọng nước ngoài, OmniVoice

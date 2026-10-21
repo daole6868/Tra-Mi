@@ -324,17 +324,16 @@ def download(key: str, progress: Prog | None = None, cancel=None, settings: dict
 
         ensure_model(progress, cancel)
     elif key == "omnivoice":
-        from huggingface_hub import snapshot_download
+        from . import hf_download
 
         st = settings or {}
         repo = st.get("omnivoice_model") or "k2-fsa/OmniVoice"
         token = st.get("hf_token") or None
         try:
-            with tqdm_progress(progress, 0.0, 0.9, label, cancel, download=label):
-                d = Path(snapshot_download(repo, token=token))
+            d = hf_download.download(repo, token=token, progress=progress, cancel=cancel, label=label, hi=0.9)
             if not (d / "audio_tokenizer").is_dir():
-                with tqdm_progress(progress, 0.9, 1.0, label, cancel, download=label + " (bộ mã hoá âm thanh)"):
-                    snapshot_download(OMNI_TOKENIZER, token=token)
+                hf_download.download(OMNI_TOKENIZER, token=token, progress=progress, cancel=cancel,
+                                     label=label + " (bộ mã hoá âm thanh)", lo=0.9)
         except Exception as e:  # noqa: BLE001
             msg = str(e)
             if any(x in msg for x in ("401", "403", "gated", "Gated", "restricted")):
@@ -343,16 +342,16 @@ def download(key: str, progress: Prog | None = None, cancel=None, settings: dict
                                    "Cài đặt → HuggingFace token.") from None
             raise
     elif key in ("qwen_asr", "qwen_align", "hymt"):
-        from huggingface_hub import snapshot_download
-
+        from . import hf_download
         from .asr_qwen import ALIGNER
         from .translate import HYMT_REPO
 
         repo = {"qwen_asr": qwen_repo(settings), "qwen_align": ALIGNER}.get(key) or \
             (settings or {}).get("hymt_model") or HYMT_REPO
-        with tqdm_progress(progress, 0.0, 1.0, label, cancel, download=label):
-            # tải vào kho HuggingFace trên máy – đúng chỗ tiến trình Qwen3-ASR nạp, nên khi dịch không tải lại
-            snapshot_download(repo, token=(settings or {}).get("hf_token") or None, allow_patterns=HF_FILES)
+        # tải vào kho HuggingFace trên máy – đúng chỗ tiến trình Qwen3-ASR / Hy-MT2 nạp, nên khi dùng không tải lại;
+        # tải ở tiến trình riêng: hiện MB thật, Huỷ được, kiểu tải Xet bị treo thì tự chuyển sang tải thường
+        hf_download.download(repo, HF_FILES, token=(settings or {}).get("hf_token") or None, progress=progress,
+                             cancel=cancel, label=label)
         if not _hf_complete(repo):
             raise RuntimeError("Tải chưa đủ file mô hình (mạng bị ngắt?) – bấm Tải về lần nữa để tải tiếp phần còn thiếu.")
     elif key == "gender":
