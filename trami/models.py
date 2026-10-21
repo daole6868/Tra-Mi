@@ -91,6 +91,13 @@ def _hf_snapshot(repo: str) -> Path | None:
     except Exception:  # noqa: BLE001
         base = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
     snaps = base / f"models--{repo.replace('/', '--')}" / "snapshots"
+    try:   # bản đang dùng (refs/main) trước – vd. bản tải từ ModelScope (hf_download) cạnh bản HuggingFace tải dở
+        name = (snaps.parent / "refs" / "main").read_text(encoding="utf-8").strip()
+        main = snaps / name
+        if name and main.is_dir() and any(main.iterdir()):
+            return main
+    except (OSError, ValueError):
+        pass
     if snaps.is_dir():
         for d in snaps.iterdir():
             if d.is_dir() and any(d.iterdir()):

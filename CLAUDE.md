@@ -50,8 +50,10 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   chữ mọi màu). `trami/logo.py` – gỡ logo cố định (tính ngược lớp logo trong suốt từ ~200 khung). `inpaint.inpaint_video`
   ghép cả hai (`_Job`, 2 tiến trình giải mã: dải hình + khung đầy đủ).
 - `trami/hf_download.py` – tải mô hình HuggingFace (tab Tài liệu: Qwen3, Hy-MT2, OmniVoice) ở tiến trình riêng
-  `TraMi.py --hf-download <json>`: % / MB / MB/s / số file thật, Huỷ = giết tiến trình, kiểu tải Xet đứng im 45 s
-  -> tải thường + ghi nhớ `data/hf_no_xet.txt` (`config` đặt `HF_HUB_DISABLE_XET=1` cho mọi tiến trình sau).
+  `TraMi.py --hf-download <json>`: % / MB / MB/s / số file thật, Huỷ = giết tiến trình. Đường tải: HuggingFace Xet
+  (đứng 45 s -> ghi `data/hf_no_xet.txt`, `config` đặt `HF_HUB_DISABLE_XET=1`) -> HuggingFace tải thường (60 s) ->
+  ModelScope chính hãng (`MS_MIRRORS`, tải thẳng vào kho HF: snapshot `ms_commit` + `refs/main`; được thì ghi
+  `data/hf_prefer_modelscope.txt` -> lần sau ModelScope trước). `models._hf_snapshot` ưu tiên snapshot theo refs/main.
 - `tests/test_core.py` – `python -m pytest -q tests` (87 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
@@ -646,6 +648,19 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Windows tắt (`HF_HUB_DISABLE_SYMLINKS_WARNING`). Đã chạy thật với huggingface_hub 1.33 trên máy chủ HF giả: tải đủ
   18 file, đứng im -> chuyển cách tải -> xong, Huỷ dừng ngay (không sót tiến trình con), sai tên kho báo ngay.
 
+- 2.0.50: 2.0.49 vẫn báo "Tải tencent/Hy-MT2-1.8B bị đứng: không nhận thêm dữ liệu nào trong 90 giây" -> cả Xet lẫn tải
+  thường đều 0 byte: file lớn của HuggingFace nằm trên Xet, tải thường cũng chuyển hướng sang cas-bridge.xethub.hf.co ->
+  mạng người dùng chặn / nghẽn máy chủ này thì không cách nào của HuggingFace tải được. Thêm nguồn ModelScope (Tencent
+  đăng chính thức `Tencent-Hunyuan/Hy-MT2-1.8B`; ModelScope vốn tải được trên máy người dùng – SenseVoice):
+  `hf_download._ms_download` = modelscope `snapshot_download(ms_id, local_dir=<kho HF>/snapshots/<sha1>,
+  allow_file_pattern=HF_FILES)` + ghi `refs/main` -> tiến trình Hy-MT2 nạp `from_pretrained(repo, local_files_only)`
+  như cũ. Tiến độ ModelScope: móc mọi thanh tqdm (`hook_all_tqdm`) + đo dung lượng thư mục (`dir_bytes`, cũng là tín
+  hiệu "còn chạy" khi thư viện không báo). Tải thường 0 byte -> sang ModelScope luôn (nhận được dữ liệu rồi mới đứng
+  thì thử lại 1 lần); lỗi cuối liệt kê từng nguồn + số MB nhận được. Kho ModelScope chỉ ghi kho chính hãng
+  (`MS_MIRRORS`; tổ chức trùng tên cả 2 nơi: Qwen). Đã chạy thật: huggingface_hub 1.33 + modelscope 1.40.2 trên 2 máy
+  chủ giả (HF đứng im cả 2 cách -> ModelScope tải xong, `hf_hub_download(local_files_only)` trỏ đúng bản ModelScope,
+  `_hf_complete` = True, lần sau ModelScope trước).
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -670,7 +685,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.38: chờ người dùng xác nhận hết mất chữ cuối khi nghe trong tool; nếu file bản lồng vẫn thiếu chữ -> làm kiểm tra lời đọc.
 - 2.0.39: chờ người dùng xác nhận đổi cỡ chữ không còn làm giật giọng lồng khi phát.
 - 2.0.40: chờ người dùng thử timeline mới (chọn nhiều, khoảng trống, công cụ theo dòng, chèn video) + tốc độ đọc.
-- 2.0.49: chờ người dùng tải lại Hy-MT2 (tắt hẳn tool đang kẹt trước) – xem có chuyển sang tải thường không.
+- 2.0.50: chờ người dùng tải lại Hy-MT2 – xem có tự chuyển sang ModelScope và tải được không (tốc độ ModelScope từ VN).
 - 2.0.48: chờ người dùng thử Xoá sạch (nền khung trước / sau) + Gỡ logo cố định trên video thật 1080p (tốc độ CPU:
   sandbox ~0,05 s / khung dải 640×130; LaMa chỉ còn vẽ phần chưa từng lộ ra), bo góc làm mờ / nền phụ đề, độ dài dòng.
 - 2.0.47: chờ người dùng thử dịch + lồng tiếng Anh / Thái / Nhật / Hàn trên máy thật (Edge giọng nước ngoài, OmniVoice

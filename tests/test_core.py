@@ -2204,29 +2204,45 @@ def test_hf_download_progress_and_xet_fallback(tmp_path, monkeypatch):
     assert s == {"files": [2, 3], "bytes": 2_000_000, "total": 5_000_000, "net": 1_500_000}
 
     monkeypatch.setattr(config, "NO_XET_FILE", tmp_path / "hf_no_xet.txt")
+    monkeypatch.setattr(config, "PREFER_MS_FILE", tmp_path / "prefer_ms.txt")
     monkeypatch.delenv("HF_HUB_DISABLE_XET", raising=False)
     monkeypatch.setattr(hd, "xet_enabled", lambda: not (tmp_path / "hf_no_xet.txt").exists())
+    monkeypatch.setattr(config, "installed", lambda *a: True)
     calls = []
 
-    def fake_run(repo, patterns, token, xet, progress, cancel, label, lo, hi):
-        calls.append(xet)
-        return ("stall", "không nhận thêm dữ liệu") if xet else ("ok", str(tmp_path))
+    def src(req, env):
+        return "ms" if req.get("ms_id") else ("http" if env.get("HF_HUB_DISABLE_XET") else "xet")
+
+    # Xet đứng im -> tải thường cũng đứng (0 byte: mạng chặn máy chủ Xet) -> ModelScope chính hãng tải được
+    def fake_run(req, env, limit, progress, cancel, label, lo, hi):
+        calls.append(src(req, env))
+        if req.get("ms_id"):
+            assert req["ms_id"] == "Tencent-Hunyuan/Hy-MT2-1.8B"
+            return "ok", str(tmp_path), 5_000_000
+        return "stall", "không nhận thêm dữ liệu", 0
     monkeypatch.setattr(hd, "_run", fake_run)
     msgs = []
-    assert hd.download("a/b", progress=lambda x, m: msgs.append(m)) == tmp_path
-    assert calls == [True, False] and (tmp_path / "hf_no_xet.txt").exists()
-    assert any("chuyển sang tải thường" in m for m in msgs)
+    repo = "tencent/Hy-MT2-1.8B"
+    assert hd.download(repo, progress=lambda x, m: msgs.append(m)) == tmp_path
+    assert calls == ["xet", "http", "ms"]
+    assert (tmp_path / "hf_no_xet.txt").exists() and (tmp_path / "prefer_ms.txt").exists()
+    assert any("chuyển sang tải thường" in m for m in msgs) and any("ModelScope" in m for m in msgs)
     assert os.environ.get("HF_HUB_DISABLE_XET") == "1"
     monkeypatch.delenv("HF_HUB_DISABLE_XET", raising=False)
-
-    # tải thường đứng im 2 lần -> báo lỗi mạng rõ ràng; sai tên kho / cần token -> báo ngay, không thử lại
-    monkeypatch.setattr(hd, "_run", lambda *a: calls.append("h") or ("stall", "đứng im"))
     calls.clear()
-    with pytest.raises(RuntimeError, match="bị đứng"):
+    hd.download(repo)                       # lần sau: ModelScope trước
+    assert calls == ["ms"]
+
+    # tải thường nhận được dữ liệu rồi mới đứng -> thử lại 1 lần (nối tiếp); không có bản ModelScope -> báo lỗi tổng hợp
+    monkeypatch.setattr(hd, "_run", lambda req, env, *a: calls.append(src(req, env)) or ("stall", "đứng im", 2_000_000))
+    calls.clear()
+    with pytest.raises(RuntimeError, match="Không tải được"):
         hd.download("a/b")
-    assert calls == ["h", "h"]
-    monkeypatch.setattr(hd, "_run", lambda *a: calls.append("g") or ("error", "GatedRepoError: 401 Client Error"))
+    assert calls == ["http", "http"]
+    # cần token / đồng ý điều khoản -> báo ngay, không thử lại
+    monkeypatch.setattr(hd, "_run", lambda req, env, *a: calls.append(src(req, env)) or
+                        ("error", "GatedRepoError: 401 Client Error", 0))
     calls.clear()
     with pytest.raises(RuntimeError, match="401"):
         hd.download("a/b")
-    assert calls == ["g"]
+    assert calls == ["http"]

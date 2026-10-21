@@ -34,6 +34,8 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 NO_XET_FILE = DATA_DIR / "hf_no_xet.txt"
 if NO_XET_FILE.is_file():
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+# HuggingFace không tải được trên máy này nhưng ModelScope được -> mô hình có bản ModelScope chính hãng tải từ đó trước
+PREFER_MS_FILE = DATA_DIR / "hf_prefer_modelscope.txt"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 
 for _d in (DATA_DIR, PROJECTS_DIR, MODELS_DIR, CACHE_DIR):
