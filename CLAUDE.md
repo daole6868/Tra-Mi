@@ -54,7 +54,10 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (đứng 45 s -> ghi `data/hf_no_xet.txt`, `config` đặt `HF_HUB_DISABLE_XET=1`) -> HuggingFace tải thường (60 s) ->
   ModelScope chính hãng (`MS_MIRRORS`, tải thẳng vào kho HF: snapshot `ms_commit` + `refs/main`; được thì ghi
   `data/hf_prefer_modelscope.txt` -> lần sau ModelScope trước). `models._hf_snapshot` ưu tiên snapshot theo refs/main.
-- `tests/test_core.py` – `python -m pytest -q tests` (87 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `trami/sitelogin.py` – tải video từ link: `extract_url` (link / dòng chia sẻ của app / mã BV), đăng nhập Bilibili
+  bằng mã QR (`bili_qr_start/poll/status`, cookie Netscape `data/cookies/bilibili.txt`), `BROWSERS` cho cookie
+  trình duyệt; hộp mã QR `gui/link_login.py`; `pipeline.download_video` / `update_ytdlp` / `ytdlp_version`.
+- `tests/test_core.py` – `python -m pytest -q tests` (90 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -661,6 +664,31 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   chủ giả (HF đứng im cả 2 cách -> ModelScope tải xong, `hf_hub_download(local_files_only)` trỏ đúng bản ModelScope,
   `_hf_complete` = True, lần sau ModelScope trước).
 
+- 2.0.51: "tải video từ Bilibili có tốt không" -> rà lại `download_video` (chưa từng chạy thật với Bilibili; sandbox chặn
+  bilibili.com): khách chỉ được 480p, dán dòng chia sẻ "【tên】 https://b23.tv/…" bị báo "Link không hợp lệ", có thể tải về
+  HEVC/AV1 (phải tạo bản xem trước), tải lỗi để lại dự án trống, tiến độ chạy 2 lần (hình rồi tiếng), yt-dlp cũ báo 412.
+  * `trami/sitelogin.py`: `extract_url` (link đầu tiên, bỏ dấu câu Trung / Việt dính đuôi; chỉ mã BV -> link video),
+    `is_bilibili`. Đăng nhập Bilibili bằng MÃ QR (API web passport `qrcode/generate` + `qrcode/poll`: 86101 chờ / 86090 đã
+    quét / 86038 hết hạn / 0 xong; cookie từ Set-Cookie, thiếu thì từ query của data.url, giữ nguyên dạng %2C) -> file
+    Netscape `data/cookies/bilibili.txt` (hạn theo Expires, mặc định 180 ngày) -> yt-dlp `cookiefile`; `bili_status` hỏi
+    `x/web-interface/nav` (tên, VIP). Mã QR vẽ bằng `cv2.QRCodeEncoder` (dự phòng gói qrcode). Cookie Chrome / Edge trên
+    Windows hay hỏng (App-Bound Encryption từ Chrome 127, file bị khoá khi trình duyệt mở) -> Bilibili không dựa vào nó.
+  * `download_video(url, …, notes=, settings=)`: cookie Bilibili (QR) > `dl_cookie_file` > `dl_browser`
+    (`cookiesfrombrowser`); lỗi đọc cookie trình duyệt -> tải lại không cookie + ghi chú; `format_sort`
+    ["res:1080", "vcodec:h264", "acodec:aac"] (≤ 1080p, H.264 trước); tiến độ gộp các phần theo `requested_formats`
+    (không biết cỡ: hình 85 % / tiếng 15 %), "(hình)/(tiếng)", MB, MB/s, "Đang ghép hình và tiếng…" (postprocessor_hooks),
+    `noprogress`; `_dl_error` giải thích 412 / Douyin "Fresh cookies" / Unsupported URL / khu vực / VIP / cần đăng nhập;
+    Bilibili không cookie mà ≤ 480p -> ghi chú nhắc đăng nhập (`p.data["dl_warning"]`, `auto` nối vào thông báo).
+    `update_ytdlp` (`python -m pip install -U yt-dlp`, đã import yt_dlp thì nhắc mở lại tool; exe không cập nhật).
+  * Trang chủ khung "Tải video từ link": ô nhận dòng chia sẻ, trạng thái Bilibili + "Đăng nhập Bilibili (quét mã QR)" /
+    "Đăng xuất", "Trang khác lấy đăng nhập từ" (Không / Firefox / Edge / Chrome / Brave / Opera / Vivaldi / File cookies.txt…),
+    "Trình tải yt-dlp <bản>" + "Cập nhật trình tải" (job "update"). Hàng loạt / dòng lệnh cũng nhận dòng chia sẻ.
+    `MainWindow._drop_empty_project`: job download / auto lỗi hoặc huỷ mà dự án chưa có video + câu -> xoá, đang mở thì
+    về Trang chủ. Thông báo xong có ⚠ -> toast "warn" 9 s.
+  * Sửa `timeline.mouseMoveEvent` IndexError khi rê chuột qua dòng Video / Tiếng gốc lúc chưa biết độ dài video.
+  * Đã chạy thật: yt-dlp 2026.08.19 tải từ máy chủ trên máy (dòng chia sẻ, cookie chrome lỗi -> tải không cookie), hộp mã
+    QR (giải mã lại bằng cv2.QRCodeDetector ra đúng link), trạng thái đăng nhập, xoá dự án trống. Bilibili thật chưa chạy.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -685,6 +713,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.38: chờ người dùng xác nhận hết mất chữ cuối khi nghe trong tool; nếu file bản lồng vẫn thiếu chữ -> làm kiểm tra lời đọc.
 - 2.0.39: chờ người dùng xác nhận đổi cỡ chữ không còn làm giật giọng lồng khi phát.
 - 2.0.40: chờ người dùng thử timeline mới (chọn nhiều, khoảng trống, công cụ theo dòng, chèn video) + tốc độ đọc.
+- 2.0.51: chờ người dùng thử đăng nhập Bilibili bằng mã QR + tải video 720p/1080p (API QR web chưa gọi thật từ sandbox).
 - 2.0.50: chờ người dùng tải lại Hy-MT2 – xem có tự chuyển sang ModelScope và tải được không (tốc độ ModelScope từ VN).
 - 2.0.48: chờ người dùng thử Xoá sạch (nền khung trước / sau) + Gỡ logo cố định trên video thật 1080p (tốc độ CPU:
   sandbox ~0,05 s / khung dải 640×130; LaMa chỉ còn vẽ phần chưa từng lộ ra), bo góc làm mờ / nền phụ đề, độ dài dòng.

@@ -23,48 +23,196 @@ def _sub(progress: Prog | None, a: float, b: float) -> Prog:
 
 # ------------------------------------------------------------------ nguồn video
 
-def download_video(url: str, dest_dir: Path, progress: Prog | None = None, cancel=None) -> Path:
-    """Tải video từ Douyin, Bilibili, YouTube, TikTok, Weibo, Xigua... bằng yt-dlp."""
+def ytdlp_version() -> str:
+    """Phiên bản yt-dlp đang cài (không import – đọc thông tin gói)."""
+    import importlib
+    import importlib.metadata as md
+
+    importlib.invalidate_caches()
+    try:
+        return md.version("yt-dlp")
+    except md.PackageNotFoundError:
+        return ""
+
+
+def update_ytdlp(progress: Prog | None = None, cancel=None) -> dict:
+    """Cập nhật yt-dlp (Bilibili / Douyin hay đổi cách chặn – bản cũ báo lỗi 412 / Unable to extract)."""
+    import subprocess
+    import sys
+
+    from .config import FROZEN
+
+    if FROZEN:
+        raise RuntimeError("Bản đóng gói .exe không tự cập nhật trình tải được – hãy tải bản TraMi mới.")
+    old = ytdlp_version()
+    if progress:
+        progress(0.1, f"Đang cập nhật yt-dlp {old}…")
+    r = subprocess.run([sys.executable, "-m", "pip", "install", "-U", "yt-dlp"], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", creationflags=ff._NO_WINDOW, timeout=900)
+    if r.returncode:
+        raise RuntimeError("pip báo lỗi khi cập nhật yt-dlp:\n" + (r.stderr or r.stdout or "")[-800:])
+    new = ytdlp_version()
+    if new == old:
+        return {"message": f"yt-dlp {new} đã là bản mới nhất"}
+    again = " – mở lại tool để dùng bản mới" if "yt_dlp" in sys.modules else ""
+    return {"message": f"Đã cập nhật yt-dlp {old} → {new}{again}"}
+
+
+def _dl_error(e: BaseException, url: str, used_cookies: bool) -> str:
+    """Lỗi yt-dlp -> lời giải thích + cách sửa."""
+    from . import sitelogin
+
+    msg = str(e)
+    low = msg.lower()
+    upd = "bấm 'Cập nhật trình tải' ở khung Tải video từ link (Trang chủ) rồi mở lại tool"
+    if "412" in msg or "precondition failed" in low:
+        return f"Bilibili chặn bản trình tải đang cài (HTTP 412) – {upd}.\n({msg[:200]})"
+    if "fresh cookies" in low:
+        return ("Douyin cần cookie trình duyệt: ở Trang chủ, mục 'Trang khác lấy đăng nhập từ' chọn Firefox (mở "
+                f"douyin.com trên Firefox 1 lần trước) hoặc chọn file cookies.txt.\n({msg[:200]})")
+    if "unsupported url" in low:
+        return f"Link này không được hỗ trợ hoặc sai link – mở thử trên trình duyệt xem có phát được không.\n({msg[:200]})"
+    if any(x in low for x in ("not available in your country", "geo restrict", "地区")):
+        return f"Video bị giới hạn khu vực, không tải được từ Việt Nam.\n({msg[:200]})"
+    if any(x in low for x in ("premium", "大会员", "vip", "paid", "purchase")):
+        return f"Video chỉ dành cho tài khoản trả phí (VIP / 大会员).\n({msg[:200]})"
+    if any(x in low for x in ("login", "sign in", "log in", "cookies")) and not used_cookies:
+        hint = ("bấm 'Đăng nhập Bilibili (quét mã QR)'" if sitelogin.is_bilibili(url)
+                else "chọn trình duyệt ở 'Trang khác lấy đăng nhập từ'")
+        return f"Video cần đăng nhập – {hint} ở Trang chủ rồi tải lại.\n({msg[:200]})"
+    return f"{msg[:400]}\nNếu trước đây tải được: {upd}."
+
+
+def download_video(url: str, dest_dir: Path, progress: Prog | None = None, cancel=None,
+                   notes: list | None = None, settings: dict | None = None) -> Path:
+    """Tải video từ Douyin, Bilibili, YouTube, TikTok, Weibo, Xigua... bằng yt-dlp.
+
+    `url` có thể là cả dòng chia sẻ của app ("【tên】 https://b23.tv/xx") – tự lấy link. Bilibili đã đăng nhập bằng mã QR
+    (sitelogin) -> tải 720p/1080p; trang khác dùng cookie trình duyệt / file cookies.txt ở Cài đặt. Chọn ≤ 1080p, ưu
+    tiên H.264 (trình phát + FFmpeg mở nhanh, không phải tạo bản xem trước như HEVC/AV1). Tiến độ gộp hình + tiếng
+    (Bilibili / YouTube tải 2 file rồi ghép). `notes` nhận lời nhắc (vd. chỉ 480p vì chưa đăng nhập)."""
     import yt_dlp
 
+    from . import sitelogin
+
+    raw = url
+    url = sitelogin.extract_url(url)
+    if not url:
+        raise ValueError(f"Không tìm thấy link trong: {raw[:120]}")
+    settings = settings if settings is not None else load_settings()
+    bili = sitelogin.is_bilibili(url)
+    cookie_opts: dict = {}
+    if bili and sitelogin.bili_cookie_file():
+        cookie_opts = {"cookiefile": str(sitelogin.BILI_FILE)}
+    elif (settings.get("dl_cookie_file") or "") and Path(settings["dl_cookie_file"]).is_file():
+        cookie_opts = {"cookiefile": settings["dl_cookie_file"]}
+    elif settings.get("dl_browser"):
+        cookie_opts = {"cookiesfrombrowser": (settings["dl_browser"],)}
+
     dest_dir.mkdir(parents=True, exist_ok=True)
-    result: dict = {}
+    parts: dict[str, list] = {}       # file đang tải -> [đã tải, tổng]
+    state = {"t": 0.0}
 
     def hook(d):
         if cancel and cancel():
             raise ff.Cancelled()
-        if d.get("status") == "downloading" and progress:
-            tot = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-            if tot:
-                progress(d.get("downloaded_bytes", 0) / tot * 0.95, f"Đang tải video {d.get('_percent_str', '').strip()}")
-        if d.get("status") == "finished":
-            result["file"] = d.get("filename")
+        if not progress:
+            return
+        st = d.get("status")
+        name = d.get("filename") or d.get("tmpfilename") or "?"
+        tot = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+        if st == "finished":
+            parts[name] = [tot or parts.get(name, [0, 0])[1], tot or parts.get(name, [0, 0])[1]]
+            return
+        if st != "downloading":
+            return
+        parts[name] = [d.get("downloaded_bytes") or 0, tot]
+        now = time.time()
+        if now - state["t"] < 0.4:
+            return
+        state["t"] = now
+        info = d.get("info_dict") or {}
+        req = info.get("requested_formats") or [info]
+        sizes = [f.get("filesize") or f.get("filesize_approx") or 0 for f in req]
+        done = sum(v[0] for v in parts.values())
+        expect = max(sum(sizes), sum(v[1] for v in parts.values())) if all(sizes) else 0
+        if expect:
+            frac = min(1.0, done / expect)
+        else:   # chưa biết cỡ cả 2 file: hình ~85 %, tiếng ~15 %
+            k = len(parts) - 1
+            w = [0.85, 0.15] if len(req) == 2 else [1.0 / max(1, len(req))] * max(1, len(req))
+            frac = sum(w[:k]) + w[min(k, len(w) - 1)] * (parts[name][0] / tot if tot else 0)
+            expect = sum(v[1] for v in parts.values())
+        kind = "" if len(req) < 2 else (" (hình)" if (info.get("vcodec") or "none") != "none" else " (tiếng)")
+        sp = d.get("speed") or 0
+        size = f" · {done / 1e6:.0f}/{expect / 1e6:.0f} MB" if expect else f" · {done / 1e6:.0f} MB"
+        progress(min(0.95, frac * 0.95), f"Đang tải video{kind} {int(frac * 100)}%{size}"
+                 + (f" · {sp / 1e6:.1f} MB/s" if sp else ""))
+
+    def pp_hook(d):
+        if progress and d.get("status") == "started" and "Merger" in str(d.get("postprocessor", "")):
+            progress(0.96, "Đang ghép hình và tiếng…")
 
     opts = {
         "outtmpl": str(dest_dir / "%(title).80s [%(id)s].%(ext)s"),
-        "format": "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b",
+        "format": "bv*+ba/b",
+        # ≤ 1080p (4K làm mọi bước chậm mà đăng Facebook / YouTube không cần), cùng cỡ thì H.264 + AAC trước
+        "format_sort": ["res:1080", "vcodec:h264", "acodec:aac"],
         "merge_output_format": "mp4",
         "noplaylist": True,
         "progress_hooks": [hook],
+        "postprocessor_hooks": [pp_hook],
         "quiet": True,
+        "noprogress": True,     # tiến độ đi qua hook (không in ra cửa sổ đen)
         "no_warnings": True,
         "ffmpeg_location": ff.ffmpeg_bin(),
         "restrictfilenames": False,
         "windowsfilenames": True,
-        "http_headers": {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                                       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"},
+        "retries": 5,
+        "fragment_retries": 5,
+        "http_headers": {"User-Agent": sitelogin.UA},
     }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        path = Path(ydl.prepare_filename(info))
+
+    def run(extra: dict):
+        with yt_dlp.YoutubeDL({**opts, **extra}) as ydl:
+            info = ydl.extract_info(url, download=True)
+            return info, Path(ydl.prepare_filename(info))
+
+    try:
+        try:
+            info, path = run(cookie_opts)
+        except yt_dlp.utils.DownloadError as e:
+            low = str(e).lower()
+            # Chrome / Edge trên Windows: cookie mã hoá "App-Bound" hoặc file đang bị trình duyệt khoá -> tải không cookie
+            if cookie_opts.get("cookiesfrombrowser") and any(
+                    x in low for x in ("cookie", "dpapi", "decrypt", "could not copy", "permission denied")):
+                if notes is not None:
+                    notes.append(f"Không đọc được cookie của {settings['dl_browser']} (Chrome / Edge trên Windows hay "
+                                 "khoá cookie) – đã tải không đăng nhập. Nên dùng Firefox hoặc file cookies.txt.")
+                cookie_opts = {}
+                info, path = run({})
+            else:
+                raise
+    except ff.Cancelled:
+        raise
+    except yt_dlp.utils.DownloadError as e:
+        if isinstance(getattr(e, "exc_info", (None, None))[1], ff.Cancelled):
+            raise ff.Cancelled() from None
+        raise RuntimeError(_dl_error(e, url, bool(cookie_opts))) from None
+    if path.suffix.lower() != ".mp4" and path.with_suffix(".mp4").exists():
+        path = path.with_suffix(".mp4")   # đã ghép hình + tiếng thành .mp4
     if not path.exists():
         cands = sorted(dest_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
         if cands:
             path = cands[0]
     if not path.exists():
         raise RuntimeError("Tải video thất bại.")
+    h = int(info.get("height") or 0)
+    if bili and h and h <= 480 and not cookie_opts and notes is not None:
+        notes.append(f"Video chỉ {h}p vì chưa đăng nhập Bilibili – ở Trang chủ bấm 'Đăng nhập Bilibili (quét mã QR)' "
+                     "rồi tải lại để có 720p / 1080p.")
     if progress:
-        progress(1.0, "Đã tải xong video")
+        progress(1.0, "Đã tải xong video" + (f" ({h}p)" if h else ""))
     return path
 
 
@@ -1530,9 +1678,11 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
         acc += weights[st]
         pr = _sub(progress, a, acc / total_w)
         if st == "download":
-            path = download_video(opts["url"], p.dir / "source", pr, cancel)
+            notes: list[str] = []
+            path = download_video(opts["url"], p.dir / "source", pr, cancel, notes=notes, settings=settings)
             attach_source(p, path)
             p.data["name"] = path.stem[:80]
+            p.data["dl_warning"] = " ".join(notes)
             p.save()
         elif st == "recognize":
             if opts.get("asr_engine"):
@@ -1589,7 +1739,7 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
         result["message"] = "Hoàn tất! " + (f"Video: {Path(result['video']).name}" if result.get("video") else "")
     if opts.get("dub") and not no_tr:
         result["message"] += "  · " + dub_summary(p)
-    for w in ("sep_warning", "asr_warning", "ocr_warning", "translate_warning"):
+    for w in ("dl_warning", "sep_warning", "asr_warning", "ocr_warning", "translate_warning"):
         if p.data.get(w):
             result["message"] = result.get("message", "") + "  ⚠ " + p.data[w]
     return result

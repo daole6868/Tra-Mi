@@ -206,7 +206,7 @@ class _Canvas(QWidget):
                     it = self.tl.inserts[ins]
                     tip = (f"Video chèn: {it.get('name', '')} ({float(it.get('dur', 0)):.1f} giây) tại "
                            f"{_tc(float(it.get('at', 0)), 0.5)}\nChỉ có trong video xuất (trình phát không chiếu)")
-                else:
+                elif self.tl.pieces():   # chưa biết độ dài video (chưa nạp / mất file gốc) -> không có đoạn nào
                     a, b = self.tl.pieces()[self.tl.piece_at(self.t(pos.x()))]
                     tags = []
                     if any(ca < b and cb > a for ca, cb in self.tl.cuts):

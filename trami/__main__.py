@@ -48,11 +48,14 @@ def cli_translate(args):
         "render": not args.chi_phude,
         "denoise": args.loc_nhieu,
     }
+    from .sitelogin import extract_url
+
     for item in args.inputs:
-        is_url = item.startswith(("http://", "https://"))
+        url = "" if Path(item).exists() else extract_url(item)   # link / dòng chia sẻ của app
+        is_url = bool(url)
         p = Project.create(Path(item).stem if not is_url else "Video từ link")
         if is_url:
-            opts["url"] = item
+            opts["url"] = url
         else:
             pipeline.attach_source(p, Path(item))
         last = [0.0]

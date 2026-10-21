@@ -2246,3 +2246,157 @@ def test_hf_download_progress_and_xet_fallback(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="401"):
         hd.download("a/b")
     assert calls == ["http"]
+
+
+def test_link_parse_and_bilibili_qr_login(tmp_path, monkeypatch):
+    """Dòng chia sẻ của app -> link; đăng nhập Bilibili bằng mã QR -> file cookie cho yt-dlp."""
+    import email.message
+    import time
+
+    from trami import sitelogin as sl
+
+    assert sl.extract_url("【【大鸣王潮】岁共交流会-哔哩哔哩】 https://b23.tv/AbC123x") == "https://b23.tv/AbC123x"
+    assert sl.extract_url("7.43 复制打开抖音，看看【作品】 https://v.douyin.com/iRNBho6u/ 复制此链接") == \
+        "https://v.douyin.com/iRNBho6u/"
+    assert sl.extract_url("xem cái này https://www.bilibili.com/video/BV1xx411c7mD?p=2，hay lắm") == \
+        "https://www.bilibili.com/video/BV1xx411c7mD?p=2"
+    assert sl.extract_url("BV1xx411c7mD") == "https://www.bilibili.com/video/BV1xx411c7mD"
+    assert sl.extract_url("không có link") == ""
+    assert sl.is_bilibili("https://b23.tv/x") and sl.is_bilibili("https://m.bilibili.com/video/BV1")
+    assert not sl.is_bilibili("https://www.youtube.com/watch?v=1") and not sl.is_bilibili("https://notbilibili.com/")
+
+    monkeypatch.setattr(sl, "BILI_FILE", tmp_path / "bili.txt")
+    replies = iter([({"code": 0, "data": {"code": 86101}}, None), ({"code": 0, "data": {"code": 86090}}, None)])
+    monkeypatch.setattr(sl, "_get", lambda url, *a, **k: next(replies))
+    assert sl.bili_qr_poll("k")["state"] == "wait" and sl.bili_qr_poll("k")["state"] == "scanned"
+    h = email.message.Message()
+    h["Set-Cookie"] = "SESSDATA=ab%2C1790000000%2Cxy*c1; Path=/; Domain=bilibili.com; HttpOnly; Secure"
+    h["Set-Cookie"] = "bili_jct=jct123; Path=/; Domain=bilibili.com"
+    exp = int(time.time()) + 1000
+    ok = {"code": 0, "data": {"code": 0, "url": f"https://passport.biligame.com/x?DedeUserID=42&Expires={exp}"
+                                                f"&SESSDATA=other&gourl=x"}}
+    monkeypatch.setattr(sl, "_get", lambda url, *a, **k: (ok, h))
+    assert sl.bili_qr_poll("k")["state"] == "ok"
+    ck = sl.read_cookies(tmp_path / "bili.txt")
+    assert ck == {"SESSDATA": "ab%2C1790000000%2Cxy*c1", "bili_jct": "jct123", "DedeUserID": "42"}
+    assert str(exp) in (tmp_path / "bili.txt").read_text(encoding="utf-8")
+    assert sl.bili_cookie_file() == tmp_path / "bili.txt"
+    monkeypatch.setattr(sl, "_get", lambda url, cookies=None, **k: (
+        {"code": 0, "data": {"isLogin": cookies.get("SESSDATA") == ck["SESSDATA"], "uname": "Tra", "vipStatus": 1}},
+        None))
+    assert sl.bili_status() == {"login": True, "name": "Tra", "vip": True}
+    monkeypatch.setattr(sl, "_get", lambda url, *a, **k: ({"code": 0, "data": {"code": 86038}}, None))
+    assert sl.bili_qr_poll("k")["state"] == "expired"
+    sl.bili_logout()
+    assert sl.bili_cookie_file() is None and sl.bili_status() == {"login": False}
+    m = sl.qr_matrix("https://account.bilibili.com/h5/account-h5/auth/scan-web?qrcode_key=abc")
+    assert m.shape[0] == m.shape[1] >= 21 and m.any() and not m.all()
+
+
+def test_download_video_share_text_and_cookie_fallback(tmp_path, monkeypatch):
+    """Tải bằng yt-dlp thật từ máy chủ trên máy: dán cả dòng chia sẻ, tiến độ, cookie trình duyệt lỗi -> tải không cookie."""
+    pytest.importorskip("yt_dlp")
+    import functools
+    import http.server
+    import threading
+
+    from trami import pipeline
+
+    www = tmp_path / "www"
+    www.mkdir()
+    subprocess.run([ff.ffmpeg_bin(), "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=160x120:r=10",
+                    "-f", "lavfi", "-i", "sine=f=440", "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-shortest", str(www / "clip.mp4")], check=True)
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(
+        http.server.SimpleHTTPRequestHandler, directory=str(www)))
+    srv.RequestHandlerClass.log_message = lambda *a: None
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(k, raising=False)
+    url = f"http://127.0.0.1:{srv.server_address[1]}/clip.mp4"
+    try:
+        msgs, notes = [], []
+        path = pipeline.download_video(f"【thử】 {url} 复制此链接", tmp_path / "a", lambda x, m: msgs.append((x, m)),
+                                       notes=notes, settings={})
+        assert path.exists() and path.suffix == ".mp4" and ff.probe(path).duration > 1.5
+        assert msgs[-1][0] == 1.0 and all(x <= 1.0 for x, _ in msgs) and not notes
+        notes = []
+        path = pipeline.download_video(url, tmp_path / "b", None, notes=notes,
+                                       settings={"dl_browser": "chrome"})   # máy thử không có Chrome
+        assert path.exists() and notes and "cookie" in notes[0]
+        with pytest.raises(ValueError, match="Không tìm thấy link"):
+            pipeline.download_video("chỉ có chữ", tmp_path / "c", settings={})
+    finally:
+        srv.shutdown()
+    assert "Cập nhật trình tải" in pipeline._dl_error(Exception("HTTP Error 412: Precondition Failed"), url, False)
+    assert "Firefox" in pipeline._dl_error(Exception("Fresh cookies (not necessarily logged in) are needed"), url, False)
+    assert "mã QR" in pipeline._dl_error(Exception("This video requires login"), "https://b23.tv/x", False)
+    assert pipeline.ytdlp_version()
+
+
+def test_link_login_gui(tmp_path, monkeypatch):
+    """Trang chủ: trạng thái đăng nhập Bilibili, hộp mã QR (giả lập Bilibili), dự án trống bị xoá khi tải lỗi."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    try:
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        pytest.skip(str(e))
+    from trami import sitelogin as sl
+    from trami.gui import theme
+    from trami.gui.link_login import BiliLoginDialog, qr_pixmap
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    theme.load_fonts()
+    app.setStyleSheet(theme.stylesheet())
+    monkeypatch.setattr(sl, "BILI_FILE", tmp_path / "bili.txt")
+    state = {"login": False}
+    monkeypatch.setattr(sl, "bili_status", lambda: {"login": True, "name": "Tra"} if state["login"] else {"login": False})
+    win = MainWindow()
+    win.show()
+
+    def wait(cond, ms=3000):
+        t = 0
+        while not cond() and t < ms:
+            QTest.qWait(20)
+            t += 20
+        return cond()
+
+    home = win.home
+    home._bili_refresh()
+    assert wait(lambda: "480p" in home.bili_lbl.text()) and home.bili_btn.isVisibleTo(home)
+    assert "yt-dlp" in home.ytdlp_lbl.text() or "Chưa cài" in home.ytdlp_lbl.text()
+
+    pm = qr_pixmap("https://account.bilibili.com/h5/account-h5/auth/scan-web?qrcode_key=abc")
+    assert pm.width() == pm.height() >= 200
+    polls = iter([{"state": "wait"}, {"state": "scanned"}, {"state": "ok"}])
+    monkeypatch.setattr(sl, "bili_qr_start", lambda: {"url": "https://x/scan?qrcode_key=k1", "key": "k1"})
+    monkeypatch.setattr(sl, "bili_qr_poll", lambda key: next(polls))
+    dlg = BiliLoginDialog(home)
+    dlg.show()
+    assert wait(lambda: dlg.key == "k1" and dlg.qr.pixmap() is not None and not dlg.qr.pixmap().isNull())
+    dlg._poll()
+    assert wait(lambda: "Chờ quét" in dlg.status.text() and not dlg._busy)
+    dlg._poll()
+    assert wait(lambda: "xác nhận" in dlg.status.text() and not dlg._busy)
+    dlg._poll()
+    assert wait(lambda: "Đã đăng nhập" in dlg.status.text())
+    assert wait(lambda: dlg.result() == 1, 2000)
+    state["login"] = True
+    home._bili_refresh()
+    assert wait(lambda: "Tra" in home.bili_lbl.text()) and home.bili_out.isVisibleTo(home)
+
+    # tải từ link lỗi -> dự án trống "Video từ link" bị xoá, đang mở thì về Trang chủ
+    p = Project.create("Video từ link")
+    win.open_project(p.id)
+    win._drop_empty_project(p.id)
+    assert not p.dir.exists() and win.project_page.p is None
+    q = Project.create("Có video")
+    q.data["source"] = "x.mp4"
+    q.save()
+    win._drop_empty_project(q.id)
+    assert q.dir.exists()
+    win.close()

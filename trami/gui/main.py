@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QFileDialog, QFrame, 
                                QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
                                QStackedWidget, QVBoxLayout, QWidget)
 
-from .. import __version__, pipeline
+from .. import __version__, pipeline, sitelogin
 from ..config import load_settings, public_settings, save_settings
 from ..jobs import manager
 from ..project import Project
@@ -280,14 +280,41 @@ class HomePage(QWidget):
         c1.add(dz)
         c2 = SectionCard("Tải video từ link", "link", "Douyin, Bilibili, YouTube, TikTok, Weibo, Xigua, Kuaishou…")
         self.url = QLineEdit()
-        self.url.setPlaceholderText("https://www.bilibili.com/video/BV…")
+        self.url.setPlaceholderText("Dán link hoặc cả dòng chia sẻ của app (【tên】 https://b23.tv/…)")
         self.url.returnPressed.connect(self.download)
         c2.add(self.url)
         dl = GradientButton("Tải về & tạo dự án", "download")
         dl.clicked.connect(self.download)
         c2.add(dl)
+        # Bilibili: khách chỉ được 480p -> đăng nhập bằng mã QR để tải 720p / 1080p
+        self.bili_lbl = label("Bilibili: đang kiểm tra đăng nhập…", "muted", wrap=True)
+        self.bili_btn = button("Đăng nhập Bilibili (quét mã QR)", "users", on_click=self._bili_login,
+                               tip="Chưa đăng nhập Bilibili chỉ tải được 480p. Quét mã bằng app Bilibili trên điện "
+                                   "thoại – không cần nhập mật khẩu vào tool.")
+        self.bili_out = button("Đăng xuất", "x", flat=True, on_click=self._bili_logout)
+        self.bili_out.hide()
+        c2.add(self.bili_lbl)
+        c2.add(hbox(self.bili_btn, self.bili_out, None))
+        st = load_settings()
+        self.dl_browser = combo(list(sitelogin.BROWSERS) + [("file", "File cookies.txt…")],
+                                "file" if st.get("dl_cookie_file") else st.get("dl_browser", ""))
+        self._name_cookie_file(st.get("dl_cookie_file", ""))
+        self._dl_prev = self.dl_browser.currentData()
+        self.dl_browser.setToolTip(
+            "Trang cần đăng nhập / cookie (Douyin, YouTube giới hạn tuổi…): tool lấy đăng nhập từ trình duyệt bạn đã "
+            "đăng nhập trang đó.\nFirefox chạy ổn nhất. Chrome / Edge trên Windows thường khoá cookie (mã hoá riêng) "
+            "– lỗi thì tool tự tải không đăng nhập.\nFile cookies.txt: xuất bằng tiện ích 'Get cookies.txt LOCALLY' "
+            "trên trình duyệt.\nBilibili dùng đăng nhập bằng mã QR ở trên.")
+        self.dl_browser.currentIndexChanged.connect(self._browser_changed)
+        c2.add(hbox(label("Trang khác lấy đăng nhập từ:", "muted"), self.dl_browser, None))
+        self.ytdlp_lbl = label("", "muted")
+        self.ytdlp_btn = button("Cập nhật trình tải", "refresh", on_click=self._update_ytdlp,
+                                tip="Bilibili / Douyin hay đổi cách chặn – tải lỗi (HTTP 412, Unable to extract…) thì "
+                                    "bấm đây để cập nhật yt-dlp rồi mở lại tool.")
+        c2.add(hbox(self.ytdlp_lbl, None, self.ytdlp_btn))
         c2.add(label("Mẹo: vào tab Cài đặt để chọn công cụ dịch AI cho bản dịch chuẩn nhất.", "muted", wrap=True))
         c2.lay.addStretch(1)
+        QTimer.singleShot(1200, self._bili_refresh)
         grid.addWidget(c1, 3)
         grid.addWidget(c2, 2)
         v.addLayout(grid)
@@ -338,20 +365,92 @@ class HomePage(QWidget):
             return
         self.win.create_from_path(paths[0])
 
+    def showEvent(self, e):
+        super().showEvent(e)
+        v = pipeline.ytdlp_version()
+        self.ytdlp_lbl.setText(f"Trình tải yt-dlp {v}" if v else "⚠ Chưa cài yt-dlp – bấm Cập nhật trình tải")
+        from ..config import FROZEN
+
+        self.ytdlp_btn.setVisible(not FROZEN)
+
+    # ------------------------------------------------------------ đăng nhập để tải chất lượng cao
+    def _bili_refresh(self):
+        def done(r: dict):
+            if r.get("login"):
+                who = f" – {r['name']}" if r.get("name") else ""
+                vip = " (VIP)" if r.get("vip") else ""
+                self.bili_lbl.setText(f"Bilibili: ✓ đã đăng nhập{who}{vip} – tải được tới 1080p")
+                self.bili_lbl.setStyleSheet("color: #4ADE80;")
+            else:
+                self.bili_lbl.setText("Bilibili: " + ("phiên đăng nhập đã hết hạn" if r.get("expired") else
+                                                      "chưa đăng nhập") + " – chỉ tải được 480p")
+                self.bili_lbl.setStyleSheet("")
+            self.bili_btn.setVisible(not r.get("login"))
+            self.bili_out.setVisible(bool(r.get("login")))
+        run_async(sitelogin.bili_status, done, lambda m: done({"login": False}))
+
+    def _bili_login(self):
+        from .link_login import BiliLoginDialog
+
+        dlg = BiliLoginDialog(self)
+        ok = dlg.exec()
+        dlg.deleteLater()
+        if ok:
+            self.win.toast("Đã đăng nhập Bilibili – video tải sau sẽ ở 720p / 1080p", "ok")
+        self._bili_refresh()
+
+    def _bili_logout(self):
+        sitelogin.bili_logout()
+        self._bili_refresh()
+        self.win.toast("Đã đăng xuất Bilibili trên tool", "ok")
+
+    def _name_cookie_file(self, path: str):
+        i = self.dl_browser.findData("file")
+        self.dl_browser.setItemText(i, f"File: {Path(path).name}" if path else "File cookies.txt…")
+
+    def _browser_changed(self):
+        val = self.dl_browser.currentData()
+        st = load_settings()
+        if val == "file":
+            path, _ = QFileDialog.getOpenFileName(self, "Chọn file cookies.txt", "", "Cookie (*.txt);;Tất cả (*.*)")
+            if not path:
+                self.dl_browser.blockSignals(True)
+                set_combo(self.dl_browser, self._dl_prev)
+                self.dl_browser.blockSignals(False)
+                return
+            st["dl_cookie_file"], st["dl_browser"] = path, ""
+            self._name_cookie_file(path)
+        else:
+            st["dl_browser"], st["dl_cookie_file"] = val, ""
+            self._name_cookie_file("")
+            if val in ("chrome", "edge", "brave", "opera", "vivaldi"):
+                self.win.toast("Chrome / Edge trên Windows thường khoá cookie – nếu lỗi, tool tự tải không đăng nhập. "
+                               "Nên dùng Firefox.", "warn")
+        self._dl_prev = val
+        save_settings(st)
+
+    def _update_ytdlp(self):
+        manager.submit("update", "Cập nhật trình tải video (yt-dlp)",
+                       lambda j: pipeline.update_ytdlp(j.update, j.cancelled))
+        self.win.jobs_changed()
+        self.win.toast("Đang cập nhật trình tải – xem tiến độ bên dưới", "ok")
+
     def download(self):
-        url = self.url.text().strip()
-        if not url.startswith(("http://", "https://")):
-            return self.win.toast("Link không hợp lệ", "err")
+        url = sitelogin.extract_url(self.url.text())
+        if not url:
+            return self.win.toast("Không thấy link trong ô – dán link video hoặc cả dòng chia sẻ của app", "err")
         p = Project.create("Video từ link")
         pid = p.id
 
         def fn(j):
             pr = Project(pid)
-            path = pipeline.download_video(url, pr.dir / "source", j.update, j.cancelled)
+            notes: list[str] = []
+            path = pipeline.download_video(url, pr.dir / "source", j.update, j.cancelled, notes=notes)
             pipeline.attach_source(pr, path)
             pr.data["name"] = path.stem[:80]
+            pr.data["dl_warning"] = " ".join(notes)
             pr.save()
-            return {"message": "Đã tải xong video"}
+            return {"message": "Đã tải xong video" + ("  ⚠ " + " ".join(notes) if notes else "")}
         manager.submit("download", f"Tải video: {url[:50]}", fn, pid)
         self.url.clear()
         self.win.refresh_projects()
@@ -424,7 +523,8 @@ class BatchPage(QWidget):
         aspect = self.aspect.currentData()
         n = 0
         for it in items:
-            is_url = it.startswith(("http://", "https://"))
+            url = "" if Path(it).exists() else sitelogin.extract_url(it)   # link / dòng chia sẻ của app
+            is_url = bool(url)
             if not is_url and not Path(it).exists():
                 continue
             p = Project.create(Path(it).stem if not is_url else "Video từ link")
@@ -440,12 +540,12 @@ class BatchPage(QWidget):
                 p.data["edit"] = e
                 p.save()
 
-            def fn(j, pid=p.id, url=it if is_url else ""):
+            def fn(j, pid=p.id, url=url):
                 o = dict(opts)
                 if url:
                     o["url"] = url
                 return pipeline.auto(Project(pid), o, j.update, j.cancelled)
-            manager.submit("auto", f"Hàng loạt: {Path(it).name if not is_url else it[-40:]}", fn, p.id)
+            manager.submit("auto", f"Hàng loạt: {Path(it).name if not is_url else url[-40:]}", fn, p.id)
             n += 1
         self.win.refresh_projects()
         self.win.toast(f"Đã xếp hàng {n} video", "ok")
@@ -937,7 +1037,8 @@ class MainWindow(QMainWindow):
         self.home.set_projects(items)
 
     def toast(self, text: str, kind: str = "info"):
-        Toast(self.centralWidget(), text, kind, 6000 if kind == "err" else 3500)
+        Toast(self.centralWidget(), text, kind, 6000 if kind == "err" else 9000 if kind == "warn" and len(text) > 80
+              else 3500)
 
     def jobs_changed(self):
         self.poll()
@@ -950,12 +1051,36 @@ class MainWindow(QMainWindow):
             prev = self._seen.get(j["id"])
             if prev and prev != j["status"] and j["status"] in ("done", "error", "cancelled"):
                 if j["status"] == "done":
-                    self.toast("✓ " + (j["message"] or j["title"]), "ok")
+                    msg = j["message"] or j["title"]
+                    self.toast("✓ " + msg, "warn" if "⚠" in msg else "ok")
                 elif j["status"] == "error":
                     self.toast(f"{j['title']}: {j['error'][:300]}", "err")
                 self.project_page.job_finished(j)
+                if j["kind"] in ("download", "auto") and j["status"] in ("error", "cancelled"):
+                    self._drop_empty_project(j.get("project_id") or "")
                 self.refresh_projects()
             self._seen[j["id"]] = j["status"]
+
+    def _drop_empty_project(self, pid: str):
+        """Tải video từ link lỗi / huỷ -> xoá dự án trống "Video từ link" (chưa có video, chưa có câu nào)."""
+        from ..config import PROJECTS_DIR
+
+        if not pid or not (PROJECTS_DIR / pid / "project.json").is_file():
+            return
+        try:
+            pr = Project(pid)
+        except Exception:  # noqa: BLE001
+            return
+        if pr.data.get("source") or pr.data.get("segments"):
+            return
+        pp = self.project_page
+        if pp.p and pp.p.id == pid:
+            pp.flush()
+            pp.player.mp.stop()
+            pp.p = None
+            if self.pages.currentWidget() is pp:
+                self.go_home()
+        pr.delete()
 
     def _sysinfo(self):
         def get():

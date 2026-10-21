@@ -62,7 +62,10 @@ Bản exe kèm AI nâng cao khá nặng (2–4 GB) vì có PyTorch.
 
 ## 2. Dùng nhanh
 
-1. Ở **Trang chủ**, kéo thả video, bấm chọn file, hoặc dán link Douyin / Bilibili / YouTube / TikTok.
+1. Ở **Trang chủ**, kéo thả video, bấm chọn file, hoặc dán link Douyin / Bilibili / YouTube / TikTok. Dán được cả dòng chia sẻ của app (`【tên】 https://b23.tv/…`).
+   - Bilibili chưa đăng nhập chỉ tải được 480p: bấm **Đăng nhập Bilibili (quét mã QR)** rồi quét bằng app Bilibili trên điện thoại để tải 720p / 1080p.
+   - Douyin và trang cần đăng nhập: chọn trình duyệt ở **Trang khác lấy đăng nhập từ** (Firefox chạy ổn nhất) hoặc chọn file cookies.txt.
+   - Tải báo lỗi (HTTP 412, Unable to extract…): bấm **Cập nhật trình tải** rồi mở lại tool.
 2. Mở tab **Tự động** và chọn:
    - **Nguồn phụ đề**:
      - *Nhận dạng giọng nói*: dùng khi video chưa có chữ.
