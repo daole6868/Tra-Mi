@@ -1,6 +1,6 @@
 # TraMi – ghi nhớ cho Claude
 
-Công cụ desktop (PySide6) dịch video tiếng Trung → tiếng Việt: nhận dạng giọng / OCR phụ đề cứng → dịch (LLM hoặc Google)
+Công cụ desktop (PySide6) dịch video tiếng Trung → tiếng Việt (từ 2.0.47 cả Anh / Thái / Nhật / Hàn): nhận dạng giọng / OCR phụ đề cứng → dịch (LLM hoặc Google)
 → xoá phụ đề cũ (LaMa / OpenCV) → đè phụ đề Việt → lồng tiếng (Edge TTS / VieNeu-TTS, nhái giọng) → xuất MP4 bằng FFmpeg.
 Phiên bản hiện tại: xem `trami/__init__.py`.
 
@@ -39,7 +39,10 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
   Chụp ảnh kiểm tra giao diện phải nạp theme như `run()`: `theme.load_fonts(); app.setFont(theme.font(10));
   app.setStyleSheet(theme.stylesheet())`.
-- `tests/test_core.py` – `python -m pytest -q tests` (79 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `trami/langs.py` – tiếng đích (vi/en/th/ja/ko): tên, mã Google, tên cho Hy-MT2, giọng Edge, tốc độ nói (`budget`),
+  `units` (từ / chữ), `detect` (tiếng của 1 câu theo chữ viết), font phụ đề Thái/Nhật/Hàn (`subtitle_font`).
+  `pipeline.target_lang(p)` (dự án `p.data["target_lang"]`, chưa có -> Cài đặt), `trans_lang(p)` (tiếng của bản dịch đang có).
+- `tests/test_core.py` – `python -m pytest -q tests` (82 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -536,6 +539,48 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   công cụ cũ. Sửa: `sync_engine()` (mở dự án + `SettingsPage.save`), đổi ô tab Tự động -> `_engine_changed` lưu
   `translate_engine` / `translate_style` vào Cài đặt ("Không dịch" không lưu).
 
+- 2.0.47: "thêm tiếng Anh, Thái, Nhật, Hàn, áp dụng vào tất cả, có lựa chọn chọn đích" + "tab Tự động hoạt động đúng chưa;
+  Nghe & tách câu đã bật tách giọng mà sang tab Âm thanh chọn bản đã tách thì không thấy".
+  * Tab Tự động: tách giọng trong `recognize` lỗi / chưa cài audio-separator trước đây IM LẶNG (nghe trên tiếng gốc, không
+    có bản tách) -> `p.data["sep_warning"]` hiện sau "1. Nghe & tách câu" và trong `auto()`; xong thì báo "đã tách giọng /
+    nhạc nền (dùng được ở tab Âm thanh)". Nguyên nhân hay gặp: lỗi pythonw (sửa ở 2.0.41) hoặc chưa cài gói tách giọng.
+    Cũng sửa: chạy trọn gói bỏ qua vùng OCR đã khoanh (`opts["region"]`); bước 3 dùng ô bộ đọc ở tab Lồng tiếng thay vì
+    ô ở tab Tự động (`a_tts` <-> `d_engine` đồng bộ); bước 2 luôn dịch lại tất cả (`_step_translate`: chưa dịch -> dịch
+    hết, dịch dở -> chỉ dòng trống, đã dịch hết -> hỏi).
+  * Dịch (`translate.py`): `Translator(target=, source=)`; `system_prompt(target)` (tiếng Việt giữ nguyên bản cũ, tiếng
+    khác lời nhắc tiếng Anh: tên riêng pinyin / đọc Nhật / Hán Hàn, kính ngữ), `STYLES_EN`, `SHORTEN_PROMPT_EN`, phân tích
+    phim theo tiếng; giới hạn `⟪≤N words / Thai characters / Japanese characters / Korean syllables⟫` theo `langs.budget`
+    (vi 4,6 tiếng/s, en 2,7 từ/s, th 11, ja 6, ko 6 chữ/s); `untranslated(text, lang)` (tiếng Nhật: chỉ coi là chưa dịch
+    khi không có kana mà ≥ 3 chữ Hán); bộ nhớ dịch `cache_key` (tiếng Việt giữ khoá cũ "máy|kiểu|câu", tiếng khác
+    "máy|kiểu|tiếng|câu"), `cache_line`; Google `sl` theo tiếng gốc (`source_lang(p)` = `p.data["language"]`), `tl` theo
+    đích; Hy-MT2 nhận `target` (泰语/日语/韩语/英语). Bảng thuật ngữ: `glossary` (Hán Việt) chỉ cho tiếng Việt, tiếng khác
+    `glossary_<tiếng>` (`pipeline.glossary_key`); bảng chung ở Cài đặt chỉ áp cho tiếng Việt. `pipeline.translate`:
+    tiếng đích khác tiếng của bản dịch đang có (`trans_lang`) -> dịch lại mọi câu (kể cả "chỉ dòng trống"); ghi
+    `target_lang` + `trans_lang`. Rút gọn / AI tự rút gọn / `shorten_target` / `needs_shorten` đếm độ dài theo tiếng.
+  * Giọng đọc (`tts.py`): mỗi câu nhận tiếng theo chữ viết (`langs.detect(trans, tiếng dự án)`) -> `clean_tts_text(text,
+    lang)` giữ chữ Thái / kana + Hán / Hangul; giọng Edge tiếng khác -> `edge_for` đổi sang giọng tiếng đó cùng nam / nữ
+    (Hoài My -> Aria / Premwadee / Nanami / Sun-Hi; Nam Minh -> Guy / Niwat / Keita / InJoon; en có 6 giọng); VieNeu
+    (chỉ tiếng Việt) gặp câu tiếng khác -> Edge cùng giới tính (preset / `speaker_gender`), `stats["lang_edge"]` -> 
+    `dub_summary`; OmniVoice nhận `language` (worker `req["language"]`, `VieneuWorker.synth(language=)`), giọng chọn sẵn có
+    câu mẫu riêng từng tiếng (`omni_design.ANCHOR_TEXTS`, `key/anchor_path/ensure_anchor(..., lang)`, file
+    `<mã>_<tiếng>_<key>.wav`; tiếng Việt giữ tên + mã cũ); `spoken_vi` chỉ cho câu tiếng Việt. `list_voices(settings,
+    lang)` / `auto_assign(..., lang)` / `preview_voice(..., lang)` theo tiếng đích (không liệt kê VieNeu khi khác tiếng
+    Việt; nghe thử VieNeu với tiếng khác -> báo). Sửa luôn lỗi cũ: tạo câu mẫu "nu_trung_nien" xoá nhầm câu mẫu
+    "nu_trung_nien_tram" (glob) -> `_stale` so đúng mã + tiếng.
+  * Phụ đề: `effective_style` ghi `st["lang"]`; `subtitle.line_font` -> `{\fn<font>}` mỗi câu Thái / Nhật / Hàn (Windows:
+    Leelawadee UI / Yu Gothic / Malgun Gothic – font Latin như Be Vietnam Pro, Bangers không có các chữ này), chữ Hán
+    chưa dịch -> font chữ Hán; karaoke + nền hộp: cả 2 lớp có `\fn`. `wrap_line` tính độ rộng hiển thị (`vis_len`: chữ
+    Đông Á ×1,8, dấu kết hợp 0), tiếng viết liền (Nhật, Thái) ngắt giữa 2 chữ (`_wrap_chars`: không ngắt trước dấu
+    thanh / dấu câu đóng / kana nhỏ, không sau nguyên âm đứng trước của chữ Thái, ưu tiên sau 、。). Xem trước
+    (`player.SubtitleItem`) dùng cùng `line_font`. Karaoke chữ Thái: mỗi chữ + dấu đi kèm 1 đơn vị. Đã xuất thử bằng
+    libass: Thái / Nhật (2 dòng) / Hàn / Việt hiện đúng, không ô vuông. SRT xuất đuôi `.<tiếng>.srt`.
+  * Giao diện: tab Tự động ô **Dịch sang** (`a_target`, `_target_changed`: lưu `p.data["target_lang"]` + mặc định ở Cài
+    đặt, đổi nhãn cột bản dịch (`SubsModel.set_trans_label`), ô khung Câu đang chọn (`inspector.set_lang`), lựa chọn
+    phụ đề (`common.which_choices` / `relabel`), nút SRT, bảng thuật ngữ theo tiếng, danh sách giọng; đã có bản dịch tiếng
+    khác -> nhắc bấm "2. Dịch"); Cài đặt "Dịch sang (dự án mới)"; Xử lý hàng loạt "Dịch sang"; CLI `--dich-sang`;
+    `auto(opts["target"])`. Nạp SRT đã dịch tiếng khác (`pipeline.note_trans_lang` / `guess_trans_lang`) -> tự đổi "Dịch
+    sang" theo (không thì bấm Dịch sẽ dịch đè mất bản vừa nạp); dòng tiếng Nhật có kana không bị coi là dòng Trung.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -560,5 +605,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.38: chờ người dùng xác nhận hết mất chữ cuối khi nghe trong tool; nếu file bản lồng vẫn thiếu chữ -> làm kiểm tra lời đọc.
 - 2.0.39: chờ người dùng xác nhận đổi cỡ chữ không còn làm giật giọng lồng khi phát.
 - 2.0.40: chờ người dùng thử timeline mới (chọn nhiều, khoảng trống, công cụ theo dòng, chèn video) + tốc độ đọc.
+- 2.0.47: chờ người dùng thử dịch + lồng tiếng Anh / Thái / Nhật / Hàn trên máy thật (Edge giọng nước ngoài, OmniVoice
+  `language` khác "vi" chưa chạy thật – nếu bản OmniVoice báo lỗi tham số language thì cần đổi mã sang tên tiếng),
+  và xác nhận "1. Nghe & tách câu" có báo lỗi tách giọng (nếu có) để biết vì sao tab Âm thanh không có bản tách.
 - 2.0.42: chờ người dùng nghe thử các cách xếp giọng trên video thật (nhất là Tự động với cụm câu dài, Đọc đè 2 giọng
   cùng lúc) và xem phụ đề chạy theo giọng lồng có dễ theo dõi không.

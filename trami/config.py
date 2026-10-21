@@ -53,6 +53,7 @@ DEFAULT_SETTINGS: dict = {
     "asr_max_chars": 28,              # câu dài hơn số chữ Hán này mới chia đôi (ở dấu phẩy / chỗ nghỉ gần giữa)
     # Dịch
     "translate_engine": "google",     # google / openai / anthropic / gemini / deepseek / ollama / offline(none)
+    "target_lang": "vi",              # dịch sang: vi / en / th / ja / ko (mỗi dự án nhớ riêng, đây là mặc định)
     "translate_style": "auto",        # auto/co_trang/hien_dai/review/phim_hoat_hinh/tai_lieu
     "translate_batch": 40,
     "openai_api_key": "",

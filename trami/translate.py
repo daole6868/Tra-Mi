@@ -1,4 +1,4 @@
-"""Dịch phụ đề Trung -> Việt.
+"""Dịch phụ đề Trung -> Việt (hoặc Anh / Thái / Nhật / Hàn – ngôn ngữ đích, xem trami/langs.py).
 
 Hỗ trợ:
   - google    : miễn phí, không cần key (deep-translator)
@@ -21,6 +21,7 @@ from typing import Callable
 
 import requests
 
+from . import langs
 from .ffmpeg import Cancelled
 from .subtitle import Segment
 from .tts import VieneuWorker
@@ -52,7 +53,48 @@ Yêu cầu bắt buộc:
 8. Dòng có ký hiệu ⟪≤N tiếng⟫ ở cuối là giới hạn độ dài để LỒNG TIẾNG khớp thời gian nhân vật nói: bản dịch KHÔNG được
    vượt N tiếng (âm tiết). Ưu tiên cách nói gọn, tự nhiên; lược từ đệm, giữ đủ ý chính. KHÔNG chép ký hiệu ⟪⟫ vào bản dịch."""
 
-SYL_PER_SEC = 4.6      # tiếng Việt lồng tiếng tự nhiên ~4–5 tiếng/giây
+# Dịch sang Anh / Thái / Nhật / Hàn: lời nhắc tiếng Anh (luật giống bản tiếng Việt, đổi phần xưng hô / tên riêng)
+STYLES_EN = {
+    "auto": "Infer the genre from the content and translate accordingly.",
+    "co_trang": "Ancient / xianxia / wuxia drama: period, slightly formal tone; consistent titles and honorifics.",
+    "hien_dai": "Modern / romance / urban drama: natural everyday speech that fits each relationship.",
+    "review": "Movie recap / storytelling video: engaging narrative tone, third person, short clear sentences.",
+    "hoat_hinh": "Animation / donghua: lively, easy to understand.",
+    "tai_lieu": "Documentary / tutorial / sales: formal, precise terminology, clear.",
+}
+_ADDRESS = {"en": "", "th": " (use ครับ / ค่ะ and pronouns that fit each character)",
+            "ja": " (choose keigo or casual speech to fit each relationship)",
+            "ko": " (choose 존댓말 or 반말 to fit each relationship)"}
+_NAMES = {"en": "the established English name if one exists, otherwise pinyin (e.g. 李逍遥 -> Li Xiaoyao)",
+          "th": "the usual Thai transliteration of the Chinese name",
+          "ja": "the Japanese reading in kanji or katakana as commonly used in Japanese releases",
+          "ko": "the Korean (Sino-Korean) reading in Hangul (e.g. 李逍遥 -> 이소요)"}
+SRC_NAMES = {"zh": ("tiếng Trung", "Chinese"), "yue": ("tiếng Quảng Đông", "Cantonese"), "en": ("tiếng Anh", "English"),
+             "ja": ("tiếng Nhật", "Japanese"), "ko": ("tiếng Hàn", "Korean"), "auto": ("tiếng gốc", "the source language")}
+
+
+def system_prompt(target: str, source: str = "zh") -> str:
+    """Lời nhắc hệ thống cho AI theo ngôn ngữ đích (tiếng Việt: giữ nguyên bản chuẩn có luật Hán Việt)."""
+    target = langs.norm(target)
+    src_vi, src_en = SRC_NAMES.get(source, SRC_NAMES["zh"])
+    if target == "vi":
+        return SYSTEM_PROMPT.replace("từ tiếng Trung sang", f"từ {src_vi} sang", 1)
+    L = langs.INFO[target]
+    return f"""You are an expert film subtitle translator with 15+ years of experience, translating {src_en} dialogue into {L['english']}.
+Mandatory rules:
+1. Translate faithfully and naturally, the way a native {L['english']} speaker talks; never word-by-word, never drop meaning.
+2. Render idioms, slang and internet expressions with natural {L['english']} equivalents.
+3. Keep forms of address consistent with the characters' relationships, age and status for the whole film{_ADDRESS[target]}.
+4. Names of people, places, organizations and techniques: use {_NAMES[target]}. ALWAYS follow the GLOSSARY if given.
+5. Subtitles must be short and easy to read; each input line maps to exactly ONE output line; never merge or split lines; keep the numbering.
+6. Source lines may contain speech-recognition errors (homophones): use the context to understand the intended meaning.
+7. Return ONLY valid JSON like {{"1": "translation", "2": "translation", ...}} with no explanation.
+8. A line ending with ⟪≤N {L['unit_ai']}⟫ is a length limit so the DUBBED voice fits the character's speaking time: the
+   translation must NOT exceed N {L['unit_ai']}. Prefer short natural phrasing, drop filler words, keep the core meaning.
+   NEVER copy the ⟪⟫ marker into the translation."""
+
+
+SYL_PER_SEC = 4.6      # tiếng Việt lồng tiếng tự nhiên ~4–5 tiếng/giây (tiếng khác: langs.INFO[...]["rate"])
 BUDGET_RE = re.compile(r"\s*⟪[^⟫]*⟫\s*")
 HAN_RE = re.compile(r"[㐀-鿿]")
 
@@ -61,18 +103,47 @@ số tiếng (âm tiết) tối đa. Hãy viết lại bản dịch NGẮN HƠN,
 giữ nguyên xưng hô và tên riêng. Chỉ trả về JSON {"1": "câu mới", ...} không kèm giải thích."""
 
 
-def syllables(text: str) -> int:
-    return len([w for w in re.split(r"[\s,.;:!?…\-–—\"'()]+", text or "") if w])
+SHORTEN_PROMPT_EN = """You are a film dubbing script editor. Each item has the source line, the current {lang} translation and
+the maximum length in {unit}. Rewrite the translation SHORTER, within the maximum length, still natural, keeping the core
+meaning, names and forms of address. Return ONLY JSON {{"1": "new line", ...}} with no explanation."""
 
 
-def budget_for(duration: float, speedup: float = 1.0) -> int:
-    """Số tiếng tối đa nói vừa trong `duration` giây (cho phép tăng tốc nhẹ `speedup`)."""
-    return max(2, int(duration * SYL_PER_SEC * speedup))
+def syllables(text: str, lang: str = "vi") -> int:
+    """Độ dài lời: số tiếng / từ (Việt, Anh), số chữ (Thái, Nhật, Hàn)."""
+    return langs.units(text, lang)
 
 
-def untranslated(text: str) -> bool:
-    """Bản dịch rỗng hoặc vẫn còn chữ Hán (AI chép lại câu gốc / bỏ sót) -> coi như chưa dịch."""
-    return not (text or "").strip() or len(HAN_RE.findall(text)) >= 2
+def budget_for(duration: float, speedup: float = 1.0, lang: str = "vi") -> int:
+    """Độ dài lời tối đa nói vừa trong `duration` giây (cho phép tăng tốc nhẹ `speedup`) – theo tiếng."""
+    return langs.budget(duration, lang, speedup)
+
+
+KANA_RE = re.compile(r"[\u3040-\u30FF]")
+
+
+def untranslated(text: str, lang: str = "vi") -> bool:
+    """Bản dịch rỗng hoặc vẫn còn chữ Hán (AI chép lại câu gốc / bỏ sót) -> coi như chưa dịch. Dịch sang tiếng Nhật thì
+    chữ Hán là bình thường: chỉ coi là chưa dịch khi không có chữ kana nào mà có ≥ 3 chữ Hán (chép nguyên câu Trung)."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    if langs.norm(lang) == "ja":
+        return not KANA_RE.search(t) and len(HAN_RE.findall(t)) >= 3
+    return len(HAN_RE.findall(t)) >= 2
+
+
+def cache_line(key: str) -> str:
+    """Câu gốc trong 1 khoá bộ nhớ bản dịch (khoá tiếng Việt cũ "máy|kiểu|câu", tiếng khác "máy|kiểu|tiếng|câu")."""
+    parts = key.split("|", 3)
+    if len(parts) == 4 and parts[2] in langs.INFO:
+        return parts[3]
+    return key.split("|", 2)[2] if len(parts) >= 3 else key
+
+
+def cache_key(engine: str, style: str, target: str, line: str) -> str:
+    """Khoá bộ nhớ bản dịch (tiếng Việt giữ dạng cũ để dùng lại bản dịch đã nhớ của dự án cũ)."""
+    target = langs.norm(target)
+    return f"{engine}|{style}|{line}" if target == "vi" else f"{engine}|{style}|{target}|{line}"
 
 
 def parse_glossary(text: str) -> dict[str, str]:
@@ -253,11 +324,15 @@ def hymt_worker(settings: dict | None = None) -> HymtWorker:
 
 class Translator:
     def __init__(self, settings: dict, engine: str | None = None, style: str | None = None,
-                 glossary: dict[str, str] | None = None, cache: dict | None = None):
+                 glossary: dict[str, str] | None = None, cache: dict | None = None, target: str | None = None,
+                 source: str | None = None):
         self.s = settings
         self.engine = engine or settings.get("translate_engine", "google")
         self.style = style or settings.get("translate_style", "auto")
-        self.glossary = dict(parse_glossary(settings.get("glossary", "")))
+        self.target = langs.norm(target or settings.get("target_lang"))
+        self.source = source or "zh"
+        # bảng thuật ngữ của bạn là tên Hán Việt -> chỉ dùng khi dịch sang tiếng Việt; tiếng khác dùng bảng riêng
+        self.glossary = dict(parse_glossary(settings.get("glossary", ""))) if self.target == "vi" else {}
         if glossary:
             self.glossary.update(glossary)
         self.cache = cache if cache is not None else {}
@@ -284,31 +359,39 @@ class Translator:
                 summary = summary or ""
         texts = [segs[i].text for i in idx]
         if self.llm and self.fit_dub:
-            # dịch vừa thời lượng: mỗi câu kèm giới hạn số tiếng theo thời gian nhân vật nói
-            texts = [f"{segs[i].text} ⟪≤{budget_for(segs[i].duration, 1.1)} tiếng⟫" for i in idx]
+            # dịch vừa thời lượng: mỗi câu kèm giới hạn độ dài theo thời gian nhân vật nói (đơn vị theo tiếng đích)
+            unit = langs.INFO[self.target]["unit_vi"] if self.target == "vi" else langs.INFO[self.target]["unit_ai"]
+            texts = [f"{segs[i].text} ⟪≤{budget_for(segs[i].duration, 1.1, self.target)} {unit}⟫" for i in idx]
         results = self.translate_lines(texts, progress, cancel, summary=summary)
         for i, t in zip(idx, results):
             segs[i].trans = BUDGET_RE.sub(" ", t or "").strip()
             segs[i].extra.pop("trans_user", None)
-            if segs[i].trans and not untranslated(segs[i].trans):   # nhớ theo câu gốc -> dịch lại không tốn API
-                self.cache.setdefault(f"{self.engine}|{self.style}|{segs[i].text}", segs[i].trans)
+            if segs[i].trans and not untranslated(segs[i].trans, self.target):   # nhớ theo câu gốc -> không tốn API
+                self.cache.setdefault(cache_key(self.engine, self.style, self.target, segs[i].text), segs[i].trans)
         return segs
 
     def shorten(self, items: list[tuple[str, str, int]]) -> list[str]:
         """Rút gọn bản dịch quá dài so với thời gian nói. items: (câu gốc, bản dịch, số tiếng tối đa)."""
         if not self.llm or not items:
             return [vi for _, vi, _ in items]
-        payload = {str(k + 1): {"goc": zh, "dich": vi, "toi_da": f"{n} tiếng"} for k, (zh, vi, n) in enumerate(items)}
-        user = "RÚT GỌN CÁC BẢN DỊCH SAU:\n" + json.dumps(payload, ensure_ascii=False, indent=0)
+        L = langs.INFO[self.target]
+        if self.target == "vi":
+            payload = {str(k + 1): {"goc": zh, "dich": vi, "toi_da": f"{n} tiếng"} for k, (zh, vi, n) in enumerate(items)}
+            sysp, user = SHORTEN_PROMPT, "RÚT GỌN CÁC BẢN DỊCH SAU:\n" + json.dumps(payload, ensure_ascii=False, indent=0)
+        else:
+            payload = {str(k + 1): {"source": zh, "translation": vi, "max": f"{n} {L['unit_ai']}"}
+                       for k, (zh, vi, n) in enumerate(items)}
+            sysp = SHORTEN_PROMPT_EN.format(lang=L["english"], unit=L["unit_ai"])
+            user = "SHORTEN THESE TRANSLATIONS:\n" + json.dumps(payload, ensure_ascii=False, indent=0)
         try:
-            d = _extract_json(self.llm.chat(SHORTEN_PROMPT, user))
+            d = _extract_json(self.llm.chat(sysp, user))
         except Exception:  # noqa: BLE001
             return [vi for _, vi, _ in items]
         out = []
         for k, (_, vi, n) in enumerate(items):
             v = d.get(str(k + 1)) if isinstance(d, dict) else None
             v = BUDGET_RE.sub(" ", v).strip() if isinstance(v, str) else ""
-            out.append(v if v and syllables(v) < syllables(vi) else vi)
+            out.append(v if v and syllables(v, self.target) < syllables(vi, self.target) else vi)
         return out
 
     def translate_lines(self, lines: list[str], progress: ProgressCB | None = None,
@@ -316,8 +399,8 @@ class Translator:
         out: list[str | None] = [None] * len(lines)
         todo = []
         for i, l in enumerate(lines):
-            hit = self.cache.get(f"{self.engine}|{self.style}|{l}")
-            if hit and not untranslated(hit):   # bản dịch rỗng / còn chữ Hán (lần trước lỗi) -> dịch lại
+            hit = self.cache.get(cache_key(self.engine, self.style, self.target, l))
+            if hit and not untranslated(hit, self.target):   # bản dịch rỗng / còn chữ Hán (lần trước lỗi) -> dịch lại
                 out[i] = hit
             else:
                 todo.append(i)
@@ -326,8 +409,8 @@ class Translator:
             res = self._hymt(lines, todo, progress, cancel, done)
             for gi, r in zip(todo, res):
                 out[gi] = r
-                if r and not untranslated(r):
-                    self.cache[f"{self.engine}|{self.style}|{lines[gi]}"] = r
+                if r and not untranslated(r, self.target):
+                    self.cache[cache_key(self.engine, self.style, self.target, lines[gi])] = r
         elif self.engine == "google":
             batches = self._google_batches([lines[i] for i in todo])
             pos = 0
@@ -339,7 +422,7 @@ class Translator:
                     gi = todo[pos + j]
                     out[gi] = r
                     if r:
-                        self.cache[f"{self.engine}|{self.style}|{lines[gi]}"] = r
+                        self.cache[cache_key(self.engine, self.style, self.target, lines[gi])] = r
                 pos += len(chunk)
                 done += len(chunk)
                 if progress:
@@ -354,8 +437,8 @@ class Translator:
                 res = self._llm_batch([lines[i] for i in ids], ctx_before, ctx_after, summary)
                 for gi, r in zip(ids, res):
                     out[gi] = r
-                    if r and not untranslated(r):
-                        self.cache[f"{self.engine}|{self.style}|{lines[gi]}"] = r
+                    if r and not untranslated(r, self.target):
+                        self.cache[cache_key(self.engine, self.style, self.target, lines[gi])] = r
                 done += len(ids)
                 if progress:
                     progress(done / len(lines), f"AI đang dịch {done}/{len(lines)} câu ({self.engine})")
@@ -375,17 +458,29 @@ class Translator:
         if cur:
             chunks.append(cur)
         notes = []
+        L = langs.INFO[self.target]
         for ch in chunks[:6]:  # đọc tối đa ~40k ký tự đầu là đủ nắm nhân vật
-            prompt = (
-                "Đọc đoạn kịch bản phụ đề tiếng Trung dưới đây và trả về JSON với các khoá:\n"
-                '"genre": thể loại phim (cổ trang/tiên hiệp/hiện đại/review/...)\n'
-                '"terms": object ánh xạ TÊN RIÊNG tiếng Trung (tên người, biệt danh, địa danh, môn phái, tổ chức, '
-                "chiêu thức, bảo vật) -> phiên âm Hán Việt chuẩn. Chỉ lấy tên riêng thực sự, không lấy từ thông thường.\n"
-                '"relations": mô tả ngắn quan hệ giữa các nhân vật chính và cách xưng hô tiếng Việt phù hợp.\n\n'
-                "KỊCH BẢN:\n" + ch)
+            if self.target == "vi":
+                sysp = "Bạn là chuyên gia Hán Việt và biên dịch phim Trung Quốc. Chỉ trả JSON."
+                prompt = (
+                    "Đọc đoạn kịch bản phụ đề tiếng Trung dưới đây và trả về JSON với các khoá:\n"
+                    '"genre": thể loại phim (cổ trang/tiên hiệp/hiện đại/review/...)\n'
+                    '"terms": object ánh xạ TÊN RIÊNG tiếng Trung (tên người, biệt danh, địa danh, môn phái, tổ chức, '
+                    "chiêu thức, bảo vật) -> phiên âm Hán Việt chuẩn. Chỉ lấy tên riêng thực sự, không lấy từ thông thường.\n"
+                    '"relations": mô tả ngắn quan hệ giữa các nhân vật chính và cách xưng hô tiếng Việt phù hợp.\n\n'
+                    "KỊCH BẢN:\n" + ch)
+            else:
+                sysp = f"You are an expert translator of Chinese films into {L['english']}. Return JSON only."
+                prompt = (
+                    "Read the subtitle script below and return JSON with the keys:\n"
+                    '"genre": the film genre\n'
+                    f'"terms": object mapping PROPER NAMES in the source (people, nicknames, places, sects, '
+                    f"organizations, techniques, treasures) -> their standard {L['english']} rendering "
+                    f"({_NAMES.get(self.target, '')}). Only real proper names, no common words.\n"
+                    f'"relations": short description of the main characters\' relationships and suitable forms of '
+                    f"address in {L['english']}.\n\nSCRIPT:\n" + ch)
             try:
-                d = _extract_json(self.llm.chat("Bạn là chuyên gia Hán Việt và biên dịch phim Trung Quốc. Chỉ trả JSON.",
-                                                prompt, max_tokens=4000, temperature=0.1))
+                d = _extract_json(self.llm.chat(sysp, prompt, max_tokens=4000, temperature=0.1))
             except Exception:
                 continue
             for k, v in (d.get("terms") or {}).items():
@@ -398,22 +493,28 @@ class Translator:
 
     def _llm_batch(self, lines: list[str], ctx_before, ctx_after, summary: str, depth: int = 0) -> list[str]:
         gl = {k: v for k, v in self.glossary.items() if any(k in l for l in lines)}
-        parts = [f"PHONG CÁCH: {STYLES.get(self.style, STYLES['auto'])}"]
+        vi = self.target == "vi"
+        lab = (("PHONG CÁCH", "THÔNG TIN PHIM", "BẢNG THUẬT NGỮ (bắt buộc dùng)",
+                "NGỮ CẢNH TRƯỚC (đã dịch, chỉ để tham khảo, KHÔNG dịch lại)", "NGỮ CẢNH SAU (chỉ tham khảo)") if vi else
+               ("STYLE", "FILM NOTES", "GLOSSARY (must use)", "PREVIOUS CONTEXT (already translated, reference only, "
+                "do NOT translate again)", "FOLLOWING CONTEXT (reference only)"))
+        parts = [f"{lab[0]}: {(STYLES if vi else STYLES_EN).get(self.style, (STYLES if vi else STYLES_EN)['auto'])}"]
         if summary:
-            parts.append(f"THÔNG TIN PHIM:\n{summary}")
+            parts.append(f"{lab[1]}:\n{summary}")
         if gl:
-            parts.append("BẢNG THUẬT NGỮ (bắt buộc dùng):\n" + glossary_text(gl))
+            parts.append(f"{lab[2]}:\n" + glossary_text(gl))
         if ctx_before:
-            parts.append("NGỮ CẢNH TRƯỚC (đã dịch, chỉ để tham khảo, KHÔNG dịch lại):\n" +
-                         "\n".join(f"- {a} => {b}" for a, b in ctx_before))
+            parts.append(f"{lab[3]}:\n" + "\n".join(f"- {a} => {b}" for a, b in ctx_before))
         if ctx_after:
-            parts.append("NGỮ CẢNH SAU (chỉ tham khảo):\n" + "\n".join(f"- {a}" for a in ctx_after))
+            parts.append(f"{lab[4]}:\n" + "\n".join(f"- {a}" for a in ctx_after))
         payload = {str(i + 1): l for i, l in enumerate(lines)}
-        parts.append(f"DỊCH {len(lines)} DÒNG SAU sang tiếng Việt, trả về JSON với đúng các khoá 1..{len(lines)}:\n"
-                     + json.dumps(payload, ensure_ascii=False, indent=0))
+        ask = (f"DỊCH {len(lines)} DÒNG SAU sang tiếng Việt, trả về JSON với đúng các khoá 1..{len(lines)}:" if vi else
+               f"TRANSLATE THE FOLLOWING {len(lines)} LINES into {langs.INFO[self.target]['english']}, return JSON with "
+               f"exactly the keys 1..{len(lines)}:")
+        parts.append(ask + "\n" + json.dumps(payload, ensure_ascii=False, indent=0))
         user = "\n\n".join(parts)
         try:
-            d = _extract_json(self.llm.chat(SYSTEM_PROMPT, user))
+            d = _extract_json(self.llm.chat(system_prompt(self.target, self.source), user))
         except (PermissionError, ApiError, ValueError) as e:
             if isinstance(e, ValueError) and "JSON" in str(e):
                 d = None  # AI trả về sai định dạng -> chia nhỏ lô rồi thử lại
@@ -423,7 +524,7 @@ class Translator:
             d = None
         if d is not None:
             res = [(d.get(str(i + 1)) or "").strip() if isinstance(d.get(str(i + 1)), str) else "" for i in range(len(lines))]
-            miss = [i for i, r in enumerate(res) if (not r or untranslated(r)) and lines[i].strip()]
+            miss = [i for i, r in enumerate(res) if (not r or untranslated(r, self.target)) and lines[i].strip()]
             if not miss:
                 return res
             if len(miss) <= max(2, len(lines) // 8) and depth < 4:
@@ -469,7 +570,7 @@ class Translator:
                                  f"{len(lines)} câu (trên máy)")
                     elif progress:
                         progress(base / max(1, len(lines)), msg)
-                r = w.call({"items": items}, pr, cancel)
+                r = w.call({"items": items, "target": langs.INFO[self.target]["hymt"]}, pr, cancel)
                 res += [str(x) for x in r.get("out", [])][:len(ids)] + [""] * max(0, len(ids) - len(r.get("out", [])))
         finally:
             w.stop()
@@ -494,21 +595,26 @@ class Translator:
             batches.append(cur)
         return batches
 
-    @staticmethod
-    def _gtx(text: str) -> str:
+    def _gl(self) -> tuple[str, str]:
+        """(nguồn, đích) cho Google: nguồn theo ngôn ngữ gốc của dự án (trước đây ghi cứng tiếng Trung)."""
+        sl = {"zh": "zh-CN", "yue": "zh-TW", "en": "en", "ja": "ja", "ko": "ko"}.get(self.source, "auto")
+        return sl, langs.INFO[self.target]["google"]
+
+    def _gtx(self, text: str) -> str:
         """Google Translate (endpoint miễn phí trả JSON)."""
+        sl, tl = self._gl()
         r = requests.post("https://translate.googleapis.com/translate_a/single",
-                          params={"client": "gtx", "sl": "zh-CN", "tl": "vi", "dt": "t", "ie": "UTF-8", "oe": "UTF-8"},
+                          params={"client": "gtx", "sl": sl, "tl": tl, "dt": "t", "ie": "UTF-8", "oe": "UTF-8"},
                           data={"q": text}, timeout=30,
                           headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
         r.raise_for_status()
         data = r.json()
         return "".join(part[0] for part in (data[0] or []) if part and part[0])
 
-    @staticmethod
-    def _clients5(text: str) -> str:
+    def _clients5(self, text: str) -> str:
+        sl, tl = self._gl()
         r = requests.get("https://clients5.google.com/translate_a/t",
-                         params={"client": "dict-chrome-ex", "sl": "zh-CN", "tl": "vi", "q": text}, timeout=30,
+                         params={"client": "dict-chrome-ex", "sl": sl, "tl": tl, "q": text}, timeout=30,
                          headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
         r.raise_for_status()
         d = r.json()
@@ -530,7 +636,8 @@ class Translator:
             try:
                 from deep_translator import GoogleTranslator
 
-                return GoogleTranslator(source="zh-CN", target="vi").translate(text) or ""
+                sl, tl = self._gl()
+                return GoogleTranslator(source=sl, target=tl).translate(text) or ""
             except Exception as e:
                 errs.append(f"deep_translator: {str(e)[:150]}")
             time.sleep(2 * 2 ** attempt)
@@ -561,5 +668,6 @@ class Translator:
         return t
 
 
-def translate_text(text: str, settings: dict, engine: str | None = None) -> str:
-    return Translator(settings, engine).translate_lines([text])[0] if text.strip() else ""
+def translate_text(text: str, settings: dict, engine: str | None = None, target: str | None = None,
+                   source: str | None = None) -> str:
+    return Translator(settings, engine, target=target, source=source).translate_lines([text])[0] if text.strip() else ""

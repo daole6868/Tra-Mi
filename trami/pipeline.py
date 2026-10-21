@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import ffmpeg as ff
-from .config import load_settings, log_error
+from .config import err_text, load_settings, log_error
 from .project import Project, safe_name
 from .subtitle import normalize, save_subtitles
 
@@ -499,15 +499,24 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         from . import asr_funasr, separate as sepmod
 
         info_dur = p.data.get("info", {}).get("duration", 0)
-        # 1) tách giọng trước để nhận dạng chính xác hơn khi có nhạc nền
+        # 1) tách giọng trước để nhận dạng chính xác hơn khi có nhạc nền (bản tách dùng luôn cho tab Âm thanh / Lồng
+        # tiếng). Lỗi / chưa cài -> vẫn nghe trên tiếng gốc nhưng BÁO RÕ (trước đây bỏ qua lặng lẽ -> tab Âm thanh
+        # báo "chưa tách" mà người dùng không biết vì sao)
         audio_in: Path = Path(src)
-        if settings.get("sep_before_asr", True) and sepmod.available():
+        p.data.pop("sep_warning", None)
+        if settings.get("sep_before_asr", True) and not sepmod.available():
+            p.data["sep_warning"] = ("Chưa tách được giọng khỏi nhạc nền: chưa cài bộ tách giọng (audio-separator, cài AI "
+                                     "nâng cao) – đã nghe trên tiếng gốc")
+        elif settings.get("sep_before_asr", True):
             try:
                 v, _ = separate_audio(p, settings, _sub(progress, 0.0, 0.3), cancel)
                 audio_in = v
             except Exception as e:  # không chặn cả quy trình nếu tách giọng lỗi
                 if isinstance(e, ff.Cancelled):
                     raise
+                log_error("Tách giọng trước khi nghe")
+                p.data["sep_warning"] = (f"Tách giọng khỏi nhạc nền bị lỗi ({err_text(e)[:160]}) – đã nghe trên tiếng "
+                                         "gốc. Thử lại ở tab Âm thanh → 'Tách giọng / nhạc nền'")
                 if progress:
                     progress(0.3, f"Bỏ qua tách giọng ({str(e)[:80]})")
         # 2) chuẩn hoá về wav 16k mono
@@ -632,13 +641,68 @@ def _drop_char_times(p: Project) -> None:
 
 # ------------------------------------------------------------------ dịch
 
+def target_lang(p: Project | None, settings: dict | None = None) -> str:
+    """Ngôn ngữ đích của dự án ("Dịch sang"): mỗi dự án nhớ riêng, chưa chọn -> theo Cài đặt (mặc định tiếng Việt)."""
+    from . import langs
+
+    t = p.data.get("target_lang") if p is not None else None
+    if t not in langs.INFO:
+        t = (settings if settings is not None else load_settings()).get("target_lang")
+    return langs.norm(t)
+
+
+def trans_lang(p: Project) -> str:
+    """Tiếng của bản dịch ĐANG CÓ trong dự án (dự án cũ chưa ghi -> tiếng Việt)."""
+    from . import langs
+
+    return langs.norm(p.data.get("trans_lang") or "vi")
+
+
+def guess_trans_lang(segs, default: str = "vi") -> str | None:
+    """Tiếng của các lời dịch (đa số câu) – nhận theo chữ viết; chưa có lời dịch -> None."""
+    from . import langs
+
+    count: dict[str, int] = {}
+    for s in segs:
+        if (s.trans or "").strip():
+            lg = langs.detect(s.trans, default)
+            count[lg] = count.get(lg, 0) + 1
+    return max(count, key=count.get) if count else None
+
+
+def note_trans_lang(p: Project) -> str | None:
+    """Sau khi nạp file phụ đề đã dịch: ghi tiếng của bản dịch; khác tiếng đích đang chọn thì đổi "Dịch sang" theo
+    (không thì bấm Dịch sẽ dịch đè mất bản vừa nạp). Trả về tiếng mới nếu đã đổi."""
+    p.reload()
+    old = target_lang(p)
+    lg = guess_trans_lang(p.segments, old)
+    if not lg:
+        return None
+    p.data["trans_lang"] = lg
+    p.data["target_lang"] = lg
+    p.save()
+    return lg if lg != old else None
+
+
+def glossary_key(target: str) -> str:
+    """Bảng thuật ngữ của dự án theo tiếng đích (tên Hán Việt chỉ dùng cho tiếng Việt)."""
+    return "glossary" if target == "vi" else f"glossary_{target}"
+
+
+def source_lang(p: Project) -> str:
+    """Tiếng gốc của video cho công cụ dịch (theo tiếng đã chọn khi nghe; mặc định tiếng Trung)."""
+    lang = str(p.data.get("language") or "zh")
+    return lang if lang in ("zh", "yue", "en", "ja", "ko") else "zh"
+
+
 def translate(p: Project, engine: str | None = None, style: str | None = None, only_empty: bool = False,
               settings: dict | None = None, progress: Prog | None = None, cancel=None,
               rows: list[int] | None = None) -> int:
     """Dịch phụ đề. rows: chỉ các câu này (dịch LẠI: bỏ bản dịch nhớ sẵn của chúng để ra bản mới)."""
-    from .translate import BUDGET_RE, Translator, glossary_text, parse_glossary
+    from .translate import BUDGET_RE, Translator, cache_line, glossary_text, parse_glossary, untranslated
 
     settings = settings or load_settings()
+    target = target_lang(p, settings)
     segs = p.segments
     if not segs:
         raise ValueError("Chưa có phụ đề gốc. Hãy nhận dạng giọng nói/OCR hoặc nhập file phụ đề trước.")
@@ -649,10 +713,15 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
     if rows is not None and not only_empty:   # dịch lại câu chọn: không lấy lại bản dịch cũ đã nhớ
         texts = {segs[i].text for i in rows if 0 <= i < len(segs)}
         for key in list(cache):
-            parts = key.split("|", 2)
-            if len(parts) == 3 and BUDGET_RE.sub("", parts[2]).strip() in texts:
+            if BUDGET_RE.sub("", cache_line(key)).strip() in texts:
                 del cache[key]
-    tr = Translator(settings, engine, style, parse_glossary(p.data.get("glossary", "")), cache)
+    gkey = glossary_key(target)
+    old_lang = trans_lang(p)
+    if old_lang != target and rows is None:
+        # đổi tiếng đích: bản dịch cũ (tiếng khác) không dùng được -> "chỉ dịch dòng trống" cũng dịch lại mọi câu
+        only_empty = False
+    tr = Translator(settings, engine, style, parse_glossary(p.data.get(gkey, "")), cache, target=target,
+                    source=source_lang(p))
 
     last_save = [time.time()]
 
@@ -666,15 +735,17 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
     tr.translate_segments(segs, prog, cancel, only_empty=only_empty, summary=p.data.get("summary", ""),
                           rows=set(rows) if rows is not None else None)
     # ghi lại thuật ngữ AI tìm được để người dùng xem/sửa
-    user_g = parse_glossary(settings.get("glossary", ""))
-    proj_g = parse_glossary(p.data.get("glossary", ""))
+    user_g = parse_glossary(settings.get("glossary", "")) if target == "vi" else {}
+    proj_g = parse_glossary(p.data.get(gkey, ""))
     for k, v in tr.glossary.items():
         if k not in user_g:
             proj_g.setdefault(k, v)
-    p.data["glossary"] = glossary_text(proj_g)
-    from .translate import untranslated
+    p.data[gkey] = glossary_text(proj_g)
+    p.data["target_lang"] = target
+    if rows is None or old_lang == target:
+        p.data["trans_lang"] = target
 
-    left = sum(1 for s in segs if s.text.strip() and untranslated(s.trans))
+    left = sum(1 for s in segs if s.text.strip() and untranslated(s.trans, target))
     warn = []
     if tr.fallback_lines:
         warn.append(f"{tr.fallback_lines} câu AI trả lời lỗi định dạng nên đã dịch bằng Google – nên soát lại các câu này")
@@ -744,7 +815,8 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
                        max_speedup=float(settings.get("tts_max_speedup", 1.3)), progress=pr, cancel=cancel,
                        voices=voices, ref_audio=ref_audio, settings=settings,
                        skip_songs=bool(settings.get("dub_skip_songs", True)), stats=stats,
-                       only=set(only) if only is not None else None)
+                       only=set(only) if only is not None else None, lang=trans_lang(p),
+                       genders=p.data.get("speaker_gender") or {})
 
     run(_sub(progress, 0.0, 0.85))
     # tầng 3b: câu vẫn quá dài -> AI rút gọn bản dịch rồi đọc lại (chỉ những câu đó, câu khác dùng lại bản đã đọc)
@@ -759,12 +831,14 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
         if progress:
             progress(0.86, f"AI đang rút gọn {len(long_)} câu đọc quá dài so với thời gian nhân vật nói…")
         try:
-            tr = Translator(settings)
+            lg = trans_lang(p)
+            tr = Translator(settings, target=lg, source=source_lang(p))
             items = []
             for k, need, have in long_:
                 cur = segs[k].trans
-                n = min(syllables(cur) - 1, max(2, int(syllables(cur) * max(0.4, have / max(need, 0.1)) * 0.95)))
-                items.append((segs[k].text, cur, max(2, min(n, budget_for(have, 1.25)))))
+                n = min(syllables(cur, lg) - 1,
+                        max(2, int(syllables(cur, lg) * max(0.4, have / max(need, 0.1)) * 0.95)))
+                items.append((segs[k].text, cur, max(2, min(n, budget_for(have, 1.25, lg)))))
             new = tr.shorten(items)
             for (k, _, _), t in zip(long_, new):
                 if t != segs[k].trans:
@@ -942,7 +1016,7 @@ SHORTEN_FROM = 1.15    # câu ⚡ phải đọc nhanh hơn ×1,15 mới cần r�
 SHORTEN_SPEED = 1.1    # bản rút gọn nhắm đọc vừa chỗ ở tốc độ ≤ ×1,1
 
 
-def shorten_target(s, slot: float) -> int | None:
+def shorten_target(s, slot: float, lang: str = "vi") -> int | None:
     """Số tiếng (âm tiết) tối đa nên rút gọn còn; None = KHÔNG cần rút gọn.
     Đã lồng tiếng (theo đúng màu cột Độ vừa): ✓ xanh (kể cả câu đọc sớm mà vừa) và ⚡ đọc nhanh ≤ ×1,15 -> giữ nguyên;
     ⚠ đỏ / ⚡ nhanh hơn ×1,15 -> rút gọn, TRỪ KHI lời của chính câu vừa chỗ của nó (giọng ở ×1 `fit_need` so với chỗ
@@ -950,7 +1024,7 @@ def shorten_target(s, slot: float) -> int | None:
     câu tính là chấp nhận được. Chưa lồng: ước theo số tiếng so với chỗ trống tới câu sau."""
     from .translate import budget_for, syllables
 
-    syl = syllables(s.trans)
+    syl = syllables(s.trans, lang)
     ex = s.extra
     fit = ex.get("fit")
     if fit:
@@ -965,17 +1039,18 @@ def shorten_target(s, slot: float) -> int | None:
         elif fit == "fast":
             ratio = SHORTEN_SPEED / sp
         else:
-            ratio = budget_for(slot, SHORTEN_SPEED) / max(1, syl)
+            ratio = budget_for(slot, SHORTEN_SPEED, lang) / max(1, syl)
     else:
-        if syl <= budget_for(slot, SHORTEN_SPEED):
+        if syl <= budget_for(slot, SHORTEN_SPEED, lang):
             return None
-        ratio = budget_for(slot, SHORTEN_SPEED) / max(1, syl)
+        ratio = budget_for(slot, SHORTEN_SPEED, lang) / max(1, syl)
     return max(2, min(syl - 1, int(syl * min(1.0, ratio) * 0.95)))
 
 
-def needs_shorten(s) -> bool:
+def needs_shorten(s, lang: str = "vi") -> bool:
     """Câu đã lồng tiếng có cần AI rút gọn không (nút "Tích câu ⚠ quá dài")."""
-    return bool(s.extra.get("fit")) and bool((s.trans or "").strip()) and shorten_target(s, s.duration) is not None
+    return bool(s.extra.get("fit")) and bool((s.trans or "").strip()) and \
+        shorten_target(s, s.duration, lang) is not None
 
 
 def shorten_lines(p: Project, rows: list[int], settings: dict | None = None) -> dict:
@@ -989,6 +1064,7 @@ def shorten_lines(p: Project, rows: list[int], settings: dict | None = None) -> 
         raise ValueError("Rút gọn câu cần công cụ dịch AI hội thoại (DeepSeek, Claude, GPT…) – Google và Hy-MT2 chỉ "
                          "dịch được, không viết lại câu. Chọn ở Cài đặt → Công cụ dịch.")
     segs = p.segments
+    lg = trans_lang(p)
     total = float(p.data.get("info", {}).get("duration", 0) or 0)
     starts = sorted(x.start for x in segs)
     items, fits = [], []
@@ -997,7 +1073,7 @@ def shorten_lines(p: Project, rows: list[int], settings: dict | None = None) -> 
             continue
         s = segs[k]
         nxt = next((t for t in starts if t > s.start + 0.01), max(total, s.end))
-        n = shorten_target(s, max(s.duration, nxt - s.start))
+        n = shorten_target(s, max(s.duration, nxt - s.start), lg)
         if n is None:
             fits.append(k)
         else:
@@ -1005,7 +1081,7 @@ def shorten_lines(p: Project, rows: list[int], settings: dict | None = None) -> 
     res = {"changed": [], "fit": fits, "same": []}
     if not items:
         return res
-    new = Translator(settings).shorten([x for _, x in items])
+    new = Translator(settings, target=lg, source=source_lang(p)).shorten([x for _, x in items])
     for (k, _), t in zip(items, new):
         if t and t != segs[k].trans:
             segs[k].extra.setdefault("trans_long", segs[k].trans)
@@ -1042,10 +1118,11 @@ def apply_translation(segs: list, cues: list) -> list[int]:
     import re
 
     han = re.compile(r"[㐀-鿿]")
+    kana = re.compile(r"[぀-ヿ]")
 
-    def vi_text(c) -> str:   # file song ngữ: bỏ dòng tiếng Trung, giữ dòng tiếng Việt
+    def vi_text(c) -> str:   # file song ngữ: bỏ dòng tiếng Trung, giữ dòng bản dịch (dòng tiếng Nhật có kana: giữ)
         lines = [x.strip() for x in (c.text or "").splitlines() if x.strip()]
-        keep = [x for x in lines if not han.search(x)] or lines
+        keep = [x for x in lines if not han.search(x) or kana.search(x)] or lines
         return " ".join(" ".join(keep).split())
 
     if not segs or not cues:
@@ -1281,6 +1358,8 @@ def dub_summary(p: Project) -> str:
         extra.append(f"{st['empty']} câu chưa dịch")
     if st.get("errors"):
         extra.append(f"{st['errors']} câu lỗi")
+    if st.get("lang_edge"):
+        extra.append(f"{st['lang_edge']} câu không phải tiếng Việt đọc bằng Edge (VieNeu chỉ đọc tiếng Việt)")
     return msg + (f" ({', '.join(extra)})" if extra else "")
 
 
@@ -1290,9 +1369,10 @@ def export_subs(p: Project, fmt: str = "srt", which: str = "trans", settings: di
     settings = settings or load_settings()
     info = p.data.get("info", {})
     name = safe_name(Path(p.data.get("source", "video")).stem or p.data.get("name", "video"))
-    suffix = {"trans": "vi", "source": "zh", "both": "zh-vi"}.get(which, "vi")
+    tl = trans_lang(p)
+    suffix = {"trans": tl, "source": "zh", "both": f"zh-{tl}"}.get(which, tl)
     out = p.output_dir / f"{name}.{suffix}.{fmt}"
-    save_subtitles(p.segments, out, which, settings.get("sub_style"), info.get("width") or 1920,
+    save_subtitles(p.segments, out, which, {**(settings.get("sub_style") or {}), "lang": tl}, info.get("width") or 1920,
                    info.get("height") or 1080)
     p.add_output(out, "subtitle")
     return out
@@ -1312,8 +1392,10 @@ def old_sub_region(p: Project) -> dict | None:
 
 def effective_style(p: Project, style: dict) -> dict:
     """Vị trí 'auto': đặt câu Việt vào đúng chỗ phụ đề Trung cũ (canh theo mép dưới của vùng chữ cũ).
-    'custom' (kéo phụ đề trên video): giữ chỗ người dùng đặt, cỡ chữ tự động vẫn theo phụ đề cũ như 'auto'."""
+    'custom' (kéo phụ đề trên video): giữ chỗ người dùng đặt, cỡ chữ tự động vẫn theo phụ đề cũ như 'auto'.
+    Ghi thêm "lang" = tiếng của bản dịch -> chọn font có chữ Thái / Nhật / Hàn khi xuất và xem trước."""
     st = dict(style or {})
+    st["lang"] = trans_lang(p)
     pos = st.get("position", "auto")
     if pos == "custom" and (st.get("pos_x") is None or st.get("pos_y") is None):
         pos = "auto"
@@ -1439,6 +1521,10 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
     total_w = sum(weights[s] for s in steps)
     acc = 0.0
     result: dict = {}
+    if opts.get("target"):   # "Dịch sang" (tiếng Việt / Anh / Thái / Nhật / Hàn)
+        from . import langs
+
+        p.data["target_lang"] = langs.norm(opts["target"])
     for st in steps:
         a = acc / total_w
         acc += weights[st]
@@ -1503,7 +1589,7 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
         result["message"] = "Hoàn tất! " + (f"Video: {Path(result['video']).name}" if result.get("video") else "")
     if opts.get("dub") and not no_tr:
         result["message"] += "  · " + dub_summary(p)
-    for w in ("asr_warning", "ocr_warning", "translate_warning"):
+    for w in ("sep_warning", "asr_warning", "ocr_warning", "translate_warning"):
         if p.data.get(w):
-            result["message"] += "  ⚠ " + p.data[w]
+            result["message"] = result.get("message", "") + "  ⚠ " + p.data[w]
     return result

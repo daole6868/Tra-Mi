@@ -29,6 +29,7 @@ from typing import Callable
 
 import numpy as np
 
+from . import langs
 from .ffmpeg import Cancelled, ffmpeg_bin, _NO_WINDOW
 from .subtitle import Segment
 from .voicefix import level_gains, speech_level, spoken_vi, voice_problem
@@ -130,10 +131,38 @@ def vieneu_params(settings: dict | None) -> dict:
     return dict(VIENEU_STYLES.get((settings or {}).get("vieneu_style", "clear"), {}))
 
 
-def list_voices(settings: dict | None = None) -> list[dict]:
+def edge_voices(lang: str = "vi") -> list[dict]:
+    """Giọng Microsoft Edge của 1 tiếng (tiếng Việt giữ đúng tên cũ)."""
+    lang = langs.norm(lang)
+    if lang == "vi":
+        return list(EDGE_VOICES)
+    return [{"id": f"edge:{vid}", "name": f"{nm} – {'Nữ' if g == 'female' else 'Nam'} (Edge, {langs.INFO[lang]['short']})",
+             "gender": g} for vid, nm, g in langs.INFO[lang]["edge"]]
+
+
+def edge_for(spec: str, lang: str) -> str:
+    """Đổi giọng Edge sang giọng CÙNG nam / nữ của tiếng `lang` (Hoài My -> Aria, Nam Minh -> Guy…). Giọng đã đúng
+    tiếng / giọng Edge lạ không biết tiếng giữ nguyên."""
+    src = langs.edge_lang(spec)
+    if not src or src == lang:
+        return spec
+    g = langs.edge_gender(spec)
+    same = [v for v, _, gg in langs.INFO[src]["edge"] if gg == g or not g]
+    idx = same.index(spec[5:]) if spec[5:] in same else 0
+    return langs.edge_voice(lang, g, idx)
+
+
+def _spk_index(speaker: str | None) -> int:
+    m = re.search(r"\d+", speaker or "")
+    return max(0, int(m.group()) - 1) if m else 0
+
+
+def list_voices(settings: dict | None = None, lang: str = "vi") -> list[dict]:
+    """Giọng cho tiếng `lang`: VieNeu chỉ đọc tiếng Việt (tiếng khác: Edge của tiếng đó + OmniVoice đa ngôn ngữ)."""
     mode = (settings or {}).get("vieneu_mode", "v3turbo")
-    voices = list(EDGE_VOICES)
-    if vieneu_available():
+    lang = langs.norm(lang)
+    voices = edge_voices(lang)
+    if vieneu_available() and lang == "vi":
         voices.insert(0, {"id": CLONE, "name": "🎭 Nhái giọng nhân vật gốc (VieNeu)", "gender": ""})
         voices += vieneu_presets(mode)
         if mode != "v3nano":
@@ -156,14 +185,15 @@ def list_voices(settings: dict | None = None) -> list[dict]:
 
 
 def auto_assign(speakers: list[str], settings: dict | None = None, current: dict | None = None,
-                genders: dict | None = None) -> dict:
+                genders: dict | None = None, lang: str = "vi") -> dict:
     """Gán sẵn giọng khác nhau cho từng người nói. genders {người nói: {"g": "male"/"female"}} (đoán từ chất giọng,
     trami/gender.py): nhân vật giọng nam nhận giọng đọc nam, giọng nữ nhận giọng nữ; chưa rõ thì xen kẽ nam / nữ.
     Giọng tiêu biểu (⭐) được dùng trước."""
     current = dict(current or {})
     genders = genders or {}
     engine = (settings or {}).get("tts_engine", "edge")
-    if engine == "vieneu" and vieneu_available():
+    lang = langs.norm(lang)
+    if engine == "vieneu" and vieneu_available() and lang == "vi":
         pool = [(v["id"], v.get("gender", "")) for v in vieneu_presets((settings or {}).get("vieneu_mode", "v3turbo"))]
     elif engine == "omnivoice" and omnivoice_available():
         from . import omni_design
@@ -172,8 +202,8 @@ def auto_assign(speakers: list[str], settings: dict | None = None, current: dict
         # giọng mẫu của bạn trước, rồi giọng chọn sẵn (có nam / nữ -> nhân vật nào nhận giọng đó)
         pool = [(f"omni:{v['id']}", "") for v in vlib.list_samples()] + \
             [(v["id"], v["gender"]) for v in omni_design.voices()]
-    else:
-        pool = [(v["id"], v["gender"]) for v in EDGE_VOICES]
+    else:   # Edge (hoặc VieNeu khi lồng tiếng khác tiếng Việt)
+        pool = [(v["id"], v["gender"]) for v in edge_voices(lang)]
     gmap = dict(pool)
     used = set(current.values())
     count = {"male": 0, "female": 0}
@@ -450,10 +480,12 @@ class VieneuWorker:
 
     def synth(self, text: str, out: str | Path, voice: str | None = None, ref_audio: str | None = None,
               ref_text: str | None = None, duration: float | None = None, params: dict | None = None,
-              seed: int | None = None, instruct: str | None = None) -> Path:
-        req = json.dumps({"text": text, "out": str(out), "voice": voice, "ref_audio": ref_audio,
-                          "ref_text": ref_text or "", "duration": duration, "params": params or {},
-                          "seed": seed, "instruct": instruct}, ensure_ascii=False)
+              seed: int | None = None, instruct: str | None = None, language: str | None = None) -> Path:
+        req = {"text": text, "out": str(out), "voice": voice, "ref_audio": ref_audio, "ref_text": ref_text or "",
+               "duration": duration, "params": params or {}, "seed": seed, "instruct": instruct}
+        if language and language != "vi":   # OmniVoice đọc tiếng khác (VieNeu chỉ đọc tiếng Việt)
+            req["language"] = language
+        req = json.dumps(req, ensure_ascii=False)
         with self.lock:
             for attempt in range(2):
                 try:
@@ -563,13 +595,21 @@ def _speed_tag(rate: str) -> float:
 
 
 _TTS_OK = re.compile(r"[^0-9A-Za-zÀ-ỹ\s.,!?;:'\"()%\-–…]")
+# tiếng khác: thêm chữ viết của tiếng đó (Thái; Nhật: kana + chữ Hán + dấu câu Nhật; Hàn: Hangul)
+_TTS_OK_LANG = {
+    "en": _TTS_OK,
+    "th": re.compile(r"[^0-9A-Za-z\u0E00-\u0E7F\s.,!?;:'\"()%\-–…]"),
+    "ja": re.compile(r"[^0-9A-Za-z\u3040-\u30FF\u31F0-\u31FF\u3400-\u9FFF\uF900-\uFAFF\uFF66-\uFF9F"
+                     r"\u3001\u3002\u300C-\u300F\uFF01\uFF1F\u30FC\s.,!?;:'\"()%\-–…]"),
+    "ko": re.compile(r"[^0-9A-Za-z\uAC00-\uD7AF\u1100-\u11FF\u3130-\u318F\s.,!?;:'\"()%\-–…]"),
+}
 
 
-def clean_tts_text(text: str) -> str:
-    """Bỏ ký tự giọng đọc tiếng Việt không đọc được (chữ Hán sót lại, emoji, ký hiệu lạ)."""
+def clean_tts_text(text: str, lang: str = "vi") -> str:
+    """Bỏ ký tự bộ đọc không đọc được (chữ Hán sót lại, emoji, ký hiệu lạ) – giữ chữ viết của tiếng `lang`."""
     t = unicodedata.normalize("NFC", text or "")
     t = t.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'").replace("—", "-")
-    t = _TTS_OK.sub(" ", t)
+    t = _TTS_OK_LANG.get(lang, _TTS_OK).sub(" ", t)
     t = re.sub(r"\(\s*\)", " ", t)
     return re.sub(r"\s+", " ", t).strip()
 
@@ -788,12 +828,19 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                    max_speedup: float = 1.6, progress: Callable[[float, str], None] | None = None,
                    cancel: Callable[[], bool] | None = None, voices: dict | None = None,
                    ref_audio: str | Path | None = None, settings: dict | None = None,
-                   skip_songs: bool = True, stats: dict | None = None, only: set[int] | None = None) -> Path:
+                   skip_songs: bool = True, stats: dict | None = None, only: set[int] | None = None,
+                   lang: str = "vi", genders: dict | None = None) -> Path:
     """only: chỉ đọc (lại) các câu này; câu khác dùng giọng đã đọc ở bản trước (extra["tts_file"]) dù lời đã đổi.
-    Câu đọc lại bị lỗi mà có giọng cũ -> giữ giọng cũ (báo lỗi), không làm hỏng cả bản lồng tiếng."""
+    Câu đọc lại bị lỗi mà có giọng cũ -> giữ giọng cũ (báo lỗi), không làm hỏng cả bản lồng tiếng.
+    lang: tiếng đích của dự án; mỗi câu còn được nhận tiếng theo chữ viết (langs.detect) -> giọng Edge tự đổi đúng tiếng,
+    OmniVoice đọc đúng tiếng, VieNeu (chỉ tiếng Việt) gặp câu tiếng khác thì đọc bằng Edge cùng nam / nữ.
+    genders: {người nói: {"g": "male"/"female"}} để chọn giọng Edge thay cho VieNeu."""
     settings = settings or {}
     stats = stats if stats is not None else {}
-    n_song = n_empty = n_nodub = 0
+    lang = langs.norm(lang)
+    genders = genders or {}
+    n_song = n_empty = n_nodub = n_lang = 0
+    by_lang: dict[str, int] = {}
     work = Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
     voices = voices or {}
@@ -813,8 +860,11 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         from . import voices as vlib
 
         samples = {v["id"]: v for v in vlib.list_samples()}
+    vn_gender = {v["id"]: v.get("gender", "") for v in (vieneu_presets(mode) + vieneu_sample_voices())} \
+        if vieneu_available() else {}
     for i, s in enumerate(segs):
-        t = clean_tts_text(s.trans or "")
+        lg = langs.detect(s.trans or "", lang)
+        t = clean_tts_text(s.trans or "", lg)
         s.extra.pop("_tts", None)
         if not t:
             n_empty += 1
@@ -839,20 +889,30 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             if not omnivoice_available() or (spec.startswith("omni:") and spec[5:] not in samples) or \
                     (spec.startswith("omnid:") and not omni_design.get(spec)):
                 spec = "edge:vi-VN-HoaiMyNeural"   # chưa cài OmniVoice / giọng mẫu đã bị xoá
+        if lg != "vi" and (spec == CLONE or spec.startswith("vieneu:")):
+            # VieNeu chỉ đọc tiếng Việt -> câu tiếng Anh / Thái / Nhật / Hàn đọc bằng Edge cùng nam / nữ
+            g = vn_gender.get(spec) or (genders.get(s.speaker or "S1") or {}).get("g", "")
+            spec = langs.edge_voice(lg, g, _spk_index(s.speaker))
+            n_lang += 1
+        if spec.startswith("edge:"):
+            spec = edge_for(spec, lg)        # giọng Edge tiếng Việt gặp câu tiếng khác -> giọng tiếng đó
+        by_lang[lg] = by_lang.get(lg, 0) + 1
         if spec == CLONE:
             spec = f"clone:{s.speaker or 'S1'}"
         if spec == OMNI_CLONE:
             spec = f"omniclone:{s.speaker or 'S1'}"
         extra = ""
-        if not spec.startswith("edge:"):
+        if not spec.startswith("edge:") and lg == "vi":
             t = spoken_vi(t)   # bộ đọc AI: số đọc thành chữ ("90.000" -> "chín mươi nghìn"); Edge tự đọc số
         if spec.startswith("omni:"):   # sửa lời / file mẫu thì đọc lại
             sm = samples[spec[5:]]
             extra = f"{sm.get('text', '')}|{sm.get('file')}|{settings.get('omnivoice_model', '')}"
         if spec.startswith("omnid:"):  # đổi mô tả / mô hình -> câu mẫu mới -> đọc lại
-            extra = omni_design.key(spec, settings.get("omnivoice_model", ""))
+            extra = omni_design.key(spec, settings.get("omnivoice_model", ""), lg)
         if spec.startswith(("omni:", "omniclone:", "omnid:")):
             extra += "|nofade"          # 2.0.34: bỏ đoạn nhỏ dần 0,1 s cuối câu (mất phụ âm cuối của câu ngắn)
+            if lg != "vi":
+                extra += "|" + lg
         elif spec.startswith(("vieneu:", "clone:")):
             extra += "|" + settings.get("vieneu_style", "clear")
             if spec.startswith(VN_LIB):     # đổi file mẫu cùng mã -> đọc lại
@@ -870,7 +930,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             continue
         if spec.startswith(("omni:", "omniclone:", "omnid:")):
             if not have:
-                omni_items.append((i, t, p, spec))
+                omni_items.append((i, t, p, spec, lg))
         elif spec.startswith("edge:"):
             if not have:
                 edge_items.append((i, t, p, spec[5:]))
@@ -917,28 +977,29 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             if progress:
                 progress((n + 1) / max(1, total_items) * 0.8, f"VieNeu đang đọc {n + 1}/{total_items}")
 
-    orefs: dict[str, tuple] = {}
+    orefs: dict[tuple, tuple] = {}
 
-    def omni_ref(spec: str) -> tuple:
-        """(file mẫu, lời trong file mẫu) cho mã giọng OmniVoice."""
-        if isinstance(orefs.get(spec), Exception):   # câu mẫu đã lỗi: không thử lại ở mỗi câu
-            raise orefs[spec]
-        if spec not in orefs:
+    def omni_ref(spec: str, lg: str = "vi") -> tuple:
+        """(file mẫu, lời trong file mẫu) cho mã giọng OmniVoice (giọng chọn sẵn: câu mẫu cùng tiếng với câu đọc)."""
+        ck = (spec, lg if spec.startswith("omnid:") else "")
+        if isinstance(orefs.get(ck), Exception):   # câu mẫu đã lỗi: không thử lại ở mỗi câu
+            raise orefs[ck]
+        if ck not in orefs:
             if spec.startswith("omni:"):
                 sm = samples[spec[5:]]
-                orefs[spec] = (str(vlib.path_of(sm)), sm.get("text", ""))
+                orefs[ck] = (str(vlib.path_of(sm)), sm.get("text", ""))
             elif spec.startswith("omnid:"):   # giọng chọn sẵn: nhái câu mẫu tạo 1 lần -> cả video 1 giọng
                 try:
-                    orefs[spec] = omni_design.ensure_anchor(om, spec,
-                                                            settings.get("omnivoice_model") or "k2-fsa/OmniVoice")
+                    orefs[ck] = omni_design.ensure_anchor(om, spec,
+                                                          settings.get("omnivoice_model") or "k2-fsa/OmniVoice", lg)
                 except Exception as e:  # noqa: BLE001
-                    orefs[spec] = e
+                    orefs[ck] = e
                     raise
             else:
                 spk = spec[10:]
                 r = build_reference_text(ref_audio, segs, spk, work / f"omniref_{spk}.wav") if ref_audio else None
-                orefs[spec] = (str(r[0]), r[1]) if r else (None, "")
-        return orefs[spec]
+                orefs[ck] = (str(r[0]), r[1]) if r else (None, "")
+        return orefs[ck]
 
     # --- OmniVoice (offline): nhái giọng từ file ghi âm mẫu / từ nhân vật gốc
     if omni_items:
@@ -948,13 +1009,13 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         om.ensure_started((lambda x, m: progress(0.01 * x, m)) if progress else None, cancel)
         speed = _speed_tag(rate)
         base = len(vn_items)
-        for n, (i, text, p, spec) in enumerate(omni_items):
+        for n, (i, text, p, spec, lg) in enumerate(omni_items):
             if cancel and cancel():
                 raise Cancelled()
             try:
-                ref, rtext = omni_ref(spec)
+                ref, rtext = omni_ref(spec, lg)
                 tmp = p.with_suffix(".raw.wav")
-                synth_checked(om, text, tmp, ref_audio=ref, ref_text=rtext)
+                synth_checked(om, text, tmp, ref_audio=ref, ref_text=rtext, language=lg)
                 sr = om.sr
                 if abs(speed - 1) > 0.01:
                     write_wav(p, _decode(tmp, speed, sr), sr)
@@ -1083,7 +1144,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                       "cut": sum(1 for x in plan.values() if x["keep"] is not None)}
     stats.update({"placed": placed, "total": len(segs), "songs": n_song, "empty": n_empty,
                   "nodub": n_nodub, "errors": len(errors), "error_samples": errors[:3],
-                  "redone": redone, "kept_old": kept_old})
+                  "redone": redone, "kept_old": kept_old, "lang_edge": n_lang, "langs": by_lang})
     if placed == 0:
         raise RuntimeError("Bản lồng tiếng tạo ra không có tiếng nào. " + "; ".join(errors[:3]))
     soft_limit(track)      # chỗ 2 giọng đọc đè lên nhau: nén mềm đỉnh, không vỡ tiếng
@@ -1107,12 +1168,26 @@ def wave_envelope(a: np.ndarray, sr: int, hop: float = 0.05) -> np.ndarray:
     return np.clip(env / max(top, 1e-4), 0, 1).astype(np.float16)
 
 
+PREVIEW_TEXT = {"vi": "Xin chào, đây là giọng đọc thử nghiệm của TraMi.",
+                "en": "Hello, this is a test voice from TraMi.",
+                "th": "สวัสดีค่ะ นี่คือเสียงทดสอบจาก TraMi",
+                "ja": "こんにちは、TraMiのテスト音声です。",
+                "ko": "안녕하세요, TraMi의 테스트 음성입니다."}
+
+
 def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,
-                  ref_audio: str | Path | None = None) -> Path:
-    """Tạo file nghe thử 1 giọng."""
+                  ref_audio: str | Path | None = None, lang: str = "vi") -> Path:
+    """Tạo file nghe thử 1 giọng (lời đọc theo tiếng của câu / tiếng đích `lang`)."""
     settings = settings or {}
-    text = clean_tts_text(text) or "Xin chào, đây là giọng đọc thử nghiệm của TraMi."
-    if not spec.startswith("edge:"):
+    lang = langs.norm(lang)
+    lg = langs.detect(text, lang) if (text or "").strip() else lang
+    text = clean_tts_text(text, lg) or PREVIEW_TEXT[lg]
+    if lg != "vi" and (spec == CLONE or spec.startswith(("vieneu:", "clone"))):
+        raise ValueError(f"VieNeu chỉ đọc tiếng Việt – {langs.name(lg).lower()} hãy chọn giọng Edge hoặc OmniVoice "
+                         "(khi lồng tiếng, câu không phải tiếng Việt tự đọc bằng Edge)")
+    if spec.startswith("edge:"):
+        spec = edge_for(spec, lg)
+    elif lg == "vi":
         text = spoken_vi(text)
     if spec.startswith("edge:"):
         import edge_tts
@@ -1126,17 +1201,19 @@ def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,
         if spec.startswith("omnid:"):
             from . import omni_design
 
-            ref, rtext = omni_design.ensure_anchor(om, spec, settings.get("omnivoice_model") or "k2-fsa/OmniVoice")
-            return om.synth(text, out.with_suffix(".wav"), ref_audio=ref, ref_text=rtext)
+            ref, rtext = omni_design.ensure_anchor(om, spec, settings.get("omnivoice_model") or "k2-fsa/OmniVoice", lg)
+            return om.synth(text, out.with_suffix(".wav"), ref_audio=ref, ref_text=rtext, language=lg)
         if spec.startswith("omni:"):
             from . import voices as vlib
 
             sm = vlib.get(spec[5:])
             if not sm:
                 raise ValueError("Giọng mẫu này đã bị xoá")
-            return om.synth(text, out.with_suffix(".wav"), ref_audio=str(vlib.path_of(sm)), ref_text=sm.get("text", ""))
+            return om.synth(text, out.with_suffix(".wav"), ref_audio=str(vlib.path_of(sm)), ref_text=sm.get("text", ""),
+                            language=lg)
         ref, rtext = (ref_audio if isinstance(ref_audio, tuple) else (ref_audio, ""))
-        return om.synth(text, out.with_suffix(".wav"), ref_audio=str(ref) if ref else None, ref_text=rtext)
+        return om.synth(text, out.with_suffix(".wav"), ref_audio=str(ref) if ref else None, ref_text=rtext,
+                        language=lg)
     tts = _vieneu(settings.get("vieneu_mode", "v3turbo"))
     prm = vieneu_params(settings)
     if spec == CLONE or spec.startswith("clone"):

@@ -108,8 +108,16 @@ class SubsModel(QAbstractTableModel):
 
     def headerData(self, section, orient, role=Qt.ItemDataRole.DisplayRole):
         if orient == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
+            if section == C_VI:
+                return getattr(self, "trans_label", COLS[C_VI])
             return COLS[section]
         return None
+
+    def set_trans_label(self, name: str):
+        """Tên cột bản dịch theo tiếng đích ("Tiếng Anh", "Tiếng Thái"…)."""
+        if getattr(self, "trans_label", None) != name:
+            self.trans_label = name
+            self.headerDataChanged.emit(Qt.Orientation.Horizontal, C_VI, C_VI)
 
     def flags(self, idx):
         f = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable

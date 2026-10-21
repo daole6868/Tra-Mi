@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDoubleSpinBox, QFi
                                QScrollArea, QSpinBox, QSplitter, QStackedWidget, QTableView, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget, QGridLayout)
 
-from .. import pipeline
+from .. import langs, pipeline
 from ..config import _deep_merge, load_settings
 from ..jobs import manager
 from ..karaoke import DEFAULT_COLOR as KARA_COLOR, MODES as KARA_MODES
@@ -86,6 +86,7 @@ class ProjectPage(QWidget):
         self.player.subtitleEdited.connect(self._sub_edited)
         self.player.regionsEdited.connect(self._regions_edited)
         self.ov_which = combo([("trans", "Xem: Tiếng Việt"), ("both", "Xem: Song ngữ"), ("source", "Xem: Tiếng Trung")])
+        self.ov_which.setToolTip("Phụ đề hiện trên khung xem trước: bản dịch / song ngữ / tiếng Trung gốc")
         self.ov_which.currentIndexChanged.connect(self._refresh_overlay)
         self.ov_show = Switch(True)
         self.ov_show.toggledOn.connect(self._refresh_overlay)
@@ -221,11 +222,19 @@ class ProjectPage(QWidget):
         self.a_engine = f.row("Công cụ dịch", combo(C.ENGINES + [(pipeline.NO_TRANSLATE, "Không dịch – chỉ nghe & tách câu, "
                                                                  "xuất SRT gốc (dịch ở phần mềm khác)")],
                                                     s.get("translate_engine")))
+        self.a_target = f.row("Dịch sang", combo(C.TARGETS, s.get("target_lang", "vi")),
+                              "Tiếng đích của dự án này: bản dịch, phụ đề ghép vào video và giọng lồng tiếng đều theo "
+                              "tiếng này. Edge / OmniVoice đọc được cả 5 tiếng; VieNeu chỉ đọc tiếng Việt")
+        self.a_target.currentIndexChanged.connect(self._target_changed)
         self.a_style = f.row("Thể loại / văn phong", combo(C.STYLES, s.get("translate_style")))
         self.a_hardsub = f.row("Phụ đề Trung cũ", combo(C.HARDSUB, "none"))
         self.a_which = f.row("Ghép phụ đề vào video", combo(C.WHICH, "trans"))
-        self.a_dub = f.row("Lồng tiếng Việt", Switch(False))
+        self.a_dub = f.row("Lồng tiếng (đọc bản dịch)", Switch(False))
         self.a_tts = f.row("Bộ đọc lồng tiếng", combo(C.TTS_ENGINES, s.get("tts_engine", "edge")))
+        # cùng 1 bộ đọc với tab Lồng tiếng (trước đây bước "3. Lồng tiếng" dùng ô ở tab Lồng tiếng, ô này bị bỏ qua)
+        self.a_tts.currentIndexChanged.connect(
+            lambda: None if self.loading or self.d_engine.currentData() == self.a_tts.currentData()
+            else set_combo(self.d_engine, self.a_tts.currentData()))
         self.a_denoise = f.row("Lọc nhiễu âm thanh", Switch(False))
         self.a_force = f.row("Nhận dạng lại từ đầu", Switch(False))
         self.a_method.currentIndexChanged.connect(
@@ -246,8 +255,9 @@ class ProjectPage(QWidget):
         step_defs = [
             ("1. Nghe && tách câu", "mic", self.run_recognize,
              "Nghe lời thoại gốc: ghi mốc lúc nhân vật BẮT ĐẦU nói tới lúc DỨT câu, tách đúng từng câu (và từng người nói)."),
-            ("2. Dịch", "globe", lambda: self.run_translate(False),
-             "Dịch từng câu sang tiếng Việt, độ dài vừa với thời gian nhân vật nói."),
+            ("2. Dịch", "globe", self._step_translate,
+             "Dịch từng câu sang ngôn ngữ ở ô 'Dịch sang', độ dài vừa với thời gian nhân vật nói. Đã dịch một phần thì "
+             "chỉ dịch các câu còn trống (giữ câu bạn đã sửa)."),
             ("3. Lồng tiếng", "volume", self._step_dub,
              "Đọc từng câu tiếng Việt và đặt đúng vào thời điểm nhân vật nói (không chồng câu)."),
             ("4. Ghép vào video && xuất", "export", self._step_export,
@@ -968,7 +978,8 @@ class ProjectPage(QWidget):
         go.clicked.connect(self.run_render)
         card.add(go)
         subs = SectionCard("Xuất phụ đề", "subtitles")
-        subs.add(hbox(button("SRT tiếng Việt", on_click=lambda: self._export_sub("srt", "trans")),
+        self.x_srt_trans = button("SRT tiếng Việt", on_click=lambda: self._export_sub("srt", "trans"))
+        subs.add(hbox(self.x_srt_trans,
                       button("SRT tiếng Trung", on_click=lambda: self._export_sub("srt", "source")),
                       button("SRT song ngữ", on_click=lambda: self._export_sub("srt", "both")), None))
         subs.add(hbox(button("ASS có kiểu chữ", on_click=lambda: self._export_sub("ass", None)),
@@ -1028,7 +1039,7 @@ class ProjectPage(QWidget):
             self.model.set_segments(p.segments)
             self._fit_rows()
             self._update_count()
-            self.glossary.setPlainText(p.data.get("glossary", ""))
+            self._apply_target(pipeline.target_lang(p, self.settings))
             self._fill_edit()
             self._fill_speakers()
             self._fill_dub_layout()
@@ -1246,6 +1257,7 @@ class ProjectPage(QWidget):
         # lồng tiếng
         d = e["dub"]
         set_combo(self.d_engine, self.p.data.get("tts_engine") or self.settings.get("tts_engine", "edge"))
+        set_combo(self.a_tts, self.d_engine.currentData())
         stems = pipeline.stems(self.p)
         self.d_sepstatus.setText("✓ Đã tách giọng / nhạc nền" if stems else "Chưa tách")
         has_dub = d.get("wav") and Path(d["wav"]).exists()
@@ -1339,7 +1351,7 @@ class ProjectPage(QWidget):
         cur = self.p.edit
         cur.update(ed)
         self.p.data["edit"] = cur
-        self.p.data["glossary"] = self.glossary.toPlainText()
+        self.p.data[pipeline.glossary_key(pipeline.target_lang(self.p, self.settings))] = self.glossary.toPlainText()
         self.p.data["tts_engine"] = self.d_engine.currentData()
         self.p.save()
         self._update_summary()
@@ -1422,6 +1434,7 @@ class ProjectPage(QWidget):
                 "ocr_fps": float(self.a_ocrfps.currentData() or 4),
                 "language": self.a_lang.currentData(), "separate": self.a_sep.isChecked(),
                 "diarize": self.a_spk.isChecked(), "engine": self.a_engine.currentData(),
+                "target": self.a_target.currentData(),
                 "style": self.a_style.currentData(), "hardsub_mode": self.a_hardsub.currentData(),
                 "burn": which != "none", "which": which if which != "none" else "trans",
                 "dub": self.a_dub.isChecked(), "tts_engine": self.a_tts.currentData(),
@@ -1431,6 +1444,8 @@ class ProjectPage(QWidget):
         if not self.p or not self.p.data.get("source"):
             return self.win.toast("Dự án chưa có video", "err")
         opts = self._auto_opts()
+        if opts["method"] == "ocr" and self.hs_editor.regions:   # vùng chữ bạn đã khoanh (như nút "1. Nghe & tách câu")
+            opts["region"] = self.hs_editor.regions[0]
         if self.p.segments and not opts["force_recognize"]:
             self.win.toast("Dự án đã có phụ đề → dùng lại (bật 'Nhận dạng lại từ đầu' nếu muốn làm lại)", "warn")
         self.submit("auto", "Dịch tự động", lambda j, p: pipeline.auto(p, opts, j.update, j.cancelled))
@@ -1455,6 +1470,10 @@ class ProjectPage(QWidget):
                 msg += f" · nghe bằng {used}"
             if o["method"] != "ocr" and p.data.get("asr_warning"):
                 msg += "  ⚠ " + p.data["asr_warning"]
+            if o["method"] != "ocr" and p.data.get("sep_warning"):
+                msg += "  ⚠ " + p.data["sep_warning"]
+            elif o["method"] != "ocr" and o["separate"] and pipeline.stems(p):
+                msg += " · đã tách giọng / nhạc nền (dùng được ở tab Âm thanh)"
             if o["method"] == "ocr":
                 ost = p.data.get("ocr_stats") or {}
                 if ost.get("frames"):
@@ -1472,6 +1491,8 @@ class ProjectPage(QWidget):
             if self.a_engine.currentData() != pipeline.NO_TRANSLATE:
                 set_combo(self.a_engine, st.get("translate_engine", "google"))
             set_combo(self.a_style, st.get("translate_style", "auto"))
+            if self.p is not None:
+                set_combo(self.a_target, pipeline.target_lang(self.p, st))
         finally:
             self.loading = was
         self._update_engine_label()
@@ -1486,6 +1507,76 @@ class ProjectPage(QWidget):
         save_settings({"translate_style": self.a_style.currentData(),
                        **({"translate_engine": eng} if eng != pipeline.NO_TRANSLATE else {})})
         self.settings = load_settings()
+
+    def _target_changed(self, *_):
+        """Đổi tiếng đích của dự án: lưu vào dự án (+ làm mặc định cho dự án mới), đổi nhãn / giọng theo tiếng mới."""
+        if self.loading or not self.p:
+            return
+        from ..config import save_settings
+
+        lang = self.a_target.currentData()
+        old = pipeline.target_lang(self.p, self.settings)
+        if lang == old:
+            return
+        self.p.reload()
+        self.p.data[pipeline.glossary_key(old)] = self.glossary.toPlainText()
+        self.p.data["target_lang"] = lang
+        self.p.save()
+        save_settings({"target_lang": lang})
+        self.settings = load_settings()
+        self._apply_target(lang)
+        self.loading = True
+        try:
+            self._fill_speakers()
+        finally:
+            self.loading = False
+        self._refresh_overlay()
+        name = langs.name(lang)
+        have = sum(1 for x in self.model.segs if x.trans.strip())
+        if have and pipeline.trans_lang(self.p) != lang:
+            self.win.toast(f"Đã chọn dịch sang {name}. Bản dịch đang có là {langs.name(pipeline.trans_lang(self.p))} – "
+                           f"bấm '2. Dịch' để dịch lại toàn bộ sang {name}", "warn")
+        else:
+            self.win.toast(f"Dự án này dịch sang {name}" +
+                           (" – VieNeu chỉ đọc tiếng Việt, lồng tiếng sẽ dùng Edge (hoặc chọn OmniVoice)"
+                            if lang != "vi" and self.d_engine.currentData() == "vieneu" else ""), "ok")
+
+    def _note_trans_lang(self) -> str:
+        """Nạp phụ đề đã dịch tiếng khác tiếng đích đang chọn -> đổi "Dịch sang" theo, trả về câu báo."""
+        self.flush()
+        lg = pipeline.note_trans_lang(self.p)
+        if not lg:
+            return ""
+        self._apply_target(lg)
+        self.loading = True
+        try:
+            self._fill_speakers()
+        finally:
+            self.loading = False
+        self._refresh_overlay()
+        return f" · nhận ra bản dịch {langs.name(lg).lower()} – đã đổi 'Dịch sang' của dự án thành {langs.name(lg)}"
+
+    def _apply_target(self, lang: str):
+        """Nhãn theo tiếng đích: cột / ô bản dịch, lựa chọn phụ đề ghép vào video, nút SRT, bảng thuật ngữ."""
+        name = langs.name(lang)
+        short = langs.INFO[langs.norm(lang)]["short"]
+        was, self.loading = self.loading, True
+        try:
+            set_combo(self.a_target, lang)
+            self.model.set_trans_label(name)
+            self.inspector.set_lang(name)
+            ch = C.which_choices(lang)
+            C.relabel(self.a_which, ch)
+            C.relabel(self.st_which, ch)
+            C.relabel(self.ov_which, [("trans", f"Xem: {name}"), ("both", "Xem: Song ngữ")])
+            self.x_srt_trans.setText(f"SRT tiếng {short}")
+            self.glossary.setPlaceholderText(
+                "Mỗi dòng: 中文=Tiếng Việt   (VD: 李逍遥=Lý Tiêu Dao). AI tự điền khi dịch." if lang == "vi" else
+                f"Mỗi dòng: 中文={name}   (VD: 李逍遥=Li Xiaoyao). Bảng riêng cho {name.lower()}, AI tự điền khi dịch.")
+            if self.p is not None:
+                self.glossary.setPlainText(self.p.data.get(pipeline.glossary_key(lang), ""))
+        finally:
+            self.loading = was
 
     def _update_engine_label(self):
         if getattr(self, "d_engine_lbl", None) is not None:
@@ -1502,7 +1593,7 @@ class ProjectPage(QWidget):
             return self.win.toast("Tích chọn câu cần dịch lại ở cột Chọn trước", "warn")
         segs = self.model.segs
         if rows is None and not any(x.text.strip() and not x.trans.strip() for x in segs):
-            return self.win.toast("Câu nào cũng đã có lời tiếng Việt", "info")
+            return self.win.toast("Câu nào cũng đã có bản dịch", "info")
         self.inspector._flush()
         before = [x.trans for x in segs]
         tts_eng, rate = self.d_engine.currentData(), self.d_rate.currentData()
@@ -1576,6 +1667,22 @@ class ProjectPage(QWidget):
             pipeline.dub(p, None, rate, st, j.update, j.cancelled, eng)
             return {"message": pipeline.dub_summary(p)}
         self.submit("dub", "Lồng tiếng", fn)
+
+    def _step_translate(self):
+        """Bước 2: chưa dịch câu nào -> dịch hết; dịch dở -> chỉ dịch câu còn trống (giữ câu đã dịch / đã sửa tay);
+        đã dịch hết -> hỏi trước khi dịch lại tất cả (trước đây luôn dịch lại tất cả, mất chỗ đã sửa)."""
+        segs = self.model.segs
+        if not segs:
+            return self.win.toast("Làm bước 1 (Nghe && tách câu) trước đã", "warn")
+        done = sum(1 for x in segs if x.trans.strip())
+        todo = sum(1 for x in segs if x.text.strip() and not x.trans.strip())
+        if not done:
+            return self.run_translate(False)
+        if todo:
+            return self.run_translate(True)
+        if QMessageBox.question(self, "Dịch lại tất cả?", "Mọi câu đã có bản dịch. Dịch lại TẤT CẢ? (các câu bạn đã sửa "
+                                "tay sẽ bị thay)") == QMessageBox.StandardButton.Yes:
+            self.run_translate(False)
 
     def _step_dub(self):
         if not any(sg.trans.strip() for sg in self.model.segs):
@@ -2071,7 +2178,9 @@ class ProjectPage(QWidget):
             self._segs_edited()
         from ..translate import translate_text
 
-        run_async(lambda: translate_text(seg.text, load_settings(), eng), done, lambda m: self.win.toast(m, "err"))
+        tgt, src = pipeline.target_lang(self.p, self.settings), pipeline.source_lang(self.p)
+        run_async(lambda: translate_text(seg.text, load_settings(), eng, tgt, src), done,
+                  lambda m: self.win.toast(m, "err"))
 
     def _shift(self):
         v, ok = QInputDialog.getDouble(self, "Dời thời gian", "Dời bao nhiêu giây? (âm = sớm hơn)\n"
@@ -2122,7 +2231,7 @@ class ProjectPage(QWidget):
             segs = cur
         self.model.set_segments(normalize(segs))
         self._segs_edited()
-        self.win.toast(f"Đã nhập {len(segs)} câu", "ok")
+        self.win.toast(f"Đã nhập {len(segs)} câu" + (self._note_trans_lang() if k else ""), "ok")
 
     # ================================================================== xoá phụ đề
     def _grab_frame(self):
@@ -2330,7 +2439,7 @@ class ProjectPage(QWidget):
 
         p = self.p
         spks = pipeline.speaker_list(p)
-        voices = tts.list_voices(self.settings)
+        voices = tts.list_voices(self.settings, pipeline.target_lang(p, self.settings))
         self._voices = voices
         self.model.voice_names = {v["id"]: v["name"] for v in voices}
         cur = self.d_line_voice.currentData()
@@ -2394,7 +2503,7 @@ class ProjectPage(QWidget):
             self.p.reload()
             st = dict(self.settings)
             st["tts_engine"] = self.d_engine.currentData()
-            self.p.data["voices"] = tts.auto_assign(spks, st, {}, genders)
+            self.p.data["voices"] = tts.auto_assign(spks, st, {}, genders, pipeline.target_lang(self.p, st))
             self.p.save()
             self.loading = True
             self._fill_speakers()
@@ -2410,6 +2519,10 @@ class ProjectPage(QWidget):
                   lambda m: (self.win.toast("Không đoán được giọng nam / nữ: " + m, "warn"), apply(known)))
 
     def _dub_engine_changed(self):
+        if self.a_tts.currentData() != self.d_engine.currentData():
+            was, self.loading = self.loading, True
+            set_combo(self.a_tts, self.d_engine.currentData())
+            self.loading = was
         if not self.loading:
             self._save_edit_timer.start()
 
@@ -2528,7 +2641,8 @@ class ProjectPage(QWidget):
             if not ref:
                 return self.win.toast("Người nói này chưa có câu nào đủ rõ để lấy mẫu giọng", "warn")
         self.win.toast("Đang tạo giọng nghe thử…")
-        run_async(lambda: tts.preview_voice(vid, text, out, self.settings, ref),
+        lang = pipeline.target_lang(self.p, self.settings)
+        run_async(lambda: tts.preview_voice(vid, text, out, self.settings, ref, lang),
                   lambda path: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))),
                   lambda m: self.win.toast("Không tạo được giọng: " + m, "err"))
 
@@ -2545,7 +2659,8 @@ class ProjectPage(QWidget):
 
     def _pick_long(self):
         """Tích các câu cần rút gọn: ⚠ quá dài + ⚡ phải đọc nhanh hơn ×1,15 (đúng các câu "AI rút gọn" sẽ làm)."""
-        rows = [i for i, s in enumerate(self.model.segs) if pipeline.needs_shorten(s)]
+        lg = pipeline.trans_lang(self.p)
+        rows = [i for i, s in enumerate(self.model.segs) if pipeline.needs_shorten(s, lg)]
         if not rows:
             return self.win.toast("Không có câu nào quá dài / phải đọc quá nhanh (hoặc chưa tạo bản lồng tiếng)", "ok")
         self.model.set_picked(range(len(self.model.segs)), False)
@@ -2713,10 +2828,13 @@ class ProjectPage(QWidget):
                 c.extra["trans_user"] = True
             self.model.set_segments(normalize(cues))
             self._segs_edited()
-            return self.win.toast(f"Đã nạp {len(cues)} câu tiếng Việt", "ok")
+            return self.win.toast(f"Đã nạp {len(cues)} câu đã dịch" + self._note_trans_lang(), "ok")
         changed = pipeline.apply_translation(segs, cues)
         self.model.set_segments(segs)
         self._segs_edited()
+        note = self._note_trans_lang()
+        if note:
+            self.win.toast(note.strip(" ·"), "info")
         if not changed:
             return self.win.toast("File này không làm đổi câu nào (lời Việt giống hệt bản đang có)", "warn")
         self.model.set_picked(range(len(segs)), False)
@@ -2876,7 +2994,8 @@ class ProjectPage(QWidget):
         e = self.p.edit
         segs = self.model.segs
         items = [f"Phụ đề: {len(segs)} câu, đã dịch {sum(1 for s in segs if s.trans)}" +
-                 (f" → ghép vào video ({dict(C.WHICH)[e['subtitles']['which']]})" if e["subtitles"].get("burn") else " (không ghép)")]
+                 (f" → ghép vào video ({dict(C.which_choices(pipeline.target_lang(self.p)))[e['subtitles']['which']]})"
+                  if e["subtitles"].get("burn") else " (không ghép)")]
         hsn = dict(C.HARDSUB).get(e["hardsub"].get("mode"), "")
         if e["hardsub"].get("mode") != "none":
             items.append(f"Phụ đề cũ: {hsn} – {len(e['hardsub'].get('regions') or [])} vùng")
@@ -2892,7 +3011,8 @@ class ProjectPage(QWidget):
         if abs(e["speed"] - 1) > 1e-3:
             items.append(f"Tốc độ ×{e['speed']:.2f}")
         if e["dub"].get("enabled") and e["dub"].get("wav"):
-            items.append("Lồng tiếng Việt" + (" + nhạc nền gốc đã tách" if e["dub"].get("bg_wav") else ""))
+            items.append(f"Lồng tiếng {langs.INFO[pipeline.trans_lang(self.p)]['short']}" +
+                         (" + nhạc nền gốc đã tách" if e["dub"].get("bg_wav") else ""))
         if e["bgm"].get("path"):
             items.append("Nhạc nền thêm")
         if e["watermark"].get("path"):
@@ -2910,8 +3030,9 @@ class ProjectPage(QWidget):
         if not path:
             return
         i = self.p.data.get("info", {})
-        save_subtitles(self.model.segs, path, which, _deep_merge(self.settings.get("sub_style") or {}, self.current_style()),
-                       i.get("width") or 1920, i.get("height") or 1080)
+        st = _deep_merge(self.settings.get("sub_style") or {}, self.current_style())
+        st["lang"] = pipeline.trans_lang(self.p)
+        save_subtitles(self.model.segs, path, which, st, i.get("width") or 1920, i.get("height") or 1080)
         self.win.toast(f"Đã lưu {Path(path).name}", "ok")
 
     def _fill_outputs(self):

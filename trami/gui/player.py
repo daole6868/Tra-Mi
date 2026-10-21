@@ -116,7 +116,7 @@ class SubtitleItem(QGraphicsItem):
 
     # ------------------------------------------------------------ hình học (giống libass)
     def _layout(self):
-        from ..subtitle import (SOURCE_SCALE, block_anchor, box_pads, cjk_font_name, fixed_box, sub_size,
+        from ..subtitle import (SOURCE_SCALE, block_anchor, box_pads, cjk_font_name, fixed_box, line_font, sub_size,
                                 wrap_line)
 
         fr = self.box
@@ -136,7 +136,8 @@ class SubtitleItem(QGraphicsItem):
         for text, kind in parts:
             if kind == "vi":
                 t = wrap_line(text.strip(), max_chars)
-                rows += [(ln.upper() if st.get("uppercase") else ln, st.get("font") or theme.FONT_FAMILY, size,
+                fam = line_font(text, {**st, "font": st.get("font") or theme.FONT_FAMILY})   # Thái / Nhật / Hàn
+                rows += [(ln.upper() if st.get("uppercase") else ln, fam, size,
                           st.get("color", "#FFFFFF"), kara is not None) for ln in t.split("\n")]
             else:   # song ngữ: dòng Trung nhỏ, màu vàng (kiểu "Source" khi xuất)
                 fs, col = (int(size * SOURCE_SCALE), st.get("secondary_color", "#FFE14D")) if kind == "zh" else \

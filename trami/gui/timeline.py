@@ -194,7 +194,7 @@ class _Canvas(QWidget):
                        + (f" · đã kéo dời {shift:+.2f} s" if shift else "") + "\n" + fit_tip(s)
                        + f"\n{s.trans}\nKéo sang trái / phải để dời · bấm đúp để nghe · Ctrl/Shift chọn nhiều")
             elif s and self.track_rect("dub").contains(pos):
-                why = ("chưa có lời tiếng Việt" if not (s.trans or "").strip() else "đã tắt lồng câu này"
+                why = ("chưa có bản dịch" if not (s.trans or "").strip() else "đã tắt lồng câu này"
                        if s.extra.get("nodub") else "đang hát – giữ giọng gốc" if s.extra.get("song")
                        else "chưa có giọng lồng – bấm Tạo lại giọng câu này")
                 tip = f"#{row + 1} {why}\n{s.trans or s.text}"

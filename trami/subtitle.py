@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
@@ -180,18 +181,56 @@ def _ass_escape(t: str) -> str:
     return t.replace("\\", "\\\\").replace("{", "(").replace("}", ")").replace("\n", "\\N")
 
 
+def vis_len(t: str) -> float:
+    """Độ rộng hiển thị tính theo chữ Latin: chữ Hán / kana / Hangul (rộng gấp ~1,8), dấu kết hợp (dấu thanh Thái) 0."""
+    n = 0.0
+    for c in t:
+        if unicodedata.category(c) == "Mn":
+            continue
+        n += 1.8 if unicodedata.east_asian_width(c) in "WF" else 1.0
+    return n
+
+
+# không ngắt dòng ngay TRƯỚC các ký tự này (dấu câu đóng, kana nhỏ, ー) và ngay SAU các ký tự kia (mở ngoặc, nguyên
+# âm đứng trước của chữ Thái เ แ โ ใ ไ)
+_NO_START = set("、。，．！？）」』】〉》ー・…ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶ,.!?;:)]")
+_NO_END = set("（「『【〈《([เแโใไ")
+_BREAK_AFTER = set("、。，！？,.!?;:")
+
+
+def _wrap_chars(text: str, max_chars: int) -> str:
+    """Ngắt dòng tiếng viết liền không có dấu cách (Nhật, Thái): cắt giữa 2 chữ gần giữa nhất, ưu tiên sau dấu câu."""
+    total = vis_len(text)
+    best, best_diff = None, 1e9
+    acc = 0.0
+    for i in range(1, len(text)):
+        acc += vis_len(text[i - 1])
+        c, prev = text[i], text[i - 1]
+        if unicodedata.category(c) == "Mn" or c in _NO_START or prev in _NO_END:
+            continue
+        diff = abs(acc - (total - acc))
+        if prev in _BREAK_AFTER:
+            diff -= 4
+        if diff < best_diff:
+            best, best_diff = i, diff
+    if best is None:
+        return text
+    return text[:best].rstrip() + "\n" + text[best:].lstrip()
+
+
 def wrap_line(text: str, max_chars: int) -> str:
-    """Ngắt dòng tiếng Việt cân đối (tối đa 2 dòng) nếu quá dài."""
+    """Ngắt dòng cân đối (tối đa 2 dòng) nếu quá dài. Độ dài tính theo độ rộng hiển thị (chữ Nhật / Hàn rộng gấp
+    ~1,8 chữ Latin); tiếng viết liền (Nhật, Thái không cách) ngắt giữa 2 chữ."""
     text = " ".join(text.split())
-    if max_chars <= 0 or len(text) <= max_chars or "\n" in text:
+    if max_chars <= 0 or vis_len(text) <= max_chars or "\n" in text:
         return text
     words = text.split(" ")
-    if len(words) < 2:
-        return text
+    if len(words) < 2 or max(vis_len(w) for w in words) > max_chars * 0.7:
+        return _wrap_chars(text, max_chars)
     best, best_diff = None, 1e9
     for i in range(1, len(words)):
         a, b = " ".join(words[:i]), " ".join(words[i:])
-        diff = abs(len(a) - len(b))
+        diff = abs(vis_len(a) - vis_len(b))
         # ưu tiên ngắt sau dấu câu
         if a.endswith((",", ".", "?", "!", ";", ":")):
             diff -= 4
@@ -253,6 +292,18 @@ def cjk_font_name(st: dict) -> str:
                                   "PingFang SC" if _sys.platform == "darwin" else "Noto Sans CJK SC")
 
 
+def line_font(text: str, st: dict) -> str:
+    """Font cho 1 dòng phụ đề dịch: font đã chọn (Việt / Anh); câu tiếng Thái / Nhật / Hàn -> font hệ thống có đủ chữ
+    (Be Vietnam Pro, Bangers… không có các chữ này); chữ Trung chưa dịch -> font chữ Hán."""
+    from . import langs
+
+    base = st.get("font", "Be Vietnam Pro")
+    lg = langs.detect(text, st.get("lang") or "vi")
+    if lg in ("vi", "en"):
+        return cjk_font_name(st) if langs.has_han(text) and not langs.has_latin(text) else base
+    return langs.subtitle_font(lg, base)
+
+
 def _ass_color_alpha(color: str, opacity: float) -> tuple[str, str]:
     full = _hex_to_ass(color, 1 - float(opacity))          # &HAABBGGRR
     return f"&H{full[4:]}&", f"&H{full[2:4]}&"
@@ -310,6 +361,13 @@ def to_ass(segs: list[Segment], style: dict, width: int = 1920, height: int = 10
         font = cjk_font
     max_chars = int(width / (size * 0.55)) if size else 42
     src_size = int(size * SOURCE_SCALE)
+
+    def fn(text: str) -> str:
+        """Thẻ đổi font cho dòng tiếng Thái / Nhật / Hàn (rỗng nếu dùng font đã chọn)."""
+        if which == "source":
+            return ""
+        f = line_font(text, st)
+        return "{\\fn" + f + "}" if f != font else ""
 
     # karaoke + nền ôm chữ: libass vẽ nền riêng cho TỪNG TỪ (chồng lên nhau thành sọc tối) -> nền vẽ ở lớp 0 từ câu
     # không có thẻ karaoke (chữ trong suốt), chữ karaoke vẽ ở lớp 1 bằng kiểu không nền
@@ -370,9 +428,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 vi = vi.upper()
             if not vi and not zh:
                 continue
-            txt = kara_text(vi, s.start, s.end, s.extra.get("kv"), kara_mode) if kara else _ass_escape(vi)
+            ft = fn(vi) if vi else ""
+            txt = ft + (kara_text(vi, s.start, s.end, s.extra.get("kv"), kara_mode) if kara else _ass_escape(vi))
             if kara_box and vi:
-                emit(s, txt, 0, 0, _ass_escape(vi), zh)
+                emit(s, txt, 0, 0, ft + _ass_escape(vi), zh)
                 continue
             if zh:
                 txt += "\\N{\\rSource" + bord + "}" + _ass_escape(zh)
@@ -384,8 +443,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             body = wrap_line(body, max_chars)
         if st.get("uppercase"):
             body = body.upper()
-        txt = kara_text(body, s.start, s.end, s.extra.get("kv"), kara_mode) if kara else _ass_escape(body)
-        emit(s, txt, body.count("\n") + 1, 0, _ass_escape(body))
+        ft = fn(body)
+        txt = ft + (kara_text(body, s.start, s.end, s.extra.get("kv"), kara_mode) if kara else _ass_escape(body))
+        emit(s, txt, body.count("\n") + 1, 0, ft + _ass_escape(body))
     return "".join(lines)
 
 

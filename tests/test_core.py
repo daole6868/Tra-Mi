@@ -525,6 +525,18 @@ def test_gui_smoke(sample_video, tmp_path):
     pp.model.setData(pp.model.index(0, 5), "Xin chào bạn")
     pp.flush()
     assert Project(p.id).segments[0].trans == "Xin chào bạn"
+    # đổi "Dịch sang" -> lưu vào dự án, nhãn cột / lựa chọn phụ đề / danh sách giọng theo tiếng mới
+    from PySide6.QtCore import Qt as _Qt
+
+    pp.a_target.setCurrentIndex(pp.a_target.findData("en"))
+    app.processEvents()
+    assert Project(p.id).data["target_lang"] == "en"
+    assert pp.model.headerData(5, _Qt.Orientation.Horizontal) == "Tiếng Anh"
+    assert pp.a_which.itemText(pp.a_which.findData("trans")) == "Chỉ tiếng Anh"
+    assert all(v["id"].startswith(("edge:en-", "omni")) for v in pp._voices)
+    pp.a_target.setCurrentIndex(pp.a_target.findData("vi"))
+    app.processEvents()
+    assert pp.model.headerData(5, _Qt.Orientation.Horizontal) == "Tiếng Việt"
     for k in ("batch", "concat", "settings", "home"):
         win.show_page(k)
         app.processEvents()
@@ -1845,3 +1857,165 @@ def test_translate_only_chosen_rows_without_cache(monkeypatch):
     assert [s.trans for s in p.segments] == ["Xin chào", "mới 1", "Đợi đã"] and calls == [["走吧"]]
     pipeline.translate(p, "google", "auto", False, {"translate_engine": "google"}, rows=[0])
     assert p.segments[0].trans == "mới 2" and p.segments[2].trans == "Đợi đã" and calls[-1] == ["你好"]
+
+
+def test_target_language_detect_and_translate(monkeypatch):
+    """Dịch sang Anh / Thái / Nhật / Hàn: nhận tiếng theo chữ viết, lời nhắc AI, Google đúng tiếng, bộ nhớ dịch riêng,
+    đổi tiếng đích thì dịch lại cả bản, bảng thuật ngữ Hán Việt không dùng cho tiếng khác."""
+    from trami import langs, pipeline, translate
+    from trami.project import Project
+
+    assert langs.detect("Hello there", "en") == "en" and langs.detect("Hello there", "vi") == "vi"
+    assert langs.detect("Xin chào bạn", "en") == "vi" and langs.detect("สวัสดีครับ") == "th"
+    assert langs.detect("こんにちは", "vi") == "ja" and langs.detect("大丈夫", "ja") == "ja"
+    assert langs.detect("안녕하세요") == "ko" and langs.detect("你好", "vi") == "vi"
+    assert langs.units("สวัสดีครับ", "th") == 7          # 10 ký tự, 3 dấu ั ี ั không tính riêng
+    assert langs.units("I am fine, thanks", "en") == 4 and langs.budget(2.0, "th") > langs.budget(2.0, "en")
+    assert langs.edge_voice("en", "male") == "edge:en-US-GuyNeural"
+    assert translate.system_prompt("vi") == translate.SYSTEM_PROMPT
+    sp = translate.system_prompt("ko")
+    assert "Korean" in sp and "Korean syllables" in sp and "Hán" not in sp
+    assert translate.untranslated("你好世界", "ja") and not translate.untranslated("大丈夫です", "ja")
+    assert translate.untranslated("你好", "en") and not translate.untranslated("Hello", "en")
+    k = translate.cache_key("google", "auto", "th", "你好")
+    assert k == "google|auto|th|你好" and translate.cache_line(k) == "你好"
+    assert translate.cache_key("google", "auto", "vi", "你|好") == "google|auto|你|好"
+    assert translate.cache_line("google|auto|你|好") == "你|好"
+    # Google: nguồn / đích đúng tiếng
+    sent = {}
+
+    class R:
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return [[["Hello", "你好"]]]
+
+    def fake_post(url, params=None, **kw):
+        sent.update(params or {})
+        return R()
+    monkeypatch.setattr(translate.requests, "post", fake_post)
+    tr = translate.Translator({"translate_engine": "google"}, target="ja")
+    assert tr._gl() == ("zh-CN", "ja") and tr._gtx("你好") == "Hello" and sent["tl"] == "ja" and sent["sl"] == "zh-CN"
+    # dự án: đổi tiếng đích -> dịch lại mọi câu (kể cả câu đã có bản tiếng Việt), thuật ngữ theo tiếng
+    seen = []
+
+    def fake(self, lines, progress=None, cancel=None, summary=""):
+        seen.append((self.target, dict(self.glossary), list(lines)))
+        return [f"EN {x}" for x in lines]
+    monkeypatch.setattr(translate.Translator, "translate_lines", fake)
+    p = Project.create("dich_sang_anh")
+    p.segments = [Segment(0, 1, "李逍遥", "Lý Tiêu Dao"), Segment(2, 3, "走吧", "")]
+    p.data["glossary"] = "李逍遥=Lý Tiêu Dao"
+    p.data["glossary_en"] = "李逍遥=Li Xiaoyao"
+    p.data["target_lang"] = "en"
+    p.save()
+    assert pipeline.target_lang(p, {}) == "en" and pipeline.trans_lang(p) == "vi"
+    pipeline.translate(p, "google", "auto", True, {"translate_engine": "google"})
+    tgt, gl, lines = seen[-1]
+    assert tgt == "en" and gl == {"李逍遥": "Li Xiaoyao"} and lines == ["李逍遥", "走吧"]
+    assert [s.trans for s in p.segments] == ["EN 李逍遥", "EN 走吧"] and p.data["trans_lang"] == "en"
+    assert pipeline.export_subs(p, "srt", "trans", {}).name.endswith(".en.srt")
+    # nạp SRT đã dịch tiếng Nhật vào dự án đang dịch sang tiếng Anh -> "Dịch sang" đổi theo (bấm Dịch không dịch đè)
+    cues = [Segment(0, 1, "李さん、こんにちは"), Segment(2, 3, "行こう")]
+    segs = p.segments
+    pipeline.apply_translation(segs, cues)
+    assert segs[0].trans == "李さん、こんにちは"
+    p.segments = segs
+    p.save()
+    assert pipeline.note_trans_lang(p) == "ja" and p.data["target_lang"] == "ja" and pipeline.trans_lang(p) == "ja"
+    assert pipeline.note_trans_lang(p) is None
+    # auto(): tuỳ chọn "Dịch sang" ghi vào dự án
+    p2 = Project.create("auto_target")
+    monkeypatch.setattr(pipeline, "translate", lambda *a, **k: 0)
+    monkeypatch.setattr(pipeline, "export_subs", lambda *a, **k: Path("x.srt"))
+    p2.segments = [Segment(0, 1, "你好", "")]
+    p2.save()
+    pipeline.auto(p2, {"target": "th", "render": False}, {"translate_engine": "google"})
+    assert p2.data["target_lang"] == "th"
+    p.delete()
+    p2.delete()
+
+
+def test_multilang_dub_voices(monkeypatch, tmp_path):
+    """Giọng đọc theo tiếng của từng câu: Edge đổi đúng giọng tiếng đó (cùng nam / nữ), VieNeu chỉ tiếng Việt ->
+    câu tiếng khác đọc bằng Edge; OmniVoice nhận tham số language + câu mẫu cùng tiếng."""
+    from trami import omni_design as od
+    from trami import tts
+
+    got = {}
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, p, voice in items:
+            got[i] = (voice, text)
+            _fake_audio(p, 0.6)
+        return []
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    monkeypatch.setattr(tts, "vieneu_available", lambda: True)
+    monkeypatch.setattr(tts, "vieneu_presets", lambda mode="v3turbo": [{"id": "vieneu:Binh", "name": "Bình",
+                                                                         "gender": "male"}])
+    monkeypatch.setattr(tts, "vieneu_sample_voices", lambda: [])
+    segs = [Segment(0, 1, "a", "Hello there", "S1"), Segment(1.5, 2.5, "b", "Xin chào bạn", "S1"),
+            Segment(3, 4, "c", "สวัสดีครับ", "S1"), Segment(4.5, 5.5, "d", "こんにちは、元気？", "S1"),
+            Segment(6, 7, "e", "안녕하세요", "S1"), Segment(7.5, 8.5, "f", "See you", "S2")]
+    stats = {}
+    tts.synthesize_dub(segs, tmp_path / "dub.wav", 9.0, tmp_path / "t", voice="edge:vi-VN-HoaiMyNeural",
+                       voices={"S2": "vieneu:Binh"}, stats=stats, lang="en")
+    assert [got[i][0] for i in range(6)] == ["en-US-AriaNeural", "vi-VN-HoaiMyNeural", "th-TH-PremwadeeNeural",
+                                             "ja-JP-NanamiNeural", "ko-KR-SunHiNeural", "en-US-ChristopherNeural"]
+    assert got[2][1] == "สวัสดีครับ" and got[3][1] == "こんにちは、元気？" and got[4][1] == "안녕하세요"
+    assert stats["lang_edge"] == 1 and stats["placed"] == 6 and stats["langs"]["en"] == 2
+    assert tts.clean_tts_text("你好 hello", "vi") == "hello" and tts.clean_tts_text("ไทย 123", "th") == "ไทย 123"
+    vs = tts.list_voices({}, "en")
+    assert vs and all(not v["id"].startswith(("vieneu", "clone")) for v in vs)
+    assert any(v["id"] == "edge:en-US-EmmaNeural" for v in vs)
+    asg = tts.auto_assign(["S1", "S2"], {"tts_engine": "vieneu"}, {}, {"S1": {"g": "male"}, "S2": {"g": "female"}},
+                          "ko")
+    assert asg == {"S1": "edge:ko-KR-InJoonNeural", "S2": "edge:ko-KR-SunHiNeural"}
+    with pytest.raises(ValueError):
+        tts.preview_voice("vieneu:Binh", "Hello", tmp_path / "pv", {}, None, "en")
+    # OmniVoice giọng chọn sẵn: câu mẫu theo tiếng, file riêng, không xoá nhầm giọng khác / tiếng khác
+    monkeypatch.setattr(od, "DESIGN_DIR", tmp_path / "design")
+    calls = []
+
+    class W:
+        def synth(self, text, out, instruct=None, seed=None, language=None, **kw):
+            calls.append((text, language))
+            tts.write_wav(out, _speech_like(24000, 2.0), 24000)
+            return out
+    fv, _ = od.ensure_anchor(W(), "omnid:nu_trung_nien_tram", "repo")
+    f_vi, t_vi = od.ensure_anchor(W(), "omnid:nu_trung_nien", "repo")
+    f_en, t_en = od.ensure_anchor(W(), "omnid:nu_trung_nien", "repo", "en")
+    assert t_en == od.ANCHOR_TEXTS["en"] and calls[-1] == (od.ANCHOR_TEXTS["en"], "en") and calls[0][1] == "vi"
+    assert f_en != f_vi and all(Path(x).exists() for x in (fv, f_vi, f_en))
+    assert od.key("omnid:nu_tre", "r", "vi") == od.key("omnid:nu_tre", "r")
+
+
+def test_subtitle_font_wrap_karaoke_other_languages():
+    """Phụ đề tiếng Thái / Nhật / Hàn: font có đủ chữ (\\fn theo câu), ngắt dòng tiếng viết liền, karaoke từng chữ."""
+    from trami import langs
+    from trami.karaoke import tokens
+
+    stl = {"font": "Be Vietnam Pro", "lang": "ja"}
+    assert st.line_font("こんにちは", stl) == langs.subtitle_font("ja", "Be Vietnam Pro")
+    assert st.line_font("大丈夫", stl) == langs.subtitle_font("ja", "Be Vietnam Pro")
+    assert st.line_font("Xin chào", {"font": "Bangers", "lang": "vi"}) == "Bangers"
+    assert st.line_font("你好", {"font": "Bangers", "lang": "vi"}) == st.cjk_font_name({})
+    segs = [Segment(0, 1, "a", "สวัสดีครับ"), Segment(1, 2, "b", "Xin chào"), Segment(2, 3, "c", "안녕하세요")]
+    ass = st.to_ass(segs, {"font": "Be Vietnam Pro", "lang": "vi"}, 1920, 1080)
+    assert "{\\fn" + langs.subtitle_font("th", "x") + "}สวัสดีครับ" in ass
+    assert "{\\fn" + langs.subtitle_font("ko", "x") + "}" in ass and "\\fnBe Vietnam Pro" not in ass
+    kara = st.to_ass(segs[:1], {"font": "Be Vietnam Pro", "karaoke": True, "box": True}, 1920, 1080)
+    assert kara.count("\\fn" + langs.subtitle_font("th", "x")) == 2      # lớp nền + lớp chữ karaoke
+    ja = "今日はとても面白いお話をしたいと思います、ゆっくり座って聞いてくださいね。"
+    w = st.wrap_line(ja, 30)
+    a, b = w.split("\n")
+    assert a + b == ja and abs(st.vis_len(a) - st.vis_len(b)) < 12 and b[0] not in "、。ー"
+    th = "วันนี้ฉันจะเล่าเรื่องที่น่าสนใจมากให้ฟังนั่งลงสบายๆแล้วตั้งใจฟังนะ"
+    a, b = st.wrap_line(th, 30).split("\n")
+    assert a + b == th and not __import__("unicodedata").category(b[0]) == "Mn" and a[-1] not in "เแโใไ"
+    assert st.wrap_line("Xin chào các bạn", 42) == "Xin chào các bạn"
+    toks = tokens("สวัสดี")
+    assert [t for t, _ in toks] == ["ส", "วั", "ส", "ดี"]

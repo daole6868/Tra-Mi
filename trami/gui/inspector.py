@@ -61,7 +61,8 @@ class LineInspector(Card):
         self.zh = QPlainTextEdit()
         self.zh.setFixedHeight(58)
         v.addWidget(self.zh)
-        v.addWidget(label("Tiếng Việt (lời đọc + phụ đề)", "muted"))
+        self.vi_lbl = label("Tiếng Việt (lời đọc + phụ đề)", "muted")
+        v.addWidget(self.vi_lbl)
         self.vi = _TextBox()
         self.vi.setMinimumHeight(84)
         v.addWidget(self.vi, 1)
@@ -139,6 +140,10 @@ class LineInspector(Card):
     def _model_changed(self, a, b, roles=None):
         if a.row() <= self.row <= b.row() and not (self.vi.hasFocus() or self.zh.hasFocus()):
             self.set_row(self.row)
+
+    def set_lang(self, name: str):
+        """Nhãn ô bản dịch theo tiếng đích."""
+        self.vi_lbl.setText(f"{name} (lời đọc + phụ đề)")
 
     def refresh_voices(self):
         cur = self.voice.currentData()

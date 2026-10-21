@@ -16,7 +16,7 @@ DEFAULT_COLOR = "#FFEF00"
 PAUSE = {",": 0.45, ";": 0.45, ":": 0.45, "…": 0.6, ".": 0.7, "!": 0.7, "?": 0.7, "，": 0.45, "。": 0.7,
          "！": 0.7, "？": 0.7, "、": 0.3}
 GAP_MIN = 0.18        # khoảng lặng ≥ 0,18 s trong giọng lồng = chỗ ngắt hơi
-_CJK = re.compile(r"[⺀-鿿豈-﫿぀-ヿ가-힯]")
+_CJK = re.compile(r"[\u2E80-\u9FFF\uF900-\uFAFF\u3040-\u30FF\uAC00-\uD7AF\u0E00-\u0E7F]")   # Hán / Nhật / Hàn / Thái (viết liền)
 _WORD = re.compile(r"(\S+)(\s*)")
 
 
@@ -32,8 +32,9 @@ def tokens(text: str) -> list[tuple[str, str]]:
             if line_i and out:
                 out[-1][1] = "\n"
             for ch in line:
-                if out and out[-1][1] == "" and unicodedata.category(ch)[0] in "PS":
-                    out[-1][0] += ch           # dấu câu
+                if out and out[-1][1] == "" and (unicodedata.category(ch)[0] in "PS" or
+                                                 unicodedata.category(ch) == "Mn"):
+                    out[-1][0] += ch           # dấu câu / dấu thanh, nguyên âm trên-dưới của chữ Thái
                 elif ch.strip():
                     out.append([ch, ""])
         return [(a, b) for a, b in out]

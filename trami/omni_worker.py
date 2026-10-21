@@ -52,7 +52,7 @@ def main(repo: str = "k2-fsa/OmniVoice") -> None:
             continue
         try:
             req = json.loads(line)
-            gen = {"text": req["text"], "language": "vi"}
+            gen = {"text": req["text"], "language": req.get("language") or "vi"}   # vi / en / th / ja / ko
             ref = req.get("ref_audio")
             if ref:
                 key = (ref, req.get("ref_text") or "")

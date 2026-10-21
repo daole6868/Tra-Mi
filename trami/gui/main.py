@@ -383,12 +383,16 @@ class BatchPage(QWidget):
         self.method = f.row("Nguồn phụ đề", combo(C.METHODS, "asr"))
         self.asr = f.row("Bộ nhận dạng", combo(C.ASR_ENGINES, s.get("asr_engine")))
         self.engine = f.row("Công cụ dịch", combo(C.ENGINES, s.get("translate_engine")))
+        self.target = f.row("Dịch sang", combo(C.TARGETS, s.get("target_lang", "vi")))
         self.style = f.row("Văn phong", combo(C.STYLES, s.get("translate_style")))
         self.hardsub = f.row("Phụ đề cũ", combo(C.HARDSUB, "none"))
         self.which = f.row("Ghép phụ đề", combo(C.WHICH, "trans"))
         self.aspect = f.row("Khung hình", combo(C.ASPECTS, "original"))
-        self.dub = f.row("Lồng tiếng Việt", Switch(False))
+        self.dub = f.row("Lồng tiếng", Switch(False))
         self.tts = f.row("Bộ đọc", combo(C.TTS_ENGINES, s.get("tts_engine", "edge")))
+        self.target.currentIndexChanged.connect(
+            lambda: C.relabel(self.which, C.which_choices(self.target.currentData())))
+        C.relabel(self.which, C.which_choices(self.target.currentData()))
         o.add(f)
         go = GradientButton("Bắt đầu xử lý hàng loạt", "bolt", big=True)
         go.clicked.connect(self.run)
@@ -413,6 +417,7 @@ class BatchPage(QWidget):
         which = self.which.currentData()
         opts = {"method": self.method.currentData(), "asr_engine": self.asr.currentData(),
                 "engine": self.engine.currentData(), "style": self.style.currentData(),
+                "target": self.target.currentData(),
                 "hardsub_mode": self.hardsub.currentData(), "burn": which != "none",
                 "which": which if which != "none" else "trans", "dub": self.dub.isChecked(),
                 "tts_engine": self.tts.currentData(), "separate": True}
@@ -508,6 +513,7 @@ class SettingsPage(QWidget):
         ("sep_model", "sep_model", "c"), ("sep_before", "sep_before_asr", "b"), ("diarize", "diarize", "b"),
         ("spk_n", "diarize_speakers", "i"), ("spk_thr", "diarize_threshold", "f"),
         ("engine", "translate_engine", "c"), ("style", "translate_style", "c"), ("batch", "translate_batch", "i"),
+        ("target", "target_lang", "c"),
         ("ds_key", "deepseek_api_key", "t"), ("ds_model", "deepseek_model", "t"),
         ("oa_key", "openai_api_key", "t"), ("oa_base", "openai_base_url", "t"), ("oa_model", "openai_model", "t"),
         ("an_key", "anthropic_api_key", "t"), ("an_model", "anthropic_model", "t"),
@@ -588,6 +594,8 @@ class SettingsPage(QWidget):
                         "Hy-MT2: dịch ngay trên máy, miễn phí (tải 1 lần ~3,6 GB ở tab Tài liệu của dự án).")
         f = Form()
         self.engine = f.row("Công cụ dịch mặc định", combo(C.ENGINES))
+        self.target = f.row("Dịch sang (dự án mới)", combo(C.TARGETS),
+                            "Tiếng đích mặc định cho dự án mới. Mỗi dự án đổi riêng ở tab Tự động → 'Dịch sang'")
         self.style = f.row("Văn phong mặc định", combo(C.STYLES))
         self.batch = f.row("Số câu mỗi lần gửi AI", spin(5, 120))
         self.ds_key = f.row("DeepSeek API key", key())
@@ -606,7 +614,7 @@ class SettingsPage(QWidget):
         t.add(hbox(button("Thử dịch 1 câu", "sparkle", on_click=self.test_translate), None))
         t.add(self.test_out)
 
-        g = SectionCard("Bảng thuật ngữ chung", "list", "Áp dụng mọi dự án. Mỗi dòng: 中文=Tiếng Việt")
+        g = SectionCard("Bảng thuật ngữ chung", "list", "Áp dụng mọi dự án dịch sang tiếng Việt. Mỗi dòng: 中文=Tiếng Việt")
         self.glossary = QPlainTextEdit()
         self.glossary.setMinimumHeight(140)
         g.add(self.glossary)

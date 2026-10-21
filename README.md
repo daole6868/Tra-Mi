@@ -68,6 +68,8 @@ Bản exe kèm AI nâng cao khá nặng (2–4 GB) vì có PyTorch.
      - *Nhận dạng giọng nói*: dùng khi video chưa có chữ.
      - *OCR phụ đề cứng*: dùng khi video đã in sẵn chữ Trung. Cách này chính xác nhất.
    - **Công cụ dịch**: AI dịch hay hơn Google, ví dụ DeepSeek rẻ và giỏi tiếng Trung. Nhập API key ở trang **Cài đặt**. Hoặc chọn **Hy-MT2**: mô hình chuyên dịch chạy ngay trên máy, miễn phí, không cần mạng (tải 1 lần ~3,6 GB ở tab **Tài liệu**).
+   - **Dịch sang**: tiếng Việt (mặc định), Anh, Thái, Nhật hoặc Hàn. Bản dịch, phụ đề ghép vào video và giọng lồng
+     tiếng đều theo tiếng này (mỗi dự án chọn riêng; Edge và OmniVoice đọc được cả 5 tiếng, VieNeu chỉ đọc tiếng Việt).
    - **Thể loại**: quyết định cách xưng hô, ví dụ cổ trang dùng ta – ngươi, huynh – đệ.
    - **Phụ đề Trung cũ**: chọn *Xoá sạch bằng AI*.
    - **Lồng tiếng**: bật nếu muốn thêm giọng Việt.
@@ -91,7 +93,14 @@ Muốn dịch nhanh không cần mở giao diện, kéo thả video vào `DichNh
 | **Lồng tiếng** | ① **Tách giọng / nhạc nền** (Mel-RoFormer Kim, BS-RoFormer hoặc kết hợp cả hai): giữ nguyên nhạc và hiệu ứng gốc, chỉ thay lời thoại. ② **Mỗi người nói một giọng**: 25 giọng Việt của VieNeu (⭐ giọng tiêu biểu đứng đầu) + 6 giọng thu âm sạch + giọng mẫu của bạn, **23 giọng OmniVoice chọn sẵn** (nam / nữ trẻ, thiếu niên, trung niên, ông bà lão, trẻ con, thì thầm, hoạt hình – không cần file ghi âm), 2 giọng Microsoft, hoặc **nhái giọng nhân vật gốc**. Nghe thử từng giọng. "Tự gán giọng" tự nhận nhân vật giọng nam / nữ để chọn giọng hợp. Số đọc thành chữ, câu đọc hỏng (tiếng bíp, im lặng) tự đọc lại, âm lượng các câu được cân cho đều. ③ Mỗi câu phụ đề là 1 đoạn giọng riêng, ghép đúng lúc nhân vật nói, hiện trên dòng *Lồng tiếng* của timeline (kéo để dời, bấm đúp để nghe); bài hát trong phim được giữ nguyên. **Tốc độ đọc** cho các câu đã tích (mức tối thiểu: câu đang đọc nhanh hơn giữ nguyên) + nút *Về tốc độ gốc*. ④ **Câu đọc dài hơn chỗ trống**: *Tự động* (tăng tốc nhẹ → đọc sớm vào khoảng lặng → tăng tốc thêm → câu sau lùi lại rồi đuổi kịp; nhiều câu dài liền nhau dùng chung 1 tốc độ; không cắt chữ), *Nối tiếp* (đọc hết rồi mới sang câu sau), *Đọc đè* (câu sau vẫn đúng giờ), *Đọc sớm* (lùi câu dài lên trước), *Giữ đúng giờ – cắt bớt* (cách cũ); chọn chung hoặc riêng từng câu, đổi là xếp lại ngay (không đọc lại). Phụ đề tiếng Việt tự hiện theo đúng lúc giọng đọc |
 | **Âm thanh** | MỌI chỉnh âm thanh ở 1 chỗ: chọn nguồn tiếng gốc (nguyên bản / bản đã tách), âm lượng từng lớp – tiếng gốc, nhạc nền + hiệu ứng đã tách, giọng nói gốc tiếng Trung (đoạn hát giữ nguyên), giọng lồng tiếng Việt, nhạc thêm (tự nhỏ xuống khi có lời), âm lượng tổng. Mỗi lớp có nút tắt và *Nghe riêng*. Đổi cao độ giọng gốc. Bấm Phát trên video là nghe thay đổi ngay khi kéo thanh; video xuất ra trộn y như vậy. Tải MP3 bản trộn / giọng gốc / nhạc nền |
 | **Timeline** (dưới cùng) | Bấm khối để chọn, Ctrl / Shift để chọn nhiều, kéo trên chỗ trống để quét chọn, bấm tên dòng để chọn hết. Bấm chỗ trống dòng Phụ đề rồi *Thêm phụ đề* để thêm câu đúng chỗ. Thanh công cụ đổi theo dòng đang chọn: Phụ đề (thêm, tách, gộp, xoá, dịch lại), Lồng tiếng (tạo lại giọng, tốc độ, cách xếp khi câu dài, bỏ lồng, về đúng chỗ – đoạn đọc đè hiện thành 2 làn, câu đọc sớm / bị lùi có vạch nối), Video (tách tại đầu phát, xoá / khôi phục đoạn, gộp đoạn, **chèn video khác**), Tiếng gốc (tắt / bật tiếng gốc từng đoạn). Áp dụng ngay trên trình phát và khi xuất |
-| **Xuất** | MP4 (H.264 CPU / NVIDIA NVENC / H.265), tất cả trong 1 lần encode. Phụ đề SRT (Việt / Trung / song ngữ), ASS, VTT, TXT. Chia video dài thành nhiều phần, tách MP3 |
+| **Xuất** | MP4 (H.264 CPU / NVIDIA NVENC / H.265), tất cả trong 1 lần encode. Phụ đề SRT (bản dịch / Trung / song ngữ), ASS, VTT, TXT. Chia video dài thành nhiều phần, tách MP3 |
+
+**Ngôn ngữ đích** (tab Tự động → *Dịch sang*): Việt, Anh, Thái, Nhật, Hàn. AI dịch theo đúng tiếng đó (tên riêng
+phiên âm kiểu tiếng đích, kính ngữ Nhật / Hàn, độ dài câu vừa thời gian nhân vật nói), Google / Hy-MT2 cũng dịch đúng
+tiếng. Phụ đề tiếng Thái / Nhật / Hàn tự dùng font có đủ chữ và ngắt dòng đúng kiểu chữ viết liền. Giọng đọc tự đổi theo
+tiếng của từng câu: giọng Microsoft tiếng Anh (6 giọng), Thái, Nhật, Hàn (mỗi tiếng 1 nam 1 nữ); OmniVoice đọc đúng tiếng;
+VieNeu chỉ đọc tiếng Việt nên câu tiếng khác tự đọc bằng Microsoft. Nạp file SRT đã dịch tiếng khác thì dự án tự đổi
+*Dịch sang* theo.
 
 **Bộ nhận dạng giọng nói** (chọn ở tab Tự động hoặc trang Cài đặt):
 - **Qwen3-ASR** (mặc định): nghe tiếng Trung chuẩn nhất, tự đặt dấu câu theo nghĩa, kèm bộ căn giờ từng chữ (lệch ~0,03 s)
@@ -115,6 +124,7 @@ Muốn dịch nhanh không cần mở giao diện, kéo thả video vào `DichNh
 python TraMi.py                                   # mở giao diện
 python TraMi.py dich phim.mp4 --engine deepseek --style co_trang
 python TraMi.py dich phim.mp4 --ocr --xoa-phude inpaint --long-tieng -o D:\KetQua
+python TraMi.py dich phim.mp4 --dich-sang en --long-tieng      # dịch + lồng tiếng Anh (th / ja / ko: Thái / Nhật / Hàn)
 ```
 
 ## 6. Cấu trúc

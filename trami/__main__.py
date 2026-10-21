@@ -40,6 +40,7 @@ def cli_translate(args):
         "method": "ocr" if args.ocr else "asr",
         "engine": args.engine,
         "style": args.style,
+        "target": args.dich_sang,
         "dub": args.long_tieng,
         "hardsub_mode": args.xoa_phude,
         "burn": not args.khong_ghep,
@@ -90,10 +91,12 @@ def main(argv=None):
     d.add_argument("inputs", nargs="+", help="File video hoặc link (Douyin, Bilibili, YouTube...)")
     d.add_argument("--engine", default=None, help="google/openai/anthropic/gemini/deepseek/ollama")
     d.add_argument("--style", default=None, help="auto/co_trang/hien_dai/review/hoat_hinh/tai_lieu")
+    d.add_argument("--dich-sang", default=None, choices=["vi", "en", "th", "ja", "ko"],
+                   help="Ngôn ngữ đích: vi (Việt, mặc định) / en (Anh) / th (Thái) / ja (Nhật) / ko (Hàn)")
     d.add_argument("--ocr", action="store_true", help="Lấy phụ đề bằng OCR chữ Trung có sẵn trên video")
     d.add_argument("--xoa-phude", default="none", choices=["none", "blur", "box", "delogo", "inpaint", "patch"],
                    help="Cách xử lý phụ đề Trung cũ trên video")
-    d.add_argument("--long-tieng", action="store_true", help="Lồng tiếng Việt bằng AI")
+    d.add_argument("--long-tieng", action="store_true", help="Lồng tiếng (đọc bản dịch) bằng AI")
     d.add_argument("--khong-ghep", action="store_true", help="Không ghép phụ đề vào video")
     d.add_argument("--hien-thi", default="trans", choices=["trans", "both", "source"])
     d.add_argument("--chi-phude", action="store_true", help="Chỉ xuất file phụ đề, không xuất video")

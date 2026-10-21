@@ -30,8 +30,28 @@ HARDSUB = [("none", "Giữ nguyên"), ("inpaint", "Xoá sạch bằng AI (LaMa)"
            ("patch", "Vá nền (chép nền sát bên, nhanh)")]
 WHICH = [("trans", "Chỉ tiếng Việt"), ("both", "Song ngữ Việt + Trung"), ("source", "Chỉ tiếng Trung"),
          ("none", "Không ghép (chỉ xuất SRT)")]
-TTS_ENGINES = [("edge", "Microsoft Edge (2 giọng, cần mạng)"), ("vieneu", "VieNeu-TTS (25 giọng + 6 giọng thu âm sạch + nhái giọng, offline)"),
-               ("omnivoice", "OmniVoice (23 giọng chọn sẵn + nhái giọng từ file mẫu, offline)")]
+TTS_ENGINES = [("edge", "Microsoft Edge (giọng Việt / Anh / Thái / Nhật / Hàn, cần mạng)"),
+               ("vieneu", "VieNeu-TTS (25 giọng + 6 giọng thu âm sạch + nhái giọng, offline – chỉ tiếng Việt)"),
+               ("omnivoice", "OmniVoice (23 giọng chọn sẵn + nhái giọng từ file mẫu, offline, đọc được nhiều tiếng)")]
+TARGETS = [("vi", "Tiếng Việt"), ("en", "Tiếng Anh (English)"), ("th", "Tiếng Thái (ภาษาไทย)"),
+           ("ja", "Tiếng Nhật (日本語)"), ("ko", "Tiếng Hàn (한국어)")]
+
+
+def which_choices(lang: str = "vi") -> list[tuple[str, str]]:
+    """Lựa chọn phụ đề ghép vào video theo tiếng đích ("Chỉ tiếng Anh", "Song ngữ Anh + Trung"…)."""
+    from ..langs import INFO, norm
+
+    short = INFO[norm(lang)]["short"]
+    return [("trans", f"Chỉ tiếng {short}"), ("both", f"Song ngữ {short} + Trung"), ("source", "Chỉ tiếng Trung"),
+            ("none", "Không ghép (chỉ xuất SRT)")]
+
+
+def relabel(cb: QComboBox, choices: list[tuple[str, str]]):
+    """Đổi chữ các mục của ô chọn (giữ mục đang chọn) – dùng khi đổi tiếng đích."""
+    for i in range(cb.count()):
+        for k, name in choices:
+            if cb.itemData(i) == k:
+                cb.setItemText(i, name)
 ASPECTS = [("original", "Giữ nguyên"), ("9:16", "9:16 – TikTok/Reels/Shorts"), ("16:9", "16:9 – YouTube/Facebook"),
            ("1:1", "1:1 vuông"), ("4:5", "4:5 – Facebook dọc"), ("4:3", "4:3"), ("3:4", "3:4")]
 ASPECT_MODES = [("blur", "Nền mờ"), ("pad", "Viền đen"), ("crop", "Cắt cho đầy khung")]
