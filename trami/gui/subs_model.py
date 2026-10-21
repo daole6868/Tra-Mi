@@ -133,6 +133,8 @@ class SubsModel(QAbstractTableModel):
             if section == C_VI:
                 return getattr(self, "trans_label", COLS[C_VI])
             return COLS[section]
+        if orient == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.ToolTipRole and section == C_SEL:
+            return "Bấm để tích / bỏ tích tất cả câu đang hiện trong bảng"
         return None
 
     def set_trans_label(self, name: str):

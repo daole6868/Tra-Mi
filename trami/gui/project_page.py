@@ -49,6 +49,7 @@ class ProjectPage(QWidget):
         self.loading = False
         self.settings = load_settings()
         self.cut_a: float | None = None
+        self._mirrors: list[tuple[QComboBox, QComboBox]] = []   # ô chọn ở tab Phụ đề <-> ô gốc ở tab Tự động
 
         self._save_edit_timer = QTimer(self, singleShot=True, interval=500, timeout=self._save_edit_now)
         self._live_timer = QTimer(self, singleShot=True, interval=40, timeout=self._apply_live)
@@ -322,22 +323,24 @@ class ProjectPage(QWidget):
         tv.setModel(self.proxy)
         tv.setAlternatingRowColors(True)
         tv.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        tv.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        tv.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)   # Ctrl / Shift chọn nhiều dòng
         tv.setWordWrap(True)
         tv.setTextElideMode(Qt.TextElideMode.ElideNone)
         tv.verticalHeader().hide()
         tv.verticalHeader().setDefaultSectionSize(40)
         hh = tv.horizontalHeader()
-        for c, w in ((0, 40), (C_START, 92), (C_END, 92), (C_SPK, 58), (C_SONG, 34), (C_NODUB, 64), (C_FIT, 74)):
+        for c, w in ((C_SEL, 52), (0, 40), (C_START, 92), (C_END, 92), (C_SPK, 58)):
             hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Fixed)
             tv.setColumnWidth(c, w)
         hh.setSectionResizeMode(C_ZH, QHeaderView.ResizeMode.Stretch)
         hh.setSectionResizeMode(C_VI, QHeaderView.ResizeMode.Stretch)
+        hh.moveSection(hh.visualIndex(C_SEL), 0)          # Chọn | # | giờ | Người | Tiếng Trung | Tiếng Việt
+        hh.sectionClicked.connect(lambda c: self._toggle_pick_all(self.proxy) if c == C_SEL else None)
         tv.setItemDelegateForColumn(C_SPK, SpeakerDelegate(tv))
         tv.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed |
                            QAbstractItemView.EditTrigger.AnyKeyPressed)
-        tv.setColumnHidden(C_SEL, True)      # 2 cột này dùng ở bảng câu của tab Lồng tiếng
-        tv.setColumnHidden(C_VOICE, True)
+        for c in (C_SONG, C_NODUB, C_FIT, C_VOICE):   # cột của lồng tiếng: ở bảng câu tab Lồng tiếng
+            tv.setColumnHidden(c, True)
         tv.clicked.connect(self._row_clicked)
         self.table = tv
         self.search = QLineEdit()
@@ -345,15 +348,29 @@ class ProjectPage(QWidget):
         self.search.textChanged.connect(self.proxy.set_query)
         self.follow = Switch(True)
         self.seg_count = label("", "muted")
-        bar1 = flow(button("Dịch dòng trống", "globe", on_click=lambda: self.run_translate(True)),
+        # cách dịch: cùng giá trị với tab Tự động / Cài đặt (đổi ở đây = đổi ở đó)
+        self.s_engine, self.s_target = self._mirror(self.a_engine), self._mirror(self.a_target)
+        self.s_style, self.s_skill = self._mirror(self.a_style), self._mirror(self.a_skill)
+        bar0 = flow(hbox(label("Dịch bằng", "muted"), self.s_engine), hbox(label("sang", "muted"), self.s_target),
+                    hbox(label("Văn phong", "muted"), self.s_style),
+                    hbox(label("Kỹ năng AI", "muted"), self.s_skill,
+                         button("", "wand", "Xem, thêm, sửa kỹ năng dịch AI của bạn", flat=True,
+                                on_click=self._edit_skills)))
+        bar1 = flow(button("Dịch câu chưa dịch", "globe", "Dịch mọi câu chưa có bản dịch (dịch lần đầu: dịch cả phim)",
+                           on_click=lambda: self.run_translate(True)),
                     button("Dịch lại tất cả", "refresh", on_click=lambda: self.run_translate(False)),
-                    button("Dịch câu chọn", "sparkle", on_click=self._retranslate_one),
+                    button("Dịch câu đã tích", "sparkle", "Dịch (lại) các câu đã tích ở cột Chọn – đã có bản lồng thì "
+                           "đọc lại giọng đúng các câu đó", on_click=self._translate_picked),
                     button("Nhập SRT", "download", "Nhập file phụ đề SRT/ASS/VTT", on_click=self._import_subs),
                     button("Lưu", "save", on_click=lambda: (self._save_segs_now(), self.win.toast("Đã lưu phụ đề", "ok"))))
         bar2 = flow(button("Thêm", "plus", "Thêm câu tại vị trí đang phát", on_click=lambda: self._seg_op("insert")),
-                    button("Gộp", "merge", "Gộp câu đang chọn với câu sau", on_click=lambda: self._seg_op("merge")),
+                    button("Gộp", "merge", "Gộp các câu đã tích (liền nhau), không tích thì gộp câu đang chọn với câu sau",
+                           on_click=lambda: self._seg_op("merge")),
                     button("Tách", "split", "Tách câu tại vị trí đang phát", on_click=lambda: self._seg_op("split")),
-                    button("Xoá", "trash", "Xoá câu đang chọn", danger=True, on_click=lambda: self._seg_op("delete")),
+                    button("Xoá", "trash", "Xoá câu đang chọn (hoặc các câu đã tích)", danger=True,
+                           on_click=lambda: self._seg_op("delete")),
+                    button("Bỏ tích", "x", "Bỏ tích mọi câu", flat=True,
+                           on_click=lambda: self.model.set_picked(range(len(self.model.segs)), False)),
                     button("Dời giờ", "clock", on_click=self._shift),
                     button("Căn khớp thoại", "wand", "Căn mốc từng câu sát lời thoại thật, tách câu ở chỗ nghỉ "
                            "(dùng cho phụ đề đã nhận dạng từ bản cũ)", on_click=self.run_realign),
@@ -405,6 +422,7 @@ class ProjectPage(QWidget):
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(8)
+        v.addWidget(bar0)
         v.addWidget(bar1)
         v.addWidget(bar2)
         v.addLayout(hbox(self.search, self.seg_count, label("Tự cuộn", "muted"), self.follow))
@@ -934,15 +952,15 @@ class ProjectPage(QWidget):
         dt.verticalHeader().hide()
         dt.verticalHeader().setDefaultSectionSize(38)
         dh = dt.horizontalHeader()
-        for c in (C_ZH, C_SONG):
-            dt.setColumnHidden(c, True)
+        dt.setColumnHidden(C_ZH, True)
         for c, w in ((C_SEL, 52), (0, 40), (C_START, 88), (C_END, 88), (C_SPK, 58), (C_VOICE, 170), (C_FIT, 70),
-                     (C_NODUB, 64)):
+                     (C_SONG, 34), (C_NODUB, 64)):
             dh.setSectionResizeMode(c, QHeaderView.ResizeMode.Fixed if c != C_VOICE else QHeaderView.ResizeMode.Interactive)
             dt.setColumnWidth(c, w)
         dh.setSectionResizeMode(C_VI, QHeaderView.ResizeMode.Stretch)
         dh.moveSection(dh.visualIndex(C_SEL), 0)                         # Chọn | # | giờ | Người | Giọng | Tiếng Việt…
         dh.moveSection(dh.visualIndex(C_VOICE), dh.visualIndex(C_SPK) + 1)
+        dh.sectionClicked.connect(lambda c: self._toggle_pick_all(self.dub_proxy) if c == C_SEL else None)
         dt.setItemDelegateForColumn(C_SPK, SpeakerDelegate(dt))
         dt.setItemDelegateForColumn(C_VOICE, VoiceDelegate(dt, lambda: [(v["id"], v["name"]) for v in self._voices]))
         dt.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed)
@@ -955,6 +973,7 @@ class ProjectPage(QWidget):
         self.dub_search.textChanged.connect(self.dub_proxy.set_query)
         self.d_picked = label("Chưa tích câu nào", "muted")
         self.model.picked.connect(self._update_picked)
+        self.model.picked.connect(self._update_count)
         spk.add(label("Các câu lồng tiếng", "h3"))
         spk.add(hbox(self.dub_search,
                      button("Tích các câu đang lọc", "check", "Tích tất cả câu đang hiện trong bảng",
@@ -1006,7 +1025,7 @@ class ProjectPage(QWidget):
         spk.add(flow(label("Dịch", "muted"),
                      button("Dịch câu chưa dịch", "globe", "Dịch các câu chưa có lời tiếng Việt – đã có bản lồng thì "
                             "đọc luôn giọng các câu này", on_click=lambda: self._translate_rows(None, True)),
-                     button("Dịch lại câu đã tích", "refresh", "Dịch lại các câu đã tích (ra bản dịch mới) rồi tạo lại "
+                     button("Dịch câu đã tích", "refresh", "Dịch (lại) các câu đã tích (ra bản dịch mới) rồi tạo lại "
                             "giọng đúng các câu đó",
                             on_click=lambda: self._translate_rows(sorted(self.model.selected), False)),
                      self.d_engine_lbl))
@@ -1706,6 +1725,7 @@ class ProjectPage(QWidget):
             set_combo(self.a_skill, st.get("translate_skill", ""))
         finally:
             self.loading = was
+        self._sync_mirrors()
 
     def _skill_changed(self, *_):
         if self.loading:
@@ -1762,7 +1782,7 @@ class ProjectPage(QWidget):
             if st["unsure"]:
                 msg += f" · {len(st['unsure'])} chỗ chưa chắc (rê chuột vào câu gốc để xem)"
             if any(p.segments[k].trans.strip() for k in st["changed"]):
-                msg += " · câu đổi được tích sẵn – bấm 'Dịch lại câu đã tích' ở tab Lồng tiếng"
+                msg += " · câu đổi được tích sẵn – bấm 'Dịch câu đã tích'"
             return {"message": msg + " · bấm 'Hoàn tác sửa' nếu không ưng", "pick": st["changed"]}
         self.submit("clean", "AI sửa lỗi nghe & nối câu", fn)
 
@@ -2457,11 +2477,30 @@ class ProjectPage(QWidget):
         segs = self.model.segs
         n = len(segs)
         spk = len({s.speaker for s in segs if s.speaker})
-        self.seg_count.setText(f"{n} câu · đã dịch {sum(1 for s in segs if s.trans)}" + (f" · {spk} người nói" if spk else ""))
+        k = len(self.model.selected)
+        self.seg_count.setText(f"{n} câu · đã dịch {sum(1 for s in segs if s.trans)}" + (f" · {spk} người nói" if spk else "")
+                               + (f" · đã tích {k}" if k else ""))
+
+    def _multi_rows(self) -> list[int]:
+        """Các câu cho Gộp / Xoá ở tab Phụ đề: câu đã tích (≥ 2), không thì các dòng đang bôi chọn (Ctrl / Shift)."""
+        picked = sorted(self.model.selected)
+        if len(picked) >= 2:
+            return picked
+        sel = sorted({self.proxy.mapToSource(i).row() for i in self.table.selectionModel().selectedRows()})
+        return sel if len(sel) >= 2 else []
 
     def _seg_op(self, op: str):
         from .. import subtitle as st
 
+        rows = self._multi_rows() if op in ("merge", "delete") else []
+        if op == "merge" and rows:
+            if rows[-1] - rows[0] + 1 != len(rows):
+                return self.win.toast("Chỉ gộp được các câu liền nhau – bỏ tích câu nằm xa", "warn")
+            return self._sub_op("merge", rows)
+        if op == "delete" and rows:
+            if QMessageBox.question(self, "Xoá câu", f"Xoá {len(rows)} câu đã chọn?") != QMessageBox.StandardButton.Yes:
+                return
+            return self._sub_op("delete", rows)
         i = self._selected_row()
         segs = self.model.segs
         if op == "insert":
@@ -2486,6 +2525,49 @@ class ProjectPage(QWidget):
         self._sel_row = -1
         if 0 <= i < len(segs):
             self._select_line(min(i, len(segs) - 1))
+
+    def _translate_picked(self):
+        """Tab Phụ đề: dịch (lại) các câu đã tích; chưa tích câu nào thì dịch câu đang chọn."""
+        rows = sorted(self.model.selected)
+        if not rows:
+            i = self._selected_row()
+            if i < 0:
+                return self.win.toast("Tích ô ở cột Chọn (đầu bảng) các câu cần dịch – bấm chữ 'Chọn' để tích hết",
+                                      "warn")
+            rows = [i]
+        self._translate_rows(rows, False)
+
+    def _toggle_pick_all(self, proxy):
+        """Bấm tiêu đề cột Chọn: tích hết các câu đang hiện (đang lọc), đã tích hết rồi thì bỏ tích."""
+        rows = [proxy.mapToSource(proxy.index(r, 0)).row() for r in range(proxy.rowCount())]
+        on = not rows or not all(self.model.is_picked(r) for r in rows)
+        self.model.set_picked(rows, on)
+
+    def _mirror(self, src: QComboBox) -> QComboBox:
+        """Ô chọn ở tab Phụ đề dùng chung giá trị với ô `src` ở tab Tự động: đổi bên nào cũng đổi bên kia (và lưu Cài đặt
+        như ô gốc)."""
+        m = QComboBox()
+        m.setMinimumContentsLength(10)
+        m.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        m.setToolTip(src.toolTip())
+        self._mirrors.append((src, m))
+        src.currentIndexChanged.connect(self._sync_mirrors)
+        m.currentIndexChanged.connect(lambda _=0, a=src, b=m: set_combo(a, b.currentData()))
+        self._sync_mirrors()
+        return m
+
+    def _sync_mirrors(self, *_):
+        for src, m in self._mirrors:
+            items = [(src.itemData(i), src.itemText(i)) for i in range(src.count())]
+            m.blockSignals(True)
+            try:
+                if [(m.itemData(i), m.itemText(i)) for i in range(m.count())] != items:
+                    m.clear()
+                    for d, t in items:
+                        m.addItem(t, d)
+                m.setCurrentIndex(src.currentIndex())
+            finally:
+                m.blockSignals(False)
 
     def _retranslate_one(self, row: int | None = None):
         i = self._selected_row() if row is None else row

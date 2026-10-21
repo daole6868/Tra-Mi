@@ -63,7 +63,10 @@ def test_gbk_srt(tmp_path):
 def test_merge_split_shift():
     segs = [Segment(0, 1, "你好", "Xin chào"), Segment(1, 2, "朋友", "bạn")]
     st.merge(segs, 0)
-    assert len(segs) == 1 and segs[0].end == 2 and segs[0].trans == "Xin chào bạn"
+    assert len(segs) == 1 and segs[0].end == 2 and segs[0].trans == "Xin chào bạn" and segs[0].text == "你好朋友"
+    cut = [Segment(0, 1, "我可是最强"), Segment(2, 3, "AI。你先别最强了")]
+    assert st.merge(cut, 0)[0].text == "我可是最强AI。你先别最强了"      # câu bị cắt: nối thẳng, không chèn "，"
+    assert st.merge([Segment(0, 1, "用GPT"), Segment(1, 2, "AI写")], 0)[0].text == "用GPT AI写"
     st.split(segs, 0, 1.0)
     assert len(segs) == 2 and segs[0].end == 1.0
     st.shift(segs, 0.5)
@@ -2656,4 +2659,59 @@ def test_skills_gui(monkeypatch):
     assert jobs == ["clean", "profile"] and "cần công cụ dịch AI" in toasts[-1]
     config.save_settings({"translate_skill": "", "translate_skills": [], "ai_review_after_translate": False,
                           "translate_engine": "google"})
+    win.close()
+
+
+def test_subs_tab_ticks_and_translate_options(monkeypatch):
+    """Tab Phụ đề: cột Chọn (tích) thay 3 cột lồng tiếng, ô cách dịch dùng chung với tab Tự động, Gộp / Dịch theo câu
+    đã tích."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        pytest.skip(str(e))
+    from trami import config
+    from trami.gui.main import MainWindow
+    from trami.gui.subs_model import C_FIT, C_NODUB, C_SEL, C_SONG
+    from trami.gui.widgets import set_combo
+    from trami.project import Project
+
+    QApplication.instance() or QApplication([])
+    config.save_settings({"translate_engine": "google", "translate_style": "auto"})
+    p = Project.create("tich_phu_de")
+    p.segments = [Segment(0, 1, "当当，一只真"), Segment(2.5, 4, "的鹈鹕。"), Segment(5, 6, "你好"), Segment(7, 8, "再见")]
+    p.save()
+    win = MainWindow()
+    win.open_project(p.id)
+    pp, m = win.project_page, win.project_page.model
+    t = pp.table
+    assert not t.isColumnHidden(C_SEL) and t.horizontalHeader().visualIndex(C_SEL) == 0
+    assert all(t.isColumnHidden(c) for c in (C_SONG, C_NODUB, C_FIT))
+    assert not pp.dub_table.isColumnHidden(C_SONG)                       # 🎵 chuyển sang bảng câu tab Lồng tiếng
+    # ô cách dịch ở tab Phụ đề <-> tab Tự động <-> Cài đặt
+    set_combo(pp.s_engine, "deepseek")
+    assert pp.a_engine.currentData() == "deepseek" and config.load_settings()["translate_engine"] == "deepseek"
+    set_combo(pp.a_style, "hai_huoc") if pp.a_style.findData("hai_huoc") >= 0 else None
+    assert pp.s_style.currentData() == pp.a_style.currentData()
+    assert pp.s_skill.count() == pp.a_skill.count()
+    # bấm tiêu đề "Chọn" -> tích hết / bỏ hết
+    pp._toggle_pick_all(pp.proxy)
+    assert m.selected == {0, 1, 2, 3} and "đã tích 4" in pp.seg_count.text()
+    pp._toggle_pick_all(pp.proxy)
+    assert m.selected == set()
+    # tích 2 câu bị cắt -> Gộp -> câu gộp vẫn tích -> Dịch câu đã tích dịch đúng câu đó
+    m.set_picked([0, 1])
+    pp._seg_op("merge")
+    assert [s.text for s in m.segs][:2] == ["当当，一只真的鹈鹕。", "你好"] and m.selected == {0}
+    calls = []
+    monkeypatch.setattr(pp, "_translate_rows", lambda rows, only_empty: calls.append((rows, only_empty)))
+    pp._translate_picked()
+    assert calls == [([0], False)]
+    m.set_picked([0, 2])
+    toasts = []
+    monkeypatch.setattr(win, "toast", lambda msg, kind="info", *a, **k: toasts.append(msg))
+    pp._seg_op("merge")                                                 # không liền nhau -> không gộp
+    assert len(m.segs) == 3 and "liền nhau" in toasts[-1]
+    config.save_settings({"translate_engine": "google"})
     win.close()

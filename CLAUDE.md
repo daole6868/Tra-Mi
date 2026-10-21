@@ -59,7 +59,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (link điện thoại / rút gọn -> dạng yt-dlp có bộ tải riêng), đăng nhập Bilibili
   bằng mã QR (`bili_qr_start/poll/status`, cookie Netscape `data/cookies/bilibili.txt`), `BROWSERS` cho cookie
   trình duyệt; hộp mã QR `gui/link_login.py`; `pipeline.download_video` / `update_ytdlp` / `ytdlp_version`.
-- `tests/test_core.py` – `python -m pytest -q tests` (95 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (96 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -749,6 +749,23 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     nối câu (job "clean", tích câu đổi) / Hoàn tác sửa / AI kiểm tra bản dịch (đã lồng -> redub đúng câu sửa) / AI lập lại
     hồ sơ phim; 2 ô Hồ sơ phim + Bảng tên riêng cạnh nhau, mở đầu ẩn (`_show_profile`). Bảng câu: chữ gốc AI sửa mà chưa
     chắc màu vàng; tooltip câu gốc (trước khi sửa / chưa chắc), câu dịch (lý do + bản trước khi AI kiểm tra).
+
+- 2.0.56: "tách xong rồi thì dịch thế nào; sao tab Phụ đề không có lựa chọn dịch; bỏ 3 cột 🎵 / Bỏ lồng / Độ vừa, thay bằng
+  cột tích – bắt tôi tích chọn mà không có chỗ tích". Tab Phụ đề:
+  * Hàng "Dịch bằng / sang / Văn phong / Kỹ năng AI" (`s_engine`, `s_target`, `s_style`, `s_skill`) = ô gương của ô tab
+    Tự động (`_mirror` / `_sync_mirrors`: đổi bên nào cũng đổi bên kia, ô gốc lưu Cài đặt như cũ; `_fill_skills` nạp lại).
+  * Nút "Dịch câu chưa dịch" (= Dịch dòng trống cũ), "Dịch lại tất cả", "Dịch câu đã tích" (`_translate_picked` ->
+    `_translate_rows`; chưa tích thì câu đang chọn; đã có bản lồng thì đọc lại giọng đúng các câu đó). Tab Lồng tiếng đổi
+    tên "Dịch lại câu đã tích" -> "Dịch câu đã tích".
+  * Bảng: cột "Chọn" (C_SEL) đầu bảng, bấm tiêu đề = tích / bỏ hết câu đang hiện (`_toggle_pick_all`, cả bảng tab Lồng
+    tiếng); ẩn 🎵 / Bỏ lồng / Độ vừa (cột 🎵 chuyển sang bảng câu tab Lồng tiếng). Chọn nhiều dòng (Ctrl / Shift).
+    "đã tích N" ở dòng đếm câu. Nút "Bỏ tích".
+  * Gộp: ≥ 2 câu đã tích (hoặc bôi chọn) liền nhau -> gộp cả nhóm (`_multi_rows` -> `_sub_op`), câu gộp vẫn tích ->
+    bấm "Dịch câu đã tích" ngay; không liền nhau -> báo. Xoá nhiều câu hỏi lại.
+  * `subtitle.merge` nối thẳng chữ (trước chèn "，" -> "一只真，的鹈鹕"), chỉ chèn dấu cách giữa 2 chữ Latin / số.
+  * Đề xuất sửa cách tách câu (chưa làm, chờ người dùng đồng ý): sửa `_split_text` đẩy "AI。" sang câu sau; không cắt
+    giữa từ / sau từ treo ở chỗ nghỉ; mốc chữ cuối vô lý (mẩu ≤ 2 chữ cách > 0,8 s) gộp về; tin dấu câu hơn khoảng lặng
+    (nghỉ không dấu ≥ 1,5–2 s, phẩy ≥ 0,7 s, gộp khúc nghỉ ≤ 1,5 s); bước "Nối câu bị cắt" không cần AI; kiểu tách câu.
 
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.

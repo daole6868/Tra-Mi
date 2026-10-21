@@ -576,8 +576,11 @@ def shift(segs: list[Segment], offset: float, start_from: float = 0.0) -> list[S
 def merge(segs: list[Segment], i: int) -> list[Segment]:
     if 0 <= i < len(segs) - 1:
         a, b = segs[i], segs[i + 1]
-        joiner_zh = "" if a.text.endswith(("，", "。", "！", "？")) else "，"
-        a.text = (a.text + joiner_zh + b.text).strip("，") if a.text and b.text else a.text + b.text
+        # gộp thường là để nối câu bị cắt ngang ("一只真" + "的鹈鹕", "最强" + "AI。") -> nối thẳng, không chèn dấu phẩy;
+        # chỉ chèn dấu cách giữa 2 chữ Latin / số
+        x, y = a.text.rstrip(), b.text.lstrip()
+        joiner = " " if x and y and x[-1].isascii() and x[-1].isalnum() and y[0].isascii() and y[0].isalnum() else ""
+        a.text = x + joiner + y
         a.trans = (a.trans.rstrip() + " " + b.trans.lstrip()).strip()
         a.end = b.end
         del segs[i + 1]
