@@ -23,6 +23,10 @@ ASR_ENGINES = [("qwen3", "Qwen3-ASR – nghe chuẩn nhất, căn giờ từng c
 LANGS = [("zh", "Tiếng Trung (Phổ thông)"), ("yue", "Tiếng Quảng Đông"), ("auto", "Tự nhận diện"),
          ("en", "Tiếng Anh"), ("ja", "Tiếng Nhật"), ("ko", "Tiếng Hàn")]
 METHODS = [("asr", "Nhận dạng giọng nói"), ("ocr", "OCR phụ đề cứng có sẵn trên video")]
+SPLIT_STYLES = [("dub", "Câu trọn ý – hợp lồng tiếng (khuyên dùng)"), ("short", "Câu ngắn – hợp phụ đề đọc nhanh")]
+SPLIT_HELP = ("Câu trọn ý: tin dấu câu của bộ nghe, chỉ cắt ở chỗ nghỉ rất dài (≥ 1,6 s) hoặc dấu phẩy + nghỉ ≥ 0,7 s, "
+              "tự nối dòng chưa hết câu → dịch và lồng tiếng liền mạch. Câu ngắn: cắt ở mọi chỗ nghỉ ≥ 0,8 s / dấu phẩy + "
+              "nghỉ ≥ 0,45 s (cách tách cũ). Cả 2 kiểu đều không cắt giữa 1 từ và tự nối câu bị cắt ngang")
 OCR_SPEEDS = [("2", "Nhanh – 2 lần/giây (video dài, câu hiện lâu)"), ("4", "Chuẩn – 4 lần/giây (khuyên dùng)"),
               ("8", "Kỹ – 8 lần/giây (câu đổi rất nhanh, chậm gấp đôi)")]
 HARDSUB = [("none", "Giữ nguyên"), ("inpaint", "Xoá sạch bằng AI (LaMa)"), ("blur", "Làm mờ vùng phụ đề"),

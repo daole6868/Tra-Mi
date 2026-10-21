@@ -2715,3 +2715,143 @@ def test_subs_tab_ticks_and_translate_options(monkeypatch):
     assert len(m.segs) == 3 and "liền nhau" in toasts[-1]
     config.save_settings({"translate_engine": "google"})
     win.close()
+
+
+def test_split_rules_words_latin_tail_and_styles():
+    """Tách câu 2.0.57: "AI。" thuộc câu trước; chỗ nghỉ không dấu câu không cắt giữa từ / sau từ treo / trước trợ từ;
+    mẩu cụt cuối câu gộp lại + kéo mốc; 2 kiểu tách câu (trọn ý / câu ngắn)."""
+    pytest.importorskip("jieba")
+    from trami import align
+
+    dub, short = align.split_params({"split_style": "dub"}), align.split_params({"split_style": "short"})
+    assert align.split_params({}) == dub and dub["chunk_gap"] == 1.5 and short["chunk_gap"] == 1.0
+
+    def run(text, gaps=None, q=short, per=0.2, exact=True):
+        pos = align._char_positions(text)
+        t, times = 0.0, []
+        for k in range(len(pos)):
+            times.append((t, t + per))
+            t += per + ((gaps or {}).get(k, 0.0))
+        seg = Segment(0, t, text)
+        return [(x.text, x.start, x.end) for x in align.split_timed(seg, times, exact, 28, 0.0, q)]
+
+    texts = lambda out: [x[0] for x in out]  # noqa: E731
+    # chữ Latin trước dấu kết câu đi theo câu trước, mốc cuối câu nới thêm cho "AI"
+    out = run("我可是最强AI。你先别最强了", gaps={4: 1.0})
+    assert texts(out) == ["我可是最强AI。", "你先别最强了"] and out[0][2] > 5 * 0.2 + 0.3
+    assert align._split_text("爸最好了，6块钱", align._char_positions("爸最好了，6块钱"), [3]) == ["爸最好了，", "6块钱"]
+    # nghỉ dài giữa 1 từ (真|的, 好|吃), sau từ treo (一只|), trước trợ từ (|呢) -> không cắt
+    assert texts(run("当当一只真的鹈鹕", gaps={4: 1.6})) == ["当当一只真的鹈鹕"]
+    assert texts(run("放开我不好吃", gaps={4: 2.0})) == ["放开我不好吃"]
+    assert texts(run("我买了一只鹈鹕回来", gaps={4: 1.2})) == ["我买了一只鹈鹕回来"]
+    assert texts(run("你到底在说什么呢", gaps={6: 1.2})) == ["你到底在说什么呢"]
+    # ranh giới từ thật vẫn cắt được (kiểu câu ngắn)
+    assert texts(run("快想办法给我变回去估计额度用完了", gaps={8: 0.9})) == ["快想办法给我变回去", "估计额度用完了"]
+    # mẩu cụt cuối câu ("日子。" sau chỗ nghỉ 1,2 s) gộp về câu trước, mốc kéo về sát chữ trước
+    out = run("让他看看我过的什么日子。", gaps={8: 1.2})
+    assert texts(out) == ["让他看看我过的什么日子。"] and out[0][2] < 11 * 0.2 + 0.2
+    # kiểu câu trọn ý: phẩy + nghỉ 0,5 s / nghỉ 1 s không dấu câu -> không cắt; nghỉ 1,8 s -> cắt
+    assert texts(run("我们先走吧，他们马上就到", gaps={4: 0.5})) == ["我们先走吧，", "他们马上就到"]
+    assert texts(run("我们先走吧，他们马上就到", gaps={4: 0.5}, q=dub)) == ["我们先走吧，他们马上就到"]
+    assert texts(run("快想办法给我变回去估计额度用完了", gaps={8: 1.0}, q=dub)) == ["快想办法给我变回去估计额度用完了"]
+    assert len(run("快想办法给我变回去估计额度用完了", gaps={8: 1.8}, q=dub)) == 2
+
+
+def test_join_broken_lines():
+    """Nối câu bị cắt ngang (không cần AI) trên đúng các dòng người dùng gửi; giữ nguyên câu không đổi."""
+    pytest.importorskip("jieba")
+    from trami import align
+
+    def lines():
+        return [Segment(53.28, 54.98, "那是当然，", "Đương nhiên rồi,"), Segment(55.36, 56.42, "我可是最强"),
+                Segment(57.44, 61.22, "AI。你先别最强了，已经有十份鹈鹕自行车等着你生成。"),
+                Segment(61.28, 63.78, "不是哥们，不是说好的鹈鹕测试吗？", "Ủa alo"),
+                Segment(101.58, 101.98, "不，"), Segment(102.86, 103.52, "我不困了。"),
+                Segment(121.13, 122.75, "恭喜业务翻倍了，"), Segment(123.13, 128.59, "真的不想写了，我现在满脑子都是鹈鹕啊！"),
+                Segment(130.49, 131.71, "当当，一只真"), Segment(133.29, 136.03, "的鹈鹕，这个必须发我爸，让他看看我过的什么日"),
+                Segment(137.21, 137.61, "子。"), Segment(138.01, 139.31, "你从哪儿弄来的的？"),
+                Segment(151.38, 151.78, "放开我，不好"), Segment(154.21, 154.61, "吃。"), Segment(157.37, 157.87, "嘎！")]
+
+    src = lines()
+    out, made = align.join_broken(src, align.SPLIT_STYLES["dub"])
+    assert [s.text for s in out] == [
+        "那是当然，我可是最强AI。", "你先别最强了，已经有十份鹈鹕自行车等着你生成。", "不是哥们，不是说好的鹈鹕测试吗？",
+        "不，我不困了。", "恭喜业务翻倍了，", "真的不想写了，我现在满脑子都是鹈鹕啊！",
+        "当当，一只真的鹈鹕，这个必须发我爸，让他看看我过的什么日子。", "你从哪儿弄来的的？", "放开我，不好吃。", "嘎！"]
+    assert made == 5 and out[2] is src[3] and out[2].trans == "Ủa alo"          # câu không đổi: giữ nguyên
+    assert out[6].end < 137.0 and out[8].end < 153.0                              # mẩu cụt "子。" / "吃。" kéo mốc về
+    assert all(a.end <= b.start for a, b in zip(out, out[1:]))
+    # kiểu câu ngắn: chỉ nối chỗ chắc chắn bị cắt ngang
+    out, _ = align.join_broken(lines(), align.SPLIT_STYLES["short"])
+    assert "那是当然，" in [s.text for s in out] and "我可是最强AI。" in [s.text for s in out]
+    assert "放开我，不好吃。" in [s.text for s in out] and "不，" in [s.text for s in out]
+    # khác người nói / đoạn hát -> không nối
+    a, b = Segment(0, 1, "当当，一只真", speaker="S1"), Segment(1.5, 3, "的鹈鹕。", speaker="S2")
+    assert align.join_broken([a, b])[1] == 0
+    a, b = Segment(0, 1, "当当，一只真"), Segment(1.5, 3, "的鹈鹕。")
+    b.extra["song"] = True
+    assert align.join_broken([a, b])[1] == 0
+    # phụ đề không dấu câu (OCR): chỉ nối khi cắt giữa từ
+    ocr = [Segment(0, 1, "你好"), Segment(1.3, 2, "再见"), Segment(3, 4, "我们走"), Segment(4.5, 5, "一只真"),
+           Segment(5.4, 6, "的鹈鹕")]
+    out, made = align.join_broken(ocr)
+    assert [s.text for s in out] == ["你好", "再见", "我们走", "一只真的鹈鹕"] and made == 1
+
+
+def test_join_lines_button_and_undo(monkeypatch):
+    pytest.importorskip("jieba")
+    from trami import pipeline, skills
+    from trami.project import Project
+
+    p = Project.create("noi_cau")
+    p.segments = [Segment(10.49, 11.71, "当当，一只真", "Tèn ten, một con"),
+                  Segment(13.29, 16.03, "的鹈鹕，这个必须发我爸，让他看看我过的什么日", "bồ nông thật…"),
+                  Segment(17.21, 17.61, "子。", "ngày gì đây."), Segment(18.01, 19.31, "你从哪儿弄来的的？", "Cậu kiếm ở đâu?")]
+    p.save()
+    rows = pipeline.join_lines(p, {"split_style": "dub"})
+    segs = p.segments
+    assert rows == [0] and len(segs) == 2 and segs[0].text.endswith("什么日子。")
+    assert segs[0].trans == "Tèn ten, một con bồ nông thật… ngày gì đây." and segs[1].trans == "Cậu kiếm ở đâu?"
+    assert pipeline.join_lines(p, {"split_style": "dub"}) == []                 # chạy lại: không còn gì để nối
+    assert pipeline.undo_join(p) == 4 and len(p.segments) == 4 and pipeline.undo_join(p) == 0
+    # AI sửa lỗi nghe & nối câu: giờ nhận 2 dòng cách 1,58 s ("一只真" | "的鹈鹕")
+    new, st = skills.apply_cleanup(p.segments, {"merge": [[1, 2]], "fix": {}, "unsure": {}})
+    assert st["merged"] == 1 and new[0].text.startswith("当当，一只真的鹈鹕")
+
+
+def test_join_button_and_split_style_gui(monkeypatch):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    pytest.importorskip("jieba")
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        pytest.skip(str(e))
+    from trami import config
+    from trami.gui.main import MainWindow
+    from trami.gui.widgets import set_combo
+    from trami.project import Project
+
+    QApplication.instance() or QApplication([])
+    config.save_settings({"split_style": "dub"})
+    p = Project.create("noi_cau_gui")
+    p.segments = [Segment(0, 1, "放开我，不好"), Segment(3.4, 3.8, "吃。"), Segment(5, 6, "嘎！")]
+    p.save()
+    win = MainWindow()
+    win.open_project(p.id)
+    pp = win.project_page
+    assert pp.a_split.currentData() == "dub"
+    set_combo(pp.a_split, "short")                                    # 1 giá trị chung với Cài đặt
+    assert config.load_settings()["split_style"] == "short"
+    win.settings_page.load()
+    assert win.settings_page.split_style.currentData() == "short"     # trang Cài đặt cũng thấy
+    jobs = []
+    pp.submit = lambda kind, title, fn: jobs.append((kind, fn(type("J", (), {"update": lambda *a: None})(), p)))
+    pp.run_join()
+    assert jobs[0][0] == "join" and jobs[0][1]["pick"] == [0]
+    assert [s.text for s in p.segments] == ["放开我，不好吃。", "嘎！"]
+    pp.reload()
+    pp.run_undo_join()
+    assert [s.text for s in pp.model.segs] == ["放开我，不好", "吃。", "嘎！"]
+    config.save_settings({"split_style": "dub"})
+    win.close()

@@ -128,7 +128,7 @@ def transcribe_sensevoice(audio_path: str | Path, settings: dict, language: str 
     """split=False: không chia câu ở đây – các đoạn giọng nói sát nhau được gộp thành khúc ≤ 25 s để SenseVoice nghe
     trọn câu, lấy luôn mốc từng chữ (FunASR có output_timestamp) vào extra["ct"]; bước căn thời gian tách câu theo
     dấu câu cuối câu + chỗ nghỉ thật (không chia theo tỉ lệ số chữ – hay cắt đôi câu)."""
-    from .align import chunk_spans, times_from_words
+    from .align import chunk_spans, split_params, times_from_words
     from .asr import is_hallucination, to_simplified
 
     dev = _device(settings.get("asr_device", "auto"))
@@ -144,7 +144,7 @@ def transcribe_sensevoice(audio_path: str | Path, settings: dict, language: str 
     max_chars = int(settings.get("asr_max_chars", 28))
     timed = not split and _timestamps_ok(model, audio, spans, lang)
     if timed:
-        spans = chunk_spans(spans, audio, max_gap=1.0, max_len=25.0)
+        spans = chunk_spans(spans, audio, max_gap=split_params(settings)["chunk_gap"], max_len=25.0)
     kw = {"output_timestamp": True} if timed else {}
     segs: list[Segment] = []
     batch = 16 if not timed else 8

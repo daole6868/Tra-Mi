@@ -43,6 +43,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - `trami/langs.py` – tiếng đích (vi/en/th/ja/ko): tên, mã Google, tên cho Hy-MT2, giọng Edge, tốc độ nói (`budget`),
   `units` (từ / chữ), `detect` (tiếng của 1 câu theo chữ viết), font phụ đề Thái/Nhật/Hàn (`subtitle_font`).
   `pipeline.target_lang(p)` (dự án `p.data["target_lang"]`, chưa có -> Cài đặt), `trans_lang(p)` (tiếng của bản dịch đang có).
+- Tách câu (`align.py`): `plan_cuts` (dấu câu + chỗ nghỉ + ranh giới từ jieba), `split_timed`, `join_broken` (nối câu
+  bị cắt ngang), kiểu tách câu `split_params` (Cài đặt `split_style`: dub / short).
 - `trami/textfit.py` – đo bề rộng chữ phụ đề như libass (Qt khi có giao diện, không thì Pillow+fontTools, không thì ước
   lượng) + `fit_lines` (xếp câu vào dòng: % bề rộng, số dòng tối đa, thu nhỏ chữ). `subtitle.layout_event` dùng chung
   cho `to_ass` và khung xem trước (`player.SubtitleItem._layout`) -> xuống dòng / cỡ chữ / ô nền giống hệt.
@@ -59,7 +61,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (link điện thoại / rút gọn -> dạng yt-dlp có bộ tải riêng), đăng nhập Bilibili
   bằng mã QR (`bili_qr_start/poll/status`, cookie Netscape `data/cookies/bilibili.txt`), `BROWSERS` cho cookie
   trình duyệt; hộp mã QR `gui/link_login.py`; `pipeline.download_video` / `update_ytdlp` / `ytdlp_version`.
-- `tests/test_core.py` – `python -m pytest -q tests` (96 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (100 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -763,9 +765,30 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   * Gộp: ≥ 2 câu đã tích (hoặc bôi chọn) liền nhau -> gộp cả nhóm (`_multi_rows` -> `_sub_op`), câu gộp vẫn tích ->
     bấm "Dịch câu đã tích" ngay; không liền nhau -> báo. Xoá nhiều câu hỏi lại.
   * `subtitle.merge` nối thẳng chữ (trước chèn "，" -> "一只真，的鹈鹕"), chỉ chèn dấu cách giữa 2 chữ Latin / số.
-  * Đề xuất sửa cách tách câu (chưa làm, chờ người dùng đồng ý): sửa `_split_text` đẩy "AI。" sang câu sau; không cắt
-    giữa từ / sau từ treo ở chỗ nghỉ; mốc chữ cuối vô lý (mẩu ≤ 2 chữ cách > 0,8 s) gộp về; tin dấu câu hơn khoảng lặng
-    (nghỉ không dấu ≥ 1,5–2 s, phẩy ≥ 0,7 s, gộp khúc nghỉ ≤ 1,5 s); bước "Nối câu bị cắt" không cần AI; kiểu tách câu.
+
+- 2.0.57: "câu liền mạch bị tách thành 2–3 dòng -> dịch / lồng tiếng rời rạc" (`当当，一只真` | `的鹈鹕，…什么日` | `子。`,
+  `那是当然，` | `我可是最强` | `AI。你先别…`, `放开我，不好` | `吃。`). Nguyên nhân: `plan_cuts` cắt ở MỌI chỗ nghỉ ≥ 0,8 s kể cả
+  giữa 1 từ (bộ căn thời gian hay gán chữ cuối vào tiếng động phía sau -> tưởng nghỉ dài), mẩu ≤ 2 chữ chỉ gộp lại khi nghỉ
+  < 0,6 s, phẩy + nghỉ 0,45 s đã cắt, khúc nghe gộp đoạn nghỉ ≤ 1 s; `_split_text` đẩy "AI。" sang câu sau. Sửa (`align.py`):
+  * `split_params(settings)` / `SPLIT_STYLES` – Cài đặt `split_style` (Cài đặt + tab Tự động `a_split`, 1 giá trị chung):
+    "dub" (mặc định, câu trọn ý – hợp lồng tiếng): phẩy cắt khi nghỉ ≥ 0,7 s, chỗ nghỉ không dấu câu ≥ 1,6 s, khúc nghe
+    gộp nghỉ ≤ 1,5 s (`chunk_gap`, asr_qwen / asr_funasr), câu dài tới 10 s, nối dòng chưa hết câu; "short" = cách cũ.
+  * `_word_info` (jieba.posseg) + `_cut_ok`: chỗ nghỉ không dấu câu chỉ cắt ở ranh giới từ, không sau từ treo
+    (`HANG_TAGS` p/c/m/q trừ `ENDABLE` 一下…, `HANG_WORDS` 一只 / 因为 / 真…), không trước trợ từ (`HEAD_WORDS` 的了吗呢…);
+    dùng cả trong `best_cut`. Không có jieba -> chỉ xét danh sách từ. requirements thêm `jieba`.
+  * Mẩu ≤ 2 chữ ngăn bởi chỗ không dấu câu gộp lại dù nghỉ ≤ 3 s; `_pull_tail`: 1–2 chữ cuối câu cách phần trước > 0,8 s
+    -> kéo mốc về sát chữ trước. `_split_text`: có dấu câu ở chỗ cắt -> cắt SAU dấu câu cuối ("最强AI。" | "你…"), không
+    dấu câu -> số / Latin theo phần sau như cũ; `split_timed` nới mốc đầu / cuối câu cho chữ Latin / số (`_latin_dur`).
+  * `join_broken(segs, params, max_chars, total)` – nối câu bị cắt ngang không cần AI rồi tách lại (chỉ ở dấu kết câu /
+    câu quá dài): luôn nối khi `broken_junction` (cắt giữa từ / từ treo / trợ từ đầu / "AI。" đầu dòng / mẩu cụt ≤ 2 chữ,
+    cách ≤ 3 s); kiểu "dub" thêm dòng không dấu câu cuối (≤ 2 s) và dòng mở đầu ≤ 4 chữ kết thúc bằng phẩy (≤ 1 s); cùng
+    người nói, không phải 🎵, ≤ 36 chữ / 10 s; phụ đề không dấu câu (OCR, < 30 % dòng có dấu) chỉ nối khi cắt giữa từ.
+    Câu không đổi giữ nguyên đối tượng (bản dịch, giọng). Tự chạy trong `recognize` sau căn thời gian (ASR, tiếng
+    Trung) -> `p.data["asr_joined"]` -> thông báo bước 1 ("nối lại N câu…", "kiểu tách: …").
+  * `pipeline.join_lines` / `undo_join` (`join_backup`, bỏ giọng câu đổi + xếp lại bản lồng) – tab Phụ đề nút "Nối câu bị
+    cắt" (job "join", tích câu mới) / "Hoàn tác nối". `skills.MAX_GAP` 1,5 -> 2,5 s (AI nối được "一只真" | "的鹈鹕").
+  * Thử trên đúng các dòng người dùng gửi: "那是当然，我可是最强AI。" | "你先别最强了，…", "当当，一只真的鹈鹕，…什么日子。",
+    "放开我，不好吃。", "不，我不困了。"; câu trọn vẹn khác giữ nguyên.
 
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
@@ -798,6 +821,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.47: chờ người dùng thử dịch + lồng tiếng Anh / Thái / Nhật / Hàn trên máy thật (Edge giọng nước ngoài, OmniVoice
   `language` khác "vi" chưa chạy thật – nếu bản OmniVoice báo lỗi tham số language thì cần đổi mã sang tên tiếng),
   và xác nhận "1. Nghe & tách câu" có báo lỗi tách giọng (nếu có) để biết vì sao tab Âm thanh không có bản tách.
+- 2.0.57: chờ người dùng chạy lại "1. Nghe & tách câu" (hoặc bấm "Nối câu bị cắt" ở tab Phụ đề) trên video thật – xem
+  câu có liền mạch, có nối nhầm 2 lượt nói khác người không (khi để 1 người nói thì không phân biệt được).
 - 2.0.55: chờ người dùng thử kỹ năng dịch AI với API thật (DeepSeek / GPT / Claude…): AI sửa lỗi nghe có sửa đúng
   không, số câu bị nối, hồ sơ phim, kiểm tra bản dịch (chỉ thử với AI giả lập ở sandbox).
 - 2.0.42: chờ người dùng nghe thử các cách xếp giọng trên video thật (nhất là Tự động với cụm câu dài, Đọc đè 2 giọng

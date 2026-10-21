@@ -3,7 +3,7 @@ API tương thích OpenAI), không dùng với Google / Hy-MT2 (không phải AI
 
   1. Sửa lỗi nghe & nối câu (`clean_lines` -> `apply_cleanup`): máy nghe (ASR) hay nghe nhầm chữ đồng âm (升/生, 咬/摇,
      D神/地神…) và cắt câu sai chỗ (真 | 的假的, 最强 | AI。). AI đọc cả kịch bản, trả về chữ sửa + nhóm dòng cần gộp;
-     tool kiểm tra (chữ mới phải gần chữ cũ, chỉ gộp dòng liền nhau, nghỉ ≤ 1,5 s, câu gộp ≤ 15 s) rồi mới áp dụng.
+     tool kiểm tra (chữ mới phải gần chữ cũ, chỉ gộp dòng liền nhau, nghỉ ≤ 2,5 s, câu gộp ≤ 15 s) rồi mới áp dụng.
   2. Hồ sơ phim (`make_profile`): thể loại, nhân vật, bảng xưng hô, tên riêng / meme – lưu trong dự án, sửa được, AI dùng
      cho mọi lần dịch sau (không đọc lại kịch bản mỗi lần).
   3. Kiểm tra bản dịch (`review_lines`): sai nghĩa, sót ý, xưng hô / tên không thống nhất, quá dài so với thời gian,
@@ -158,7 +158,7 @@ def _close(old: str, new: str) -> bool:
     return difflib.SequenceMatcher(None, old, new).ratio() >= 0.45
 
 
-MAX_GAP = 1.5      # chỉ gộp 2 dòng cách nhau ≤ 1,5 s
+MAX_GAP = 2.5      # chỉ gộp 2 dòng cách nhau ≤ 2,5 s (câu bị cắt hay có chỗ nghỉ 1,5–2 s: "一只真" | "的鹈鹕")
 MAX_MERGED = 15.0  # câu sau khi gộp ≤ 15 s
 
 

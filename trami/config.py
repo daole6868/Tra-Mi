@@ -58,6 +58,7 @@ DEFAULT_SETTINGS: dict = {
     "asr_beam_size": 5,
     "asr_vad": True,
     "ocr_fps": "4",                   # OCR phụ đề cứng: số lần quét mỗi giây (2 nhanh / 4 chuẩn / 8 kỹ)
+    "split_style": "dub",            # kiểu tách câu: dub = câu trọn ý (hợp lồng tiếng) / short = câu ngắn
     "asr_max_chars": 28,              # câu dài hơn số chữ Hán này mới chia đôi (ở dấu phẩy / chỗ nghỉ gần giữa)
     # Dịch
     "translate_engine": "google",     # google / openai / anthropic / gemini / deepseek / ollama / offline(none)

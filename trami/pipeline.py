@@ -553,7 +553,8 @@ def align_segments(segs, wav: Path, language: str, settings: dict, progress: Pro
         use_fa = zh and fa_available() and bool(settings.get("align_fa", True))
         with tqdm_progress(progress, 0.0, 1.0, "Đang căn thời gian từng chữ", cancel,
                            download="Đang tải mô hình căn thời gian (fa-zh)"):
-            return align.refine(segs, audio, use_fa=use_fa, progress=progress, cancel=cancel, max_chars=max_chars)
+            return align.refine(segs, audio, use_fa=use_fa, progress=progress, cancel=cancel, max_chars=max_chars,
+                                params=align.split_params(settings))
     except ff.Cancelled:
         raise
     except Exception as e:  # noqa: BLE001 – không để bước phụ làm hỏng cả quy trình
@@ -789,6 +790,13 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
             from .asr_qwen import release
 
             release()   # trả bộ nhớ GPU trước bước phân biệt người nói
+        # 2c) nối dòng bị cắt ngang câu (cắt giữa từ, mẩu cụt, câu chưa hết) rồi tách lại đúng chỗ – không cần AI
+        p.data["asr_joined"] = 0
+        if segs and language in ("zh", "yue", "auto"):
+            from .align import join_broken, split_params
+
+            segs, p.data["asr_joined"] = join_broken(segs, split_params(settings),
+                                                     int(settings.get("asr_max_chars", 28)), info_dur)
         if engine in ("sensevoice", "qwen3"):
             from .asr_funasr import mark_songs
 
@@ -808,6 +816,7 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
     p.data["sub_source"] = method
     if method == "ocr":
         p.data.pop("asr_warning", None)
+        p.data.pop("asr_joined", None)
     p.save()
     # 3) phân biệt người nói
     if want_dz:
@@ -961,6 +970,42 @@ def ai_cleanup(p: Project, settings: dict | None = None, engine: str | None = No
     p.data["asr_cleaned"] = True
     p.save()
     return stats
+
+
+def join_lines(p: Project, settings: dict | None = None) -> list[int]:
+    """Nút "Nối câu bị cắt" (tab Phụ đề): nối các dòng bị cắt ngang câu rồi tách lại đúng chỗ, không cần AI, không
+    nghe lại. Giữ bản cũ để Hoàn tác; câu đổi lời mất bản dịch + giọng lồng (bản lồng tự xếp lại). Trả về số thứ tự các
+    câu mới (để tích sẵn)."""
+    from . import align
+
+    settings = settings or load_settings()
+    segs = p.segments
+    new, made = align.join_broken(segs, align.split_params(settings), int(settings.get("asr_max_chars", 28)),
+                                  float(p.data.get("info", {}).get("duration", 0) or 0))
+    if not made:
+        return []
+    old_ids = {id(s) for s in segs}
+    p.data["join_backup"] = [s.to_dict() for s in segs]
+    lost = forget_stale_voice({s.text for s in segs}, new, moved=False)
+    p.segments = new
+    p.save()
+    if lost and has_dub(p):   # câu nối: bỏ giọng cũ khỏi bản lồng (không đọc lại câu nào)
+        relayout(p, settings)
+    return [k for k, s in enumerate(new) if id(s) not in old_ids]
+
+
+def undo_join(p: Project, settings: dict | None = None) -> int:
+    """Hoàn tác lần "Nối câu bị cắt" gần nhất. Trả về số câu sau khi hoàn tác (0 = không có gì để hoàn tác)."""
+    from .subtitle import Segment
+
+    back = p.data.pop("join_backup", None)
+    if not back:
+        return 0
+    p.segments = [Segment.from_dict(d) for d in back]
+    p.save()
+    if has_dub(p):
+        relayout(p, settings or load_settings())
+    return len(back)
 
 
 def undo_cleanup(p: Project, settings: dict | None = None) -> int:

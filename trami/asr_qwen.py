@@ -156,13 +156,13 @@ def transcribe_qwen(wav: str | Path, settings: dict, language: str = "zh", progr
                     cancel=None) -> list[Segment]:
     """Nghe cả video: chia đoạn có tiếng -> gộp thành khúc ≤ 28 s (nghe trọn câu) -> Qwen3-ASR + mốc từng chữ.
     Mỗi khúc trả về 1 Segment có extra["ct"]; bước căn thời gian (align.refine) tách câu theo dấu câu + chỗ nghỉ."""
-    from .align import chunk_spans
+    from .align import chunk_spans, split_params
     from .asr_funasr import load_wav16k
 
     if progress:
         progress(0.0, "Đang chia đoạn giọng nói…")
     audio = load_wav16k(wav)
-    chunks = chunk_spans(_spans(audio, settings), audio, max_gap=1.0, max_len=28.0)
+    chunks = chunk_spans(_spans(audio, settings), audio, max_gap=split_params(settings)["chunk_gap"], max_len=28.0)
     if not chunks:
         return []
     r = worker(settings).call({"cmd": "asr", "wav": _wav_path(wav), "spans": [list(c) for c in chunks],
