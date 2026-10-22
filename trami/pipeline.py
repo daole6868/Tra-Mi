@@ -1522,42 +1522,108 @@ def unshorten_lines(p: Project, rows: list[int]) -> list[int]:
     return back
 
 
-def apply_translation(segs: list, cues: list) -> list[int]:
-    """Nạp bản dịch từ file SRT (đã dịch ở phần mềm khác) vào các câu hiện có – giữ nguyên câu gốc, mốc, người nói.
-    Cùng số câu và mốc gần khớp -> ghép theo thứ tự; không thì ghép theo thời gian trùng nhau nhiều nhất.
-    Trả về chỉ số các câu có lời Việt THAY ĐỔI (để tích sẵn, chỉ đọc lại những câu này)."""
+def apply_translation(segs: list, cues: list, stats: dict | None = None) -> list[int]:
+    """Nạp bản dịch từ file SRT (đã dịch ở phần mềm khác) vào các câu hiện có – giữ câu gốc, mốc, người nói.
+    Cùng số câu và mốc gần khớp -> ghép theo thứ tự. Khác số câu -> ghép theo thời gian:
+      * file dịch GỘP câu (1 câu dịch phủ 2–3 câu gốc liền nhau) -> gộp các câu gốc đó thành 1 câu mang bản dịch đó
+        (trước đây câu gốc thứ 2 bị bỏ trống);
+      * file dịch TÁCH câu (2 câu dịch nằm trong 1 câu gốc) -> nối các bản dịch vào câu gốc đó;
+      * câu dịch không trùng câu gốc nào -> thêm câu mới chỉ có lời dịch.
+    Sửa `segs` tại chỗ. stats (nếu có) nhận {"merged": số câu gốc bị gộp, "joined": số câu gốc nhận ≥ 2 câu dịch,
+    "added": số câu thêm}. Trả về chỉ số (sau khi gộp) các câu có lời dịch THAY ĐỔI (để tích sẵn, chỉ đọc lại câu đó)."""
     import re
+
+    from .subtitle import Segment
 
     han = re.compile(r"[㐀-鿿]")
     kana = re.compile(r"[぀-ヿ]")
+    st = stats if stats is not None else {}
+    st.update(merged=0, joined=0, added=0)
 
     def vi_text(c) -> str:   # file song ngữ: bỏ dòng tiếng Trung, giữ dòng bản dịch (dòng tiếng Nhật có kana: giữ)
         lines = [x.strip() for x in (c.text or "").splitlines() if x.strip()]
         keep = [x for x in lines if not han.search(x) or kana.search(x)] or lines
         return " ".join(" ".join(keep).split())
 
+    def ov(c, x) -> float:
+        return min(c.end, x.end) - max(c.start, x.start)
+
+    def put(x, t: str) -> bool:
+        if t and t != x.trans:
+            x.trans = t
+            x.extra["trans_user"] = True     # bản dịch người dùng đưa vào: AI không tự rút gọn
+            x.extra.pop("fit", None)
+            return True
+        return False
+
+    cues = sorted([c for c in cues if vi_text(c)], key=lambda c: c.start)
     if not segs or not cues:
-        return 0
-    if len(cues) == len(segs) and all(abs(c.start - s.start) < 1.0 for c, s in zip(cues, segs)):
-        pairs = list(zip(segs, [[c] for c in cues]))
-    else:
-        got: dict[int, list] = {}
-        for c in cues:
-            ov = [(min(c.end, s.end) - max(c.start, s.start), k) for k, s in enumerate(segs)]
-            best, k = max(ov)
-            if best > 0:
-                got.setdefault(k, []).append(c)
-        pairs = [(segs[k], cs) for k, cs in sorted(got.items())]
-    index = {id(s): k for k, s in enumerate(segs)}
-    changed = []
-    for s, cs in pairs:
-        t = " ".join(vi_text(c) for c in sorted(cs, key=lambda c: c.start)).strip()
-        if t and t != s.trans:
-            s.trans = t
-            s.extra["trans_user"] = True     # bản dịch người dùng đưa vào: AI không tự rút gọn
-            s.extra.pop("fit", None)
-            changed.append(index[id(s)])
-    return changed
+        return []
+    if len(cues) == len(segs) and all(abs(c.start - x.start) < 1.0 for c, x in zip(cues, segs)):
+        return [k for k, (x, c) in enumerate(zip(segs, cues)) if put(x, vi_text(c))]
+    # câu gốc -> câu dịch phủ nó nhiều nhất (phủ ≥ 30 % câu hoặc ≥ 0,5 s mới tính)
+    owner: list[int | None] = []
+    for x in segs:
+        best = max(((ov(c, x), j) for j, c in enumerate(cues)), default=(0.0, None))
+        dur = max(0.05, x.end - x.start)
+        owner.append(best[1] if best[0] > 0 and (best[0] >= 0.3 * dur or best[0] >= 0.5) else None)
+    # các câu gốc liền nhau cùng 1 câu dịch -> 1 nhóm (sẽ gộp)
+    groups: list[list[int]] = []
+    for k, o in enumerate(owner):
+        if groups and o is not None and owner[groups[-1][-1]] == o:
+            groups[-1].append(k)
+        else:
+            groups.append([k])
+    group_of = {k: g for g, ks in enumerate(groups) for k in ks}
+    # mỗi câu dịch vào đúng 1 nhóm: nhóm câu gốc nhận nó làm chủ; không thì câu gốc trùng giờ nhiều nhất
+    got: dict[int, list] = {}
+    added = []
+    for j, c in enumerate(cues):
+        own = [k for k, o in enumerate(owner) if o == j]
+        if own:
+            got.setdefault(group_of[own[0]], []).append(c)
+            continue
+        best = max(((ov(c, x), k) for k, x in enumerate(segs)), default=(0.0, -1))
+        if best[0] > 0:
+            got.setdefault(group_of[best[1]], []).append(c)
+        else:
+            added.append(c)
+    new: list = []
+    changed_ids: set[int] = set()
+    for g, ks in enumerate(groups):
+        cs = got.get(g, [])
+        t = " ".join(vi_text(c) for c in cs).strip()
+        if len(ks) > 1:   # file dịch gộp các câu này làm 1 -> gộp câu gốc
+            parts = [segs[k] for k in ks]
+            text = ""
+            for x in parts:
+                y = x.text.strip()
+                text += (" " if text and y and text[-1].isascii() and text[-1].isalnum() and y[0].isascii()
+                         and y[0].isalnum() else "") + y
+            m = Segment(parts[0].start, max(x.end for x in parts), text, "", parts[0].speaker,
+                        {k: v for k, v in parts[0].extra.items()
+                         if k not in ("tts_file", "take", "dub_at", "dub_shift", "fit", "fit_need", "fit_have",
+                                      "fit_shift", "fit_over")})
+            put(m, t)
+            st["merged"] += len(ks) - 1
+            new.append(m)
+            changed_ids.add(id(m))
+            continue
+        x = segs[ks[0]]
+        if len(cs) > 1:
+            st["joined"] += 1
+        if put(x, t):
+            changed_ids.add(id(x))
+        new.append(x)
+    for c in added:
+        x = Segment(c.start, c.end, "", vi_text(c))
+        x.extra["trans_user"] = True
+        new.append(x)
+        changed_ids.add(id(x))
+    st["added"] = len(added)
+    new.sort(key=lambda x: x.start)
+    segs[:] = new
+    return [k for k, x in enumerate(segs) if id(x) in changed_ids]
 
 
 def _voice_summary(voices: dict, default_voice: str) -> str:

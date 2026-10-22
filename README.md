@@ -120,7 +120,9 @@ VieNeu chỉ đọc tiếng Việt nên câu tiếng khác tự đọc bằng Mi
 - Video chỉ có tiếng: bật **Tách giọng khỏi nhạc trước**, rồi dùng **Qwen3-ASR** (hoặc SenseVoice). Mỗi dòng phụ đề là
   1 câu trọn nghĩa: chỉ tách ở cuối câu (。！？) hoặc chỗ nghỉ thật, không bao giờ cắt giữa 1 từ; dòng bị cắt ngang câu
   được tự nối lại. **Kiểu tách câu** (tab Tự động / Cài đặt): *Câu trọn ý – hợp lồng tiếng* (mặc định) hoặc *Câu ngắn –
-  hợp phụ đề đọc nhanh*. Dự án cũ: tab Phụ đề → **Nối câu bị cắt** (có *Hoàn tác nối*). Có tách giọng thì tool còn **nghe lại các đoạn có tiếng bị bộ chia đoạn bỏ sót**, nên không còn câu bị bỏ không dịch.
+  hợp phụ đề đọc nhanh*. Dự án cũ: tab Phụ đề → **Nối câu bị cắt** (có *Hoàn tác nối*; dự án đã dịch thì câu mới được dịch luôn).
+- Dịch ở phần mềm khác rồi **Nạp SRT đã dịch**: file dịch có ít câu hơn (gộp câu) thì tool gộp các câu gốc tương ứng,
+  nhiều câu hơn (tách câu) thì nối các câu dịch vào câu gốc – không còn câu bị trống. Có tách giọng thì tool còn **nghe lại các đoạn có tiếng bị bộ chia đoạn bỏ sót**, nên không còn câu bị bỏ không dịch.
 - Dùng **AI dịch** và chọn đúng **thể loại**. Sau lần dịch đầu, sửa bảng tên riêng nếu cần rồi bấm **Dịch lại tất cả**. Bản dịch cũ được lưu sẵn, nên dịch lại không tốn thêm tiền cho những câu không đổi.
 - **Kỹ năng dịch AI** (dùng với mọi công cụ dịch AI: DeepSeek, Claude, GPT, Gemini, Ollama hoặc bất kỳ API tương thích
   OpenAI nào – điền *OpenAI base URL* + *OpenAI API key* ở Cài đặt):

@@ -61,7 +61,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (link điện thoại / rút gọn -> dạng yt-dlp có bộ tải riêng), đăng nhập Bilibili
   bằng mã QR (`bili_qr_start/poll/status`, cookie Netscape `data/cookies/bilibili.txt`), `BROWSERS` cho cookie
   trình duyệt; hộp mã QR `gui/link_login.py`; `pipeline.download_video` / `update_ytdlp` / `ytdlp_version`.
-- `tests/test_core.py` – `python -m pytest -q tests` (100 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (102 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -789,6 +789,16 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     cắt" (job "join", tích câu mới) / "Hoàn tác nối". `skills.MAX_GAP` 1,5 -> 2,5 s (AI nối được "一只真" | "的鹈鹕").
   * Thử trên đúng các dòng người dùng gửi: "那是当然，我可是最强AI。" | "你先别最强了，…", "当当，一只真的鹈鹕，…什么日子。",
     "放开我，不好吃。", "不，我不困了。"; câu trọn vẹn khác giữ nguyên.
+
+- 2.0.58: (1) "nối câu xong một số câu bị trống": không phải mất chữ gốc (thử 3.000 bộ ngẫu nhiên: không câu rỗng, không mất
+  chữ) mà cột bản dịch trống – câu tách lại sau khi nối mất bản dịch. Sửa: `align._whole_lines_trans` (câu mới = đúng các
+  dòng cũ liền nhau ghép lại -> giữ bản dịch nối lại); `run_join` (dự án đã dịch) tự `translate(rows=câu mới chưa dịch)` bằng
+  công cụ đang chọn, đã lồng thì `redub` đúng các câu đó (job "redub"). (2) "tách 10 câu, dịch ở ngoài còn 9 câu, nạp vào
+  lòi 1 câu trống": `apply_translation` ghép mỗi câu dịch vào 1 câu gốc trùng giờ nhiều nhất -> câu gốc kia trống. Giờ khác số
+  câu: câu gốc -> câu dịch phủ nó nhiều nhất (≥ 30 % hoặc ≥ 0,5 s); câu gốc liền nhau cùng 1 câu dịch -> GỘP thành 1 câu
+  (chữ gốc nối thẳng, bỏ giọng cũ); câu dịch không làm chủ câu gốc nào -> nối vào câu gốc trùng nhiều nhất; không trùng câu
+  nào -> thêm câu mới chỉ có lời dịch. `stats` {merged, joined, added} -> 1 thông báo khi nạp ("File dịch 9 câu, dự án 10
+  câu: gộp 1 câu gốc…"). Sửa `segs` tại chỗ (`segs[:] = new`).
 
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.

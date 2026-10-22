@@ -691,6 +691,17 @@ def _even_times(s: Segment) -> list[tuple[float, float]]:
     return [(a + i * d, a + (i + 1) * d) for i in range(n)]
 
 
+def _whole_lines_trans(grp: list[Segment], text: str) -> str:
+    """Bản dịch cho câu mới nếu nó đúng bằng các dòng cũ i..j liền nhau ghép lại (và các dòng đó đều đã dịch)."""
+    t = text.strip()
+    for i in range(len(grp)):
+        for j in range(i + 1, len(grp) + 1):
+            if _join_text([x.text for x in grp[i:j]]).strip() == t:
+                tr = [x.trans.strip() for x in grp[i:j]]
+                return " ".join(tr) if all(tr) else ""
+    return ""
+
+
 def join_broken(segs: list[Segment], params: dict | None = None, max_chars: int = 28,
                 total: float = 0.0) -> tuple[list[Segment], int]:
     """Nối các dòng bị cắt ngang câu rồi tách lại đúng chỗ (dấu kết câu / câu quá dài) – không cần AI.
@@ -727,6 +738,8 @@ def join_broken(segs: list[Segment], params: dict | None = None, max_chars: int 
             keep = old.get(piece.text.strip())
             if keep is None:
                 made += 1
+                if not piece.trans:   # câu mới = đúng mấy dòng cũ liền nhau ghép lại -> giữ bản dịch của chúng
+                    piece.trans = _whole_lines_trans(grp, piece.text)
             out.append(keep if keep is not None else piece)
     return fix_overlaps(out) if made else out, made
 

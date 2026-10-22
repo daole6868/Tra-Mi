@@ -1798,20 +1798,37 @@ class ProjectPage(QWidget):
         self.submit("clean", "AI sửa lỗi nghe & nối câu", fn)
 
     def run_join(self):
+        """Nối câu bị cắt ngang. Dự án đã dịch: câu mới chưa có bản dịch được DỊCH LUÔN (trước đây để trống, phải tự bấm
+        dịch) và đã lồng tiếng thì đọc lại giọng đúng các câu đó."""
         if not self.model.segs:
             return self.win.toast("Chưa có phụ đề", "warn")
         self.flush()
+        eng, sty = self.a_engine.currentData(), self.a_style.currentData()
+        tts_eng, rate = self.d_engine.currentData(), self.d_rate.currentData()
+        st = dict(load_settings())
+        st["dub_skip_songs"] = self.d_skipsong.isChecked()
+        translated = any(x.trans.strip() for x in self.model.segs)
 
         def fn(j, p):
-            j.update(0.2, "Đang tìm câu bị cắt ngang…")
+            j.update(0.05, "Đang tìm câu bị cắt ngang…")
             rows = pipeline.join_lines(p)
             if not rows:
                 return {"message": "Không thấy câu nào bị cắt ngang"}
             msg = f"Đã nối và tách lại thành {len(rows)} câu trọn ý (được tích sẵn)"
-            if any(x.trans.strip() for x in p.segments):
-                msg += " – bấm 'Dịch câu đã tích' để dịch các câu này"
+            empty = [k for k in rows if p.segments[k].text.strip() and not p.segments[k].trans.strip()]
+            if translated and empty:
+                if eng == pipeline.NO_TRANSLATE:
+                    msg += f" – {len(empty)} câu chưa có bản dịch: chọn công cụ dịch rồi bấm 'Dịch câu đã tích'"
+                else:
+                    pipeline.translate(p, eng, sty, False, None, lambda x, m="": j.update(0.1 + 0.5 * x, m),
+                                       j.cancelled, rows=empty)
+                    left = sum(1 for k in empty if not p.segments[k].trans.strip())
+                    msg += f" · đã dịch {len(empty) - left} câu mới" + (f" (⚠ {left} câu chưa dịch được)" if left else "")
+            if pipeline.has_dub(p) and any(p.segments[k].trans.strip() for k in rows):
+                pipeline.redub(p, rows, rate, st, lambda x, m="": j.update(0.6 + 0.4 * x, m), j.cancelled, tts_eng)
+                msg += " và tạo lại giọng các câu đó"
             return {"message": msg + " · bấm 'Hoàn tác nối' nếu không ưng", "pick": rows}
-        self.submit("join", "Nối câu bị cắt", fn)
+        self.submit("redub" if pipeline.has_dub(self.p) else "join", "Nối câu bị cắt", fn)
 
     def run_undo_join(self):
         if not self.p or not self.p.data.get("join_backup"):
@@ -3286,18 +3303,28 @@ class ProjectPage(QWidget):
             self.model.set_segments(normalize(cues))
             self._segs_edited()
             return self.win.toast(f"Đã nạp {len(cues)} câu đã dịch" + self._note_trans_lang(), "ok")
-        changed = pipeline.apply_translation(segs, cues)
+        n_before = len(segs)
+        stats: dict = {}
+        changed = pipeline.apply_translation(segs, cues, stats)
         self.model.set_segments(segs)
+        self._fit_rows()
         self._segs_edited()
+        parts = []   # file dịch khác số câu: báo đã xử lý thế nào (không còn câu trống)
+        if stats.get("merged"):
+            parts.append(f"gộp {stats['merged']} câu gốc vào câu trước (file dịch gộp câu)")
+        if stats.get("joined"):
+            parts.append(f"{stats['joined']} câu gốc nhận 2 câu dịch, đã nối lại (file dịch tách câu)")
+        if stats.get("added"):
+            parts.append(f"thêm {stats['added']} câu chỉ có trong file dịch")
+        diff = (f"File dịch {len(cues)} câu, dự án {n_before} câu: " + "; ".join(parts) + f" → còn {len(segs)} câu. "
+                if parts else "")
         note = self._note_trans_lang()
-        if note:
-            self.win.toast(note.strip(" ·"), "info")
         if not changed:
-            return self.win.toast("File này không làm đổi câu nào (lời Việt giống hệt bản đang có)", "warn")
+            return self.win.toast(diff + "File này không làm đổi câu nào (lời Việt giống hệt bản đang có)" + note, "warn")
         self.model.set_picked(range(len(segs)), False)
         self.model.set_picked(changed)       # tích sẵn các câu đổi lời -> bấm "Tạo lại giọng…" là đọc lại đúng các câu này
-        self.win.toast(f"Đã nạp bản dịch: {len(changed)}/{len(segs)} câu đổi lời và đã được tích sẵn – bấm "
-                       "'Tạo lại giọng các câu đã tích' để đọc lại và cập nhật vào video", "ok")
+        self.win.toast(diff + f"Đã nạp bản dịch: {len(changed)}/{len(segs)} câu đổi lời và đã được tích sẵn – bấm "
+                       "'Tạo lại giọng các câu đã tích' để đọc lại và cập nhật vào video" + note, "ok")
 
     def _save_mp3(self, src: str | Path | None, default_name: str):
         if not src or not Path(src).exists():

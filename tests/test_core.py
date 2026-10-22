@@ -2855,3 +2855,68 @@ def test_join_button_and_split_style_gui(monkeypatch):
     assert [s.text for s in pp.model.segs] == ["放开我，不好", "吃。", "嘎！"]
     config.save_settings({"split_style": "dub"})
     win.close()
+
+
+def test_apply_translation_different_line_count():
+    """Nạp SRT đã dịch khác số câu: file dịch gộp câu -> gộp câu gốc (không còn câu trống); tách câu -> nối bản dịch;
+    câu chỉ có trong file dịch -> thêm câu mới."""
+    from trami import pipeline
+
+    segs = [Segment(i * 2, i * 2 + 1.5, f"句{i}", f"cũ {i}") for i in range(10)]
+    segs[3].extra["tts_file"] = "x.wav"
+    cues = [Segment(i * 2, i * 2 + 1.5, f"Câu {i}") for i in range(10) if i not in (3, 4)]
+    cues.insert(3, Segment(6.0, 9.5, "Câu 3 và 4 gộp"))
+    st = {}
+    changed = pipeline.apply_translation(segs, cues, st)
+    assert len(segs) == 9 and st["merged"] == 1 and all(s.trans for s in segs)
+    assert (segs[3].text, segs[3].start, segs[3].end, segs[3].trans) == ("句3句4", 6, 9.5, "Câu 3 và 4 gộp")
+    assert "tts_file" not in segs[3].extra and 3 in changed
+    segs = [Segment(i * 2, i * 2 + 1.5, f"句{i}", "") for i in range(10)]
+    cues = [Segment(i * 2, i * 2 + 1.5, f"Câu {i}") for i in range(10) if i != 2]
+    cues += [Segment(4.0, 4.7, "Câu 2a"), Segment(4.8, 5.5, "câu 2b"), Segment(25, 26, "Thêm mới")]
+    st = {}
+    pipeline.apply_translation(segs, cues, st)
+    assert len(segs) == 11 and st == {"merged": 0, "joined": 1, "added": 1}
+    assert segs[2].trans == "Câu 2a câu 2b" and (segs[-1].text, segs[-1].trans) == ("", "Thêm mới")
+    # câu dịch chỉ chạm nhẹ câu bên cạnh (< 30 %) -> không gộp nhầm
+    segs = [Segment(0, 2, "你好", ""), Segment(2.1, 4, "再见", "")]
+    pipeline.apply_translation(segs, [Segment(0, 2.3, "Xin chào"), Segment(2.3, 4, "Tạm biệt"), Segment(3.9, 4.5, "x")])
+    assert [s.trans for s in segs] == ["Xin chào", "Tạm biệt x"]
+
+
+def test_join_keeps_or_translates_new_lines(monkeypatch):
+    """Nối câu ở dự án đã dịch: câu mới = các dòng cũ ghép lại -> giữ bản dịch; câu tách lại -> tự dịch luôn (trước để
+    trống)."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    pytest.importorskip("jieba")
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        pytest.skip(str(e))
+    from trami import align, config, translate
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+
+    out, _ = align.join_broken([Segment(0, 1, "放开我，不好", "Buông tôi ra, không"),
+                                Segment(1.5, 2, "吃。", "ngon."), Segment(3, 4, "嘎！", "Quác!")])
+    assert out[0].text == "放开我，不好吃。" and out[0].trans == "Buông tôi ra, không ngon."
+    QApplication.instance() or QApplication([])
+    config.save_settings({"split_style": "dub", "translate_engine": "google"})
+    monkeypatch.setattr(translate.Translator, "translate_lines",
+                        lambda self, lines, *a, **k: [f"VI {x}" for x in lines])
+    p = Project.create("noi_cau_dich")
+    p.segments = [Segment(53.28, 54.98, "那是当然，", "Đương nhiên rồi,"), Segment(55.36, 56.42, "我可是最强", "tôi là"),
+                  Segment(57.44, 61.22, "AI。你先别最强了，已经有十份鹈鹕自行车等着你生成。", "AI mạnh nhất. Thôi bớt đi…")]
+    p.save()
+    win = MainWindow()
+    win.open_project(p.id)
+    pp = win.project_page
+    jobs = []
+    pp.submit = lambda kind, title, fn: jobs.append(fn(type("J", (), {"update": lambda *a: None,
+                                                                    "cancelled": lambda *a: False})(), p))
+    pp.run_join()
+    segs = p.segments
+    assert [s.text for s in segs] == ["那是当然，我可是最强AI。", "你先别最强了，已经有十份鹈鹕自行车等着你生成。"]
+    assert all(s.trans.startswith("VI ") for s in segs) and "đã dịch 2 câu mới" in jobs[0]["message"]
+    win.close()
