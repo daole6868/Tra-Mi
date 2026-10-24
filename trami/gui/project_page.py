@@ -1048,6 +1048,9 @@ class ProjectPage(QWidget):
         spk.add(dt)
         self.d_line_voice = QComboBox()
         self.d_line_voice.setMinimumContentsLength(16)
+        # chọn là áp luôn cho câu đã tích (trước phải bấm thêm "Đổi giọng" – chọn xong bấm thẳng Tạo lại giọng thì câu
+        # vẫn đọc giọng cũ)
+        self.d_line_voice.activated.connect(lambda _i: self._set_line_voice() if self.model.selected else None)
         self.d_speed = QDoubleSpinBox()
         self.d_speed.setRange(0.5, 2.0)
         self.d_speed.setSingleStep(0.05)
@@ -3461,9 +3464,13 @@ class ProjectPage(QWidget):
         if not rows:
             return self.win.toast("Tích chọn câu cần đổi giọng ở cột Chọn trước", "warn")
         vid = self.d_line_voice.currentData() or ""
-        for r in rows:
+        changed = [r for r in rows if (self.model.segs[r].extra.get("voice") or "") != vid]
+        for r in changed:
             self.model.setData(self.model.index(r, C_VOICE), vid)
-        self.win.toast(f"Đã đổi giọng {len(rows)} câu – bấm 'Tạo lại giọng các câu đã tích' để đọc lại", "ok")
+        if changed:
+            self._save_segs_now()
+        name = self.d_line_voice.currentText() if vid else "giọng của người nói"
+        self.win.toast(f"{len(rows)} câu đã tích đọc bằng {name} – bấm 'Tạo lại giọng các câu đã tích' để đọc lại", "ok")
 
     def _apply_speed(self, rows: list[int], speed: float | None):
         """Tốc độ đọc tối thiểu cho các câu (None = về tốc độ gốc) -> xếp lại bản lồng đang dùng (không đọc lại câu nào),
@@ -3510,6 +3517,12 @@ class ProjectPage(QWidget):
         rows = sorted(self.model.selected)
         if not rows:
             return self.win.toast("Tích chọn câu cần tạo lại giọng ở cột Chọn trước", "warn")
+        vid = self.d_line_voice.currentData() or ""
+        if vid and any((self.model.segs[r].extra.get("voice") or "") != vid for r in rows):
+            # ô "Giọng cho câu đã tích" đang chọn 1 giọng mà câu tích chưa mang giọng đó -> áp trước khi đọc lại
+            for r in rows:
+                self.model.setData(self.model.index(r, C_VOICE), vid)
+            self._save_segs_now()
         self._redub_rows(rows)
 
     def _redub_rows(self, rows: list[int]):
@@ -3530,6 +3543,13 @@ class ProjectPage(QWidget):
             pipeline.redub(p, rows, rate, st, j.update, j.cancelled, eng)
             sts = p.data.get("dub_stats") or {}
             msg = f"Đã tạo lại giọng {sts.get('redone', len(rows))}/{len(rows)} câu – trình phát đang dùng bản mới"
+            segs = p.segments
+            used = sorted({segs[r].extra.get("voice_used") for r in rows if r < len(segs) and segs[r].extra.get("voice_used")})
+            if used:
+                msg += " · giọng: " + ", ".join(pipeline.voice_label(v) for v in used)
+            for spec, n in (sts.get("fallback") or {}).items():
+                msg += (f" · ⚠ {n} câu chọn {pipeline.voice_label(spec)} nhưng bộ đọc này chưa cài / giọng mẫu đã xoá – "
+                        "đã đọc bằng Hoài My (Edge)")
             if sts.get("kept_old"):
                 msg += f". ⚠ {sts['kept_old']} câu đọc lỗi nên giữ giọng cũ: " + "; ".join(sts.get("error_samples") or [])
             return {"message": msg}

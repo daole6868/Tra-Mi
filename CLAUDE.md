@@ -929,6 +929,11 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   bảng mục 2 -> dự án về `voice_all = ""`; dòng "Giọng đọc" ghi "mọi người nói dùng 1 giọng: …". Giả lập 2 video (VieNeu
   giả, file mẫu Ngọc): mọi câu đọc bằng đúng file mẫu Ngọc.
 
+- 2.0.67: "Giọng cho câu đã tích" (mục 2): chọn giọng ở ô rồi bấm thẳng "Tạo lại giọng các câu đã tích" (không bấm "Đổi
+  giọng") -> câu vẫn đọc giọng cũ. Sửa: `d_line_voice.activated` áp ngay cho câu đã tích (`_set_line_voice`, lưu ngay);
+  `_redub_picked` thấy ô đang chọn 1 giọng mà câu tích chưa mang giọng đó -> áp trước khi đọc lại; thông báo tạo lại
+  giọng ghi "giọng: <giọng thật đã đọc>" + cảnh báo giọng không dùng được (`stats["fallback"]`).
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
