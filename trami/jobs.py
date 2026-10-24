@@ -1,4 +1,11 @@
-"""Hàng đợi tác vụ nền: chạy lần lượt, báo tiến độ, huỷ được."""
+"""Hàng đợi tác vụ nền: chạy NHIỀU việc cùng lúc, báo tiến độ, huỷ được.
+
+Quy tắc chia luồng (chạy được ngay thì chạy, không phải chờ hết việc trước):
+- tối đa MAX_RUNNING việc cùng lúc;
+- 2 việc của CÙNG 1 dự án không chạy cùng lúc (cùng ghi 1 file dự án -> mất dữ liệu); khác dự án thì chạy song song;
+- 2 việc nặng GPU (nghe, tách giọng, đọc giọng AI, xoá phụ đề AI…) không chạy cùng lúc (tránh hết bộ nhớ card đồ hoạ);
+  việc dùng mạng / CPU (tải video, dịch bằng API, xuất video, tải mô hình) chạy song song với việc GPU.
+Trong 1 việc "Dịch tự động" chế độ song song, các bước tách / dịch / đọc giọng tự chạy chồng lên nhau (pipeline.auto)."""
 from __future__ import annotations
 
 import threading
@@ -26,6 +33,7 @@ class Job:
     created: float = field(default_factory=time.time)
     started: float = 0.0
     finished: float = 0.0
+    gpu: bool = False
     _cancel: threading.Event = field(default_factory=threading.Event, repr=False)
     _fn: Callable | None = field(default=None, repr=False)
 
@@ -37,7 +45,7 @@ class Job:
         return {"id": self.id, "kind": self.kind, "title": self.title, "project_id": self.project_id,
                 "status": self.status, "progress": round(self.progress, 4), "message": self.message,
                 "result": self.result, "error": self.error, "created": self.created, "started": self.started,
-                "finished": self.finished, "eta": round(eta)}
+                "finished": self.finished, "eta": round(eta), "gpu": self.gpu}
 
     # dùng trong hàm xử lý
     def update(self, p: float, msg: str = ""):
@@ -49,20 +57,41 @@ class Job:
         return self._cancel.is_set()
 
 
+MAX_RUNNING = 4
+# việc nặng GPU (mỗi lúc 1 việc); việc khác (mạng / CPU) chạy song song
+GPU_KINDS = {"auto", "recognize", "separate", "diarize", "inpaint", "dub", "redub", "realign"}
+# việc chỉ ĐỌC dự án (không ghi project.json) -> chạy được song song với việc khác của cùng dự án
+READONLY_KINDS = {"preview", "tool"}
+
+
+def needs_gpu(kind: str) -> bool:
+    if kind == "translate":   # dịch trên máy (Hy-MT2) mới dùng GPU; dịch bằng API / Google thì không
+        try:
+            from .config import load_settings
+
+            return load_settings().get("translate_engine") == "hymt"
+        except Exception:  # noqa: BLE001
+            return False
+    return kind in GPU_KINDS
+
+
 class JobManager:
-    def __init__(self, workers: int = 1):
+    def __init__(self, workers: int = MAX_RUNNING):
         self.jobs: dict[str, Job] = {}
         self.queue: list[str] = []
+        self.running: set[str] = set()
         self.cv = threading.Condition()
-        for _ in range(workers):
-            threading.Thread(target=self._worker, daemon=True).start()
+        for i in range(workers):
+            threading.Thread(target=self._worker, daemon=True, name=f"trami-job-{i}").start()
 
-    def submit(self, kind: str, title: str, fn: Callable[[Job], dict | None], project_id: str = "") -> Job:
-        job = Job(id=uuid.uuid4().hex[:10], kind=kind, title=title, project_id=project_id, _fn=fn)
+    def submit(self, kind: str, title: str, fn: Callable[[Job], dict | None], project_id: str = "",
+               gpu: bool | None = None) -> Job:
+        job = Job(id=uuid.uuid4().hex[:10], kind=kind, title=title, project_id=project_id, _fn=fn,
+                  gpu=needs_gpu(kind) if gpu is None else bool(gpu))
         with self.cv:
             self.jobs[job.id] = job
             self.queue.append(job.id)
-            self.cv.notify()
+            self.cv.notify_all()
         return job
 
     def cancel(self, jid: str) -> bool:
@@ -85,39 +114,82 @@ class JobManager:
     def get(self, jid: str) -> Job | None:
         return self.jobs.get(jid)
 
+    def clear_finished(self) -> int:
+        """Xoá các việc đã xong / lỗi / huỷ khỏi danh sách."""
+        with self.cv:
+            gone = [k for k, j in self.jobs.items() if j.status in ("done", "error", "cancelled")]
+            for k in gone:
+                del self.jobs[k]
+        return len(gone)
+
+    def counts(self) -> tuple[int, int]:
+        """(đang chạy, đang chờ)."""
+        st = [j.status for j in self.jobs.values()]
+        return st.count("running"), st.count("queued")
+
+    def _why_wait(self, job: Job) -> str:
+        """Vì sao việc này chưa chạy được ('' = chạy được ngay)."""
+        run = [self.jobs[r] for r in self.running]
+        if len(run) >= MAX_RUNNING:
+            return f"chờ – đang chạy {len(run)} việc"
+        if job.project_id and job.kind not in READONLY_KINDS and any(
+                r.project_id == job.project_id and r.kind not in READONLY_KINDS for r in run):
+            return "chờ việc khác của dự án này xong"
+        if job.gpu and any(r.gpu for r in run):
+            return "chờ việc dùng card đồ hoạ (GPU) khác xong"
+        return ""
+
+    def _next(self) -> Job | None:
+        for jid in self.queue:
+            job = self.jobs[jid]
+            why = self._why_wait(job)
+            if not why:
+                return job
+            job.message = "Đang chờ: " + why
+        return None
+
     def _worker(self):
         while True:
             with self.cv:
-                while not self.queue:
-                    self.cv.wait()
-                jid = self.queue.pop(0)
-            job = self.jobs[jid]
-            if job._cancel.is_set():
-                continue
-            job.status, job.started, job.message = "running", time.time(), "Đang bắt đầu…"
+                job = self._next()
+                while job is None:
+                    self.cv.wait(1.0)
+                    job = self._next()
+                self.queue.remove(job.id)
+                self.running.add(job.id)
             try:
-                # mọi lần gọi mạng trong tác vụ biết nút Huỷ + báo "mất mạng – đang chờ" vào dòng trạng thái
-                with net.task(job.cancelled, lambda m, j=job: j.update(j.progress, m)):
-                    res = job._fn(job) if job._fn else None
-                job.result = res or {}
-                job.status, job.progress, job.message = "done", 1.0, job.result.get("message", "Hoàn tất")
-            except Cancelled:
-                job.status, job.message = "cancelled", "Đã huỷ"
-            except Exception as e:
-                from .config import err_text, log_error
-
-                job.status, job.error = "error", err_text(e)
-                job.message = "Lỗi: " + err_text(e)[:300]
-                traceback.print_exc()
-                log_error(job.title)
+                if not job._cancel.is_set():
+                    self._run(job)
             finally:
-                job.finished = time.time()
-                try:   # thư viện AI vừa nạp có thể để lại module "lười" làm PySide6 sập -> dọn đi
-                    from .diarize import drop_broken_lazy_modules
+                with self.cv:
+                    self.running.discard(job.id)
+                    self.cv.notify_all()
 
-                    drop_broken_lazy_modules()
-                except Exception:  # noqa: BLE001
-                    pass
+    def _run(self, job: Job):
+        job.status, job.started, job.message = "running", time.time(), "Đang bắt đầu…"
+        try:
+            # mọi lần gọi mạng trong tác vụ biết nút Huỷ + báo "mất mạng – đang chờ" vào dòng trạng thái
+            with net.task(job.cancelled, lambda m, j=job: j.update(j.progress, m)):
+                res = job._fn(job) if job._fn else None
+            job.result = res or {}
+            job.status, job.progress, job.message = "done", 1.0, job.result.get("message", "Hoàn tất")
+        except Cancelled:
+            job.status, job.message = "cancelled", "Đã huỷ"
+        except Exception as e:
+            from .config import err_text, log_error
+
+            job.status, job.error = "error", err_text(e)
+            job.message = "Lỗi: " + err_text(e)[:300]
+            traceback.print_exc()
+            log_error(job.title)
+        finally:
+            job.finished = time.time()
+            try:   # thư viện AI vừa nạp có thể để lại module "lười" làm PySide6 sập -> dọn đi
+                from .diarize import drop_broken_lazy_modules
+
+                drop_broken_lazy_modules()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 manager = JobManager()

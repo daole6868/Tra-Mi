@@ -75,8 +75,13 @@ Bản exe kèm AI nâng cao khá nặng (2–4 GB) vì có PyTorch.
      tiếng đều theo tiếng này (mỗi dự án chọn riêng; Edge và OmniVoice đọc được cả 5 tiếng, VieNeu chỉ đọc tiếng Việt).
    - **Thể loại**: quyết định cách xưng hô, ví dụ cổ trang dùng ta – ngươi, huynh – đệ.
    - **Phụ đề Trung cũ**: chọn *Xoá sạch bằng AI*.
-   - **Lồng tiếng**: bật nếu muốn thêm giọng Việt.
-3. Bấm **Bắt đầu dịch tự động**. Thanh tiến độ ở cuối cửa sổ hiện % hoàn thành và thời gian còn lại.
+   - **Lồng tiếng**: bật nếu muốn thêm giọng Việt (tắt thì chỉ dịch phụ đề, không đọc giọng).
+   - **Giọng lồng**: 1 giọng cho mọi nhân vật, *Tự gán giọng nam / nữ*, hoặc để mặc định = giọng chọn ở tab Lồng tiếng mục 2.
+   - **Vừa tách vừa dịch**: nghe tới đâu dịch tới đó (đủ "Số câu mỗi lần gửi" của công cụ dịch là gửi), câu dịch hiện
+     ngay ở tab Phụ đề, Edge đọc trước giọng các câu đã dịch – nhanh hơn chạy lần lượt từng bước.
+3. Bấm **Bắt đầu dịch tự động**: tool làm trọn nghe → dịch → lồng tiếng (nếu bật) → xoá phụ đề cũ → xuất video.
+   Thanh tiến độ ở cuối cửa sổ hiện % hoàn thành và thời gian còn lại; mọi việc đang chạy xem ở mục **Việc đang làm**
+   (thanh bên trái). Nhiều dự án chạy được cùng lúc, mỗi lúc 1 việc dùng card đồ hoạ.
 4. Soát phụ đề ở tab **Phụ đề**, rồi mở tab **Xuất** để lấy video MP4 và file SRT.
 
 Để dịch hàng loạt, chọn nhiều file cùng lúc ở Trang chủ, hoặc dùng trang **Xử lý hàng loạt**.

@@ -77,6 +77,7 @@ class Sidebar(QFrame):
         self.group = QButtonGroup(self)
         self.nav: dict[str, NavButton] = {}
         for key, text, ic in (("home", "Trang chủ", "home"), ("project", "Dự án đang mở", "film"),
+                              ("jobs", "Việc đang làm", "cpu"),
                               ("batch", "Xử lý hàng loạt", "stack"), ("concat", "Ghép nhiều video", "merge"),
                               ("settings", "Cài đặt", "settings")):
             b = NavButton(text, ic)
@@ -519,7 +520,8 @@ class BatchPage(QWidget):
                 "target": self.target.currentData(),
                 "hardsub_mode": self.hardsub.currentData(), "burn": which != "none",
                 "which": which if which != "none" else "trans", "dub": self.dub.isChecked(),
-                "tts_engine": self.tts.currentData(), "separate": True}
+                "tts_engine": self.tts.currentData(), "separate": True,
+                "parallel": bool(load_settings().get("auto_parallel", True))}
         aspect = self.aspect.currentData()
         n = 0
         for it in items:
@@ -1074,11 +1076,14 @@ class JobsBar(QFrame):
         self.cancel = button("Huỷ", "x", flat=True)
         self.cancel.clicked.connect(self._cancel)
         self.cancel.hide()
+        self.all = button("Việc đang làm", "list", flat=True, on_click=lambda: win.show_page("jobs"))
+        self.all.hide()
         lay.addWidget(self.icon)
         lay.addLayout(tb, 1)
         lay.addWidget(self.queue)
         lay.addWidget(self.bar)
         lay.addWidget(self.cancel)
+        lay.addWidget(self.all)
         self.cur = None
 
     def paintEvent(self, e):
@@ -1095,17 +1100,18 @@ class JobsBar(QFrame):
         running = [j for j in jobs if j["status"] == "running"]
         queued = [j for j in jobs if j["status"] == "queued"]
         self.queue.setText(f"{len(queued)} đang chờ" if queued else "")
+        self.all.setVisible(bool(jobs))
         if running:
             j = running[0]
             self.cur = j["id"]
             self.icon.color = theme.ACCENT2
             self.icon.name = "cpu"
-            self.title.setText(j["title"])
-            eta = f" · còn ~{j['eta'] // 60} phút" if j["eta"] > 90 else (f" · còn ~{j['eta']}s" if j["eta"] > 0 else "")
-            self.msg.setText(f"{j['message']} · {j['progress'] * 100:.1f}%{eta}")
+            more = f"  (+{len(running) - 1} việc khác đang chạy)" if len(running) > 1 else ""
+            self.title.setText(j["title"] + more)
+            self.msg.setText(f"{j['message']} · {j['progress'] * 100:.1f}%{eta_text(j)}")
             self.bar.set(j["progress"], True)
             self.bar.show()
-            self.cancel.show()
+            self.cancel.setVisible(len(running) == 1)   # nhiều việc: huỷ từng việc ở trang Việc đang làm
         else:
             self.cur = None
             self.icon.color = theme.MUTED
@@ -1121,6 +1127,152 @@ class JobsBar(QFrame):
             self.bar.hide()
             self.cancel.hide()
         self.icon.update()
+
+
+def eta_text(j: dict) -> str:
+    e = j.get("eta", 0)
+    return f" · còn ~{e // 60} phút" if e > 90 else (f" · còn ~{e}s" if e > 0 else "")
+
+
+def _clock(t: float) -> str:
+    return time.strftime("%H:%M", time.localtime(t)) if t else ""
+
+
+def _dur(sec: float) -> str:
+    sec = int(max(0, sec))
+    return f"{sec // 3600}:{sec % 3600 // 60:02d}:{sec % 60:02d}" if sec >= 3600 else f"{sec // 60}:{sec % 60:02d}"
+
+
+class JobRow(QFrame):
+    """1 dòng việc: icon trạng thái, tên, dòng tiến độ, thanh %, nút Mở dự án / Huỷ."""
+
+    def __init__(self, win, job: dict):
+        super().__init__()
+        self.win = win
+        self.jid = job["id"]
+        self.pid = job.get("project_id", "")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(4, 6, 4, 6)
+        lay.setSpacing(12)
+        self.icon = IconBadge("cpu", 30, theme.MUTED)
+        self.title = label(job["title"])
+        self.title.setFont(theme.font(9.6, QFont.Weight.DemiBold))
+        self.msg = label("", "muted", wrap=True)
+        self.msg.setFont(theme.font(8.8))
+        tb = QVBoxLayout()
+        tb.setSpacing(2)
+        tb.addWidget(self.title)
+        tb.addWidget(self.msg)
+        self.bar = ProgressBar(height=7)
+        self.bar.setFixedWidth(220)
+        self.pct = label("", "muted")
+        self.pct.setFixedWidth(52)
+        self.pct.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.open_b = button("Mở dự án", "film", flat=True, on_click=self._open)
+        self.open_b.setVisible(bool(self.pid))
+        self.cancel_b = button("Huỷ", "x", flat=True, on_click=lambda: manager.cancel(self.jid))
+        lay.addWidget(self.icon)
+        lay.addLayout(tb, 1)
+        lay.addWidget(self.bar)
+        lay.addWidget(self.pct)
+        lay.addWidget(self.open_b)
+        lay.addWidget(self.cancel_b)
+        self.set(job)
+
+    def _open(self):
+        if self.pid and Project(self.pid).exists:
+            self.win.open_project(self.pid)
+
+    def set(self, j: dict):
+        st = j["status"]
+        self.title.setText(j["title"])
+        gpu = " · GPU" if j.get("gpu") else ""
+        if st == "running":
+            self.icon.name, self.icon.color = "cpu", theme.ACCENT2
+            self.msg.setText(f"{j['message']}{eta_text(j)} · chạy {_dur(time.time() - j['started'])}{gpu}")
+            self.bar.set(j["progress"], True)
+            self.pct.setText(f"{j['progress'] * 100:.0f}%")
+        elif st == "queued":
+            self.icon.name, self.icon.color = "clock", theme.MUTED
+            self.msg.setText((j["message"] or "Đang chờ") + gpu)
+            self.bar.set(0)
+            self.pct.setText("")
+        else:
+            self.icon.name = {"done": "check", "error": "x"}.get(st, "info")
+            self.icon.color = {"done": theme.OK, "error": theme.ERR}.get(st, theme.MUTED)
+            took = f" · {_dur(j['finished'] - j['started'])}" if j.get("started") else ""
+            text = j["error"][:400] if st == "error" else j["message"]
+            self.msg.setText(f"{text} · xong lúc {_clock(j['finished'])}{took}")
+            self.bar.set(1.0 if st == "done" else j["progress"])
+            self.pct.setText({"done": "Xong", "error": "Lỗi", "cancelled": "Đã huỷ"}.get(st, ""))
+        self.bar.setVisible(st != "queued")
+        self.cancel_b.setVisible(st in ("running", "queued"))
+        self.icon.update()
+
+
+class JobsPage(QWidget):
+    """Việc đang làm: mọi tác vụ đang chạy / đang chờ / vừa xong của mọi dự án."""
+
+    GROUPS = (("running", "Đang chạy", "cpu"), ("queued", "Đang chờ", "clock"), ("finished", "Đã xong", "check"))
+
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+        inner = QWidget()
+        v = QVBoxLayout(inner)
+        v.setContentsMargins(28, 24, 28, 24)
+        v.setSpacing(16)
+        v.addWidget(label("Việc đang làm", "h1"))
+        v.addWidget(label("Việc của các dự án khác nhau chạy cùng lúc (tối đa 4). Mỗi lúc 1 việc dùng card đồ hoạ (GPU); "
+                          "việc của cùng 1 dự án làm lần lượt.", "muted", wrap=True))
+        self.cards: dict[str, SectionCard] = {}
+        self.boxes: dict[str, QVBoxLayout] = {}
+        self.empty: dict[str, QLabel] = {}
+        for key, title, ic in self.GROUPS:
+            c = SectionCard(title, ic)
+            box = QVBoxLayout()
+            box.setSpacing(0)
+            c.add(box)
+            e = label("Không có", "muted")
+            c.add(e)
+            if key == "finished":
+                c.head.addWidget(button("Xoá danh sách đã xong", "trash", flat=True, on_click=self._clear))
+            self.cards[key], self.boxes[key], self.empty[key] = c, box, e
+            v.addWidget(c)
+        v.addStretch(1)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(scroll(inner))
+        self.rows: dict[str, JobRow] = {}
+        self._where: dict[str, str] = {}
+
+    def _clear(self):
+        manager.clear_finished()
+        self.update_jobs(manager.list())
+
+    def update_jobs(self, jobs: list[dict]):
+        want: dict[str, list[dict]] = {"running": [], "queued": [], "finished": []}
+        for j in jobs:
+            want[j["status"] if j["status"] in ("running", "queued") else "finished"].append(j)
+        want["queued"].sort(key=lambda j: j["created"])   # chờ: theo thứ tự gửi
+        layout_now = {j["id"]: g for g, js in want.items() for j in js}
+        if layout_now != self._where or [*self.rows] != [*layout_now]:
+            for r in self.rows.values():   # dựng lại khi có việc mới / đổi nhóm
+                r.hide()
+                r.setParent(None)
+                r.deleteLater()
+            self.rows = {}
+            for g, js in want.items():
+                for j in js:
+                    row = JobRow(self.win, j)
+                    self.boxes[g].addWidget(row)
+                    self.rows[j["id"]] = row
+            self._where = layout_now
+        else:
+            for j in jobs:
+                self.rows[j["id"]].set(j)
+        for g, js in want.items():
+            self.empty[g].setVisible(not js)
 
 
 # ====================================================================== Cửa sổ chính
@@ -1142,7 +1294,9 @@ class MainWindow(QMainWindow):
         self.batch_page = BatchPage(self)
         self.concat_page = ConcatPage(self)
         self.settings_page = SettingsPage(self)
-        self.page_keys = {"home": self.home, "project": self.project_page, "batch": self.batch_page,
+        self.jobs_page = JobsPage(self)
+        self.page_keys = {"home": self.home, "project": self.project_page, "jobs": self.jobs_page,
+                          "batch": self.batch_page,
                           "concat": self.concat_page, "settings": self.settings_page}
         for w in self.page_keys.values():
             self.pages.addWidget(w)
@@ -1177,6 +1331,8 @@ class MainWindow(QMainWindow):
             self.settings_page.load()
         if key == "home":
             self.refresh_projects()
+        if key == "jobs":
+            self.jobs_page.update_jobs(manager.list())
         self.pages.setCurrentWidget(self.page_keys[key])
         self.sidebar.nav[key].setChecked(True)
         self.sidebar.set_compact(key == "project")   # trang dự án: thanh bên chỉ còn icon, rộng chỗ cho timeline
@@ -1229,6 +1385,9 @@ class MainWindow(QMainWindow):
     def poll(self):
         jobs = manager.list()
         self.jobsbar.update_jobs(jobs)
+        self.sidebar.nav["jobs"].set_badge(sum(j["status"] in ("running", "queued") for j in jobs))
+        if self.pages.currentWidget() is self.jobs_page:
+            self.jobs_page.update_jobs(jobs)
         self.project_page.update_job(jobs)
         for j in jobs:
             prev = self._seen.get(j["id"])

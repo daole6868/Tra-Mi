@@ -34,7 +34,9 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `omni_design.py` (23 giọng OmniVoice chọn sẵn tạo theo mô tả).
 - `trami/audiomix.py` – quy tắc trộn âm thanh dùng chung cho xuất video (`video.build_and_render`) và bộ trộn trực tiếp
   `LiveMix` của trình phát (`player.LiveAudio` + `_Feeder` ở QThread riêng, QAudioSink); cài đặt ở `edit["audio"]`, tab `gui/audio_tab.py`.
-- `trami/jobs.py` – hàng đợi 1 luồng cho tác vụ dài; `trami/gui/*` – giao diện (QPainter), `common.run_async`,
+- `trami/jobs.py` – hàng đợi NHIỀU luồng (từ 2.0.64, tối đa `MAX_RUNNING` 4): cùng dự án lần lượt (trừ `READONLY_KINDS`),
+  mỗi lúc 1 việc GPU (`GPU_KINDS`, dịch Hy-MT2); `progress_hook` theo từng luồng; trang `main.JobsPage` "Việc đang làm".
+  `trami/stream.py` – `LivePipeline` (tab Tự động "Vừa tách vừa dịch"); `trami/gui/*` – giao diện `trami/gui/*` – giao diện (QPainter), `common.run_async`,
   `WheelGuard` (lăn chuột không đổi ô chọn khi chưa bấm vào). Trang dự án bố cục kiểu trình dựng phim (từ 2.0.28):
   trái `IconTabs` + 9 tab (Âm thanh = tab 6, `TAB_AUDIO`…`TAB_EXPORT` = 8), giữa trình phát, phải `gui/inspector.LineInspector` (câu đang chọn), dưới `gui/timeline.TrackTimeline`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
@@ -66,7 +68,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `call` (gọi ở luồng phụ, Huỷ dừng ngay), `session` (requests có TCP keepalive). `jobs` chạy mọi tác vụ trong
   `net.task(cancel, report)` -> hàm gọi mạng tự lấy nút Huỷ + dòng trạng thái.
 - `trami/songs.py` – đoán cụm câu đang HÁT (nốt ngân trên giọng đã tách) -> 🎵; `pipeline.mark_song_lines` (♪ trong bản dịch).
-- `tests/test_core.py` – `python -m pytest -q tests` (111 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (115 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -874,6 +876,35 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   "Ollama" (giải thích để ở dòng mô tả dưới tiêu đề), "Khi câu đọc dài hơn chỗ trống", thẻ "Kỹ năng dịch AI" (tab Phụ đề).
   Viết tiêu đề mới: chỉ tên, không thêm cụm giải thích.
 
+- 2.0.64: "bấm Bắt đầu dịch tự động có làm trọn không" (có: nghe → dịch → lồng tiếng CHỈ khi bật "Lồng tiếng (đọc bản
+  dịch)" → xoá phụ đề cũ → xuất), "chọn giọng như mục 2", "vừa tách vừa dịch, dịch xong hiện ngay tab Phụ đề, có phụ đề
+  là đọc giọng luôn", "mục Việc đang làm", "mọi việc chạy đồng thời, tool tự chia luồng".
+  * `jobs.JobManager` 4 luồng: `_why_wait` (≥ 4 việc / việc khác của cùng dự án / việc GPU khác) -> job.message "Đang chờ:
+    …"; `READONLY_KINDS` (preview, tool) chạy cùng việc khác của dự án; `GPU_KINDS` auto/recognize/separate/diarize/inpaint/
+    dub/redub/realign + translate khi Cài đặt dùng hymt; `clear_finished`, `counts`. `progress_hook` theo luồng
+    (`_by_thread`, thanh tqdm ở luồng phụ của thư viện -> ngữ cảnh mới nhất). Dữ liệu dùng chung giữa 2 việc khác dự án:
+    `_KEY_*` của LLMClient (list/dict, đủ an toàn), tiến trình VieNeu/Omni/Qwen (chỉ việc GPU dùng -> không chạy cùng lúc).
+  * Thanh bên mục "Việc đang làm" (`JobsPage`: Đang chạy / Đang chờ (vì sao) / Đã xong, mỗi dòng `JobRow`: %, còn ~,
+    thời gian chạy, GPU, Mở dự án, Huỷ; "Xoá danh sách đã xong"), số việc trên icon (`NavButton.set_badge`); thanh dưới
+    "+N việc khác đang chạy" + nút "Việc đang làm"; khung tiến độ trang dự án "(+N việc)".
+  * Tab Tự động: "Giọng lồng" `a_voice` = danh sách giọng của mục 2 (`_fill_auto_voices` trong `_fill_speakers`) + "Theo
+    giọng ở tab Lồng tiếng mục 2" ("") + "Tự gán giọng nam / nữ" ("@auto"), nút nghe thử; `pipeline._auto_voices` (1 giọng
+    -> `voices` mọi người nói; @auto -> `speaker_genders` + `tts.auto_assign`). Công tắc "Vừa tách vừa dịch" (`auto_parallel`,
+    mặc định bật; hàng loạt + dòng lệnh theo Cài đặt).
+  * Vừa tách vừa dịch (`opts["parallel"]`): `recognize(on_draft=)` – Qwen3 `transcribe_qwen(on_chunk=)` nghe theo nhóm
+    `STREAM_GROUP` 6 khúc, mỗi nhóm -> `align.draft_lines` (split_timed theo ct + join_broken, bản sao) -> câu nháp; bộ
+    khác: cả phim sau ASR; OCR: sau khi quét. `stream.LivePipeline`: luồng dịch gom đủ `Translator.batch` (= "Số câu mỗi
+    lần gửi" của công cụ) rồi `translate_segments(auto_terms=False, summary=hồ sơ phim nếu có)`, ghi `work/live_draft.json`;
+    luồng đọc trước (chỉ Edge, chỉ khi mọi câu chắc chắn cùng 1 giọng: chọn 1 giọng / 1 người nói / chưa chọn giọng riêng)
+    `synthesize_dub(prepare_only=True)` nhóm ≤ 40 câu / 3 s -> kho work/tts (cùng mã hash với bước lồng tiếng). Nghe xong:
+    `finish()` (bỏ câu nháp chưa gửi), gắn bản dịch vào câu cuối cùng trùng chữ gốc (`live_reused`), gộp bộ nhớ dịch,
+    `translate(only_empty)` dịch câu bị đổi, `dub` dùng lại file đã đọc. Hy-MT2 / VieNeu / OmniVoice (GPU) không chạy
+    song song với bộ nghe. Tab Phụ đề hiện câu nháp khi việc auto đang chạy (`_show_live_draft`, bảng chỉ xem,
+    `_save_segs_now` không ghi đè; xong -> về phụ đề thật). Dòng tiến độ "· đã dịch N/M câu · đọc trước K câu".
+  * `pipeline.dub_default_voice` tách từ `dub`. `_auto_steps` / `_start_live` tách từ `auto`.
+  * Thử: hàng đợi (4 việc song song, GPU lần lượt, cùng dự án lần lượt), tqdm 2 luồng, Qwen theo nhóm, auto song song
+    (gửi 3 lô 3 câu lúc đang nghe, chỉ dịch + đọc lại 1 câu bị đổi, 9 câu đọc trước được dùng lại), chụp giao diện 1600/1366.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -914,5 +945,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.62: chờ người dùng thử Gemini gói miễn phí thật (sandbox không gọi được Google API): thông báo 429 của Gemini
   qua endpoint tương thích OpenAI có đúng chữ "PerDay" / "retry in" như đã đoán không; `response_format` json_object có bị
   từ chối không (đã có tự bỏ khi 400).
+- 2.0.64: chờ người dùng thử "Vừa tách vừa dịch" trên phim thật (Qwen3 + Gemini / DeepSeek + Edge): câu dịch hiện dần ở tab
+  Phụ đề, bao nhiêu câu phải dịch lại sau khi nghe xong; chạy 2 dự án cùng lúc (1 việc GPU + 1 việc mạng / xuất video).
 - 2.0.42: chờ người dùng nghe thử các cách xếp giọng trên video thật (nhất là Tự động với cụm câu dài, Đọc đè 2 giọng
   cùng lúc) và xem phụ đề chạy theo giọng lồng có dễ theo dõi không.

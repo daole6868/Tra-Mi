@@ -34,6 +34,7 @@ def gui():
 
 def cli_translate(args):
     from . import pipeline
+    from .config import load_settings
     from .project import Project
 
     opts = {
@@ -47,6 +48,7 @@ def cli_translate(args):
         "which": args.hien_thi,
         "render": not args.chi_phude,
         "denoise": args.loc_nhieu,
+        "parallel": bool(load_settings().get("auto_parallel", True)),
     }
     from .sitelogin import extract_url
 

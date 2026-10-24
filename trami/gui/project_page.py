@@ -268,6 +268,22 @@ class ProjectPage(QWidget):
         self.a_tts.currentIndexChanged.connect(
             lambda: None if self.loading or self.d_engine.currentData() == self.a_tts.currentData()
             else set_combo(self.d_engine, self.a_tts.currentData()))
+        # giọng lồng: cùng danh sách giọng với tab Lồng tiếng mục 2
+        self.a_voice = combo([("", "(Theo giọng ở tab Lồng tiếng mục 2)")], "")
+        self.a_voice.setMinimumWidth(240)
+        a_play = IconButton("play", "Nghe thử giọng này", 32)
+        a_play.clicked.connect(self._preview_auto_voice)
+        v_row = hbox(self.a_voice, a_play)
+        v_row.setStretch(0, 1)
+        f.row("Giọng lồng", v_row,
+              "1 giọng cho mọi người nói, hoặc 'Tự gán giọng nam / nữ' theo chất giọng từng nhân vật. Để mặc định = "
+              "dùng giọng đã chọn cho từng người nói ở tab Lồng tiếng mục 2")
+        self.a_parallel = f.row("Vừa tách vừa dịch", Switch(bool(s.get("auto_parallel", True))),
+                                "Nghe tới đâu dịch tới đó: đủ 'Số câu mỗi lần gửi' của công cụ dịch (Cài đặt → Công cụ "
+                                "dịch) là gửi đi luôn, câu dịch hiện ngay ở tab Phụ đề; Edge đọc trước giọng các câu đã "
+                                "dịch. Nghe xong, câu bị đổi (nghe lại đoạn sót / tách người nói) được dịch / đọc lại. "
+                                "Dịch trên máy (Hy-MT2) và VieNeu / OmniVoice dùng card đồ hoạ nên chạy sau khi nghe xong")
+        self.a_parallel.toggled.connect(lambda on: None if self.loading else self._save_setting("auto_parallel", on))
         self.a_denoise = f.row("Lọc nhiễu âm thanh", Switch(False))
         self.a_force = f.row("Nhận dạng lại từ đầu", Switch(False))
         self.a_method.currentIndexChanged.connect(
@@ -345,6 +361,8 @@ class ProjectPage(QWidget):
             tv.setColumnHidden(c, True)
         tv.clicked.connect(self._row_clicked)
         self.table = tv
+        self._edit_triggers = tv.editTriggers()
+        self._live_draft = None   # mtime file câu nháp đang hiện (vừa tách vừa dịch)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Tìm trong phụ đề… (gõ S1 để lọc theo người nói)")
         self.search.textChanged.connect(self.proxy.set_query)
@@ -1611,7 +1629,7 @@ class ProjectPage(QWidget):
         self.tracks.canvas.update()
 
     def _save_segs_now(self):
-        if not self.p:
+        if not self.p or self._live_draft:   # đang hiện câu nháp của "vừa tách vừa dịch": không ghi đè dự án
             return
         self.p.reload()
         self.p.segments = self.model.segs
@@ -1642,6 +1660,7 @@ class ProjectPage(QWidget):
         if not self.p:
             return
         mine = [j for j in jobs if j["project_id"] == self.p.id and j["status"] in ("queued", "running")]
+        self._show_live_draft(next((j for j in mine if j["kind"] == "auto" and j["status"] == "running"), None))
         if not mine:
             self.job_box.hide()
             self._cur_job = None
@@ -1650,12 +1669,45 @@ class ProjectPage(QWidget):
         self._cur_job = j["id"]
         self.job_box.show()
         eta = f" · còn ~{j['eta'] // 60} phút" if j["eta"] > 90 else (f" · còn ~{j['eta']}s" if j["eta"] > 0 else "")
-        self.job_title.setText(("Đang chờ: " if j["status"] == "queued" else "") + j["title"])
+        more = f"  (+{len(mine) - 1} việc)" if len(mine) > 1 else ""
+        self.job_title.setText(("Đang chờ: " if j["status"] == "queued" else "") + j["title"] + more)
         self.job_msg.setText(f"{j['message']}  ·  {j['progress'] * 100:.1f}%{eta}")
         self.job_bar.set(j["progress"], busy=j["status"] == "running")
 
+    def _show_live_draft(self, job: dict | None):
+        """Vừa tách vừa dịch: câu đã nghe / đã dịch hiện ngay ở tab Phụ đề (chỉ xem, sửa khi chạy xong)."""
+        from .. import stream
+
+        f = stream.draft_path(self.p.work)
+        try:
+            mt = f.stat().st_mtime if job else 0.0
+        except OSError:
+            mt = 0.0
+        if not job or mt < job["started"]:
+            if self._live_draft:   # chạy xong / huỷ -> về phụ đề thật của dự án
+                self._live_draft = None
+                self.table.setEditTriggers(self._edit_triggers)
+                self.reload()
+            return
+        if self._live_draft == mt:
+            return
+        segs = stream.read_draft(self.p.work)
+        if segs is None:
+            return
+        if not self._live_draft:
+            self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._live_draft = mt
+        at_end = self.table.verticalScrollBar().value() >= self.table.verticalScrollBar().maximum() - 4
+        self.model.set_segments(segs)
+        self._update_count()
+        if at_end:   # đang xem cuối bảng -> cuộn theo câu mới
+            self.table.scrollToBottom()
+
     def job_finished(self, j: dict):
         if self.p and j["project_id"] == self.p.id:
+            if self._live_draft:
+                self._live_draft = None
+                self.table.setEditTriggers(self._edit_triggers)
             self._play_after_mix = getattr(self, "_replay_row", None) if j["kind"] == "redub" and \
                 j.get("status") == "done" else None
             self._replay_row = None if j["kind"] == "redub" else getattr(self, "_replay_row", None)
@@ -1680,6 +1732,7 @@ class ProjectPage(QWidget):
                 "style": self.a_style.currentData(), "hardsub_mode": self.a_hardsub.currentData(),
                 "burn": which != "none", "which": which if which != "none" else "trans",
                 "dub": self.a_dub.isChecked(), "tts_engine": self.a_tts.currentData(),
+                "voice": self.a_voice.currentData() or "", "parallel": self.a_parallel.isChecked(),
                 "denoise": self.a_denoise.isChecked(), "force_recognize": self.a_force.isChecked()}
 
     def run_auto(self):
@@ -1753,6 +1806,7 @@ class ProjectPage(QWidget):
             self.a_clean.setChecked(bool(st.get("ai_clean_before_translate", True)))
             self.a_review.setChecked(bool(st.get("ai_review_after_translate", False)))
             self.d_interj.setChecked(bool(st.get("dub_drop_interj", True)))
+            self.a_parallel.setChecked(bool(st.get("auto_parallel", True)))
         finally:
             self.loading = was
         self._update_engine_label()
@@ -2957,6 +3011,7 @@ class ProjectPage(QWidget):
         for v in voices:
             self.d_line_voice.addItem(v["name"], v["id"])
         set_combo(self.d_line_voice, cur or "")
+        self._fill_auto_voices(voices)
         self.inspector.refresh_voices()
         self.spk_table.setRowCount(len(spks))
         self.spk_table.setFixedHeight(36 + 44 * max(1, min(len(spks), 6)))
@@ -2991,6 +3046,26 @@ class ProjectPage(QWidget):
             b.clicked.connect(lambda _=False, c=cb, spk=s["speaker"]: self._preview_voice(c.currentData(), spk))
             self.spk_table.setCellWidget(r, 3, wrap(hbox(b)))
         self._update_voice_note()
+
+    def _fill_auto_voices(self, voices: list[dict]):
+        """Ô "Giọng lồng" ở tab Tự động = danh sách giọng của mục 2 (+ tự gán nam / nữ)."""
+        cur = self.a_voice.currentData() or ""
+        was, self.loading = self.loading, True
+        self.a_voice.clear()
+        self.a_voice.addItem("(Theo giọng ở tab Lồng tiếng mục 2)", "")
+        self.a_voice.addItem("🎲 Tự gán giọng nam / nữ theo từng người nói", "@auto")
+        for v in voices:
+            self.a_voice.addItem(v["name"], v["id"])
+        set_combo(self.a_voice, cur)
+        self.loading = was
+
+    def _preview_auto_voice(self):
+        vid = self.a_voice.currentData() or ""
+        if vid == "@auto":
+            return self.win.toast("Tự gán: mỗi nhân vật 1 giọng nam / nữ – nghe thử từng giọng ở tab Lồng tiếng mục 2",
+                                  "warn")
+        spk = next((x["speaker"] for x in pipeline.speaker_list(self.p)), "S1") if self.p else "S1"
+        self._preview_voice(vid or (self.p.data.get("voices") or {}).get(spk, ""), spk)
 
     def _set_voice(self, spk: str, vid: str):
         if self.loading:

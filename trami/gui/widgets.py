@@ -243,7 +243,30 @@ class NavButton(QAbstractButton):
         self.setFixedHeight(42)
         self._hov = False
         self.compact = False
+        self.badge = 0          # số nhỏ góc phải (vd. số việc đang chạy)
         self.setFont(theme.font(10.2, QFont.Weight.DemiBold))
+
+    def set_badge(self, n: int):
+        if n != self.badge:
+            self.badge = n
+            self.update()
+
+    def _paint_badge(self, p: QPainter, r: QRectF):
+        if not self.badge:
+            return
+        t = str(self.badge) if self.badge < 100 else "99+"
+        f = theme.font(7.6, QFont.Weight.Bold)
+        w = max(17.0, 8 + len(t) * 7.0)
+        if self.compact:
+            br = QRectF(r.center().x() + 3, r.top() + 1, w, 16)
+        else:
+            br = QRectF(r.right() - w - 8, r.center().y() - 8, w, 16)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(theme.accent_gradient(br.left(), 0, br.right(), 0))
+        p.drawRoundedRect(br, 8, 8)
+        p.setPen(QColor("#FFFFFF"))
+        p.setFont(f)
+        p.drawText(br, Qt.AlignmentFlag.AlignCenter, t)
 
     def enterEvent(self, e):
         self._hov = True
@@ -270,12 +293,14 @@ class NavButton(QAbstractButton):
         if self.compact:   # thanh bên thu gọn: chỉ icon ở giữa
             icons.paint_icon(p, self.icon_name, QRectF(r.center().x() - 10, r.center().y() - 10, 20, 20),
                              theme.ACCENT2 if on else col, 1.9)
+            self._paint_badge(p, r)
             return
         icons.paint_icon(p, self.icon_name, QRectF(r.left() + 14, r.center().y() - 10, 20, 20),
                          theme.ACCENT2 if on else col, 1.9)
         p.setPen(QColor(col))
         p.setFont(self.font())
         p.drawText(r.adjusted(46, 0, -6, 0), Qt.AlignmentFlag.AlignVCenter, self.text())
+        self._paint_badge(p, r)
 
 
 # ====================================================================== Công tắc

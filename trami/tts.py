@@ -979,8 +979,10 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                    cancel: Callable[[], bool] | None = None, voices: dict | None = None,
                    ref_audio: str | Path | None = None, settings: dict | None = None,
                    skip_songs: bool = True, stats: dict | None = None, only: set[int] | None = None,
-                   lang: str = "vi", genders: dict | None = None) -> Path:
-    """only: chỉ đọc (lại) các câu này; câu khác dùng giọng đã đọc ở bản trước (extra["tts_file"]) dù lời đã đổi.
+                   lang: str = "vi", genders: dict | None = None, prepare_only: bool = False) -> Path:
+    """prepare_only: chỉ đọc giọng từng câu vào kho đệm (work/tts), không xếp / không ghi bản lồng – chế độ vừa tách
+    vừa dịch đọc trước các câu đã dịch, bước lồng tiếng sau đó dùng lại file (cùng lời + giọng = cùng file).
+    only: chỉ đọc (lại) các câu này; câu khác dùng giọng đã đọc ở bản trước (extra["tts_file"]) dù lời đã đổi.
     Câu đọc lại bị lỗi mà có giọng cũ -> giữ giọng cũ (báo lỗi), không làm hỏng cả bản lồng tiếng.
     lang: tiếng đích của dự án; mỗi câu còn được nhận tiếng theo chữ viết (langs.detect) -> giọng Edge tự đổi đúng tiếng,
     OmniVoice đọc đúng tiếng, VieNeu (chỉ tiếng Việt) gặp câu tiếng khác thì đọc bằng Edge cùng nam / nữ.
@@ -1211,6 +1213,10 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                 s.extra["_tts"] = s.extra["tts_file"]
                 kept_old += 1
     ok = sum(1 for s in segs if s.extra.get("_tts") and Path(s.extra["_tts"]).exists())
+    if prepare_only:
+        stats["prepared"] = ok
+        stats["errors"] = errors
+        return Path(out_wav)
     if ok == 0:
         if total_items:
             raise RuntimeError("Không tạo được giọng đọc. " + "; ".join(errors[:3]))

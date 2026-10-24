@@ -109,6 +109,7 @@ DEFAULT_SETTINGS: dict = {
     "dl_cookie_file": "",                     # file cookies.txt (Netscape) người dùng xuất từ trình duyệt
     "dub_skip_songs": True,           # không lồng tiếng các câu đang hát -> giữ nguyên bài hát gốc
     "dub_drop_interj": True,          # lồng tiếng Việt: xoá câu chỉ có 1–2 tiếng cảm thán (A!, Ừm., Ái!) trước khi đọc
+    "auto_parallel": True,            # tab Tự động: vừa tách vừa dịch (nghe tới đâu dịch tới đó, Edge đọc trước giọng)
     "song_detect": True,              # khi nghe: đoán cụm câu đang hát (nốt ngân trên giọng đã tách) -> 🎵
     # Xoá phụ đề
     "inpaint_backend": "lama",        # lama (AI, đẹp) / opencv (nhanh)

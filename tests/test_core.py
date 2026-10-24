@@ -3338,3 +3338,160 @@ def test_standard_skill_default_and_editable(tmp_path):
               "translate_skill": "chuan"}
     assert skills.skill_text(edited) == "- giữ đúng số câu, tên Hán Việt"
     assert [x["id"] for x in skills.all_skills(edited)].count("chuan") == 1
+
+
+def test_jobs_run_concurrently_with_project_and_gpu_rules():
+    """Hàng đợi chạy nhiều việc cùng lúc: khác dự án chạy song song, cùng dự án lần lượt (trừ việc chỉ đọc), mỗi lúc
+    chỉ 1 việc GPU; việc chờ ghi rõ vì sao."""
+    import threading
+    import time as _t
+
+    from trami.jobs import JobManager
+
+    m = JobManager(workers=4)
+    live, peak, lock = set(), {}, threading.Lock()
+
+    def make(name, dur=0.4):
+        def fn(job):
+            with lock:
+                live.add(name)
+                peak[name] = set(live)
+            _t.sleep(dur)
+            with lock:
+                live.discard(name)
+            return {"message": name}
+        return fn
+
+    jobs = [m.submit("translate", "dịch A", make("trA"), "A"),      # mạng
+            m.submit("render", "xuất B", make("rdB"), "B"),          # CPU, dự án khác -> song song
+            m.submit("recognize", "nghe C", make("gpuC"), "C"),      # GPU
+            m.submit("dub", "lồng D", make("gpuD"), "D"),            # GPU thứ 2 -> chờ
+            m.submit("render", "xuất A", make("rdA"), "A"),          # cùng dự án A -> chờ trA
+            m.submit("preview", "xem trước A", make("pvA"), "A")]    # chỉ đọc -> chạy cùng trA
+    _t.sleep(0.15)
+    waiting = {j.title: j.message for j in jobs if j.status == "queued"}
+    assert "card đồ hoạ" in waiting["lồng D"] and "dự án này" in waiting["xuất A"]
+    t0 = _t.time()
+    while any(j.status in ("queued", "running") for j in jobs) and _t.time() - t0 < 10:
+        _t.sleep(0.05)
+    assert all(j.status == "done" for j in jobs)
+    assert {"trA", "rdB", "gpuC", "pvA"} <= peak["pvA"] | peak["trA"]       # 4 việc chạy cùng lúc
+    assert "gpuC" not in peak["gpuD"] and "trA" not in peak["rdA"]
+    assert m.counts() == (0, 0) and m.clear_finished() == 6 and m.list() == []
+
+
+def test_progress_hook_per_thread():
+    """2 việc cùng dùng thanh tqdm của thư viện: mỗi việc nhận đúng tiến độ của mình."""
+    import threading
+
+    tqdm = pytest.importorskip("tqdm")
+    from trami.progress_hook import tqdm_progress
+
+    got = {"a": [], "b": []}
+    barrier = threading.Barrier(2)
+    tqdm.tqdm.set_lock(threading.RLock())   # khoá chung của tqdm có thể bị test trước (tiến trình con) giữ lại
+
+    def run(k, n):
+        with tqdm_progress(lambda x, m: got[k].append(m), label=k):
+            barrier.wait()
+            bar = tqdm.tqdm(total=n, disable=False, file=open(os.devnull, "w"), mininterval=0)
+            for _ in range(n):
+                bar.update(1)
+            bar.close()
+
+    ts = [threading.Thread(target=run, args=("a", 7)), threading.Thread(target=run, args=("b", 9))]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert got["a"] and all(m.startswith("a ") and m.endswith("/7") for m in got["a"])
+    assert got["b"] and all(m.startswith("b ") and m.endswith("/9") for m in got["b"])
+
+
+def test_qwen_streams_chunk_groups(monkeypatch, tmp_path):
+    """Vừa tách vừa dịch: Qwen3-ASR nghe theo nhóm khúc, nghe xong nhóm nào gửi câu nhóm đó ngay."""
+    from trami import asr_qwen
+
+    calls, got = [], []
+
+    class W:
+        def call(self, req, progress=None, cancel=None):
+            calls.append(len(req["spans"]))
+            if progress:
+                progress(1.0, "nghe")
+            return {"items": [{"text": f"第{a:.0f}句话。", "words": []} for a, _ in req["spans"]]}
+
+    monkeypatch.setattr(asr_qwen, "worker", lambda st: W())
+    monkeypatch.setattr(asr_qwen, "_spans", lambda audio, st: [(i * 3.0, i * 3.0 + 2.0) for i in range(14)])
+    monkeypatch.setattr("trami.asr_funasr.load_wav16k", lambda w: np.zeros(16000 * 45, np.float32))
+    monkeypatch.setattr("trami.align.chunk_spans", lambda spans, audio, max_gap, max_len: spans)
+    segs = asr_qwen.transcribe_qwen(tmp_path / "a.wav", {}, "zh", None, None, on_chunk=lambda s: got.append(len(s)))
+    assert calls == [6, 6, 2] and got == [6, 6, 2] and len(segs) == 14
+    calls.clear()
+    asr_qwen.transcribe_qwen(tmp_path / "a.wav", {}, "zh", None, None)
+    assert calls == [14]                                        # chạy thường: 1 lần như cũ
+
+
+def test_auto_parallel_translates_and_reads_while_listening(monkeypatch):
+    """Tab Tự động "vừa tách vừa dịch": câu nghe xong được dịch theo từng lô (đủ số câu mỗi lần gửi), hiện ngay trong
+    file câu nháp, Edge đọc trước; nghe xong chỉ dịch / đọc lại câu bị đổi; giọng chọn ở tab Tự động áp cho mọi người."""
+    import threading
+    import time as _t
+
+    from trami import pipeline, stream, tts
+    from trami import translate as tr
+    from trami.config import save_settings
+    from trami.project import Project
+
+    save_settings({"translate_batch": 3, "tts_voice": "vi-VN-HoaiMyNeural"})
+    sent, spoken, seen = [], [], []
+
+    def fake_google(self, lines):
+        sent.append(list(lines))
+        return [f"dịch {len(l)} {l[1]}" for l in lines]
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, path, voice in items:
+            spoken.append((text, voice))
+            _fake_audio(path, 0.5, 300)
+        return []
+
+    monkeypatch.setattr(tr.Translator, "_google", fake_google)
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    monkeypatch.setattr(stream, "TTS_WAIT", 0.0)
+    texts = [f"第{i}句话" for i in range(9)]
+
+    def fake_recognize(p, method, language, region, ocr_fps, settings, progress, cancel, denoise, on_draft=None):
+        for g in range(3):          # 3 nhóm khúc, mỗi nhóm 3 câu
+            on_draft([Segment(g * 9 + k * 3.0, g * 9 + k * 3.0 + 2.0, texts[g * 3 + k]) for k in range(3)])
+            t0 = _t.time()
+            while (len(sent) <= g or len(spoken) < 3 * (g + 1)) and _t.time() - t0 < 5:
+                _t.sleep(0.02)
+            seen.append(len(stream.read_draft(p.work) or []))
+            progress(0.5, "nghe")
+        final = [Segment(g * 9 + k * 3.0, g * 9 + k * 3.0 + 2.0, texts[g * 3 + k], "", f"S{k % 2 + 1}")
+                 for g in range(3) for k in range(3)]
+        final[4].text = "第4句话吗"                             # câu bị đổi sau khi nghe lại / nối câu
+        p.segments = final
+        p.save()
+        return len(final)
+
+    monkeypatch.setattr(pipeline, "recognize", fake_recognize)
+    p = Project.create("song song")
+    p.data["info"] = {"duration": 30}
+    p.save()
+    opts = {"engine": "google", "dub": True, "tts_engine": "edge", "parallel": True, "render": False,
+            "voice": "edge:vi-VN-NamMinhNeural", "hardsub_mode": "none", "which": "trans"}
+    res = pipeline.auto(p, opts, None, None)
+    p.reload()
+    assert seen == [3, 6, 9]                                     # câu nháp hiện dần
+    assert [len(b) for b in sent[:3]] == [3, 3, 3]              # gửi đúng lô 3 câu lúc đang nghe
+    assert sum(len(b) for b in sent) == 10 and sent[-1] == ["第4句话吗"]   # nghe xong: chỉ dịch câu bị đổi
+    assert p.data["live_reused"] == 8 and "dùng lại 8 câu" in res["message"]
+    assert all(s.trans for s in p.segments)
+    assert set(p.data["voices"].values()) == {"edge:vi-VN-NamMinhNeural"}
+    # Edge: 9 câu đọc trước + đúng 1 câu bị đổi đọc ở bước lồng tiếng
+    assert len(spoken) == 10 and {v for _, v in spoken} == {"vi-VN-NamMinhNeural"}
+    assert [t for t, _ in spoken].count("Dịch 5 4") == 1
+    assert not stream.draft_path(p.work).exists()               # dọn file câu nháp
+    assert threading.active_count() < 50

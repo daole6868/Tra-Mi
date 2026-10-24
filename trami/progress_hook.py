@@ -11,7 +11,17 @@ from contextlib import contextmanager
 from typing import Callable
 
 _lock = threading.Lock()
-_active: dict | None = None   # mỗi lúc chỉ 1 tác vụ dài chạy (JobManager 1 luồng)
+# nhiều tác vụ chạy cùng lúc (JobManager nhiều luồng) -> mỗi luồng 1 ngữ cảnh; thanh tqdm chạy ở luồng phụ của thư
+# viện (tải song song) -> dùng ngữ cảnh mới nhất
+_by_thread: dict[int, dict] = {}
+_order: list[dict] = []
+
+
+def _ctx_now() -> dict | None:
+    c = _by_thread.get(threading.get_ident())
+    if c is not None:
+        return c
+    return _order[-1] if _order else None
 
 
 def _fmt_bytes(n: float) -> str:
@@ -19,7 +29,7 @@ def _fmt_bytes(n: float) -> str:
 
 
 def _report(bar) -> None:
-    ctx = _active
+    ctx = _ctx_now()
     if not ctx:
         return
     if ctx["cancel"] and ctx["cancel"]():
@@ -86,17 +96,23 @@ def _install() -> None:
 def tqdm_progress(progress: Callable[[float, str], None] | None, lo: float = 0.0, hi: float = 1.0,
                   label: str = "Đang xử lý", cancel: Callable[[], bool] | None = None, download: str = ""):
     """Trong khối này, thanh tqdm của thư viện -> progress(lo..hi, 'label n/total')."""
-    global _active
     if progress is None and cancel is None:
         yield
         return
     _install()
     ctx = {"progress": progress or (lambda *_: None), "lo": lo, "hi": hi, "label": label, "cancel": cancel,
            "last": 0.0, "download": download or "Đang tải mô hình", "speed": {}}
+    tid = threading.get_ident()
     with _lock:
-        prev, _active = _active, ctx
+        prev = _by_thread.get(tid)
+        _by_thread[tid] = ctx
+        _order.append(ctx)
     try:
         yield
     finally:
         with _lock:
-            _active = prev
+            if prev is None:
+                _by_thread.pop(tid, None)
+            else:
+                _by_thread[tid] = prev
+            _order[:] = [c for c in _order if c is not ctx]

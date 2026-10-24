@@ -153,10 +153,14 @@ def _segment(s: float, e: float, item: dict, simplify: bool) -> Segment | None:
     return seg
 
 
+STREAM_GROUP = 6   # chế độ vừa tách vừa dịch: nghe từng nhóm 6 khúc (≤ ~3 phút) rồi gửi câu sang bộ dịch ngay
+
+
 def transcribe_qwen(wav: str | Path, settings: dict, language: str = "zh", progress: Prog | None = None,
-                    cancel=None) -> list[Segment]:
+                    cancel=None, on_chunk: Callable[[list[Segment]], None] | None = None) -> list[Segment]:
     """Nghe cả video: chia đoạn có tiếng -> gộp thành khúc ≤ 28 s (nghe trọn câu) -> Qwen3-ASR + mốc từng chữ.
-    Mỗi khúc trả về 1 Segment có extra["ct"]; bước căn thời gian (align.refine) tách câu theo dấu câu + chỗ nghỉ."""
+    Mỗi khúc trả về 1 Segment có extra["ct"]; bước căn thời gian (align.refine) tách câu theo dấu câu + chỗ nghỉ.
+    on_chunk: nghe theo từng nhóm khúc, nghe xong nhóm nào gọi on_chunk(các khúc đó) ngay (vừa tách vừa dịch)."""
     from .align import chunk_spans, split_params
     from .asr_funasr import load_wav16k
 
@@ -166,13 +170,27 @@ def transcribe_qwen(wav: str | Path, settings: dict, language: str = "zh", progr
     chunks = chunk_spans(_spans(audio, settings), audio, max_gap=split_params(settings)["chunk_gap"], max_len=28.0)
     if not chunks:
         return []
-    r = worker(settings).call({"cmd": "asr", "wav": _wav_path(wav), "spans": [list(c) for c in chunks],
-                               "language": language, "prompt": hotwords(settings),
-                               "align": bool(settings.get("align_words", True))}, progress, cancel)
     simplify = language in ("zh", "yue", "auto")
-    segs = [x for (s, e), it in zip(chunks, r.get("items") or []) if (x := _segment(s, e, it, simplify))]
-    if r.get("align_error") and progress:
-        progress(1.0, "Không căn được thời gian bằng Qwen3 (" + r["align_error"][:80] + ") – dùng cách dự phòng")
+    req = {"cmd": "asr", "wav": _wav_path(wav), "language": language, "prompt": hotwords(settings),
+           "align": bool(settings.get("align_words", True))}
+    size = STREAM_GROUP if on_chunk else len(chunks)
+    groups = [chunks[i:i + size] for i in range(0, len(chunks), size)]
+    segs: list[Segment] = []
+    align_error = ""
+    for g, part in enumerate(groups):
+        lo, hi = g / len(groups), (g + 1) / len(groups)
+        pr = None
+        if progress:
+            def pr(x, m, lo=lo, hi=hi, g=g):
+                progress(lo + (hi - lo) * x, m + (f" (phần {g + 1}/{len(groups)})" if len(groups) > 1 else ""))
+        r = worker(settings).call(dict(req, spans=[list(c) for c in part]), pr, cancel)
+        new = [x for (s, e), it in zip(part, r.get("items") or []) if (x := _segment(s, e, it, simplify))]
+        segs += new
+        align_error = align_error or r.get("align_error") or ""
+        if on_chunk and new:
+            on_chunk(new)
+    if align_error and progress:
+        progress(1.0, "Không căn được thời gian bằng Qwen3 (" + align_error[:80] + ") – dùng cách dự phòng")
     return segs
 
 

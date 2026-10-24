@@ -8,7 +8,7 @@ from typing import Callable
 from . import ffmpeg as ff, net
 from .config import err_text, load_settings, log_error
 from .project import Project, safe_name
-from .subtitle import normalize, save_subtitles
+from .subtitle import Segment, normalize, save_subtitles
 
 Prog = Callable[[float, str], None]
 NO_TRANSLATE = "none"   # tuỳ chọn "Không dịch": chỉ nghe + tách câu, xuất SRT gốc để dịch ở phần mềm khác
@@ -664,9 +664,23 @@ def realign(p: Project, settings: dict | None = None, progress: Prog | None = No
 
 def recognize(p: Project, method: str = "asr", language: str = "zh", region: dict | None = None,
               ocr_fps: float = 4.0, settings: dict | None = None, progress: Prog | None = None, cancel=None,
-              denoise: bool = False, engine: str | None = None) -> int:
+              denoise: bool = False, engine: str | None = None,
+              on_draft: Callable[[list[Segment]], None] | None = None) -> int:
     """Lấy phụ đề gốc.  method: asr (giọng nói) | ocr (chữ trên video).
-    engine (asr): qwen3 | sensevoice | paraformer | whisper."""
+    engine (asr): qwen3 | sensevoice | paraformer | whisper.
+    on_draft: chế độ vừa tách vừa dịch – nhận CÂU NHÁP ngay khi có (Qwen3: sau mỗi nhóm khúc vừa nghe; bộ khác: nghe
+    xong cả phim, trước các bước căn thời gian / phân biệt người nói)."""
+
+    def draft(new: list[Segment]):
+        if on_draft and new:
+            try:
+                from .align import draft_lines
+
+                on_draft(draft_lines(new, settings, p.data.get("info", {}).get("duration", 0)))
+            except ff.Cancelled:
+                raise
+            except Exception:  # noqa: BLE001 – câu nháp lỗi không được làm hỏng việc nghe
+                log_error("Câu nháp vừa tách vừa dịch")
     settings = settings or load_settings()
     src = p.source
     engine = engine or settings.get("asr_engine", "qwen3")
@@ -684,6 +698,8 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         stats: dict = {}
         segs = extract_hardsubs(src, scan, fps=float(ocr_fps or 4), progress=_sub(progress, 0.05, 0.85),
                                 cancel=cancel, boxes_out=boxes, stats=stats)
+        if on_draft and segs:
+            on_draft([Segment(x.start, x.end, x.text) for x in segs])
         p.data["ocr_region"] = scan
         p.data["ocr_boxes"] = str(boxes)
         p.data["ocr_stats"] = {"fps": float(ocr_fps or 4), "frames": stats.get("frames", 0),
@@ -733,6 +749,7 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         asr_end = 0.78 if want_spk else 0.92
         pr = _sub(progress, 0.33, asr_end)
         segs = None
+        streamed = False
         p.data.pop("asr_warning", None)
         if engine == "qwen3":
             from . import asr_qwen
@@ -742,7 +759,9 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
                 engine = "sensevoice"
             else:
                 try:
-                    segs = asr_qwen.transcribe_qwen(wav, settings, language, pr, cancel)
+                    segs = asr_qwen.transcribe_qwen(wav, settings, language, pr, cancel,
+                                                    on_chunk=draft if on_draft else None)
+                    streamed = True
                 except ff.Cancelled:
                     asr_qwen.release()
                     raise
@@ -786,6 +805,8 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
             mark_songs(segs)
         p.data["asr_engine_used"] = engine
         p.data["language"] = language
+        if not streamed:
+            draft(segs or [])
         # 2a) nghe lại các đoạn CÓ TIẾNG mà bộ chia đoạn (VAD) bỏ sót -> không còn câu bị bỏ không dịch
         p.data["asr_rescued"] = 0
         if settings.get("asr_rescue", True) and segs is not None and audio_in != Path(src):
@@ -1208,6 +1229,19 @@ def speaker_list(p: Project) -> list[dict]:
     return out
 
 
+def dub_default_voice(voice: str | None, engine: str, settings: dict) -> str:
+    """Giọng mặc định của bộ đọc (người nói chưa chọn giọng riêng dùng giọng này)."""
+    if voice:
+        return voice
+    if engine == "omnivoice":
+        from . import voices as vlib
+        from .tts import OMNI_CLONE
+
+        smp = vlib.list_samples()
+        return f"omni:{smp[0]['id']}" if smp else OMNI_CLONE
+    return f"edge:{settings.get('tts_voice')}" if engine == "edge" else "vieneu:"
+
+
 def dub(p: Project, voice: str | None = None, rate: str | None = None, settings: dict | None = None,
         progress: Prog | None = None, cancel=None, engine: str | None = None, inplace: bool = False,
         only: list[int] | None = None) -> Path:
@@ -1223,16 +1257,7 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     if not any(s.trans for s in segs):
         raise ValueError("Chưa có bản dịch để lồng tiếng.")
     engine = engine or settings.get("tts_engine", "edge")
-    if voice:
-        default_voice = voice
-    elif engine == "omnivoice":
-        from . import voices as vlib
-        from .tts import OMNI_CLONE
-
-        smp = vlib.list_samples()
-        default_voice = f"omni:{smp[0]['id']}" if smp else OMNI_CLONE
-    else:
-        default_voice = f"edge:{settings.get('tts_voice')}" if engine == "edge" else "vieneu:"
+    default_voice = dub_default_voice(voice, engine, settings)
     voices = dict(p.data.get("voices") or {})
     dropped = 0
     if not inplace and only is None and trans_lang(p) == "vi" and settings.get("dub_drop_interj", True):
@@ -2131,12 +2156,59 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
     steps.append("export")
     weights = {"download": 1, "recognize": 4, "translate": 2, "dub": 2, "export": 3}
     total_w = sum(weights[s] for s in steps)
-    acc = 0.0
     result: dict = {}
     if opts.get("target"):   # "Dịch sang" (tiếng Việt / Anh / Thái / Nhật / Hàn)
         from . import langs
 
         p.data["target_lang"] = langs.norm(opts["target"])
+    live_box: list = [None]   # chế độ vừa tách vừa dịch (stream.LivePipeline)
+    try:
+        _auto_steps(p, opts, steps, weights, total_w, settings, no_tr, result, progress, cancel, live_box)
+    finally:
+        live = live_box[0]
+        if live:
+            live.stop()
+            live.cleanup()
+    if not no_tr:
+        result["message"] = "Hoàn tất! " + (f"Video: {Path(result['video']).name}" if result.get("video") else "")
+    if opts.get("parallel") and p.data.get("live_reused"):
+        result["message"] += f"  · vừa tách vừa dịch: dùng lại {p.data['live_reused']} câu dịch sẵn lúc đang nghe"
+    if opts.get("dub") and not no_tr:
+        result["message"] += "  · " + dub_summary(p)
+    if p.data.get("skill_note") and not no_tr:
+        result["message"] = result.get("message", "") + "  · " + p.data["skill_note"]
+    for w in ("dl_warning", "sep_warning", "asr_warning", "ocr_warning", "translate_warning", "skill_warning"):
+        if p.data.get(w):
+            result["message"] = result.get("message", "") + "  ⚠ " + p.data[w]
+    return result
+
+
+def _start_live(p: Project, opts: dict, settings: dict, cancel):
+    """Bật chế độ vừa tách vừa dịch: luồng dịch (+ luồng đọc trước bằng Edge khi biết chắc giọng của mọi câu)."""
+    from . import langs, stream
+
+    eng = settings.get("translate_engine", "google")
+    if eng == "hymt":   # dịch trên máy dùng card đồ hoạ – không chạy cùng lúc với bộ nghe (hết bộ nhớ GPU)
+        return None
+    target = langs.norm(p.data.get("target_lang") or settings.get("target_lang", "vi"))
+    dub_cfg = None
+    tts_engine = opts.get("tts_engine") or settings.get("tts_engine", "edge")
+    voice = opts.get("voice") or ""
+    if opts.get("dub") and tts_engine == "edge" and voice != "@auto":
+        voices = {k: v for k, v in (p.data.get("voices") or {}).items() if v}
+        one_spk = not settings.get("diarize", True) or int(settings.get("diarize_speakers", 0) or 0) == 1
+        if voice or one_spk or len(set(voices.values())) <= 1:   # mọi câu cùng 1 giọng -> đọc trước được
+            v = voice or next(iter(voices.values()), "") or dub_default_voice(None, "edge", settings)
+            if v.startswith("edge:"):
+                dub_cfg = {"voice": v, "rate": opts.get("rate") or settings.get("tts_rate", "+0%"),
+                           "settings": settings, "lang": target,
+                           "drop_interj": target == "vi" and settings.get("dub_drop_interj", True)}
+    return stream.LivePipeline(p, settings, eng, opts.get("style"), target, cancel, dub_cfg)
+
+
+def _auto_steps(p: Project, opts: dict, steps: list, weights: dict, total_w: float, settings: dict, no_tr: bool,
+                result: dict, progress: Prog | None, cancel, live_box: list) -> None:
+    acc = 0.0
     for st in steps:
         a = acc / total_w
         acc += weights[st]
@@ -2155,12 +2227,37 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
                 settings["diarize"] = bool(opts["diarize"])
             if "separate" in opts:
                 settings["sep_before_asr"] = bool(opts["separate"])
+            live = _start_live(p, opts, settings, cancel) if opts.get("parallel") and "translate" in steps else None
+            live_box[0] = live
+            rpr = pr
+            if live:
+                def rpr(x, m, pr=pr, live=live):
+                    pr(x, m + live.status())
             recognize(p, opts.get("method", "asr"), opts.get("language", "zh"), opts.get("region"),
-                      float(opts.get("ocr_fps") or settings.get("ocr_fps") or 4), settings, pr, cancel,
-                      bool(opts.get("denoise")))
+                      float(opts.get("ocr_fps") or settings.get("ocr_fps") or 4), settings, rpr, cancel,
+                      bool(opts.get("denoise")), on_draft=live.feed if live else None)
+            p.data.pop("live_reused", None)
+            if live:   # gắn bản dịch làm sẵn lúc đang nghe vào câu cuối cùng (trùng chữ gốc)
+                pr(1.0, "Đang chờ lần gửi dịch đang chạy xong…" + live.status())
+                done = live.finish()
+                segs = p.segments
+                n = 0
+                for x in segs:
+                    if not x.trans.strip() and done.get(x.text):
+                        x.trans = done[x.text]
+                        n += 1
+                p.data.setdefault("cache", {}).update(live.tr.cache)
+                if n:
+                    p.segments = segs
+                    p.data["trans_lang"] = p.data["target_lang"] = live.tr.target
+                p.data["live_reused"] = n
+                p.save()
         elif st == "translate":
-            translate(p, opts.get("engine"), opts.get("style"), bool(opts.get("only_empty")), settings, pr, cancel)
+            # vừa tách vừa dịch: chỉ dịch các câu chưa có bản dịch (câu bị đổi sau khi nghe lại / căn / tách người nói)
+            translate(p, opts.get("engine"), opts.get("style"), bool(opts.get("only_empty")) or bool(opts.get("parallel")),
+                      settings, pr, cancel)
         elif st == "dub":
+            _auto_voices(p, opts, settings)
             if opts.get("separate") and not stems(p):
                 from . import separate as sepmod
 
@@ -2199,13 +2296,27 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
             result["srt"] = str(srt)
             if opts.get("render", True) and p.data.get("info", {}).get("has_video"):
                 result["video"] = str(render(p, settings, pr, cancel))
-    if not no_tr:
-        result["message"] = "Hoàn tất! " + (f"Video: {Path(result['video']).name}" if result.get("video") else "")
-    if opts.get("dub") and not no_tr:
-        result["message"] += "  · " + dub_summary(p)
-    if p.data.get("skill_note") and not no_tr:
-        result["message"] = result.get("message", "") + "  · " + p.data["skill_note"]
-    for w in ("dl_warning", "sep_warning", "asr_warning", "ocr_warning", "translate_warning", "skill_warning"):
-        if p.data.get(w):
-            result["message"] = result.get("message", "") + "  ⚠ " + p.data[w]
-    return result
+
+
+def _auto_voices(p: Project, opts: dict, settings: dict) -> None:
+    """Giọng chọn ở tab Tự động: 1 giọng cho mọi người nói, hoặc "@auto" = tự gán giọng nam / nữ theo từng người nói.
+    Để trống = giữ giọng đã chọn ở tab Lồng tiếng mục 2."""
+    v = opts.get("voice") or ""
+    if not v:
+        return
+    spks = [x["speaker"] for x in speaker_list(p)]
+    if v == "@auto":
+        from . import tts
+
+        genders = p.data.get("speaker_gender") or {}
+        if not all(k in genders for k in spks):
+            try:
+                genders = speaker_genders(p)
+            except Exception:  # noqa: BLE001 – không đoán được thì xen kẽ nam / nữ
+                log_error("Đoán giọng nam / nữ (tab Tự động)")
+        st = dict(settings, tts_engine=opts.get("tts_engine") or settings.get("tts_engine", "edge"))
+        p.data["voices"] = tts.auto_assign(spks, st, {}, genders, target_lang(p, settings))
+        opts["voice"] = None
+    else:
+        p.data["voices"] = {k: v for k in spks}
+    p.save()

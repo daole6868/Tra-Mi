@@ -919,3 +919,32 @@ def split_speaker_changes(segs: list[Segment], audio: np.ndarray, emb_fn, min_le
         if progress and k % 10 == 0:
             progress(k / max(1, len(segs)), f"Đang tìm chỗ đổi người nói {k}/{len(segs)}")
     return out
+
+
+def draft_lines(segs: list[Segment], settings: dict | None = None, total: float = 0.0) -> list[Segment]:
+    """Câu NHÁP từ các khúc vừa nghe xong (chế độ vừa tách vừa dịch): tách câu theo mốc từng chữ có sẵn (như `refine`,
+    không nạp thêm mô hình) + nối câu bị cắt ngang. Trả về bản sao – không đụng vào danh sách gốc. Câu cuối cùng (sau
+    nghe lại đoạn sót, căn thời gian, phân biệt người nói) phần lớn trùng chữ với câu nháp -> dùng lại bản dịch."""
+    params = split_params(settings)
+    max_chars = int((settings or {}).get("asr_max_chars", 28))
+    out: list[Segment] = []
+    for s in segs:
+        s = Segment(s.start, s.end, s.text, "", s.speaker, dict(s.extra))
+        ct = s.extra.get("ct")
+        if ct and len(ct) == len(_char_positions(s.text)):
+            out += split_timed(s, [(float(a), float(b)) for a, b in ct], True, max_chars, total, params)
+        elif len(s.text) > max_chars:
+            from .asr_funasr import split_long
+
+            out += [Segment(round(x, 3), round(y, 3), t, "", s.speaker, {})
+                    for x, y, t in split_long(s.start, s.end, s.text, max_chars)]
+        else:
+            out.append(s)
+    out = fix_overlaps(out)
+    try:
+        out, _ = join_broken(out, params, max_chars, total)
+    except Exception:  # noqa: BLE001 – câu nháp: không nối được thì thôi
+        pass
+    for s in out:
+        s.extra = {}
+    return [s for s in out if s.text.strip()]
