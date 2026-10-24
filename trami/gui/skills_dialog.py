@@ -89,11 +89,17 @@ class SkillsDialog(QDialog):
         self.text.setReadOnly(ro)
         self.ro.setText("Kỹ năng có sẵn – chỉ đọc. Muốn sửa thì bấm 'Chép thành kỹ năng của tôi'." if ro else "")
         self.b_save.setEnabled(bool(sk) and not ro)
-        self.b_del.setEnabled(bool(sk) and not ro)
+        std = bool(sk and sk["id"] == skills.STD_ID)
+        self.b_del.setText("Về mặc định" if std else "Xoá")
+        self.b_del.setEnabled(bool(sk) and not ro and not (std and sk.get("default")))
+        if std:
+            self.ro.setText("Kỹ năng dịch chung – sửa trực tiếp rồi bấm Lưu. 'Về mặc định' để lấy lại nội dung gốc.")
         self.b_copy.setEnabled(bool(sk))
 
     def _own(self) -> list[dict]:
-        return [dict(id=x["id"], name=x["name"], text=x["text"]) for x in self._items() if not x.get("builtin")]
+        # kỹ năng Dịch chuẩn chưa sửa (bản mặc định) không ghi vào Cài đặt – lần sau tool cập nhật nội dung vẫn nhận
+        return [dict(id=x["id"], name=x["name"], text=x["text"]) for x in self._items()
+                if not x.get("builtin") and not x.get("default")]
 
     def _write(self, own: list[dict], select: str):
         save_settings({"translate_skills": own})
@@ -128,16 +134,27 @@ class SkillsDialog(QDialog):
         if not sk or sk.get("builtin"):
             return
         own = self._own()
-        for x in own:
+        new = {"id": sk["id"], "name": self.name.text().strip() or "Kỹ năng của tôi",
+               "text": self.text.toPlainText().strip()}
+        if sk.get("default") and (new["name"], new["text"]) == (sk["name"], sk["text"].strip()):
+            return self._fill(sk["id"])       # Dịch chuẩn chưa sửa gì: giữ bản mặc định
+        for i, x in enumerate(own):
             if x["id"] == sk["id"]:
-                x["name"] = self.name.text().strip() or "Kỹ năng của tôi"
-                x["text"] = self.text.toPlainText().strip()
+                own[i] = new
+                break
+        else:
+            own.insert(0, new)                # lần đầu sửa kỹ năng Dịch chuẩn -> thành bản của bạn
         self._write(own, sk["id"])
 
     def _delete(self):
         sk = self._cur()
         if not sk or sk.get("builtin"):
             return
+        if sk["id"] == skills.STD_ID:   # kỹ năng dịch chuẩn: "xoá" = đưa về bản mặc định
+            if QMessageBox.question(self, "Về bản mặc định", "Đưa kỹ năng “Dịch chuẩn” về nội dung mặc định?") != \
+                    QMessageBox.StandardButton.Yes:
+                return
+            return self._write([x for x in self._own() if x["id"] != sk["id"]], sk["id"])
         if QMessageBox.question(self, "Xoá kỹ năng", f"Xoá kỹ năng “{sk['name']}”?") != QMessageBox.StandardButton.Yes:
             return
         st = load_settings()

@@ -202,34 +202,146 @@ def _extract_json(txt: str) -> dict:
 class ApiError(RuntimeError):
     """Không gọi được API AI (mất mạng, sai URL, hết tiền, quá tải…) – phải báo cho người dùng, không tự đổi engine."""
 
+AI_ENGINES = ("deepseek", "openai", "anthropic", "gemini", "ollama")
+ENGINE_NAMES = {"deepseek": "DeepSeek", "openai": "OpenAI", "anthropic": "Claude", "gemini": "Gemini", "ollama": "Ollama"}
+# lần gửi / phút mặc định: gói miễn phí Gemini giới hạn số lần gọi mỗi phút (xem trang Rate limits của Google)
+DEFAULT_RPM = {"gemini": 8}
+
+
+def api_keys(settings: dict, engine: str) -> list[str]:
+    """Các API key của 1 công cụ (Cài đặt `<engine>_api_keys`, cộng key cũ `<engine>_api_key`), bỏ trùng / rỗng."""
+    out: list[str] = []
+    for k in [settings.get(f"{engine}_api_key", "")] + list(settings.get(f"{engine}_api_keys") or []):
+        k = (k or "").strip()
+        if k and not k.startswith("••••") and k not in out:
+            out.append(k)
+    return out
+
+
+def engine_batch(settings: dict, engine: str) -> int:
+    """Số câu mỗi lần gửi AI của công cụ này (khung riêng ở Cài đặt; chưa đặt -> 'Số câu mỗi lần gửi AI' cũ)."""
+    return max(1, int(settings.get(f"{engine}_batch") or settings.get("translate_batch") or 40))
+
+
+def engine_rpm(settings: dict, engine: str) -> int:
+    """Số lần gửi tối đa mỗi phút cho MỖI key (0 = không giới hạn)."""
+    v = settings.get(f"{engine}_rpm")
+    return max(0, int(DEFAULT_RPM.get(engine, 0) if v is None else v))
+
+
+# nhớ trong phiên: key đang dùng tốt / key hỏng / các lần gửi gần đây của mỗi key (giới hạn mỗi phút)
+_KEY_POS: dict[str, int] = {}
+_KEY_DEAD: dict[str, tuple[float, str]] = {}   # key -> (hết hạn chặn lúc, lý do)
+_KEY_CALLS: dict[str, list[float]] = {}
+DAY_BLOCK = 3600.0        # key hết lượt trong ngày: 1 giờ sau mới thử lại
+WAIT_LIMIT_429 = 20       # bị giới hạn mỗi phút mà chỉ có 1 key: chờ rồi gửi lại tối đa 20 lần
+
+
+def _key_tag(engine: str, i: int, n: int) -> str:
+    return f"key {ENGINE_NAMES.get(engine, engine)} số {i + 1}" + (f"/{n}" if n > 1 else "")
+
+
 class LLMClient:
     def __init__(self, settings: dict, engine: str):
         self.engine = engine
         self.s = settings
         if engine == "anthropic":
-            self.api_key = settings.get("anthropic_api_key", "")
             self.model = settings.get("anthropic_model") or "claude-opus-5-5"
         elif engine == "gemini":
-            self.api_key = settings.get("gemini_api_key", "")
             self.model = settings.get("gemini_model") or "gemini-2.5-flash"
             self.base = "https://generativelanguage.googleapis.com/v1beta/openai"
         elif engine == "deepseek":
-            self.api_key = settings.get("deepseek_api_key", "")
             self.model = settings.get("deepseek_model") or "deepseek-chat"
             self.base = "https://api.deepseek.com/v1"
         elif engine == "ollama":
-            self.api_key = "ollama"
             self.model = settings.get("ollama_model") or "qwen2.5:7b"
             self.base = (settings.get("ollama_base_url") or "http://localhost:11434/v1").rstrip("/")
         else:
-            self.api_key = settings.get("openai_api_key", "")
             self.model = settings.get("openai_model") or "gpt-4o-mini"
             self.base = (settings.get("openai_base_url") or "https://api.openai.com/v1").rstrip("/")
-        if not self.api_key:
-            raise ValueError(f"Chưa nhập API key cho engine '{engine}'. Vào tab Cài đặt để nhập.")
+        self.keys = ["ollama"] if engine == "ollama" else api_keys(settings, engine)
+        if not self.keys:
+            raise ValueError(f"Chưa nhập API key cho {ENGINE_NAMES.get(engine, engine)}. Vào trang Cài đặt → khung "
+                             f"{ENGINE_NAMES.get(engine, engine)} để nhập.")
+        self.ki = _KEY_POS.get(engine, 0) % len(self.keys)
+        self.rpm = 0 if engine == "ollama" else engine_rpm(settings, engine)
         self._json_mode = True
         # Các model Claude đời mới (và một số model OpenAI) không nhận tham số temperature -> không gửi
         self._send_temp = engine != "anthropic"
+
+    @property
+    def api_key(self) -> str:
+        return self.keys[self.ki]
+
+    # ------------------------------------------------------------------ nhiều key + giới hạn mỗi phút
+    def _alive(self, i: int) -> bool:
+        d = _KEY_DEAD.get(self.keys[i])
+        return not d or time.time() > d[0]
+
+    def _room(self, i: int) -> float:
+        """Còn phải chờ bao nhiêu giây thì key i được gửi tiếp (0 = gửi ngay)."""
+        if not self.rpm:
+            return 0.0
+        now = time.time()
+        calls = [t for t in _KEY_CALLS.get(self.keys[i], []) if now - t < 60]
+        _KEY_CALLS[self.keys[i]] = calls
+        return 0.0 if len(calls) < self.rpm else 60.5 - (now - calls[0])
+
+    def _switch(self, why: str) -> bool:
+        """Đổi sang key khác còn dùng được (ưu tiên key gửi được ngay). False = không còn key nào."""
+        alive = [i for i in range(len(self.keys)) if i != self.ki and self._alive(i)]
+        if not alive:
+            return False
+        nxt = min(alive, key=lambda i: (self._room(i), (i - self.ki) % len(self.keys)))
+        _, report = net.current()
+        if report:
+            report(f"{why} – chuyển sang {_key_tag(self.engine, nxt, len(self.keys))}")
+        self.ki = nxt
+        _KEY_POS[self.engine] = nxt
+        return True
+
+    def _pace(self):
+        """Gói miễn phí: không gửi quá `rpm` lần / phút / key – key này hết lượt phút này thì dùng key khác, không có thì chờ."""
+        if not self._alive(self.ki):
+            self._switch(f"{_key_tag(self.engine, self.ki, len(self.keys))} đang bị chặn")
+        wait = self._room(self.ki)
+        if wait > 0:
+            others = [i for i in range(len(self.keys)) if i != self.ki and self._alive(i) and self._room(i) == 0]
+            if others:
+                self.ki = others[0]
+                _KEY_POS[self.engine] = self.ki
+                wait = 0.0
+        if wait > 0:
+            _, report = net.current()
+            if report:
+                report(f"Gói miễn phí {ENGINE_NAMES.get(self.engine, self.engine)}: chờ {wait:.0f} s "
+                       f"(tối đa {self.rpm} lần gửi / phút mỗi key – thêm key ở Cài đặt để dịch nhanh hơn)")
+            net.sleep(wait)
+        _KEY_CALLS.setdefault(self.api_key, []).append(time.time())
+
+    @staticmethod
+    def _retry_after(r) -> float:
+        m = re.search(r'retry[_ -]?delay"?\s*[:=]\s*"?(\d+(?:\.\d+)?)', r.text or "", re.I) or \
+            re.search(r"retry in (\d+(?:\.\d+)?)\s*s", r.text or "", re.I)
+        if m:
+            return min(120.0, float(m.group(1)) + 1)
+        try:
+            return min(120.0, float(r.headers.get("retry-after", "") or 0)) or 20.0
+        except (TypeError, ValueError):
+            return 20.0
+
+    def _key_failed(self, r) -> str | None:
+        """Lỗi do KEY (sai / hết hạn / hết lượt trong ngày / hết tiền) -> lý do; lỗi khác -> None."""
+        t = (r.text or "").lower()
+        if r.status_code in (401, 403) or (r.status_code == 400 and any(
+                x in t for x in ("api key not valid", "api_key_invalid", "invalid api key", "api key expired",
+                                 "expired", "invalid x-api-key"))):
+            return "sai hoặc hết hạn"
+        if r.status_code == 402 or "insufficient_quota" in t or "insufficient balance" in t or "credit balance" in t:
+            return "hết tiền / hết hạn mức"
+        if r.status_code == 429 and any(x in t for x in ("perday", "per day", "per_day", "daily", "requests per day")):
+            return "hết lượt miễn phí hôm nay"
+        return None
 
     def _http(self, url: str, headers: dict, body: dict):
         # chờ AI viết xong có thể lâu (không có dữ liệu) -> chờ đọc tới 5 phút; rớt mạng thì keepalive báo trong ~40 s
@@ -238,8 +350,11 @@ class LLMClient:
     def chat(self, system: str, user: str, max_tokens: int = 8000, temperature: float = 0.3) -> str:
         last_err = None
         fails = 0
+        waits = 0
+        name = ENGINE_NAMES.get(self.engine, self.engine)
         while fails < 4:
             try:
+                self._pace()
                 if self.engine == "anthropic":
                     body = {"model": self.model, "max_tokens": max(max_tokens, 16000),  # chừa chỗ cho phần suy nghĩ
                             "system": system, "messages": [{"role": "user", "content": user}]}
@@ -267,12 +382,34 @@ class LLMClient:
                 if r.status_code == 400 and self._send_temp and "temperature" in r.text:
                     self._send_temp = False  # model không hỗ trợ temperature -> gửi lại không có nó
                     continue
-                if r.status_code in (401, 403):
-                    raise PermissionError(f"API key không hợp lệ hoặc không có quyền ({r.status_code}): {r.text[:300]}")
+                why = self._key_failed(r)
+                if why:   # key hỏng / hết lượt -> đánh dấu, đổi key khác dịch tiếp
+                    tag = _key_tag(self.engine, self.ki, len(self.keys))
+                    _KEY_DEAD[self.api_key] = (time.time() + (DAY_BLOCK if "hôm nay" in why or "tiền" in why
+                                                              else 10 ** 9), why)
+                    if self._switch(f"{tag} {why}"):
+                        continue
+                    if r.status_code in (401, 403) or "hết hạn" in why:
+                        raise PermissionError(f"API key {name} không hợp lệ hoặc hết hạn ({r.status_code}) – "
+                                              f"đã thử {len(self.keys)} key. Thêm / sửa key ở trang Cài đặt: {r.text[:200]}")
+                    raise ApiError(f"Tất cả {len(self.keys)} key {name} đều {why}. Thêm key khác ở trang Cài đặt (khung "
+                                   f"{name}) hoặc dịch tiếp sau – câu đã dịch được giữ lại, bấm 'Dịch câu chưa dịch' "
+                                   "để dịch nốt.")
+                if r.status_code == 429:   # giới hạn mỗi phút -> key khác, không có thì chờ rồi gửi lại
+                    if self._switch(f"{_key_tag(self.engine, self.ki, len(self.keys))} bị giới hạn số lần / phút"):
+                        continue
+                    if waits < WAIT_LIMIT_429:
+                        waits += 1
+                        wait = self._retry_after(r)
+                        _, report = net.current()
+                        if report:
+                            report(f"{name} báo gửi quá nhanh (gói miễn phí) – chờ {wait:.0f} s rồi gửi tiếp")
+                        net.sleep(wait)
+                        continue
                 if r.status_code == 404:
                     raise ValueError(f"Không tìm thấy model '{self.model}' ({r.text[:300]})")
                 last_err = RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
-            except (PermissionError, ValueError):
+            except (PermissionError, ValueError, ApiError):
                 raise
             except requests.RequestException as e:
                 last_err = e
@@ -285,6 +422,38 @@ class LLMClient:
         hint = ("Mạng chập chờn / máy chủ không trả lời – thử lại sau ít phút" if last_err is not None
                 and net.is_net_error(last_err) else "Kiểm tra Internet / API key / số dư tài khoản ở trang Cài đặt")
         raise ApiError(f"Không gọi được API dịch {self.engine} ({self.model}): {str(last_err)[:250]}. {hint}.")
+
+
+def list_models(settings: dict, engine: str, key: str = "") -> list[str]:
+    """Các model key này dùng được (nút 'Chọn model' ở Cài đặt) – Gemini: model gọi được generateContent."""
+    key = key or (api_keys(settings, engine) or [""])[0]
+    if engine == "gemini":
+        r = net.session().get("https://generativelanguage.googleapis.com/v1beta/models",
+                              params={"key": key, "pageSize": 200}, timeout=(10, 30))
+        r.raise_for_status()
+        return sorted({m["name"].split("/", 1)[-1] for m in r.json().get("models", [])
+                       if "generateContent" in (m.get("supportedGenerationMethods") or [])}, reverse=True)
+    if engine == "anthropic":
+        r = net.session().get("https://api.anthropic.com/v1/models", timeout=(10, 30),
+                              headers={"x-api-key": key, "anthropic-version": "2023-06-01"})
+        r.raise_for_status()
+        return [m["id"] for m in r.json().get("data", [])]
+    c = LLMClient(dict(settings, **{f"{engine}_api_keys": [key] if key else []}), engine)
+    r = net.session().get(f"{c.base}/models", headers={"Authorization": f"Bearer {c.api_key}"}, timeout=(10, 30))
+    r.raise_for_status()
+    return sorted(m["id"] for m in r.json().get("data", []))
+
+
+def check_key(settings: dict, engine: str, key: str) -> str:
+    """Thử 1 key (nút 'Kiểm tra' ở Cài đặt): trả lời ngắn gọn ✓ / ✗ + lý do."""
+    st = dict(settings, **{f"{engine}_api_key": key, f"{engine}_api_keys": [key], f"{engine}_rpm": 0})
+    _KEY_DEAD.pop(key, None)
+    try:
+        c = LLMClient(st, engine)
+        c.chat("Reply with JSON only.", 'Return {"ok": 1}', max_tokens=50, temperature=0)
+        return f"✓ dùng được ({c.model})"
+    except Exception as e:  # noqa: BLE001
+        return "✗ " + str(e)[:220]
 
 
 # ======================================================================= Hy-MT2
@@ -356,7 +525,7 @@ class Translator:
         if glossary:
             self.glossary.update(glossary)
         self.cache = cache if cache is not None else {}
-        self.batch = max(5, int(settings.get("translate_batch", 40)))
+        self.batch = engine_batch(settings, self.engine)   # số câu mỗi lần gửi (khung riêng từng công cụ ở Cài đặt)
         self.llm = None if self.engine in LOCAL_ENGINES else LLMClient(settings, self.engine)
         self.fit_dub = bool(settings.get("dub_fit", True))   # dịch vừa thời lượng để lồng tiếng khớp
         self.fallback_lines = 0   # số câu AI trả lỗi định dạng, phải dùng Google bù

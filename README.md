@@ -116,6 +116,13 @@ VieNeu chỉ đọc tiếng Việt nên câu tiếng khác tự đọc bằng Mi
 ---
 
 ## 4. Gợi ý để có bản dịch chuẩn nhất
+
+**API Gemini miễn phí:** vào aistudio.google.com/apikey (đăng nhập Google) → *Create API key* → chép key → trang **Cài
+đặt** → khung **Gemini** → dán vào ô *API key* (bấm *Thêm key* để thêm key dự phòng từ tài khoản / dự án khác) → *Kiểm tra
+các key* → *Lưu cài đặt*. Gói miễn phí giới hạn số lần gửi mỗi phút / mỗi ngày: để *Số lần gửi tối đa / phút* thấp hơn giới
+hạn một chút, *Số câu mỗi lần gửi* 30–60; key hết lượt hôm nay tool tự chuyển sang key sau. Kỹ năng *Dịch chuẩn* (mặc
+định) giữ đúng số câu đã tách, không gộp, tên riêng / địa danh chuẩn – sửa ở tab Tự động → *Kỹ năng dịch AI* → *Sửa / thêm…*.
+
 - Video đã có chữ Trung in sẵn: dùng **OCR**, cho chữ và thời gian gần như tuyệt đối chính xác.
 - Video chỉ có tiếng: bật **Tách giọng khỏi nhạc trước**, rồi dùng **Qwen3-ASR** (hoặc SenseVoice). Mỗi dòng phụ đề là
   1 câu trọn nghĩa: chỉ tách ở cuối câu (。！？) hoặc chỗ nghỉ thật, không bao giờ cắt giữa 1 từ; dòng bị cắt ngang câu

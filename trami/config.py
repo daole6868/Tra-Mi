@@ -71,6 +71,9 @@ DEFAULT_SETTINGS: dict = {
     "anthropic_api_key": "",
     "anthropic_model": "claude-opus-5-5",
     "gemini_api_key": "",
+    # nhiều key mỗi công cụ (key 1 hết lượt / hết hạn -> tự dùng key 2…), số câu mỗi lần gửi, số lần gửi / phút mỗi key
+    "deepseek_api_keys": [], "openai_api_keys": [], "anthropic_api_keys": [], "gemini_api_keys": [],
+    "gemini_rpm": 8,
     "gemini_model": "gemini-2.5-flash",
     "deepseek_api_key": "",
     "deepseek_model": "deepseek-chat",
@@ -97,9 +100,9 @@ DEFAULT_SETTINGS: dict = {
     "omnivoice_model": "k2-fsa/OmniVoice",   # hoặc g-group-ai-lab/g-omnivoice (tối ưu tiếng Việt, cần HF token)
     "hf_token": "",                           # token HuggingFace cho mô hình cần đồng ý điều khoản
     # Kỹ năng dịch AI (skills.py) – dùng với mọi công cụ dịch AI
-    "translate_skill": "",                    # kỹ năng đang dùng ("" = không; id kỹ năng có sẵn / của bạn)
+    "translate_skill": "chuan",               # kỹ năng đang dùng ("" = không; "chuan" = Dịch chuẩn – giữ đúng số câu)
     "translate_skills": [],                   # kỹ năng của bạn: [{"id", "name", "text"}]
-    "ai_clean_before_translate": True,        # AI sửa lỗi nghe & nối câu bị cắt trước khi dịch cả phim lần đầu
+    "ai_clean_before_translate": False,       # AI sửa lỗi nghe & nối câu bị cắt trước khi dịch cả phim lần đầu
     "ai_review_after_translate": False,       # AI kiểm tra lại bản dịch sau khi dịch cả phim (tốn thêm ~1 lần gọi AI)
     # Tải video từ link: Bilibili đăng nhập bằng mã QR (sitelogin); trang khác lấy cookie từ trình duyệt / file
     "dl_browser": "",                         # "" / firefox / edge / chrome / brave / opera / vivaldi

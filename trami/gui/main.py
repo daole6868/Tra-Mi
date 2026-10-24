@@ -21,7 +21,7 @@ from . import icons, theme
 from .common import run_async
 from .project_page import ProjectPage, scroll
 from .widgets import (DropZone, Form, GradientButton, IconBadge, IconButton, NavButton, ProgressBar, SectionCard,
-                      Switch, Toast, button, combo, hbox, label, set_combo, shadow)
+                      Switch, Toast, button, combo, flow, hbox, label, set_combo, shadow)
 
 VIDEO_FILTER = "Video (*.mp4 *.mkv *.mov *.avi *.flv *.webm *.ts *.m4v *.wmv *.mpg *.3gp);;Tất cả (*.*)"
 
@@ -613,12 +613,10 @@ class SettingsPage(QWidget):
         ("split_style", "split_style", "c"),
         ("sep_model", "sep_model", "c"), ("sep_before", "sep_before_asr", "b"), ("diarize", "diarize", "b"),
         ("spk_n", "diarize_speakers", "i"), ("spk_thr", "diarize_threshold", "f"),
-        ("engine", "translate_engine", "c"), ("style", "translate_style", "c"), ("batch", "translate_batch", "i"),
+        ("engine", "translate_engine", "c"), ("style", "translate_style", "c"),
         ("target", "target_lang", "c"),
-        ("ds_key", "deepseek_api_key", "t"), ("ds_model", "deepseek_model", "t"),
-        ("oa_key", "openai_api_key", "t"), ("oa_base", "openai_base_url", "t"), ("oa_model", "openai_model", "t"),
-        ("an_key", "anthropic_api_key", "t"), ("an_model", "anthropic_model", "t"),
-        ("ge_key", "gemini_api_key", "t"), ("ge_model", "gemini_model", "t"),
+        ("ds_model", "deepseek_model", "t"), ("oa_base", "openai_base_url", "t"), ("oa_model", "openai_model", "t"),
+        ("an_model", "anthropic_model", "t"), ("ge_model", "gemini_model", "t"),
         ("ol_base", "ollama_base_url", "t"), ("ol_model", "ollama_model", "t"),
         ("glossary", "glossary", "p"), ("tts_engine", "tts_engine", "c"), ("vn_mode", "vieneu_mode", "c"),
         ("vn_style", "vieneu_style", "c"), ("level_match", "dub_level_match", "b"),
@@ -699,22 +697,48 @@ class SettingsPage(QWidget):
         self.target = f.row("Dịch sang (dự án mới)", combo(C.TARGETS),
                             "Tiếng đích mặc định cho dự án mới. Mỗi dự án đổi riêng ở tab Tự động → 'Dịch sang'")
         self.style = f.row("Văn phong mặc định", combo(C.STYLES))
-        self.batch = f.row("Số câu mỗi lần gửi AI", spin(5, 120))
-        self.ds_key = f.row("DeepSeek API key", key())
-        self.ds_model = f.row("DeepSeek model", QLineEdit())
-        self.oa_key = f.row("OpenAI API key", key())
-        self.oa_base = f.row("OpenAI base URL", QLineEdit())
-        self.oa_model = f.row("OpenAI model", QLineEdit())
-        self.an_key = f.row("Claude API key", key())
-        self.an_model = f.row("Claude model", QLineEdit())
-        self.ge_key = f.row("Gemini API key", key())
-        self.ge_model = f.row("Gemini model", QLineEdit())
-        self.ol_base = f.row("Ollama URL", QLineEdit())
-        self.ol_model = f.row("Ollama model", QLineEdit())
         t.add(f)
-        self.test_out = label("", "muted", wrap=True)
-        t.add(hbox(button("Thử dịch 1 câu", "sparkle", on_click=self.test_translate), None))
-        t.add(self.test_out)
+        t.add(label("API key, số câu mỗi lần gửi, giới hạn gói miễn phí: chỉnh riêng ở khung từng công cụ bên dưới. "
+                    "Kỹ năng dịch chung (giữ đúng số câu, tên riêng chuẩn) sửa ở tab Tự động → 'Kỹ năng dịch AI' → "
+                    "Sửa / thêm…", "muted", wrap=True))
+
+        # --- mỗi công cụ dịch AI 1 khung: nhiều key (key 1 hết lượt -> key 2…), model, số câu / lần, lần gửi / phút
+        self.eng_w: dict[str, dict] = {}
+        eng_cards = []
+        for eng, title, desc in ENGINE_CARDS:
+            card = SectionCard(title, "sparkle" if eng in ("gemini", "anthropic") else "globe", desc)
+            ff = Form()
+            w: dict = {}
+            if eng != "ollama":
+                w["keys"] = ff.row("API key", KeyList(), "Thêm nhiều key: key đang dùng hết lượt miễn phí / hết hạn / "
+                                   "sai thì tool tự chuyển sang key sau để dịch tiếp")
+            if eng in ("openai", "ollama"):
+                w["base"] = ff.row("Base URL", QLineEdit())
+            mrow = QLineEdit()
+            pick = button("", "list", "Lấy danh sách model key này dùng được", flat=True,
+                          on_click=lambda _=False, e=eng: self._pick_model(e))
+            ff.row("Model", hbox(mrow, pick))
+            w["model"] = mrow
+            w["batch"] = ff.row("Số câu mỗi lần gửi", spin(1, 200),
+                                "Mỗi lần gửi AI bao nhiêu câu. Gói miễn phí giới hạn số LẦN gửi -> gửi nhiều câu / lần "
+                                "thì ít lần hơn; AI trả thiếu / lỗi thì giảm xuống 20–30")
+            w["rpm"] = ff.row("Số lần gửi tối đa / phút (mỗi key)", spin(0, 1000),
+                              "0 = không giới hạn. Gói miễn phí: đặt thấp hơn giới hạn của nhà cung cấp một chút "
+                              "(tool tự chờ cho đủ, nhiều key thì dùng xen kẽ)")
+            card.add(ff)
+            w["out"] = label("", "muted", wrap=True)
+            card.add(flow(*([button("Kiểm tra các key", "check", "Gửi thử 1 câu ngắn bằng từng key", flat=True,
+                                    on_click=lambda _=False, e=eng: self._check_keys(e))] if eng != "ollama" else []),
+                          button("Thử dịch 1 câu", "sparkle", flat=True,
+                                 on_click=lambda _=False, e=eng: self.test_translate(e))))
+            card.add(w["out"])
+            self.eng_w[eng] = w
+            eng_cards.append(card)
+        self.ds_model, self.oa_model = self.eng_w["deepseek"]["model"], self.eng_w["openai"]["model"]
+        self.an_model, self.ge_model = self.eng_w["anthropic"]["model"], self.eng_w["gemini"]["model"]
+        self.ol_model, self.ol_base, self.oa_base = (self.eng_w["ollama"]["model"], self.eng_w["ollama"]["base"],
+                                                     self.eng_w["openai"]["base"])
+        self.test_out = self.eng_w["gemini"]["out"]
 
         g = SectionCard("Bảng thuật ngữ chung", "list", "Áp dụng mọi dự án dịch sang tiếng Việt. Mỗi dòng: 中文=Tiếng Việt")
         self.glossary = QPlainTextEdit()
@@ -757,12 +781,20 @@ class SettingsPage(QWidget):
 
         grid.addWidget(a, 0, 0)
         grid.addWidget(b, 0, 1)
-        grid.addWidget(t, 1, 0, 2, 1)
-        grid.addWidget(o, 1, 1)
-        grid.addWidget(g, 2, 1)
+        grid.addWidget(t, 1, 0)
+        grid.addWidget(g, 2, 0)
+        grid.addWidget(o, 1, 1, 2, 1)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         v.addLayout(grid)
+        v.addWidget(label("Công cụ dịch AI – mỗi công cụ 1 khung", "h2"))
+        eg = QGridLayout()
+        eg.setSpacing(16)
+        for i, card in enumerate(eng_cards):
+            eg.addWidget(card, i // 2, i % 2)
+        eg.setColumnStretch(0, 1)
+        eg.setColumnStretch(1, 1)
+        v.addLayout(eg)
         save = GradientButton("Lưu cài đặt", "save", big=True)
         save.clicked.connect(self.save)
         v.addWidget(save)
@@ -786,6 +818,14 @@ class SettingsPage(QWidget):
                 w.setPlainText(val or "")
             else:
                 w.setText(val or "")
+        from ..translate import api_keys, engine_batch, engine_rpm
+
+        raw = load_settings()
+        for eng, w in self.eng_w.items():
+            if "keys" in w:
+                w["keys"].set_keys(api_keys(raw, eng))
+            w["batch"].setValue(engine_batch(raw, eng))
+            w["rpm"].setValue(engine_rpm(raw, eng))
         self.refresh_status()
 
     def refresh_status(self):
@@ -842,6 +882,13 @@ class SettingsPage(QWidget):
                 d[k] = w.toPlainText()
             else:
                 d[k] = w.text()
+        for eng, w in self.eng_w.items():
+            if "keys" in w:
+                keys = w["keys"].keys()
+                d[f"{eng}_api_keys"] = keys
+                d[f"{eng}_api_key"] = keys[0] if keys else ""
+            d[f"{eng}_batch"] = int(w["batch"].value())
+            d[f"{eng}_rpm"] = int(w["rpm"].value())
         cur = load_settings()
         for k in list(d):
             if (k.endswith("_api_key") or k == "hf_token") and isinstance(d[k], str) and d[k].startswith("••••"):
@@ -858,14 +905,148 @@ class SettingsPage(QWidget):
         self.win.toast("Đã lưu cài đặt", "ok")
         self.load()
 
-    def test_translate(self):
+    def test_translate(self, eng: str | None = None):
         save_settings(self.collect())
         from ..translate import translate_text
 
-        self.test_out.setText("Đang dịch…")
-        eng = self.engine.currentData()
+        eng = eng or self.engine.currentData()
+        out = self.eng_w.get(eng, {}).get("out", self.test_out)
+        out.setText("Đang dịch…")
         run_async(lambda: translate_text("师父，这件事你就别管了，我自己能搞定。", load_settings(), eng),
-                  lambda r: self.test_out.setText("✓ " + r), lambda m: self.test_out.setText("✗ " + m))
+                  lambda r: out.setText("✓ " + r), lambda m: out.setText("✗ " + m))
+
+    def _check_keys(self, eng: str):
+        """Thử từng key của công cụ này, ghi kết quả cạnh mỗi key."""
+        save_settings(self.collect())
+        from ..translate import check_key
+
+        w = self.eng_w[eng]
+        keys = w["keys"].keys()
+        if not keys:
+            return w["out"].setText("Chưa có key nào – bấm 'Thêm key'")
+        w["out"].setText(f"Đang kiểm tra {len(keys)} key…")
+        st = load_settings()
+        for i, k in enumerate(keys):
+            w["keys"].set_status(i, "đang thử…")
+            run_async(lambda k=k: check_key(st, eng, k),
+                      lambda r, i=i: (w["keys"].set_status(i, r), w["out"].setText("Xong – xem kết quả cạnh từng key")),
+                      lambda m, i=i: w["keys"].set_status(i, "✗ " + m))
+
+    def _pick_model(self, eng: str):
+        """Lấy danh sách model mà key dùng được rồi cho chọn (tên model của nhà cung cấp hay đổi)."""
+        from PySide6.QtGui import QCursor
+        from PySide6.QtWidgets import QMenu
+
+        from ..translate import list_models
+
+        w = self.eng_w[eng]
+        st = dict(load_settings(), **self.collect())
+        w["out"].setText("Đang lấy danh sách model…")
+
+        def show(models):
+            if not models:
+                return w["out"].setText("Không lấy được model nào")
+            w["out"].setText(f"{len(models)} model – chọn trong danh sách")
+            m = QMenu(self)
+            for name in models[:60]:
+                m.addAction(name, lambda n=name: w["model"].setText(n))
+            m.exec(QCursor.pos())
+        run_async(lambda: list_models(st, eng), show, lambda e: w["out"].setText("✗ Không lấy được danh sách: " + e))
+
+
+class KeyList(QWidget):
+    """Nhiều API key cho 1 công cụ: mỗi dòng 1 key (ẩn chữ, bấm 👁 để xem), nút xoá, kết quả kiểm tra."""
+
+    def __init__(self):
+        super().__init__()
+        self.v = QVBoxLayout(self)
+        self.v.setContentsMargins(0, 0, 0, 0)
+        self.v.setSpacing(6)
+        self.rows: list[tuple[QWidget, QLineEdit, QLabel]] = []
+        self.add_btn = button("Thêm key", "plus", "Thêm 1 API key dự phòng", flat=True, on_click=lambda: self.add(""))
+        self.v.addWidget(self.add_btn, 0, Qt.AlignmentFlag.AlignLeft)
+        self.add("")
+
+    def add(self, key: str = ""):
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+        e = QLineEdit(key)
+        e.setEchoMode(QLineEdit.EchoMode.Password)
+        e.setPlaceholderText(f"Dán API key {len(self.rows) + 1} vào đây")
+        st = QLabel("")
+        st.setStyleSheet(f"color: {theme.MUTED};")
+        st.setWordWrap(True)
+        eye = button("", "eye", "Hiện / ẩn key", flat=True,
+                     on_click=lambda: e.setEchoMode(QLineEdit.EchoMode.Normal if e.echoMode() ==
+                                                    QLineEdit.EchoMode.Password else QLineEdit.EchoMode.Password))
+        rm = button("", "x", "Xoá key này", flat=True, on_click=lambda: self._remove(row))
+        h.addWidget(QLabel(f"{len(self.rows) + 1}."))
+        h.addWidget(e, 1)
+        h.addWidget(eye)
+        h.addWidget(rm)
+        box = QWidget()
+        bv = QVBoxLayout(box)
+        bv.setContentsMargins(0, 0, 0, 0)
+        bv.setSpacing(2)
+        bv.addWidget(row)
+        bv.addWidget(st)
+        st.hide()
+        self.v.insertWidget(len(self.rows), box)
+        self.rows.append((box, e, st))
+
+    def _remove(self, row: QWidget):
+        for i, (box, e, st) in enumerate(self.rows):
+            if row.parentWidget() is box:
+                if len(self.rows) == 1:
+                    e.clear()
+                    st.hide()
+                    return
+                self.rows.pop(i)
+                box.setParent(None)
+                box.deleteLater()
+                break
+        for i, (box, e, st) in enumerate(self.rows):   # đánh số lại
+            lab = box.findChild(QLabel)
+            if lab is not None:
+                lab.setText(f"{i + 1}.")
+
+    def set_keys(self, keys: list[str]):
+        for box, _, _ in self.rows:
+            box.setParent(None)
+            box.deleteLater()
+        self.rows = []
+        for k in keys or [""]:
+            self.add(k)
+
+    def keys(self) -> list[str]:
+        out = []
+        for _, e, _ in self.rows:
+            k = e.text().strip()
+            if k and k not in out:
+                out.append(k)
+        return out
+
+    def set_status(self, i: int, text: str):
+        if 0 <= i < len(self.rows):
+            st = self.rows[i][2]
+            st.setText(text)
+            st.setStyleSheet(f"color: {theme.OK if text.startswith('✓') else theme.ERR if text.startswith('✗') else theme.MUTED};")
+            st.show()
+
+
+ENGINE_CARDS = [
+    ("gemini", "Gemini (Google) – có gói miễn phí",
+     "Lấy key miễn phí: aistudio.google.com/apikey → Create API key. Gói miễn phí giới hạn số lần gửi mỗi phút và mỗi "
+     "ngày: để 'Số lần gửi / phút' thấp hơn giới hạn một chút, gửi nhiều câu mỗi lần; thêm vài key (mỗi key 1 tài khoản "
+     "Google / dự án) – key hết lượt hôm nay tool tự chuyển key sau."),
+    ("deepseek", "DeepSeek", "Giỏi tiếng Trung, rẻ – dịch cả bộ phim chỉ vài nghìn đồng. Key ở platform.deepseek.com"),
+    ("anthropic", "Claude (Anthropic)", "Dịch hay, hiểu ngữ cảnh tốt. Key ở console.anthropic.com"),
+    ("openai", "OpenAI / API tương thích OpenAI",
+     "GPT, hoặc dịch vụ tương thích OpenAI (OpenRouter, Groq…) – đổi Base URL theo nhà cung cấp"),
+    ("ollama", "Ollama (chạy trên máy)", "Không cần key, không tốn tiền – cần cài Ollama và tải model về máy"),
+]
 
 
 # ====================================================================== Thanh tác vụ dưới cùng

@@ -3238,3 +3238,103 @@ def test_dub_tab_flags_undubbed_and_srt_row(monkeypatch):
     assert [s.trans for s in pp.model.segs] == ["Câu 1", "Ừm, đúng là như vậy.", "A!"]
     assert len(Project(p.id).segments) == 3
     win.close()
+
+
+# ------------------------------------------------------------------ 2.0.62: nhiều API key, gói miễn phí, kỹ năng dịch chuẩn
+
+def test_api_keys_rotate_and_free_tier_pacing(monkeypatch):
+    """Key 1 hết lượt hôm nay / sai -> tự dùng key 2; gói miễn phí: không quá N lần gửi / phút mỗi key (nhiều key thì xen
+    kẽ, 1 key thì chờ); hết sạch key -> báo rõ; số câu mỗi lần gửi riêng từng công cụ."""
+    from trami import net, translate as tr
+
+    assert tr.api_keys({"gemini_api_key": "A", "gemini_api_keys": ["A", " B ", "", "C"]}, "gemini") == ["A", "B", "C"]
+    assert tr.engine_batch({"gemini_batch": 15, "translate_batch": 40}, "gemini") == 15
+    assert tr.engine_batch({"translate_batch": 25}, "deepseek") == 25
+    assert tr.engine_rpm({}, "gemini") == 8 and tr.engine_rpm({}, "deepseek") == 0
+
+    class R:
+        def __init__(self, code, text="", content='{"1": "ok"}'):
+            self.status_code, self.text, self.headers, self._c = code, text, {}, content
+
+        def json(self):
+            return {"choices": [{"message": {"content": self._c}}]}
+
+    plan: dict = {}
+    sent: list = []
+
+    class Sess:
+        def post(self, url, headers=None, json=None, timeout=None):
+            k = headers["Authorization"].split()[-1]
+            sent.append(k)
+            return plan[k](len(sent))
+
+    monkeypatch.setattr(net, "session", lambda: Sess())
+    slept: list = []
+    monkeypatch.setattr(net, "sleep", lambda s, c=None: slept.append(s))
+    for d in (tr._KEY_POS, tr._KEY_DEAD, tr._KEY_CALLS):
+        d.clear()
+    daily = '{"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "details": [{"quotaId": ' \
+            '"GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}}'
+    plan.update(K1=lambda n: R(429, daily), K2=lambda n: R(200))
+    st = {"gemini_api_keys": ["K1", "K2"], "gemini_rpm": 0}
+    msgs: list = []
+    with net.task(None, msgs.append):
+        assert tr.LLMClient(st, "gemini").chat("s", "u") == '{"1": "ok"}'
+    assert sent == ["K1", "K2"] and "hết lượt miễn phí hôm nay" in msgs[0] and "key Gemini số 2/2" in msgs[0]
+    sent.clear()
+    assert tr.LLMClient(st, "gemini").chat("s", "u") and sent == ["K2"]      # lần sau dùng luôn key còn lượt
+    # key sai -> key sau
+    for d in (tr._KEY_POS, tr._KEY_DEAD):
+        d.clear()
+    sent.clear()
+    plan.update(K1=lambda n: R(400, "API key not valid. Please pass a valid API key."))
+    assert tr.LLMClient(st, "gemini").chat("s", "u") and sent == ["K1", "K2"]
+    # hết sạch key -> báo rõ
+    tr._KEY_DEAD.clear()
+    plan.update(K1=lambda n: R(429, daily), K2=lambda n: R(429, daily))
+    with pytest.raises(tr.ApiError, match="Tất cả 2 key Gemini"):
+        tr.LLMClient(st, "gemini").chat("s", "u")
+    # giới hạn mỗi phút: 1 key 2 lần / phút -> lần 3 phải chờ; 2 key 1 lần / phút -> xen kẽ không chờ
+    for d in (tr._KEY_POS, tr._KEY_DEAD, tr._KEY_CALLS):
+        d.clear()
+    plan.update(K1=lambda n: R(200), K2=lambda n: R(200))
+    slept.clear()
+    c = tr.LLMClient({"gemini_api_keys": ["K1"], "gemini_rpm": 2}, "gemini")
+    for _ in range(3):
+        c.chat("s", "u")
+    assert len(slept) == 1 and 55 < slept[0] <= 61
+    tr._KEY_CALLS.clear()
+    slept.clear()
+    sent.clear()
+    c = tr.LLMClient({"gemini_api_keys": ["K1", "K2"], "gemini_rpm": 1}, "gemini")
+    c.chat("s", "u")
+    c.chat("s", "u")
+    assert slept == [] and sorted(sent) == ["K1", "K2"]
+    # 429 vì gửi quá nhanh (giới hạn mỗi phút), chỉ 1 key -> chờ theo "retry in" rồi gửi lại
+    for d in (tr._KEY_POS, tr._KEY_DEAD, tr._KEY_CALLS):
+        d.clear()
+    slept.clear()
+    plan.update(K1=lambda n: R(429, "Quota exceeded per minute. Please retry in 12.5s.") if n % 2 else R(200))
+    sent.clear()
+    assert tr.LLMClient({"gemini_api_keys": ["K1"], "gemini_rpm": 0}, "gemini").chat("s", "u")
+    assert slept and 12 < slept[0] < 15
+    # Translator dùng đúng số câu mỗi lần gửi của công cụ
+    t = tr.Translator({"translate_engine": "gemini", "gemini_api_keys": ["K1"], "gemini_batch": 7}, "gemini")
+    assert t.batch == 7
+    for d in (tr._KEY_POS, tr._KEY_DEAD, tr._KEY_CALLS):
+        d.clear()
+
+
+def test_standard_skill_default_and_editable(tmp_path):
+    """Kỹ năng 'Dịch chuẩn' (giữ đúng số câu, không gộp, tên riêng chuẩn) dùng mặc định, sửa được, về mặc định được;
+    AI sửa lỗi nghe & nối câu không còn tự chạy trước khi dịch."""
+    from trami import config, skills
+
+    d = config.DEFAULT_SETTINGS
+    assert d["translate_skill"] == skills.STD_ID and d["ai_clean_before_translate"] is False
+    sk = skills.all_skills({})
+    assert sk[0]["id"] == "chuan" and not sk[0]["builtin"] and "GIỮ ĐÚNG SỐ CÂU" in skills.skill_text(d)
+    edited = {"translate_skills": [{"id": "chuan", "name": "Của tôi", "text": "- giữ đúng số câu, tên Hán Việt"}],
+              "translate_skill": "chuan"}
+    assert skills.skill_text(edited) == "- giữ đúng số câu, tên Hán Việt"
+    assert [x["id"] for x in skills.all_skills(edited)].count("chuan") == 1

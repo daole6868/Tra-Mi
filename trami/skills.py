@@ -39,6 +39,23 @@ BUILTIN = [
         "- Giữ không khí cổ trang, tránh từ hiện đại (OK, xịn, đỉnh).")},
 ]
 
+STD_ID = "chuan"
+# kỹ năng dịch chung mặc định – SỬA ĐƯỢC (bấm "Sửa / thêm…" cạnh ô Kỹ năng dịch AI); xoá = về bản mặc định này
+STD_SKILL = {"id": STD_ID, "name": "Dịch chuẩn – giữ đúng số câu, tên riêng chuẩn", "default": True, "text": (
+    "- GIỮ ĐÚNG SỐ CÂU: mỗi dòng gốc dịch thành đúng 1 dòng, cùng số thứ tự. KHÔNG gộp dòng, KHÔNG tách dòng, KHÔNG bỏ "
+    "dòng, KHÔNG chuyển chữ sang dòng bên cạnh – kể cả khi 1 câu bị cắt ngang giữa 2 dòng: phần nào ở dòng nào thì dịch "
+    "ở dòng đó sao cho đọc liền mạch.\n"
+    "- Dòng chỉ có tiếng cảm thán (嗯, 啊, 哦, 哈哈) vẫn dịch (Ừm, À, Ờ, Haha) – không để trống dòng nào.\n"
+    "- Dịch theo NGỮ CẢNH: đọc cả các dòng trước / sau để hiểu ai đang nói với ai, đang nói chuyện gì; câu nghe nhầm chữ "
+    "đồng âm thì dịch theo ý đúng của ngữ cảnh.\n"
+    "- TÊN RIÊNG: tên người, biệt danh, môn phái, tổ chức, chiêu thức, pháp bảo -> phiên âm Hán Việt chuẩn (李逍遥 -> Lý "
+    "Tiêu Dao). ĐỊA DANH: có tên tiếng Việt quen dùng thì dùng tên đó (北京 -> Bắc Kinh, 上海 -> Thượng Hải, 长安 -> Trường "
+    "An, 日本 -> Nhật Bản), không thì Hán Việt. Tên thương hiệu / công nghệ / người nước ngoài: đúng tên quốc tế (微信 -> "
+    "WeChat, 抖音 -> Douyin, 马斯克 -> Musk).\n"
+    "- Một tên dịch MỘT cách trong cả phim; theo đúng bảng thuật ngữ và hồ sơ phim nếu có.\n"
+    "- Xưng hô theo quan hệ, tuổi tác, địa vị và giữ nhất quán.\n"
+    "- Không thêm chú thích, ngoặc, giải thích; không bỏ ý; không thêm ý.")}
+
 CLEAN_PROMPT = """Bạn là biên tập viên phụ đề tiếng Trung. Các dòng dưới đây do máy nghe (ASR) tạo ra: có thể nghe nhầm chữ
 đồng âm / gần âm và cắt câu sai chỗ. Đọc HẾT các dòng để nắm nội dung, nhân vật, mạch chuyện, rồi:
 1. Sửa chữ nghe nhầm theo ngữ cảnh (VD 升↔生, 咬↔摇, 胃袋↔尾带, D神↔地神, 北极熊↔北京雄, 得↔的). CHỈ sửa khi ngữ cảnh rõ
@@ -76,7 +93,8 @@ def all_skills(settings: dict) -> list[dict]:
     """Kỹ năng có sẵn + kỹ năng của bạn (Cài đặt `translate_skills`)."""
     own = [dict(x, builtin=False) for x in (settings.get("translate_skills") or [])
            if isinstance(x, dict) and x.get("id") and (x.get("text") or "").strip()]
-    return BUILTIN + own
+    std = next((x for x in own if x["id"] == STD_ID), None) or dict(STD_SKILL, builtin=False)   # đã sửa -> bản của bạn
+    return [std] + BUILTIN + [x for x in own if x["id"] != STD_ID]
 
 
 def skill_text(settings: dict, sid: str | None = None) -> str:

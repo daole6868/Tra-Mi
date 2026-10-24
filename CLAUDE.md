@@ -66,7 +66,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `call` (gọi ở luồng phụ, Huỷ dừng ngay), `session` (requests có TCP keepalive). `jobs` chạy mọi tác vụ trong
   `net.task(cancel, report)` -> hàm gọi mạng tự lấy nút Huỷ + dòng trạng thái.
 - `trami/songs.py` – đoán cụm câu đang HÁT (nốt ngân trên giọng đã tách) -> 🎵; `pipeline.mark_song_lines` (♪ trong bản dịch).
-- `tests/test_core.py` – `python -m pytest -q tests` (109 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (111 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -848,6 +848,28 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `QPushButton[flat="true"]` có viền `BORDER` 1 px + bo 9 px + padding 5/11 (nền trong suốt, rê chuột nền CARD2) – áp cho
   mọi `widgets.button(flat=True)` và nút "Nghe riêng" tab Âm thanh. Đã chụp 9 tab + timeline.
 
+- 2.0.62: "lấy API Gemini gói free, số câu gửi mỗi lần, mỗi loại API 1 khung riêng, nhiều key (key 1 hết hạn -> key 2),
+  skill dịch chung sửa được: đúng số câu, không gộp, đúng ngữ cảnh / tên riêng / địa danh".
+  * `translate.py`: `api_keys(settings, eng)` (`<eng>_api_keys` + key cũ `<eng>_api_key`), `engine_batch` (`<eng>_batch`,
+    chưa đặt -> `translate_batch`), `engine_rpm` (`<eng>_rpm`, mặc định gemini 8, khác 0 = không giới hạn). `LLMClient`:
+    `keys`, `ki`; `_pace` (≤ rpm lần / 60 s MỖI key – key hết lượt phút này thì dùng key khác còn lượt, không có thì
+    `net.sleep` + báo "Gói miễn phí … chờ N s"); `_key_failed` (401/403/400 "API key not valid"/"expired" -> sai / hết hạn
+    (chặn cả phiên); 402 / insufficient_quota -> hết tiền; 429 có PerDay -> hết lượt hôm nay (chặn 1 giờ)) -> `_switch`
+    sang key khác + báo "key Gemini số 1/2 … – chuyển sang key … số 2/2"; hết key -> ApiError "Tất cả N key … câu đã dịch
+    được giữ lại"; 429 mỗi phút -> key khác, không có thì chờ `retryDelay` / "retry in Ns" (≤ 20 lần, không tính hỏng).
+    Nhớ trong phiên: `_KEY_POS` (lần sau bắt đầu bằng key còn tốt), `_KEY_DEAD`, `_KEY_CALLS`. `check_key` (nút Kiểm tra các
+    key), `list_models` (Gemini `v1beta/models` lọc generateContent; Anthropic `/v1/models`; OpenAI-compatible `/models`).
+  * Cài đặt: khung "Dịch thuật" chung (công cụ mặc định, dịch sang, văn phong) + mục "Công cụ dịch AI – mỗi công cụ 1 khung"
+    (`ENGINE_CARDS`: Gemini (hướng dẫn aistudio.google.com/apikey) / DeepSeek / Claude / OpenAI (Base URL) / Ollama): `KeyList`
+    (mỗi dòng 1 key ẩn chữ, 👁, ×, "Thêm key", kết quả kiểm tra từng key), Model + nút danh sách model (QMenu), Số câu mỗi
+    lần gửi, Số lần gửi tối đa / phút (mỗi key), Kiểm tra các key, Thử dịch 1 câu. `SettingsPage.eng_w`; `collect` ghi
+    `<eng>_api_keys` + `<eng>_api_key` (= key 1, tương thích) + `<eng>_batch` + `<eng>_rpm`. Bỏ ô "Số câu mỗi lần gửi AI" chung.
+  * `skills.STD_SKILL` "Dịch chuẩn – giữ đúng số câu, tên riêng chuẩn" (id `chuan`, mặc định `translate_skill`): đúng 1 dòng
+    ra cho mỗi dòng vào, không gộp / tách / chuyển chữ sang dòng bên, dòng cảm thán vẫn dịch, theo ngữ cảnh, tên người
+    Hán Việt, địa danh tên Việt quen dùng, thương hiệu tên quốc tế, nhất quán. SỬA ĐƯỢC (không phải builtin): chưa sửa thì
+    không ghi vào Cài đặt; sửa -> lưu vào `translate_skills` cùng id; "Về mặc định" (nút Xoá đổi tên) xoá bản đã sửa.
+    `ai_clean_before_translate` mặc định False (bước AI nối câu trước khi dịch không còn tự chạy).
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -885,5 +907,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   không, số câu bị nối, hồ sơ phim, kiểm tra bản dịch (chỉ thử với AI giả lập ở sandbox).
 - 2.0.59: chờ người dùng thử rút dây mạng / tắt wifi giữa lúc lồng tiếng Edge / dịch AI (dòng trạng thái báo mất mạng,
   có mạng lại tự làm tiếp), và "Tự tìm câu hát" trên phim thật (chỉ thử với 1 bài hát tiếng Anh + 1 phim hoạt hình).
+- 2.0.62: chờ người dùng thử Gemini gói miễn phí thật (sandbox không gọi được Google API): thông báo 429 của Gemini
+  qua endpoint tương thích OpenAI có đúng chữ "PerDay" / "retry in" như đã đoán không; `response_format` json_object có bị
+  từ chối không (đã có tự bỏ khi 400).
 - 2.0.42: chờ người dùng nghe thử các cách xếp giọng trên video thật (nhất là Tự động với cụm câu dài, Đọc đè 2 giọng
   cùng lúc) và xem phụ đề chạy theo giọng lồng có dễ theo dõi không.
