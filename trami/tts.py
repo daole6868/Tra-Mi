@@ -992,6 +992,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     lang = langs.norm(lang)
     genders = genders or {}
     n_song = n_empty = n_nodub = n_lang = 0
+    fallback: dict[str, int] = {}   # giọng đã chọn mà không dùng được (chưa cài bộ đọc / mẫu bị xoá) -> số câu
     by_lang: dict[str, int] = {}
     work = Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
@@ -1034,6 +1035,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                 s.extra["_tts"] = old
                 continue
         spec = s.extra.get("voice") or voices.get(s.speaker or "S1") or voice   # giọng riêng của câu (nếu có)
+        want = spec
         if spec in (CLONE,) or spec.startswith("vieneu:"):
             if not vieneu_available() or (spec.startswith((VN_SAMPLE, VN_LIB)) and not vieneu_ref(spec)):
                 spec = "edge:vi-VN-HoaiMyNeural"   # chưa cài VieNeu / giọng mẫu đã bị xoá
@@ -1041,6 +1043,9 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             if not omnivoice_available() or (spec.startswith("omni:") and spec[5:] not in samples) or \
                     (spec.startswith("omnid:") and not omni_design.get(spec)):
                 spec = "edge:vi-VN-HoaiMyNeural"   # chưa cài OmniVoice / giọng mẫu đã bị xoá
+        if spec != want:   # không đọc được bằng giọng đã chọn -> báo rõ (trước đây đổi im lặng sang Hoài My)
+            fallback[want] = fallback.get(want, 0) + 1
+        s.extra["voice_used"] = want if spec == want else spec
         if lg != "vi" and (spec == CLONE or spec.startswith("vieneu:")):
             # VieNeu chỉ đọc tiếng Việt -> câu tiếng Anh / Thái / Nhật / Hàn đọc bằng Edge cùng nam / nữ
             g = vn_gender.get(spec) or (genders.get(s.speaker or "S1") or {}).get("g", "")
@@ -1213,6 +1218,13 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                 s.extra["_tts"] = s.extra["tts_file"]
                 kept_old += 1
     ok = sum(1 for s in segs if s.extra.get("_tts") and Path(s.extra["_tts"]).exists())
+    used: dict[str, dict[str, int]] = {}   # người nói -> {giọng thật đã đọc: số câu}
+    for s in segs:
+        if s.extra.get("_tts") and s.extra.get("voice_used"):
+            d = used.setdefault(s.speaker or "S1", {})
+            d[s.extra["voice_used"]] = d.get(s.extra["voice_used"], 0) + 1
+    stats["voices_used"] = used
+    stats["fallback"] = fallback
     if prepare_only:
         stats["prepared"] = ok
         stats["errors"] = errors

@@ -1259,6 +1259,25 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     engine = engine or settings.get("tts_engine", "edge")
     default_voice = dub_default_voice(voice, engine, settings)
     voices = dict(p.data.get("voices") or {})
+    auto_voiced = 0
+    if not inplace and only is None and not voice:
+        # nhiều người nói mà chưa ai được chọn giọng -> trước đây cả phim đọc 1 giọng mặc định; giờ tự gán mỗi người 1
+        # giọng (nam / nữ theo chất giọng) và lưu lại để mục 2 hiện đúng giọng đã dùng
+        spks = [x["speaker"] for x in speaker_list(p)]
+        if len(spks) > 1 and not any(voices.get(k) for k in spks):
+            from . import tts
+
+            genders = p.data.get("speaker_gender") or {}
+            if not all(k in genders for k in spks) and p.data.get("source"):
+                try:
+                    genders = speaker_genders(p)
+                except Exception:  # noqa: BLE001 – không đoán được thì xen kẽ nam / nữ
+                    log_error("Đoán giọng nam / nữ trước khi lồng tiếng")
+            got = tts.auto_assign(spks, dict(settings, tts_engine=engine), {}, genders, trans_lang(p))
+            if len({v for v in got.values() if v}) > 1:
+                voices = got
+                p.data["voices"] = got
+                auto_voiced = len(spks)
     dropped = 0
     if not inplace and only is None and trans_lang(p) == "vi" and settings.get("dub_drop_interj", True):
         dropped = drop_interjections(p, segs)   # câu chỉ có "A!", "Ừm.", "Ái!"… -> xoá khỏi phụ đề trước khi đọc
@@ -1318,6 +1337,7 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
             run(_sub(progress, 0.87, 1.0))
     stats["shortened"] = shortened
     stats["interj"] = dropped
+    stats["auto_voiced"] = auto_voiced
     try:
         tmp_out.replace(target)
         out = target
@@ -1993,11 +2013,53 @@ def dub_summary(p: Project) -> str:
         extra.append(f"{st['errors']} câu lỗi")
     if st.get("lang_edge"):
         extra.append(f"{st['lang_edge']} câu không phải tiếng Việt đọc bằng Edge (VieNeu chỉ đọc tiếng Việt)")
+    if st.get("auto_voiced"):
+        extra.append(f"chưa chọn giọng nên đã tự gán giọng khác nhau cho {st['auto_voiced']} người nói")
+    for spec, n in (st.get("fallback") or {}).items():
+        extra.append(f"⚠ {n} câu chọn giọng {voice_label(spec)} nhưng bộ đọc này chưa cài / giọng mẫu đã xoá – "
+                     "đã đọc bằng Hoài My (Edge)")
     miss = int(st.get("total", 0)) - int(st.get("placed", 0)) - sum(
         int(st.get(k, 0) or 0) for k in ("songs", "empty", "nodub"))
     if miss > 0:
         extra.append(f"{miss} câu chưa có giọng – bấm 'Tích câu chưa lồng' rồi 'Tạo lại giọng các câu đã tích'")
+    used = st.get("voices_used") or {}
+    if used:   # giọng THẬT đã đọc từng người nói
+        parts = []
+        for spk in sorted(used, key=lambda k: (-sum(used[k].values()), k)):
+            vs = sorted(used[spk].items(), key=lambda x: -x[1])
+            parts.append(f"{spk}: " + ", ".join(voice_label(v) + (f" ×{n}" if len(vs) > 1 else "") for v, n in vs))
+        extra.append("giọng – " + "; ".join(parts[:6]) + (" …" if len(parts) > 6 else ""))
     return msg + (f" ({', '.join(extra)})" if extra else "")
+
+
+def voice_label(spec: str) -> str:
+    """Tên dễ đọc của mã giọng ("edge:vi-VN-NamMinhNeural" -> "Nam Minh (Edge)")."""
+    from . import tts
+
+    if spec in (tts.CLONE,) or spec.startswith("clone:"):
+        return "Nhái giọng gốc (VieNeu)"
+    if spec == tts.OMNI_CLONE or spec.startswith("omniclone:"):
+        return "Nhái giọng gốc (OmniVoice)"
+    if spec.startswith(tts.VN_SAMPLE):
+        return spec[len(tts.VN_SAMPLE):].split(" (")[0] + " (VieNeu)"
+    if spec.startswith("vieneu:"):
+        return (spec[7:] or "mặc định") + " (VieNeu)"
+    if spec.startswith("edge:"):
+        import re as _re
+
+        n = _re.sub(r"^[a-z]{2}-[A-Z]{2}-|Neural$|Multilingual", "", spec[5:])
+        return _re.sub(r"(?<=[a-z])(?=[A-Z])", " ", n) + " (Edge)"
+    if spec.startswith("omnid:"):
+        from . import omni_design
+
+        d = omni_design.get(spec) or {}
+        return (d.get("name") or spec[6:]) + " (OmniVoice)"
+    if spec.startswith("omni:"):
+        from . import voices as vlib
+
+        sm = vlib.get(spec[5:]) or {}
+        return (sm.get("name") or spec[5:]) + " (OmniVoice)"
+    return spec
 
 
 # ------------------------------------------------------------------ xuất
@@ -2319,4 +2381,9 @@ def _auto_voices(p: Project, opts: dict, settings: dict) -> None:
         opts["voice"] = None
     else:
         p.data["voices"] = {k: v for k in spks}
+    segs = p.segments   # giọng riêng từng câu đè lên giọng người nói -> bỏ, để giọng vừa chọn áp cho mọi câu
+    if any(s.extra.get("voice") for s in segs):
+        for s in segs:
+            s.extra.pop("voice", None)
+        p.segments = segs
     p.save()

@@ -68,7 +68,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `call` (gọi ở luồng phụ, Huỷ dừng ngay), `session` (requests có TCP keepalive). `jobs` chạy mọi tác vụ trong
   `net.task(cancel, report)` -> hàm gọi mạng tự lấy nút Huỷ + dòng trạng thái.
 - `trami/songs.py` – đoán cụm câu đang HÁT (nốt ngân trên giọng đã tách) -> 🎵; `pipeline.mark_song_lines` (♪ trong bản dịch).
-- `tests/test_core.py` – `python -m pytest -q tests` (115 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (116 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -905,6 +905,20 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   * Thử: hàng đợi (4 việc song song, GPU lần lượt, cùng dự án lần lượt), tqdm 2 luồng, Qwen theo nhóm, auto song song
     (gửi 3 lô 3 câu lúc đang nghe, chỉ dịch + đọc lại 1 câu bị đổi, 9 câu đọc trước được dùng lại), chụp giao diện 1600/1366.
 
+- 2.0.65: "lồng tiếng chọn sai giọng, tạo đi tạo lại mãi chỉ có 1 giọng duy nhất". Giả lập lại trên giao diện (Edge thật
+  qua `_edge_all` giả, VieNeu giả ghi tên giọng gửi vào bộ đọc; đã đọc mã vieneu 3.8.3 `v3turbo._resolve_ref` /
+  omnivoice 0.2.1 `generate` – tool gọi đúng API): mục 2 / Tạo lại giọng câu đã tích / Nghe thử đều đọc đúng giọng. Các
+  đường ra "cả phim 1 giọng" mà không báo: (1) nhiều người nói đều "(Mặc định của bộ đọc)" -> 1 giọng mặc định;
+  (2) câu có giọng riêng (`extra["voice"]`, Đổi giọng câu đã tích / khung Câu đang chọn) đè giọng người nói -> đổi mục 2
+  không có tác dụng; (3) chỉ 1 người nói (Số người nói = 1 / tắt phân biệt); (4) giọng VieNeu / OmniVoice mà bộ đọc không
+  dùng được -> đổi im lặng sang Hoài My. Sửa: `dub` (đầy đủ, không truyền giọng) nhiều người nói mà chưa ai có giọng ->
+  `tts.auto_assign` (nam / nữ theo `speaker_genders`) lưu `voices`, `stats["auto_voiced"]`; `synthesize_dub` ghi
+  `extra["voice_used"]`, `stats["voices_used"]` {người nói: {giọng: số câu}} + `stats["fallback"]` -> `dub_summary` ghi
+  "giọng – S1: Bình (VieNeu); S2: …" và "⚠ N câu chọn giọng X nhưng bộ đọc này chưa cài…" (`pipeline.voice_label`);
+  `_set_voice` (mục 2): người nói có câu giọng riêng -> hỏi dùng giọng mới cho cả các câu đó; tab Tự động chọn giọng
+  (`_auto_voices`) bỏ giọng riêng từng câu; dòng "Giọng đọc –" ở mục 3 báo "chỉ có 1 người nói…" / "chưa chọn giọng:
+  tự gán…" / "N câu có giọng riêng (đè lên giọng người nói)". Lưu ý: Edge tiếng Việt chỉ có 2 giọng (Hoài My, Nam Minh).
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -945,6 +959,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.62: chờ người dùng thử Gemini gói miễn phí thật (sandbox không gọi được Google API): thông báo 429 của Gemini
   qua endpoint tương thích OpenAI có đúng chữ "PerDay" / "retry in" như đã đoán không; `response_format` json_object có bị
   từ chối không (đã có tự bỏ khi 400).
+- 2.0.65: chờ người dùng cho biết bộ đọc / giọng đang chọn khi bị "chỉ 1 giọng" (dòng "giọng – S1: …" sau khi lồng sẽ
+  cho thấy giọng thật đã đọc); nếu VieNeu / OmniVoice thật đọc mọi giọng như nhau thì lỗi nằm ở mô hình, cần file log.
 - 2.0.64: chờ người dùng thử "Vừa tách vừa dịch" trên phim thật (Qwen3 + Gemini / DeepSeek + Edge): câu dịch hiện dần ở tab
   Phụ đề, bao nhiêu câu phải dịch lại sau khi nghe xong; chạy 2 dự án cùng lúc (1 việc GPU + 1 việc mạng / xuất video).
 - 2.0.42: chờ người dùng nghe thử các cách xếp giọng trên video thật (nhất là Tự động với cụm câu dài, Đọc đè 2 giọng

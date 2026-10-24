@@ -3495,3 +3495,48 @@ def test_auto_parallel_translates_and_reads_while_listening(monkeypatch):
     assert [t for t, _ in spoken].count("Dịch 5 4") == 1
     assert not stream.draft_path(p.work).exists()               # dọn file câu nháp
     assert threading.active_count() < 50
+
+
+def test_dub_voices_never_silently_single(monkeypatch):
+    """Nhiều người nói chưa chọn giọng -> tự gán mỗi người 1 giọng (trước: cả phim 1 giọng mặc định); giọng chọn mà bộ
+    đọc chưa cài -> báo rõ thay vì đổi im lặng sang Hoài My; báo giọng thật từng người nói; chọn giọng ở tab Tự động bỏ
+    giọng riêng từng câu (giọng riêng đè lên giọng người nói)."""
+    from trami import pipeline, tts
+    from trami.project import Project
+
+    spoken = []
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, p, voice in items:
+            spoken.append((i, voice))
+            _fake_audio(p, 0.5, 300)
+        return []
+
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    monkeypatch.setattr(tts, "vieneu_available", lambda: False)
+    monkeypatch.setattr(pipeline, "speaker_genders", lambda p, audio=None: {})
+    p = Project.create("nhiều giọng")
+    p.data["info"] = {"duration": 6}
+    p.segments = [Segment(0.2, 1.0, "a", "Một", "S1"), Segment(1.5, 2.3, "b", "Hai", "S2"),
+                  Segment(3.0, 3.8, "c", "Ba", "S1")]
+    p.save()
+    st = {"translate_engine": "google", "tts_voice": "vi-VN-HoaiMyNeural"}
+    pipeline.dub(p, None, settings=st, engine="edge")
+    v = {i: voice for i, voice in spoken}
+    assert v[0] == v[2] != v[1]                                     # 2 người nói, 2 giọng
+    assert len(set(p.data["voices"].values())) == 2
+    msg = pipeline.dub_summary(p)
+    assert "tự gán giọng khác nhau cho 2 người nói" in msg and "S1:" in msg and "S2:" in msg
+    # chọn giọng VieNeu nhưng máy chưa cài VieNeu -> báo rõ
+    p.data["voices"] = {"S1": "vieneu:Bình", "S2": "edge:vi-VN-NamMinhNeural"}
+    p.save()
+    pipeline.dub(p, None, settings=st, engine="edge")
+    assert "chọn giọng Bình (VieNeu) nhưng bộ đọc này chưa cài" in pipeline.dub_summary(p)
+    # giọng riêng của câu bị bỏ khi chọn 1 giọng cho mọi người ở tab Tự động
+    segs = p.segments
+    segs[0].extra["voice"] = "edge:vi-VN-HoaiMyNeural"
+    p.segments = segs
+    p.save()
+    pipeline._auto_voices(p, {"voice": "edge:vi-VN-NamMinhNeural"}, st)
+    assert set(p.data["voices"].values()) == {"edge:vi-VN-NamMinhNeural"}
+    assert not any(s.extra.get("voice") for s in p.segments)

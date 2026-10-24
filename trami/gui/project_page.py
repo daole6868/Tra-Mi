@@ -3073,6 +3073,16 @@ class ProjectPage(QWidget):
         self.p.reload()
         self.p.data.setdefault("voices", {})[spk] = vid
         self.p.save()
+        # câu của người này đang có giọng riêng (Đổi giọng câu đã tích / khung Câu đang chọn) -> giọng riêng đè lên giọng
+        # vừa chọn, đọc lại bao nhiêu lần cũng ra giọng cũ -> hỏi có dùng giọng mới cho cả các câu đó không
+        own = [r for r, x in enumerate(self.model.segs) if (x.speaker or "S1") == spk and x.extra.get("voice")]
+        if own and QMessageBox.question(
+                self, "Câu có giọng riêng",
+                f"{len(own)} câu của {spk} đang có giọng riêng (đặt ở cột Giọng / 'Đổi giọng' câu đã tích) nên KHÔNG đổi "
+                f"theo giọng vừa chọn.\n\nDùng giọng mới cho cả {len(own)} câu này?") == QMessageBox.StandardButton.Yes:
+            for r in own:
+                self.model.setData(self.model.index(r, C_VOICE), "")
+            self._save_segs_now()
         self._update_voice_note()
 
     def _update_voice_note(self):
@@ -3083,9 +3093,18 @@ class ProjectPage(QWidget):
             if it and isinstance(cb, QComboBox):
                 parts.append(f"{it.text().split(' ·')[0]}: {cb.currentText()}")
         own = sum(1 for x in self.model.segs if x.extra.get("voice"))
+        n_spk = self.spk_table.rowCount()
+        defaults = sum(1 for r in range(n_spk) if isinstance(self.spk_table.cellWidget(r, 2), QComboBox)
+                       and not self.spk_table.cellWidget(r, 2).currentData())
+        hint = ""
+        if n_spk == 1 and len(self.model.segs) > 1:
+            hint = (" · ⚠ chỉ có 1 người nói (S1) nên cả phim 1 giọng – muốn mỗi nhân vật 1 giọng: Cài đặt → Số người nói "
+                    "đặt 0 (tự đoán, không để 1), rồi bấm 'Phân biệt người nói' ở mục 2; hoặc tích câu rồi đổi giọng riêng")
+        elif n_spk > 1 and defaults == n_spk:
+            hint = " · chưa chọn giọng: khi lồng tiếng tool tự gán mỗi người nói 1 giọng khác nhau"
         self.d_voice_note.setText(f"Giọng đọc – bộ đọc: {self.d_engine.currentText().split(' (')[0]}" +
                                   (" · " + ", ".join(parts[:6]) + (" …" if len(parts) > 6 else "") if parts else "") +
-                                  (f" · {own} câu có giọng riêng" if own else ""))
+                                  (f" · {own} câu có giọng riêng (đè lên giọng người nói)" if own else "") + hint)
 
     def _goto_voices(self):
         from PySide6.QtWidgets import QScrollArea
