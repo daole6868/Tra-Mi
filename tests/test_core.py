@@ -3357,6 +3357,7 @@ def test_jobs_run_concurrently_with_project_and_gpu_rules(monkeypatch):
     monkeypatch.setattr(gpu, "before_job", lambda kind: None)   # dọn card (gc) có test riêng – ở đây chỉ xét lịch chạy
     monkeypatch.setattr(gpu, "after_job", lambda kind: None)
     monkeypatch.setattr(jobs_mod, "max_running", lambda: 4)     # đã bật "Chạy nhiều việc cùng lúc" ở Cài đặt
+    monkeypatch.setattr(gpu, "wait_for_vram", lambda *a, **k: "")
 
     m = JobManager(workers=4)
     live, peak, lock = set(), {}, threading.Lock()
@@ -3819,6 +3820,7 @@ def test_jobs_sequential_by_default_and_qwen_batches(monkeypatch):
     monkeypatch.setattr(jobs_mod, "_limit_cache", [0.0, 1])
     monkeypatch.setattr(gpu, "before_job", lambda kind: None)
     monkeypatch.setattr(gpu, "after_job", lambda kind: None)
+    monkeypatch.setattr(gpu, "wait_for_vram", lambda *a, **k: "")
     assert jobs_mod.max_running() == 1
     m = JobManager(workers=4)
     gate, live, peak = threading.Event(), [0], [0]
@@ -4083,6 +4085,7 @@ def test_relayout_job_not_blocked_by_long_job(monkeypatch):
     monkeypatch.setattr(jobs_mod, "_limit_cache", [_t.time() + 60, 1])
     monkeypatch.setattr(gpu, "before_job", lambda kind: None)
     monkeypatch.setattr(gpu, "after_job", lambda kind: None)
+    monkeypatch.setattr(gpu, "wait_for_vram", lambda *a, **k: "")
     m = JobManager(workers=4)
     gate = threading.Event()
     a = m.submit("recognize", "Nghe & tách câu", lambda j: gate.wait(3), "p1")
@@ -4166,4 +4169,192 @@ def test_timeline_drag_subtitle_merge_and_selection(monkeypatch):
     pp._select_line(2)
     assert pp.dub_table.selectionModel().isRowSelected(pp.dub_proxy.mapFromSource(pp.model.index(2, 0)).row())
     assert "QTableView::item:selected" in theme.stylesheet()
+    win.close()
+
+
+def test_stretch_cover_hides_text(tmp_path):
+    """Che phụ đề kiểu Kéo dọc: vùng chữ được phủ bằng dòng điểm ảnh sát mép (trên / dưới / 2 đầu) – không còn chữ, cả
+    Xem thử 1 khung (numpy) lẫn khi xuất (FFmpeg)."""
+    import numpy as np
+
+    from trami import ffmpeg as ff, video
+
+    img = np.zeros((180, 320, 3), np.uint8)
+    for y in range(180):
+        img[y] = (y, 100, 200 - y)
+    img[140:160, 40:280] = 255                                       # "chữ" trắng
+    for side in ("both", "above", "below"):
+        out = video.stretch_fill(img, 40, 136, 280, 164, side, smooth=0)
+        assert out.shape == (28, 240, 3) and out.max() < 180
+    assert video.stretch_rows(180, 170, 10, "below") == (168, None)   # sát mép dưới -> dùng dải phía trên
+    src = tmp_path / "v.mp4"
+    subprocess.run([ff.ffmpeg_bin(), "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=0x305070:s=320x180:r=25:d=1,drawbox=x=40:y=140:w=240:h=20:c=white:t=fill",
+                    "-pix_fmt", "yuv420p", str(src)], check=True)
+    spec = {"hardsub": {"mode": "stretch", "regions": [{"x": 0.1, "y": 0.75, "w": 0.8, "h": 0.17}]}}
+    video.build_and_render(src, tmp_path / "o.mp4", spec, {"video_preset": "ultrafast"}, tmp_path / "w", [])
+    raw = subprocess.run([ff.ffmpeg_bin(), "-loglevel", "error", "-i", str(tmp_path / "o.mp4"), "-frames:v", "1",
+                          "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"], capture_output=True).stdout
+    g = np.frombuffer(raw, np.uint8).reshape(180, 320)
+    assert g[140:160, 40:280].max() < 150
+
+
+def test_chunked_export_matches_and_reuses(tmp_path, monkeypatch):
+    """Xuất theo từng đoạn: cùng số khung / hình như xuất 1 lần (có cắt giữa, mờ dần, làm mờ vùng, phụ đề); sửa 1 câu
+    rồi xuất lại -> chỉ mã hoá lại đoạn có câu đó, dùng lại âm thanh."""
+    import numpy as np
+
+    from trami import ffmpeg as ff, video
+
+    src = tmp_path / "src.mp4"
+    subprocess.run([ff.ffmpeg_bin(), "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=25:d=8",
+                    "-f", "lavfi", "-i", "sine=frequency=440:d=8", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(src)], check=True)
+    monkeypatch.setattr(video, "CHUNK_MIN_DUR", 3.0)
+    monkeypatch.setattr(video, "CHUNK_SEC", 2.0)
+    segs = [Segment(i + 0.1, i + 0.8, "中", f"Câu {i}") for i in range(8)]
+    spec = {"cuts": [[3.0, 4.0]], "fade": {"in": 0.5, "out": 0.5},
+            "hardsub": {"mode": "blur", "regions": [{"x": 0.1, "y": 0.8, "w": 0.8, "h": 0.12}]},
+            "subtitles": {"burn": True, "which": "trans"}}
+    st = {"video_preset": "ultrafast"}
+    calls = []
+    real = ff.run
+    monkeypatch.setattr(ff, "run", lambda args, *a, **k: (calls.append(str(args[-1])), real(args, *a, **k))[1])
+    video.build_and_render(src, tmp_path / "one.mp4", spec, dict(st, export_chunks=False), tmp_path / "w1", segs)
+    video.build_and_render(src, tmp_path / "ch.mp4", spec, st, tmp_path / "w2", segs)
+    assert sum(".part.mp4" in c for c in calls) == 4
+
+    def frames(p):
+        raw = subprocess.run([ff.ffmpeg_bin(), "-loglevel", "error", "-i", str(p), "-f", "rawvideo", "-pix_fmt", "gray",
+                              "pipe:1"], capture_output=True).stdout
+        return np.frombuffer(raw, np.uint8).reshape(-1, 180, 320).astype(float)
+
+    a, b = frames(tmp_path / "one.mp4"), frames(tmp_path / "ch.mp4")
+    assert len(a) == len(b) == 175
+    assert np.abs(a - b).mean(axis=(1, 2)).max() < 2.0
+    assert ff.probe(tmp_path / "ch.mp4").has_audio
+    calls.clear()
+    segs[6].trans = "Câu đã sửa"                                    # giây 6 gốc = giây 5 xuất -> đoạn 3
+    video.build_and_render(src, tmp_path / "ch2.mp4", spec, st, tmp_path / "w2", segs)
+    assert sum(".part.mp4" in c for c in calls) == 1 and not any(".part.m4a" in c for c in calls)
+    assert len(list((tmp_path / "w2" / "chunks").glob("c_*.mp4"))) == 4
+
+
+def test_voice_check_flags_music_lines():
+    """Lọc câu nghe nhầm: câu là nốt nhạc đứng yên / tiếng ồn / tiếng rất nhỏ bị đánh dấu, lời thoại thật thì không."""
+    import numpy as np
+
+    from trami import voicecheck
+
+    sr, rng = 16000, np.random.default_rng(0)
+    parts, segs, t = [], [], 0.0
+
+    def speech(dur, base, gain=0.3):
+        n = int(dur * sr)
+        tt = np.arange(n) / sr
+        f = base * (1 + 0.12 * np.sin(2 * np.pi * 1.7 * tt + rng.uniform(0, 6)) + 0.05 * np.sin(2 * np.pi * 5 * tt))
+        ph = 2 * np.pi * np.cumsum(f) / sr
+        x = sum(np.sin(k * ph) / k for k in range(1, 6))
+        env = (np.sin(2 * np.pi * 4 * tt) > -0.3).astype(float)      # âm tiết ~4 / s
+        return gain * x * env
+
+    def add(x, text):
+        nonlocal t
+        parts.append(x)
+        segs.append(Segment(t, t + len(x) / sr, text, ""))
+        parts.append(np.zeros(int(0.3 * sr)))
+        t += len(x) / sr + 0.3
+
+    for i in range(10):
+        add(speech(1.6, 190 + 8 * (i % 4)), "我们今天去哪里吃")
+    tt = np.arange(int(1.6 * sr)) / sr
+    add(0.3 * np.sin(2 * np.pi * 660 * tt), "啊啊啊啊")                     # nốt nhạc cao, đứng yên
+    add(0.3 * rng.standard_normal(int(1.6 * sr)), "什么东西")                # tiếng ồn
+    add(speech(1.6, 200, gain=0.002), "你好你好")                           # rất nhỏ (nhạc lọt vào)
+    audio = np.concatenate(parts).astype(np.float32)
+    r = voicecheck.check_lines(segs, audio, trim=False)
+    assert r["suspect"] == [10, 11, 12]
+    assert all("noise" in segs[k].extra for k in (10, 11, 12)) and not any("noise" in s.extra for s in segs[:10])
+
+
+def test_length_marker_fill_range():
+    """Dịch vừa thời lượng: câu đủ dài gửi kèm khoảng ⟪tối thiểu–tối đa⟫ để AI thêm từ đệm, câu rất ngắn chỉ có tối đa."""
+    from trami import translate
+
+    assert translate.length_marker(1.0, "vi", "tiếng") == "⟪≤5 tiếng⟫"
+    assert translate.length_marker(3.0, "vi", "tiếng") == "⟪9–15 tiếng⟫"
+    assert translate.length_marker(3.0, "vi", "tiếng", fill=False) == "⟪≤15 tiếng⟫"
+
+
+def test_wait_for_vram(monkeypatch):
+    """Card bị chương trình khác chiếm: báo tên chương trình + chờ, quá hạn thì chạy kèm ghi chú; đủ chỗ thì chạy ngay."""
+    from trami import gpu
+    from trami.ffmpeg import Cancelled
+
+    free = {"mb": 900}
+
+    def smi(args):
+        if args[0].startswith("--query-gpu"):
+            return [f"{free['mb']}, 8188"]
+        return ["4321, C:\\Program Files\\Chrome\\chrome.exe, 3500"]
+
+    monkeypatch.setattr(gpu, "_smi", smi)
+    st = {"asr_engine": "qwen3", "qwen_asr_model": "Qwen/Qwen3-ASR-1.7B"}
+    msgs = []
+    note = gpu.wait_for_vram("recognize", msgs.append, None, st, wait_max=0.3, poll=0.1)
+    assert "card chỉ còn trống" in note and msgs and "chrome.exe 3.4 GB" in msgs[0]
+    with pytest.raises(Cancelled):
+        gpu.wait_for_vram("recognize", None, lambda: True, st, wait_max=5, poll=0.5)
+    free["mb"] = 7000
+    assert gpu.wait_for_vram("recognize", None, None, st) == ""
+    assert gpu.wait_for_vram("translate", None, None, dict(st, translate_engine="google")) == ""
+    assert gpu.wait_for_vram("recognize", None, None, dict(st, vram_check=False)) == ""
+
+
+def test_undo_redo_subtitle_ops(monkeypatch):
+    """Hoàn tác / làm lại: xoá rồi gộp = 2 bước riêng; gõ chữ liền nhau gộp 1 bước; hoàn tác ghi đĩa + xếp lại giọng."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    try:
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        pytest.skip(str(e))
+    from trami.gui.main import MainWindow
+    from trami.gui.subs_model import C_VI
+    from trami.project import Project
+
+    QApplication.instance() or QApplication([])
+    p = Project.create("hoàn tác")
+    segs = [Segment(2 * i, 2 * i + 1.5, f"句{i}", f"Câu {i}") for i in range(5)]
+    for i, s in enumerate(segs):
+        s.extra.update({"tts_file": f"tts_{i}.wav", "dub_at": [2 * i, 2 * i + 1.2]})
+    p.segments = segs
+    p.data["info"] = {"duration": 12}
+    p.data["edit"] = {"dub": {"enabled": True, "wav": "dub.wav"}}
+    p.save()
+    win = MainWindow()
+    win.show()
+    win.open_project(p.id)
+    QTest.qWait(50)
+    pp = win.project_page
+    relayouts = []
+    monkeypatch.setattr(pp, "_relayout", lambda *a, **k: relayouts.append(a))
+    monkeypatch.setattr(pp, "_redub_rows", lambda rows: None)
+    assert not pp.undo_btn.isEnabled()
+    pp._sub_op("delete", [4])
+    pp._sub_op("merge", [0])
+    assert [s.trans for s in pp.model.segs] == ["Câu 0 Câu 1", "Câu 2", "Câu 3"]
+    pp.undo()
+    assert len(pp.model.segs) == 4 and pp.model.segs[0].trans == "Câu 0"
+    assert len(Project(p.id).segments) == 4 and relayouts
+    pp.undo()
+    assert len(pp.model.segs) == 5 and not pp.undo_btn.isEnabled()
+    pp.redo()
+    assert len(pp.model.segs) == 4
+    for txt in ("A", "AB", "ABC"):                                       # gõ liền nhau -> 1 bước
+        pp.model.setData(pp.model.index(1, C_VI), txt)
+    assert pp.model.segs[1].trans == "ABC"
+    pp.undo()
+    assert pp.model.segs[1].trans == "Câu 1" and pp.redo_btn.isEnabled()
     win.close()

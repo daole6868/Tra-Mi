@@ -325,14 +325,34 @@ def relink_source(p: Project, path: str | Path) -> Path:
     return path
 
 
+PROXY_MODES = [("auto", "Tự tạo khi video nặng (trên 1080p, trên 30 khung/s, HEVC / AV1)"),
+               ("always", "Luôn tạo bản xem trước nhẹ"), ("off", "Không tạo (phát thẳng video gốc)")]
+
+
+def needs_proxy(p: Project, settings: dict | None = None) -> bool:
+    """Video nặng cho trình phát (4K, 50/60 khung/s, HEVC / AV1 giải mã bằng CPU) -> nên phát bản nhẹ ≤ 720p (chỉ để
+    xem trong tool; xuất video vẫn dùng video gốc)."""
+    st = settings or load_settings()
+    mode = st.get("proxy_mode", "auto")
+    i = p.data.get("info", {})
+    if mode == "off" or not p.data.get("source") or not i.get("width"):
+        return False
+    if mode == "always":
+        return True
+    return (max(int(i.get("width") or 0), int(i.get("height") or 0)) > 1920 or float(i.get("fps") or 0) > 31
+            or str(i.get("vcodec") or "") in ("hevc", "h265", "av1", "vp9") and int(i.get("height") or 0) > 720)
+
+
 def make_preview(p: Project, progress: Prog | None = None, cancel=None) -> Path:
     """Tạo bản xem trước nhẹ (H.264 ≤720p) để phát được trong trình duyệt. Không ảnh hưởng chất lượng xuất."""
     out = p.work / "preview.mp4"
     tmp = p.work / "preview_tmp.mp4"
     info = p.data.get("info", {})
-    ff.run(["-i", str(p.source), "-vf", "scale=-2:'min(720,ih)'", "-c:v", "libx264", "-preset", "veryfast",
-            "-crf", "27", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(tmp)],
-           info.get("duration", 0), progress, cancel, "Đang tạo bản xem trước")
+    fps = float(info.get("fps") or 0)
+    vf = "scale=-2:'min(720,ih)'" + (",fps=30" if fps > 31 else "")    # 50/60 khung/s -> 30: phát nhẹ hơn hẳn
+    ff.run(["-i", str(p.source), "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-tune", "fastdecode",
+            "-crf", "27", "-g", "30", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+            str(tmp)], info.get("duration", 0), progress, cancel, "Đang tạo bản xem trước nhẹ (chỉ để xem trong tool)")
     tmp.replace(out)
     return out
 
@@ -841,6 +861,19 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
                 p.data["songs_found"] = mark_sung(segs, wav)
             except Exception:  # noqa: BLE001 – bước phụ
                 log_error("Đoán đoạn hát")
+        # 2e) câu "nghe nhầm": nhạc / tiếng động bị chép thành lời -> đo cao độ giọng thật từng người, đánh dấu câu lạ
+        p.data.pop("noise_found", None)
+        if segs and audio_in != Path(src) and settings.get("pitch_check", True):
+            try:
+                from .songs import read_wav16
+                from .voicecheck import check_lines
+
+                res = check_lines(segs, read_wav16(wav), float(settings.get("pitch_tol", 4.0)),
+                                  bool(settings.get("pitch_trim", True)))
+                p.data["noise_found"] = len(res["suspect"])
+                p.data["voice_trimmed"] = res["trimmed"]
+            except Exception:  # noqa: BLE001 – bước phụ
+                log_error("Lọc câu nghe nhầm theo cao độ")
     segs = normalize(segs)
     one_spk = want_spk and int(settings.get("diarize_speakers", 0) or 0) == 1
     if one_spk:   # đặt "1 người nói": gán hết S1, không đo giọng / không tách câu theo chỗ đổi giọng
@@ -1517,16 +1550,42 @@ def restore_interjections(p: Project) -> int:
     return len(back)
 
 
-def detect_songs(p: Project, settings: dict | None = None, progress: Prog | None = None, cancel=None) -> int:
-    """Tìm các cụm câu đang HÁT trên giọng đã tách (dự án đã nghe từ trước) -> đánh dấu 🎵. Cần đã tách giọng."""
+def vocals16k(p: Project, progress: Prog | None = None, cancel=None, why: str = "đo cao độ") -> Path:
+    """Giọng đã tách bản 16 kHz mono (đoán đoạn hát, lọc câu nghe nhầm). Chưa tách giọng -> báo."""
     st = stems(p)
     if not st:
-        raise ValueError("Chưa tách giọng / nhạc nền – bấm 'Tách ngay' ở mục 1 tab Lồng tiếng trước (đoán đoạn hát đo "
-                         "trên giọng đã tách khỏi nhạc)")
+        raise ValueError("Chưa tách giọng / nhạc nền – bấm 'Tách ngay' ở mục 1 tab Lồng tiếng trước (" + why +
+                         " trên giọng đã tách khỏi nhạc)")
     wav = p.work / "asr16k_vocals.wav"
     if not wav.exists() or wav.stat().st_size < 1000 or wav.stat().st_mtime < Path(st["vocals"]).stat().st_mtime:
         ff.run(["-i", st["vocals"], "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav)],
                p.data.get("info", {}).get("duration", 0), progress, cancel, "Đang chuẩn bị giọng đã tách")
+    return wav
+
+
+def check_voices(p: Project, settings: dict | None = None, progress: Prog | None = None, cancel=None,
+                 tol: float | None = None, trim: bool | None = None) -> dict:
+    """Nút "Lọc câu nghe nhầm": đo cao độ giọng thật từng người nói -> đánh dấu câu nghi là nhạc / tiếng động bị chép
+    thành lời (`extra["noise"]`) + căn đầu / cuối câu theo đoạn có giọng. Câu đổi giờ mà đã lồng tiếng -> xếp lại."""
+    from .songs import read_wav16
+    from .voicecheck import check_lines
+
+    settings = settings or load_settings()
+    wav = vocals16k(p, progress, cancel, "lọc câu nghe nhầm đo cao độ")
+    segs = p.segments
+    before = [(s.start, s.end) for s in segs]
+    res = check_lines(segs, read_wav16(wav), float(settings.get("pitch_tol", 4.0) if tol is None else tol),
+                      bool(settings.get("pitch_trim", True) if trim is None else trim), progress=progress)
+    p.segments = segs
+    p.save()
+    if res["trimmed"] and has_dub(p) and any((s.start, s.end) != b for s, b in zip(segs, before)):
+        relayout(p, settings, progress, cancel)
+    return res
+
+
+def detect_songs(p: Project, settings: dict | None = None, progress: Prog | None = None, cancel=None) -> int:
+    """Tìm các cụm câu đang HÁT trên giọng đã tách (dự án đã nghe từ trước) -> đánh dấu 🎵. Cần đã tách giọng."""
+    wav = vocals16k(p, progress, cancel, "đoán đoạn hát đo")
     from .songs import mark_sung
 
     segs = p.segments

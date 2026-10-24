@@ -627,7 +627,8 @@ class SettingsPage(QWidget):
         ("dub_fit", "dub_fit", "b"), ("dub_short", "dub_auto_shorten", "b"),
         ("maxspeed", "tts_max_speedup", "f"), ("inpaint", "inpaint_backend", "c"),
         ("codec", "video_codec", "c"), ("crf", "video_crf", "i"), ("preset", "video_preset", "c"),
-        ("jobs_parallel", "jobs_parallel", "b"),
+        ("export_chunks", "export_chunks", "b"),
+        ("jobs_parallel", "jobs_parallel", "b"), ("vram_check", "vram_check", "b"), ("proxy_mode", "proxy_mode", "c"),
     ]
 
     def __init__(self, win):
@@ -685,6 +686,15 @@ class SettingsPage(QWidget):
         self.jobs_parallel = f.row("Chạy nhiều việc cùng lúc", Switch(),
                                    "Tắt (khuyên dùng): bấm nhiều việc thì chạy lần lượt từng việc – ít RAM / GPU nhất. "
                                    "Bật: việc của dự án khác / việc dùng mạng chạy song song (tốn RAM hơn)")
+        from ..pipeline import PROXY_MODES
+
+        self.proxy_mode = f.row("Bản xem trước nhẹ", combo(PROXY_MODES),
+                                "Video 4K / 60 khung/s / HEVC phát giật trong tool -> tự tạo bản ≤ 720p chỉ để xem "
+                                "(chạy nền vài phút, xuất video vẫn dùng video gốc)")
+        self.vram_check = f.row("Chờ khi card bị chương trình khác chiếm", Switch(),
+                                "Trước việc dùng card đồ hoạ (nghe, tách giọng, đọc giọng AI, xoá phụ đề): card còn quá "
+                                "ít chỗ vì trình duyệt / game / CapCut… -> báo tên chương trình + chờ đóng bớt (tối đa "
+                                "3 phút) thay vì chạy chậm cỡ 5 % mà máy đơ")
         a.add(f)
 
         b = SectionCard("Tách giọng & người nói", "layers")
@@ -783,6 +793,9 @@ class SettingsPage(QWidget):
                                                      ("libx265", "H.265 (file nhỏ)")]))
         self.crf = f.row("Chất lượng CRF (thấp = đẹp)", spin(12, 35))
         self.preset = f.row("Tốc độ nén", combo([(x, x) for x in ("ultrafast", "veryfast", "fast", "medium", "slow")]))
+        self.export_chunks = f.row("Xuất lại nhanh", Switch(),
+                                   "Phim ≥ 10 phút: xuất từng đoạn 60 s song song, nhớ đoạn đã xuất – sửa vài câu rồi xuất "
+                                   "lại chỉ làm lại đoạn có thay đổi (đoạn nhớ trong work\\render\\chunks)")
         o.add(f)
 
         grid.addWidget(a, 0, 0)

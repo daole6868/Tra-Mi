@@ -198,6 +198,8 @@ class SubsModel(QAbstractTableModel):
             if c == C_SPK:
                 return QColor(spk_color(s.speaker))
             if c == C_ZH:
+                if s.extra.get("noise"):
+                    return QColor("#B98CFF")       # tím = nghi nhạc / tiếng động bị nghe thành lời
                 return QColor("#E8C26A" if s.extra.get("src_unsure") else "#C3CAD6")   # vàng = AI sửa mà chưa chắc
             if c == C_FIT:
                 return QColor(FIT_COLOR.get(s.extra.get("fit"), theme.MUTED))
@@ -217,6 +219,8 @@ class SubsModel(QAbstractTableModel):
                 if s.extra.get("review_note") and s.extra.get("trans_before_review") is not None:
                     tip += f"\nAI kiểm tra đã sửa: {s.extra['review_note']}\nTrước khi sửa: {s.extra['trans_before_review']}"
                 return tip
+            if c == C_ZH and s.extra.get("noise"):
+                return f"⚠ Nghi nghe nhầm: {s.extra['noise']}\nNghe lại câu này – đúng là nhạc / tiếng động thì Xoá"
             if c == C_ZH and (s.extra.get("src_before") or s.extra.get("src_unsure")):
                 tip = f"AI sửa lỗi nghe – trước: {s.extra['src_before']}" if s.extra.get("src_before") else ""
                 if s.extra.get("src_unsure"):

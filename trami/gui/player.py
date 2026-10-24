@@ -450,7 +450,7 @@ class HardsubOverlay(QGraphicsItem):
         if self._drag:      # đang kéo: giữ vùng đang kéo, không để bản lưu cũ ghi đè
             hs[self.target] = self.hs.get(self.target) or []
         self.hs = hs
-        need = self.hs.get("mode") in ("blur", "inpaint", "delogo", "patch") and bool(self.hs.get("regions"))
+        need = self.hs.get("mode") in ("blur", "inpaint", "delogo", "patch", "stretch") and bool(self.hs.get("regions"))
         if need and not self._sink_connected:
             sink = self.video.videoSink()
             sink.videoFrameChanged.connect(self._on_frame)
@@ -505,6 +505,50 @@ class HardsubOverlay(QGraphicsItem):
                 g.setColorAt(1, QColor(0, 0, 0, 0))
                 q.fillRect(0, 0, w, h, g)
             q.end()
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            p.drawImage(r, part)
+
+    def _paint_stretch(self, p: QPainter, img: QImage, regs: list, rects: list):
+        """Kéo dọc gần đúng như khi xuất: dải 2 dòng sát mép trên / dưới vùng của khung đang hiện kéo giãn phủ kín vùng
+        (2 mép: mép dưới mờ dần lên trên mép trên)."""
+        from PySide6.QtGui import QLinearGradient
+
+        from ..video import STRIP, stretch_rows
+
+        iw, ih = img.width(), img.height()
+        side = self.hs.get("stretch_from") or "both"
+        for reg, r in zip(regs, rects):
+            x, y = int(float(reg["x"]) * iw), int(float(reg["y"]) * ih)
+            w, h = max(1, int(float(reg["w"]) * iw)), max(2, int(float(reg["h"]) * ih))
+            top, bot = stretch_rows(ih, y, h, side)
+            layers = []
+            for row in (top, bot):
+                if row is None:
+                    continue
+                strip = img.copy(x, row, w, STRIP)
+                if strip.isNull():
+                    continue
+                layers.append(strip.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio,
+                                           Qt.TransformationMode.SmoothTransformation
+                                           ).convertToFormat(QImage.Format.Format_ARGB32_Premultiplied))
+            if not layers:
+                continue
+            part = layers[0]
+            if len(layers) == 2:
+                low = layers[1]
+                q = QPainter(low)
+                q.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+                g = QLinearGradient(0, 0, 0, h)
+                g.setColorAt(0, QColor(0, 0, 0, 0))
+                g.setColorAt(1, QColor(0, 0, 0, 255))
+                q.fillRect(0, 0, w, h, g)
+                q.end()
+                q = QPainter(part)
+                q.drawImage(0, 0, low)
+                q.end()
+            mask = self._shape_mask(w, h)
+            if mask is not None:
+                self._apply_mask(part, mask)
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
             p.drawImage(r, part)
 
@@ -583,6 +627,10 @@ class HardsubOverlay(QGraphicsItem):
             img = self._frame_image()
             if img is not None:
                 self._paint_patch(p, img, regs, rects)
+        elif mode == "stretch":
+            img = self._frame_image()
+            if img is not None:
+                self._paint_stretch(p, img, regs, rects)
         elif mode in ("blur", "inpaint", "delogo"):
             img = self._frame_image()
             if img is not None:

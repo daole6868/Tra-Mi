@@ -31,7 +31,7 @@ OCR_SPEEDS = [("2", "Nhanh – 2 lần/giây (video dài, câu hiện lâu)"), (
               ("8", "Kỹ – 8 lần/giây (câu đổi rất nhanh, chậm gấp đôi)")]
 HARDSUB = [("none", "Giữ nguyên"), ("inpaint", "Xoá sạch bằng AI (LaMa)"), ("blur", "Làm mờ vùng phụ đề"),
            ("box", "Che bằng dải màu"), ("delogo", "Delogo (nhanh)"),
-           ("patch", "Vá nền (chép nền sát bên, nhanh)")]
+           ("patch", "Vá nền (chép nền sát bên, nhanh)"), ("stretch", "Kéo dọc (kéo dòng sát mép phủ kín chữ)")]
 WHICH = [("trans", "Chỉ tiếng Việt"), ("both", "Song ngữ Việt + Trung"), ("source", "Chỉ tiếng Trung"),
          ("none", "Không ghép (chỉ xuất SRT)")]
 TTS_ENGINES = [("edge", "Microsoft Edge (giọng Việt / Anh / Thái / Nhật / Hàn, cần mạng)"),

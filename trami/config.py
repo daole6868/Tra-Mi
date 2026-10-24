@@ -133,8 +133,14 @@ DEFAULT_SETTINGS: dict = {
     "dub_drop_interj": True,          # lồng tiếng Việt: xoá câu chỉ có 1–2 tiếng cảm thán (A!, Ừm., Ái!) trước khi đọc
     "dub_voice_all": "",              # 1 giọng cho MỌI người nói (tab Tự động / Lồng tiếng mục 2), "@auto" = tự gán nam / nữ
     "auto_parallel": False,           # tab Tự động: vừa tách vừa dịch (nghe tới đâu dịch tới đó, Edge đọc trước giọng)
+    "proxy_mode": "auto",             # bản xem trước nhẹ ≤ 720p cho trình phát: auto (video nặng) / always / off
+    "vram_check": True,               # trước việc GPU: card bị chương trình khác chiếm -> báo + chờ (tối đa 3 phút)
     "jobs_parallel": False,           # chạy nhiều việc cùng lúc (tắt = lần lượt từng việc, như trước 2.0.64: ít RAM / GPU)
     "song_detect": True,              # khi nghe: đoán cụm câu đang hát (nốt ngân trên giọng đã tách) -> 🎵
+    "pitch_check": True,              # khi nghe: đánh dấu câu nghi là nhạc / tiếng động bị chép thành lời (cao độ giọng)
+    "pitch_tol": 4.0,                 #   lệch cao độ cho phép ngoài khoảng giọng thường của người nói (nửa cung)
+    "pitch_trim": True,               #   thu đầu / cuối câu thừa sang nhạc / tiếng động theo đoạn có giọng thật
+    "translate_fill": True,           # dịch AI: câu ngắn hơn hẳn chỗ trống -> thêm từ đệm / phụ từ cho vừa thời gian
     # Xoá phụ đề
     "inpaint_backend": "lama",        # lama (AI, đẹp) / opencv (nhanh)
     # Phụ đề mặc định khi ghép vào video
@@ -166,6 +172,7 @@ DEFAULT_SETTINGS: dict = {
     "video_crf": 20,
     "video_preset": "medium",
     "audio_bitrate": "192k",
+    "export_chunks": True,           # phim ≥ 10 phút xuất theo từng đoạn 60 s, nhớ đoạn đã xuất -> sửa ít câu xuất lại nhanh
 }
 
 _lock = threading.Lock()

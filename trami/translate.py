@@ -51,7 +51,11 @@ Yêu cầu bắt buộc:
 6. Dòng gốc có thể bị nhận dạng sai vài chữ đồng âm: dựa vào ngữ cảnh để hiểu và dịch đúng ý.
 7. Chỉ trả về JSON hợp lệ dạng {"1": "bản dịch", "2": "bản dịch", ...} không kèm giải thích.
 8. Dòng có ký hiệu ⟪≤N tiếng⟫ ở cuối là giới hạn độ dài để LỒNG TIẾNG khớp thời gian nhân vật nói: bản dịch KHÔNG được
-   vượt N tiếng (âm tiết). Ưu tiên cách nói gọn, tự nhiên; lược từ đệm, giữ đủ ý chính. KHÔNG chép ký hiệu ⟪⟫ vào bản dịch.
+   vượt N tiếng (âm tiết). Ưu tiên cách nói gọn, tự nhiên; lược từ đệm, giữ đủ ý chính. Ký hiệu ⟪M–N tiếng⟫: nên dài
+   khoảng M tới N tiếng (nhân vật nói lâu) – bản dịch tự nhiên mà ngắn hơn hẳn M thì nói đầy đủ hơn cho vừa: thêm từ đệm /
+   phụ từ hợp ngữ cảnh (à, ạ, nhé, nhỉ, đấy, cơ, mà, thế, vậy, chứ, đi, này, ơi, nào), chủ ngữ / xưng hô, "thì", "là",
+   cách nói đầy đủ thay cách nói tắt – KHÔNG thêm ý mới, không đổi nghĩa, không lặp từ vô nghĩa, không vượt N.
+   KHÔNG chép ký hiệu ⟪⟫ vào bản dịch.
 9. Dòng chắc chắn là LỜI BÀI HÁT (nhạc phim, nhân vật đang hát – câu văn vần, không phải lời thoại) thì bắt đầu bản dịch
    bằng "♪ ". Lời thoại bình thường KHÔNG thêm ♪."""
 
@@ -93,6 +97,9 @@ Mandatory rules:
 7. Return ONLY valid JSON like {{"1": "translation", "2": "translation", ...}} with no explanation.
 8. A line ending with ⟪≤N {L['unit_ai']}⟫ is a length limit so the DUBBED voice fits the character's speaking time: the
    translation must NOT exceed N {L['unit_ai']}. Prefer short natural phrasing, drop filler words, keep the core meaning.
+   ⟪M–N {L['unit_ai']}⟫ means the line should be about M to N {L['unit_ai']} long (the character speaks for a while): if
+   the natural translation is much shorter than M, say it more fully – natural particles / filler words, subject and
+   forms of address, fuller phrasing – WITHOUT adding new information or changing the meaning, never exceeding N.
    NEVER copy the ⟪⟫ marker into the translation.
 9. A line that is clearly SONG LYRICS (theme song, a character singing – verse, not dialogue) must start with "♪ ".
    Never add ♪ to normal dialogue."""
@@ -120,6 +127,20 @@ def syllables(text: str, lang: str = "vi") -> int:
 def budget_for(duration: float, speedup: float = 1.0, lang: str = "vi") -> int:
     """Độ dài lời tối đa nói vừa trong `duration` giây (cho phép tăng tốc nhẹ `speedup`) – theo tiếng."""
     return langs.budget(duration, lang, speedup)
+
+
+FILL_MIN = 0.75     # dịch vừa thời lượng: câu nên dài ≥ 75 % số tiếng nói vừa thời gian nhân vật nói
+FILL_FROM = 4       # chỉ nhắc độ dài tối thiểu khi chỗ trống đủ cho ≥ 4 tiếng (câu ngắn "Được.", "Hả?" giữ nguyên)
+
+
+def length_marker(duration: float, lang: str, unit: str, fill: bool = True) -> str:
+    """Ký hiệu độ dài gắn sau câu gửi AI: ⟪≤N⟫ (tối đa, cho phép nhanh 10 %) hoặc ⟪M–N⟫ khi bật "thêm từ đệm" – câu
+    dịch ngắn hơn hẳn thời gian nói thì AI nói đầy đủ hơn (từ đệm, phụ từ) để giọng lồng không hụt so với miệng nhân vật."""
+    n = budget_for(duration, 1.1, lang)
+    m = int(budget_for(duration, 1.0, lang) * FILL_MIN)
+    if fill and m >= FILL_FROM and m < n:
+        return f"⟪{m}–{n} {unit}⟫"
+    return f"⟪≤{n} {unit}⟫"
 
 
 KANA_RE = re.compile(r"[\u3040-\u30FF]")
@@ -528,6 +549,7 @@ class Translator:
         self.batch = engine_batch(settings, self.engine)   # số câu mỗi lần gửi (khung riêng từng công cụ ở Cài đặt)
         self.llm = None if self.engine in LOCAL_ENGINES else LLMClient(settings, self.engine)
         self.fit_dub = bool(settings.get("dub_fit", True))   # dịch vừa thời lượng để lồng tiếng khớp
+        self.fill_short = bool(settings.get("translate_fill", True))   # câu ngắn hơn hẳn chỗ trống -> thêm từ đệm
         self.fallback_lines = 0   # số câu AI trả lỗi định dạng, phải dùng Google bù
 
     # ------------------------------------------------------------- public
@@ -552,7 +574,8 @@ class Translator:
         if self.llm and self.fit_dub:
             # dịch vừa thời lượng: mỗi câu kèm giới hạn độ dài theo thời gian nhân vật nói (đơn vị theo tiếng đích)
             unit = langs.INFO[self.target]["unit_vi"] if self.target == "vi" else langs.INFO[self.target]["unit_ai"]
-            texts = [f"{segs[i].text} ⟪≤{budget_for(segs[i].duration, 1.1, self.target)} {unit}⟫" for i in idx]
+            texts = [f"{segs[i].text} {length_marker(segs[i].duration, self.target, unit, self.fill_short)}"
+                     for i in idx]
         results = self.translate_lines(texts, progress, cancel, summary=summary)
         for i, t in zip(idx, results):
             segs[i].trans = BUDGET_RE.sub(" ", t or "").strip()

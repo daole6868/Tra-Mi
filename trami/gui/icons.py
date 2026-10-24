@@ -313,6 +313,29 @@ def _refresh(p: QPainter):
     p.drawLine(QPointF(18.2, 8.7), QPointF(14, 8.7))
 
 
+def _undo(p: QPainter):
+    path = _p()
+    path.moveTo(9, 6)
+    path.lineTo(4.5, 10.5)
+    path.lineTo(9, 15)
+    p.drawPath(path)
+    arc = _p()
+    arc.moveTo(4.5, 10.5)
+    arc.lineTo(14, 10.5)
+    arc.cubicTo(17.5, 10.5, 20, 13, 20, 15.5)
+    arc.cubicTo(20, 18, 17.5, 19.5, 15, 19.5)
+    arc.lineTo(11, 19.5)
+    p.drawPath(arc)
+
+
+def _redo(p: QPainter):
+    p.save()
+    p.translate(24, 0)
+    p.scale(-1, 1)
+    _undo(p)
+    p.restore()
+
+
 def _clock(p: QPainter):
     p.drawEllipse(QPointF(12, 12), 8.5, 8.5)
     p.drawLine(QPointF(12, 7), QPointF(12, 12))
@@ -474,7 +497,7 @@ ICONS = {
     "eye": _eye, "image": _image, "text": _text, "volume": _volume, "crop": _crop, "list": _list,
     "split": _split, "merge": _merge, "sparkle": _sparkle, "stack": _stack, "chev_left": _chev_left,
     "chev_right": _chev_right, "chev_down": _chev_down, "info": _info, "cpu": _cpu, "minus": _minus, "fit": _fit,
-    "panel_right": _panel_right, "mute": _mute,
+    "panel_right": _panel_right, "mute": _mute, "undo": _undo, "redo": _redo,
 }
 
 

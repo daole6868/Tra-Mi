@@ -89,7 +89,17 @@ class ProjectPage(QWidget):
                                  "file video (phụ đề, bản dịch, lồng tiếng giữ nguyên)", danger=True,
                                  on_click=self._relink_source)
         self.relink_btn.hide()
-        head = hbox(self.name, self.saved, None, self.relink_btn, self.insp_btn, b_dir, b_del, export_btn)
+        self.undo_btn = IconButton("undo", "Hoàn tác (Ctrl+Z) – xoá / gộp / tách / kéo câu, sửa chữ, dịch lại, đổi giọng…", 34)
+        self.undo_btn.clicked.connect(self.undo)
+        self.redo_btn = IconButton("redo", "Làm lại (Ctrl+Y)", 34)
+        self.redo_btn.clicked.connect(self.redo)
+        self._undo: list[str] = []      # ảnh chụp danh sách câu TRƯỚC mỗi thao tác (json)
+        self._redo: list[str] = []
+        self._undo_cur: str | None = None   # ảnh chụp trạng thái hiện tại
+        self._undo_t = 0.0
+        self._undo_busy = False
+        head = hbox(self.name, self.saved, None, self.relink_btn, self.undo_btn, self.redo_btn, self.insp_btn, b_dir,
+                    b_del, export_btn)
         head.setSpacing(8)
 
         # ---------------- giữa: khung xem trước (trình phát) + tiến độ tác vụ
@@ -197,6 +207,11 @@ class ProjectPage(QWidget):
 
         QShortcut(QKeySequence("Ctrl+S"), self, activated=lambda: (self._save_segs_now(), self._save_edit_now(),
                                                                    self.win.toast("Đã lưu", "ok")))
+        # ô chữ đang gõ (Tiếng Việt, tìm kiếm…) tự giữ Ctrl+Z của nó; ngoài ô chữ = hoàn tác thao tác với câu
+        for keys, fn in (("Ctrl+Z", self.undo), ("Ctrl+Y", self.redo), ("Ctrl+Shift+Z", self.redo)):
+            QShortcut(QKeySequence(keys), self, activated=fn,
+                      context=Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._update_undo_btns()
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -271,8 +286,13 @@ class ProjectPage(QWidget):
         self.a_review = f.row("AI kiểm tra lại bản dịch", Switch(bool(s.get("ai_review_after_translate", False))),
                               "Sau khi dịch cả phim: AI soát sai nghĩa, xưng hô / tên không thống nhất, câu quá dài, còn "
                               "chữ Hán rồi sửa (tốn thêm ~1 lần gọi AI)")
+        self.a_fill = f.row("Câu ngắn thêm từ đệm cho vừa thời gian", Switch(bool(s.get("translate_fill", True))),
+                            "Dịch bằng AI: câu dịch ngắn hơn hẳn thời gian nhân vật nói thì nói đầy đủ hơn – thêm từ "
+                            "đệm / phụ từ (à, nhé, đấy, cơ, mà, thế…), xưng hô – không thêm ý, không dài quá → giọng "
+                            "lồng không hụt so với miệng nhân vật. Tắt = chỉ giới hạn độ dài tối đa")
         self.a_clean.toggled.connect(self._ai_switch_changed)
         self.a_review.toggled.connect(self._ai_switch_changed)
+        self.a_fill.toggled.connect(self._ai_switch_changed)
         self.a_hardsub = f.row("Phụ đề Trung cũ", combo(C.HARDSUB, "none"))
         self.a_which = f.row("Ghép phụ đề vào video", combo(C.WHICH, "trans"))
         self.a_dub = f.row("Lồng tiếng (đọc bản dịch)", Switch(False))
@@ -348,7 +368,8 @@ class ProjectPage(QWidget):
     # ================================================================== TAB: Phụ đề
     def _tab_subs(self):
         self.model = SubsModel()
-        self.model.edited.connect(self._segs_edited)
+        # sửa chữ trong bảng / khung Câu đang chọn: các lần sửa liền nhau = 1 bước hoàn tác
+        self.model.edited.connect(lambda *_: (self._undo_mark(join=True), self._segs_edited()))
         self.proxy = SubsFilter()
         self.proxy.setSourceModel(self.model)
         tv = QTableView()
@@ -424,6 +445,26 @@ class ProjectPage(QWidget):
                     button("Căn khớp thoại", "wand", "Căn mốc từng câu sát lời thoại thật, tách câu ở chỗ nghỉ "
                            "(dùng cho phụ đề đã nhận dạng từ bản cũ)", on_click=self.run_realign),
                     button("Tìm && thay", "search", on_click=self._replace))
+        # câu nghe nhầm: nhạc / tiếng động bị chép thành lời -> lọc theo cao độ giọng thật của từng người nói
+        self.s_ptol = QDoubleSpinBox()
+        self.s_ptol.setRange(1.0, 12.0)
+        self.s_ptol.setSingleStep(0.5)
+        self.s_ptol.setDecimals(1)
+        self.s_ptol.setPrefix("± ")
+        self.s_ptol.setSuffix(" nửa cung")
+        self.s_ptol.setValue(float(self.settings.get("pitch_tol", 4.0)))
+        self.s_ptol.setToolTip("Lệch cao độ cho phép ngoài khoảng giọng thường của người nói. Nhỏ = lọc chặt (dễ đánh "
+                               "dấu nhầm câu kêu / hét), lớn = lọc lỏng (chỉ bắt nhạc cụ / giọng hát cao hẳn)")
+        self.s_ptol.valueChanged.connect(self._ptol_changed)
+        self.bar_pitch = flow(
+            button("Lọc câu nghe nhầm", "wand", "Đo cao độ giọng thật của từng người nói (trên giọng đã tách) – câu nằm "
+                   "ngoài khoảng cao độ đó, gần như không có giọng nói, hoặc nhỏ hẳn so với lời thoại = nhạc / tiếng "
+                   "động bị nghe thành lời → đánh dấu + tích sẵn để nghe lại rồi xoá. Đồng thời thu đầu / cuối câu "
+                   "kéo sang nhạc cho khớp lúc nói", on_click=self.run_voice_check),
+            label("Lệch cao độ cho phép", "muted"), self.s_ptol,
+            button("Tích câu nghi nghe nhầm", "check", flat=True, on_click=lambda: self._pick_flag("noise")),
+            button("Không phải nhạc", "x", "Bỏ đánh dấu các câu đã tích (câu thoại thật) – lần lọc sau không đánh dấu "
+                   "lại", flat=True, on_click=self._voice_ok))
         self.profile_edit = QPlainTextEdit()
         self.profile_edit.setPlaceholderText(
             "AI tự lập khi dịch lần đầu: thể loại, nhân vật, xưng hô, tên riêng / meme. Sửa được – AI dùng cho mọi lần "
@@ -484,6 +525,7 @@ class ProjectPage(QWidget):
                            on_click=self._import_translation))
         v.addWidget(bar1)
         v.addWidget(bar2)
+        v.addWidget(self.bar_pitch)
         v.addWidget(bar3)
         v.addLayout(hbox(self.search, self.seg_count, label("Tự cuộn", "muted"), self.follow))
         v.addWidget(split, 1)
@@ -491,8 +533,9 @@ class ProjectPage(QWidget):
 
     # ================================================================== TAB: Xoá phụ đề cũ
     TAB_HARDSUB, TAB_STYLE, TAB_DUB, TAB_AUDIO, TAB_MODELS, TAB_EXPORT = 2, 4, 5, 6, 7, 8
-    HS_MODES = [("none", "Không xoá", "x"), ("inpaint", "Xoá sạch (AI)", "sparkle"), ("patch", "Vá nền", "image"),
-                ("blur", "Làm mờ", "eye"), ("box", "Che dải màu", "stack"), ("delogo", "Delogo", "eraser")]
+    HS_MODES = [("none", "Không xoá", "x"), ("inpaint", "Xoá sạch (AI)", "sparkle"), ("stretch", "Kéo dọc", "layers"),
+                ("patch", "Vá nền", "image"), ("blur", "Làm mờ", "eye"), ("box", "Che dải màu", "stack"),
+                ("delogo", "Delogo", "eraser")]
     HS_HELP = {
         "none": "<b>Không xoá</b> – giữ nguyên chữ Trung cũ trên video. Dùng khi video gốc không có phụ đề cứng.",
         "inpaint": "<b>Xoá sạch</b> – chỗ bị chữ che được lấp bằng <b>nền thật</b> lấy từ các khung trước / sau (lúc "
@@ -501,6 +544,11 @@ class ProjectPage(QWidget):
                    "Cách dùng: ① khoanh vùng chữ (hoặc <i>Tự dò vùng phụ đề</i>) ② chọn tuỳ chọn bên dưới "
                    "③ bấm <i>Xem thử 1 khung</i> ④ bấm <b>Chạy xoá (cả video)</b> ở mục 3 (hoặc cứ bấm <b>Xuất "
                    "video</b> – tool tự xoá trước khi ghép). Đã lấy phụ đề bằng OCR thì mặt nạ chữ chính xác nhất.",
+        "stretch": "<b>Kéo dọc</b> – lấy dòng điểm ảnh ngay sát mép trên / dưới vùng chữ kéo dài phủ kín cả vùng (2 mép: "
+                   "nối dần từ màu mép trên xuống màu mép dưới) → <b>không còn điểm ảnh nào của chữ cũ</b>, theo từng "
+                   "khung nên cảnh chuyển động vẫn khớp màu. Thành vệt dọc như kéo giãn – hợp phụ đề trên nền tối / "
+                   "nền đơn giản, nhanh như Làm mờ. Khoanh vùng sát chữ (chừa 2–4 px) để mép không dính nét chữ. "
+                   "Không cần chạy riêng: áp dụng khi bấm <b>Xuất video</b>; video bên phải hiện gần đúng ngay.",
         "patch": "<b>Vá nền</b> – chép dải hình ngay sát vùng chữ (mặc định phía trên) phủ lên chữ cũ, viền mờ dần "
                  "cho hoà vào cảnh. Nhanh như Làm mờ nhưng nhìn tự nhiên hơn khi nền đơn giản (trời, tường, mặt nước, "
                  "nền tối); cảnh nhiều chi tiết có thể thấy vệt lặp. Không cần chạy riêng: áp dụng khi bấm "
@@ -567,7 +615,12 @@ class ProjectPage(QWidget):
         self.hs_patch = f.row("Lấy nền từ", combo([("auto", "Tự chọn (phía trên, thiếu chỗ thì phía dưới)"),
                                                    ("above", "Phía trên vùng chữ"), ("below", "Phía dưới vùng chữ")]),
                               "Chọn phía có nền giống chỗ chữ nhất (cùng màu, ít chi tiết)")
-        from ..video import BLUR_KINDS
+        from ..video import BLUR_KINDS, STRETCH_FROM
+
+        self.hs_stretch = f.row("Kéo từ", combo(list(STRETCH_FROM), "both"),
+                                "Mép nào giống nền chỗ chữ nhất thì kéo từ mép đó; 2 mép = nối dần, ít lộ nhất")
+        self.hs_ssmooth = f.row("Độ mịn", SliderRow(0, 20, 1, 3, 0, " px"),
+                                "Làm mịn ngang cho đỡ vệt sọc dọc (0 = giữ nguyên vệt)")
 
         self.hs_bkind = f.row("Kiểu mờ", combo(list(BLUR_KINDS), "box"))
         self.hs_blur = f.row("Độ mờ", SliderRow(4, 60, 1, 20, 0))
@@ -580,9 +633,9 @@ class ProjectPage(QWidget):
         self.hs_feather = f.row("Viền mờ dần", SliderRow(0, 50, 1, 0, 0, " %"),
                                 "Mép vùng hoà dần vào hình xung quanh, không lộ đường cắt")
         self.hs_mode.currentIndexChanged.connect(self._hs_mode_changed)
-        for w in (self.hs_backend, self.hs_strength, self.hs_patch, self.hs_bkind):
+        for w in (self.hs_backend, self.hs_strength, self.hs_patch, self.hs_bkind, self.hs_stretch):
             w.currentIndexChanged.connect(sv)
-        for w in (self.hs_blur, self.hs_opacity, self.hs_darken, self.hs_round, self.hs_feather):
+        for w in (self.hs_blur, self.hs_opacity, self.hs_darken, self.hs_round, self.hs_feather, self.hs_ssmooth):
             w.changed.connect(sv)
         self.hs_color.changed.connect(sv)
         for w in (self.hs_useocr, self.hs_temporal, self.hs_coverbox):
@@ -665,7 +718,8 @@ class ProjectPage(QWidget):
                self.hs_coverbox: inp, self.hs_blur: mode == "blur", self.hs_bkind: mode == "blur",
                self.hs_darken: mode == "blur", self.hs_patch: mode == "patch",
                self.hs_color: mode == "box", self.hs_opacity: mode == "box",
-               self.hs_round: mode in ("blur", "box"), self.hs_feather: mode in ("blur", "box")}
+               self.hs_stretch: mode == "stretch", self.hs_ssmooth: mode == "stretch",
+               self.hs_round: mode in ("blur", "box", "stretch"), self.hs_feather: mode in ("blur", "box", "stretch")}
         for wdg, on in vis.items():
             self.hs_form.setRowVisible(wdg, on)
         self.hs_runrow.setVisible(inp or bool(self._hs_lists.get("logos")))
@@ -1278,11 +1332,14 @@ class ProjectPage(QWidget):
             return
         self.settings = load_settings()
         self.populate(reload_media=not same)
+        if not same:
+            self._undo_reset()
 
     def reload(self):
         if self.p:
             self.p.reload()
             self.populate(reload_media=False)
+            self._undo_mark(join=False)    # việc vừa chạy (dịch, nối câu, tạo giọng…) = 1 bước hoàn tác được
 
     def populate(self, reload_media: bool = True):
         p = self.p
@@ -1441,6 +1498,24 @@ class ProjectPage(QWidget):
             QTimer.singleShot(400, self._grab_frame)
         self._dub_key = None
         self._update_player_audio()
+        self._maybe_proxy()
+
+    def _maybe_proxy(self):
+        """Video nặng (4K, 60 khung/s, HEVC…): tự tạo bản xem trước nhẹ ≤ 720p cho trình phát (chạy nền, xuất video vẫn
+        dùng video gốc). Xong -> trình phát tự đổi sang bản nhẹ."""
+        p = self.p
+        if not p or (p.work / "preview.mp4").exists() or pipeline.source_missing(p) or \
+                not pipeline.needs_proxy(p, self.settings):
+            return
+        if any(j["kind"] == "preview" and j["status"] in ("queued", "running") for j in manager.list(p.id)):
+            return
+        i = p.data.get("info", {})
+        self.win.toast(f"Video nặng ({i.get('width')}×{i.get('height')}, {float(i.get('fps') or 0):.0f} khung/s, "
+                       f"{i.get('vcodec', '')}) – đang tạo bản xem trước nhẹ 720p để phát mượt (xuất video vẫn dùng "
+                       "video gốc)", "info")
+        self.submit("preview", "Tạo bản xem trước nhẹ", lambda j, p: (pipeline.make_preview(p, j.update, j.cancelled),
+                                                                     {"message": "Đã tạo bản xem trước nhẹ – trình "
+                                                                                 "phát dùng bản này"})[1], quiet=True)
 
     def _update_player_audio(self, force: bool = False):
         """Trình phát nghe đúng như video xuất: bộ trộn trực tiếp các lớp âm thanh (tab Âm thanh). File các lớp đổi
@@ -1489,6 +1564,8 @@ class ProjectPage(QWidget):
         set_combo(self.hs_strength, hs.get("strength", "normal"))
         self.hs_blur.set(hs.get("blur_strength", 20))
         set_combo(self.hs_patch, hs.get("patch_from", "auto"))
+        set_combo(self.hs_stretch, hs.get("stretch_from") or "both")
+        self.hs_ssmooth.set(float(hs.get("stretch_smooth", 3) or 0))
         self.hs_color.set(hs.get("box_color", "#000000"))
         self.hs_opacity.set(hs.get("box_opacity", 1.0))
         self.hs_useocr.setChecked(hs.get("use_ocr_boxes", True) is not False)
@@ -1589,7 +1666,8 @@ class ProjectPage(QWidget):
                 "backend": self.hs_backend.currentData(), "strength": self.hs_strength.currentData(),
                 "blur_strength": int(self.hs_blur.value()), "box_color": self.hs_color.color,
                 "box_opacity": self.hs_opacity.value(), "use_ocr_boxes": self.hs_useocr.isChecked(),
-                "patch_from": self.hs_patch.currentData()}
+                "patch_from": self.hs_patch.currentData(), "stretch_from": self.hs_stretch.currentData(),
+                "stretch_smooth": int(self.hs_ssmooth.value())}
 
     def _set_style_widgets(self, st: dict):
         set_combo(self.st_font, st.get("font", "Be Vietnam Pro"))
@@ -1656,7 +1734,90 @@ class ProjectPage(QWidget):
         self._update_timeline()
         self._update_player_audio()
 
+    # ------------------------------------------------------------------ hoàn tác / làm lại
+    UNDO_MAX = 60
+    UNDO_JOIN = 0.8     # các thay đổi liền nhau trong 0,8 s (gõ chữ, kéo nhiều câu) = 1 bước hoàn tác
+
+    def _snap(self) -> str:
+        import json
+
+        # không dùng to_dict (asdict chép sâu từng câu – 2.600 câu ~55 ms); json tự chép phần extra
+        return json.dumps([{"start": s.start, "end": s.end, "text": s.text, "trans": s.trans, "speaker": s.speaker,
+                            "extra": s.extra} for s in self.model.segs])
+
+    def _undo_reset(self):
+        """Mở dự án: bắt đầu lịch sử hoàn tác mới."""
+        self._undo.clear()
+        self._redo.clear()
+        self._undo_cur = self._snap() if self.p else None
+        self._undo_t = 0.0
+        self._update_undo_btns()
+
+    def _undo_mark(self, join: bool = False):
+        """Gọi SAU mỗi thay đổi danh sách câu: cất trạng thái trước đó vào lịch sử hoàn tác."""
+        if self._undo_busy or not self.p or self._live_draft:
+            return
+        snap = self._snap()
+        if snap == self._undo_cur:
+            return
+        now = time.time()
+        if self._undo_cur is not None and not (join and now - self._undo_t < self.UNDO_JOIN and self._undo):
+            self._undo.append(self._undo_cur)
+            del self._undo[:-self.UNDO_MAX]
+        self._undo_t = now if join else 0.0
+        self._undo_cur = snap
+        self._redo.clear()
+        self._update_undo_btns()
+
+    def _update_undo_btns(self):
+        self.undo_btn.setEnabled(bool(self._undo))
+        self.redo_btn.setEnabled(bool(self._redo))
+        self.undo_btn.setToolTip(f"Hoàn tác (Ctrl+Z) – còn {len(self._undo)} bước" if self._undo else
+                                 "Hoàn tác (Ctrl+Z) – chưa có thao tác nào")
+
+    def undo(self):
+        self._undo_step(self._undo, self._redo, "Đã hoàn tác")
+
+    def redo(self):
+        self._undo_step(self._redo, self._undo, "Đã làm lại")
+
+    def _undo_step(self, src: list, dst: list, what: str):
+        import json
+
+        if not self.p:
+            return
+        if any(j["status"] in ("queued", "running") and j["kind"] != "relayout" for j in manager.list(self.p.id)):
+            return self.win.toast("Đợi việc đang chạy của dự án này xong rồi hãy hoàn tác", "warn")
+        self.inspector._flush()
+        self._undo_mark(join=False)      # thay đổi chưa kịp ghi lịch sử (vừa gõ xong)
+        if not src:
+            return self.win.toast("Không còn bước nào để " + ("hoàn tác" if src is self._undo else "làm lại"), "info")
+        cur = self._undo_cur or self._snap()
+        snap = src.pop()
+        dst.append(cur)
+        old = {(round(s.start, 3), round(s.end, 3), s.text, s.trans, json.dumps(s.extra, sort_keys=True))
+               for s in self.model.segs}
+        segs = [Segment.from_dict(d) for d in json.loads(snap)]
+        self._undo_busy = True
+        try:
+            self.model.set_segments(segs)
+            self._undo_cur = snap
+            self._fit_rows()
+            self._segs_edited()
+            self._save_segs_now()
+        finally:
+            self._undo_busy = False
+        self._sel_row = -1
+        self._update_timeline()
+        self._update_undo_btns()
+        changed = sum(1 for s in segs if (round(s.start, 3), round(s.end, 3), s.text, s.trans,
+                                          json.dumps(s.extra, sort_keys=True)) not in old)
+        self.win.toast(f"{what} ({len(segs)} câu, {changed} câu đổi) · còn {len(self._undo)} bước hoàn tác", "ok")
+        if any(x.extra.get("tts_file") for x in segs) and (self.p.edit.get("dub") or {}).get("wav"):
+            self._relayout(what)       # giọng lồng theo đúng các câu sau khi hoàn tác (chỉ vá đoạn đổi)
+
     def _segs_edited(self):
+        self._undo_mark(join=False)       # xoá / gộp / tách / kéo câu…: mỗi thao tác 1 bước hoàn tác
         self._update_steps()
         self._save_segs_timer.start()
         self._update_count()
@@ -1669,6 +1830,7 @@ class ProjectPage(QWidget):
     def _save_segs_now(self):
         if not self.p or self._live_draft:   # đang hiện câu nháp của "vừa tách vừa dịch": không ghi đè dự án
             return
+        self._undo_mark()
         self.p.reload()
         self.p.segments = self.model.segs
         self.p.save()
@@ -1806,6 +1968,9 @@ class ProjectPage(QWidget):
                 msg += f" · nối lại {p.data['asr_joined']} câu bị cắt ngang"
             if o["method"] != "ocr" and p.data.get("songs_found"):
                 msg += f" · {p.data['songs_found']} câu là lời bài hát – đã đánh dấu 🎵 (không lồng tiếng)"
+            if o["method"] != "ocr" and p.data.get("noise_found"):
+                msg += (f" · ⚠ {p.data['noise_found']} câu nghi là nhạc / tiếng động bị nghe thành lời – tab Phụ đề "
+                        "bấm 'Tích câu nghi nghe nhầm', nghe lại rồi Xoá")
             if o["method"] != "ocr":
                 msg += " · kiểu tách: " + dict(C.SPLIT_STYLES).get(st.get("split_style", "dub"), "").split(" –")[0]
             used = {"qwen3": "Qwen3-ASR", "sensevoice": "SenseVoice", "paraformer": "Paraformer",
@@ -1848,6 +2013,7 @@ class ProjectPage(QWidget):
             self._fill_skills(st)
             self.a_clean.setChecked(bool(st.get("ai_clean_before_translate", True)))
             self.a_review.setChecked(bool(st.get("ai_review_after_translate", False)))
+            self.a_fill.setChecked(bool(st.get("translate_fill", True)))
             self.d_interj.setChecked(bool(st.get("dub_drop_interj", True)))
             self.a_parallel.setChecked(bool(st.get("auto_parallel", False)))
         finally:
@@ -1886,7 +2052,8 @@ class ProjectPage(QWidget):
         from ..config import save_settings
 
         self.settings = save_settings({"ai_clean_before_translate": self.a_clean.isChecked(),
-                                       "ai_review_after_translate": self.a_review.isChecked()})
+                                       "ai_review_after_translate": self.a_review.isChecked(),
+                                       "translate_fill": self.a_fill.isChecked()})
 
     def _edit_skills(self):
         from .skills_dialog import SkillsDialog
@@ -3530,11 +3697,54 @@ class ProjectPage(QWidget):
 
     def _pick_flag(self, key: str):
         rows = [i for i, s in enumerate(self.model.segs) if s.extra.get(key)]
+        what = "nghi nghe nhầm (nhạc / tiếng động)" if key == "noise" else "bài hát 🎵"
         if not rows:
-            return self.win.toast("Không có câu nào đánh dấu bài hát 🎵", "ok")
+            return self.win.toast(f"Không có câu nào đánh dấu {what}", "ok")
         self.model.set_picked(range(len(self.model.segs)), False)
         self.model.set_picked(rows)
-        self.win.toast(f"Đã tích {len(rows)} câu bài hát 🎵", "ok")
+        self._select_line(rows[0], seek=True)
+        self.win.toast(f"Đã tích {len(rows)} câu {what}" + (" – rê chuột vào chữ gốc để xem lý do, nghe lại rồi bấm "
+                       "Xoá (hoặc 'Không phải nhạc' cho câu thoại thật)" if key == "noise" else ""), "ok")
+
+    def _ptol_changed(self, v: float):
+        if not self.loading:
+            from ..config import save_settings
+
+            save_settings({"pitch_tol": round(float(v), 1)})
+            self.settings = load_settings()
+
+    def run_voice_check(self):
+        """Lọc câu nghe nhầm theo cao độ giọng (cần đã tách giọng / nhạc nền)."""
+        if not self.model.segs:
+            return self.win.toast("Chưa có phụ đề", "warn")
+        if not pipeline.stems(self.p):
+            return self.win.toast("Cần tách giọng / nhạc nền trước: tab Lồng tiếng → mục 1 → Tách ngay", "warn")
+        tol = self.s_ptol.value()
+
+        def fn(j, p):
+            res = pipeline.check_voices(p, None, j.update, j.cancelled, tol=tol)
+            n = len(res["suspect"])
+            prof = ", ".join(f"{k}: {v}" for k, v in res["profiles"].items())
+            msg = (f"⚠ {n} câu nghi là nhạc / tiếng động bị nghe thành lời – đã tích sẵn, nghe lại rồi bấm Xoá"
+                   if n else "Không thấy câu nào nghi nghe nhầm")
+            if res["trimmed"]:
+                msg += f" · căn lại đầu / cuối {res['trimmed']} câu theo lúc có giọng thật"
+            if prof:
+                msg += f" · cao độ giọng thường – {prof}"
+            return {"message": msg, "pick": res["suspect"]}
+        self.submit("join", "Lọc câu nghe nhầm", fn)
+
+    def _voice_ok(self):
+        rows = [r for r in sorted(self.model.selected) if 0 <= r < len(self.model.segs)]
+        if not rows:
+            return self.win.toast("Tích câu thoại thật bị đánh dấu nhầm trước", "warn")
+        for r in rows:
+            ex = self.model.segs[r].extra
+            ex.pop("noise", None)
+            ex["voice_ok"] = True
+        self.model.dataChanged.emit(self.model.index(rows[0], 0), self.model.index(rows[-1], self.model.columnCount() - 1))
+        self._segs_edited()
+        self.win.toast(f"Đã bỏ đánh dấu {len(rows)} câu (lần lọc sau không đánh dấu lại)", "ok")
 
     def _toggle_flag(self, key: str):
         """Đặt / bỏ dấu bài hát 🎵 hoặc Bỏ lồng cho các câu đã tích (thay 2 cột cũ của bảng)."""

@@ -460,6 +460,13 @@ def preview_frame(src: str | Path, t: float, regions: list[dict], out_jpg: str |
                 op = float(hs.get("box_opacity", 1.0))
             al = (a if a is not None else 1.0) * op
             frame[y0:y1, x0:x1] = np.clip(eff * al + roi.astype(np.float32) * (1 - al), 0, 255).astype(np.uint8)
+        elif mode == "stretch":
+            from .video import stretch_fill
+
+            eff = stretch_fill(frame, x0, y0, x1, y1, hs.get("stretch_from") or "both",
+                               float(hs.get("stretch_smooth", 3) or 0))
+            al = a if a is not None else 1.0
+            frame[y0:y1, x0:x1] = np.clip(eff * al + roi.astype(np.float32) * (1 - al), 0, 255).astype(np.uint8)
         elif mode == "patch":
             from .video import patch_feather, patch_source
 

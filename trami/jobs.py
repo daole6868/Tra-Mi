@@ -216,6 +216,7 @@ class JobManager:
 
     def _run(self, job: Job):
         job.status, job.started, job.message = "running", time.time(), "Đang bắt đầu…"
+        vram_note = ""
         if job.gpu:   # tắt tiến trình AI mà việc này không dùng -> đủ chỗ trên card, không tràn sang RAM (rất chậm)
             try:
                 from . import gpu
@@ -224,10 +225,16 @@ class JobManager:
             except Exception:  # noqa: BLE001
                 pass
         try:
+            if job.gpu:   # chương trình KHÁC đang chiếm card -> báo + chờ đóng bớt (tối đa 3 phút) rồi mới nạp mô hình
+                from . import gpu
+
+                vram_note = gpu.wait_for_vram(job.kind, lambda m, j=job: j.update(j.progress, m), job.cancelled)
             # mọi lần gọi mạng trong tác vụ biết nút Huỷ + báo "mất mạng – đang chờ" vào dòng trạng thái
             with net.task(job.cancelled, lambda m, j=job: j.update(j.progress, m)):
                 res = job._fn(job) if job._fn else None
             job.result = res or {}
+            if vram_note:
+                job.result["message"] = (job.result.get("message") or "Hoàn tất") + " · ⚠ " + vram_note
             job.status, job.progress, job.message = "done", 1.0, job.result.get("message", "Hoàn tất")
         except Cancelled:
             job.status, job.message = "cancelled", "Đã huỷ"

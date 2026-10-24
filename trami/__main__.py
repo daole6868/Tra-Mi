@@ -99,7 +99,7 @@ def main(argv=None):
     d.add_argument("--dich-sang", default=None, choices=["vi", "en", "th", "ja", "ko"],
                    help="Ngôn ngữ đích: vi (Việt, mặc định) / en (Anh) / th (Thái) / ja (Nhật) / ko (Hàn)")
     d.add_argument("--ocr", action="store_true", help="Lấy phụ đề bằng OCR chữ Trung có sẵn trên video")
-    d.add_argument("--xoa-phude", default="none", choices=["none", "blur", "box", "delogo", "inpaint", "patch"],
+    d.add_argument("--xoa-phude", default="none", choices=["none", "blur", "box", "delogo", "inpaint", "patch", "stretch"],
                    help="Cách xử lý phụ đề Trung cũ trên video")
     d.add_argument("--long-tieng", action="store_true", help="Lồng tiếng (đọc bản dịch) bằng AI")
     d.add_argument("--khong-ghep", action="store_true", help="Không ghép phụ đề vào video")

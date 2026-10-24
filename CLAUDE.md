@@ -82,6 +82,10 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   223.5.5.5 / bing cùng lúc), `wait_online` (báo "⚠ Mất mạng – … tạm dừng", chờ ≤ 10 phút -> `NetworkDown`),
   `call` (gọi ở luồng phụ, Huỷ dừng ngay), `session` (requests có TCP keepalive). `jobs` chạy mọi tác vụ trong
   `net.task(cancel, report)` -> hàm gọi mạng tự lấy nút Huỷ + dòng trạng thái.
+- `trami/voicecheck.py` – lọc câu nghe nhầm theo cao độ giọng (hồ sơ p10–p90 từng người nói từ câu chắc là lời thoại, ± `pitch_tol` nửa cung) -> `extra["noise"]` + thu đầu / cuối câu thừa; `pipeline.check_voices` / bước 2e của `recognize`.
+- Xuất chia đoạn (`video._render_chunked`, `export_chunks`): phim ≥ 10 phút, đoạn 60 s theo lưới khung xuất, mã đoạn = lệnh +
+  file nguồn + dòng ASS trong đoạn -> `work/render/chunks/c_<mã>.mp4`, âm thanh trộn 1 lần `a_<mã>.m4a`, concat `-c copy`.
+  `gpu.wait_for_vram` (nvidia-smi) trước việc GPU; hoàn tác `project_page._undo/_redo` (ảnh chụp JSON danh sách câu).
 - `trami/songs.py` – đoán cụm câu đang HÁT (nốt ngân trên giọng đã tách) -> 🎵; `pipeline.mark_song_lines` (♪ trong bản dịch).
 - Đóng gói: `Subvideo.spec` (gom `collect_submodules("trami")` + `collect_all` các gói AI nạp động, `module_collection_mode`
   "pyz+py" cho transformers / torch / omnivoice / vieneu / funasr / speechbrain, loại gradio / tensorflow / matplotlib…),
@@ -89,7 +93,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (129 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (135 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1091,7 +1095,49 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   * Bảng câu (tab Phụ đề + Lồng tiếng): dòng đang chọn tô `#4A2A24` + viền cam (`QTableView::item:selected`), tắt lưới
     (khe 1 px chia vạch dòng tô), chọn từ timeline / khung câu -> cuộn câu ra GIỮA bảng (`PositionAtCenter`).
 
+- 2.0.74: người dùng xem github.com/yudgunH/XinChao-Cut (MIT – học cách làm) chọn mục 1, 2, 3, 5 + "nhạc / bài hát bị nghe
+  thành lời: đo cao độ giọng thật rồi lấy khoảng đó (chỉnh ±) xác định câu nói đúng", "dịch câu ngắn thêm phụ từ / từ đệm
+  cho vừa thời gian", "che phụ đề kéo dọc từ trên xuống / dưới lên" (3 ảnh mẫu).
+  * **Kéo dọc** (`hs mode "stretch"`): `video.stretch_rows` (dải `STRIP` 2 dòng sát trên / dưới vùng, sát mép khung thì dùng
+    phía còn lại, toạ độ chẵn), `stretch_filter` (crop dải -> scale lên cao vùng -> 2 đầu `blend` theo gradient dọc
+    `A*(H-1-Y)/(H-1)+B*Y/(H-1)` -> `gblur` ngang `stretch_smooth` -> overlay; bo góc / viền mờ qua `mask_expr`),
+    `stretch_fill` (numpy, Xem thử 1 khung), `player._paint_stretch` (xem trước). Tab Xoá phụ đề: "Kéo từ" (2 mép / trên /
+    dưới), "Độ mịn". Thử 1280×720 chữ Hán: cả 3 kiểu phủ kín chữ, xem thử vs xuất lệch trung bình 2,9.
+  * **Lọc câu nghe nhầm** (`trami/voicecheck.py`): F0 YIN 20 ms trên giọng đã tách; hồ sơ từng người nói (≥ 8 câu chắc: hữu
+    thanh ≥ 35 %, không ngân, 1,5–9 chữ/s, không nhỏ hơn mức chung > 10 dB; ít câu -> hồ sơ chung). Nghi khi hữu thanh
+    < 15 %, nhỏ hơn lời thoại > 20 dB, cao độ trung vị ngoài [p10 − tol, p90 + tol] hoặc nốt ngân ≥ 60 % -> `extra["noise"]`
+    (chữ gốc màu tím + lý do, KHÔNG tự xoá). Câu thật: thu đầu / cuối thừa > 0,3 s theo khung có cao độ trong khoảng ± 6
+    (tối đa 20 % mỗi đầu). Tự chạy sau "1. Nghe & tách câu" khi đã tách giọng (`pitch_check`, `noise_found`,
+    `voice_trimmed`). Tab Phụ đề hàng mới: "Lọc câu nghe nhầm" + "± nửa cung" (`pitch_tol`, mặc định 4) + "Tích câu nghi
+    nghe nhầm" + "Không phải nhạc" (`voice_ok`).
+  * **Dịch có từ đệm** (`translate_fill`, mặc định bật, công tắc tab Tự động): `translate.length_marker` gửi `⟪M–N tiếng⟫`
+    (M = 0,75 × số tiếng nói vừa ở tốc độ thường, N = mức tối đa cũ; chỉ khi M ≥ 4) – luật 8 của lời nhắc: câu ngắn hơn M
+    thì thêm phụ từ / từ đệm tự nhiên ("à, nhé, đấy, thì, cơ mà…") không thêm ý mới. 1 s -> ⟪≤5⟫, 3 s -> ⟪9–15 tiếng⟫.
+  * **Hoàn tác / làm lại** (Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z, 2 nút trên thanh đầu): ảnh chụp JSON danh sách câu (2.610 câu
+    ~11 ms), 60 bước; xoá / gộp / tách / kéo / dịch / lồng… mỗi thao tác 1 bước, gõ chữ liền nhau trong 0,8 s gộp 1 bước;
+    hoàn tác ghi đĩa + xếp lại bản lồng (vá đoạn đổi); đang có việc khác của dự án chạy thì không cho.
+  * **Chờ card** (`gpu.wait_for_vram`, `vram_check`): trước việc GPU đo chỗ trống thật (nvidia-smi) so với ước lượng
+    `vram_need` (Qwen 1.7B 4,6 GB, 0.6B 2,6, VieNeu 2,6, Omni 4,6, Hy-MT2 4,6, tách giọng 3, xoá AI 1,6…) + 0,3 GB; thiếu ->
+    dòng trạng thái "Card chỉ còn trống … – đang chiếm card: chrome.exe 3.4 GB…", chờ ≤ 3 phút (Huỷ được), quá hạn chạy kèm
+    ⚠ trong thông báo xong. Không có nvidia-smi -> bỏ qua.
+  * **Bản xem trước nhẹ** (`proxy_mode` auto / always / off, Cài đặt): video > 1920 px, > 31 khung/s hoặc HEVC / AV1 / VP9
+    > 720p -> mở dự án tự tạo `work/preview.mp4` 720p (≤ 30 khung/s, `-tune fastdecode`, GOP 30) ở việc nền, trình phát đổi
+    sang; xuất video vẫn dùng video gốc.
+  * **Xuất lại nhanh** (`export_chunks`, Cài đặt → Xuất video): phim xuất ≥ 10 phút, không đổi tốc độ / chèn video -> hình
+    chia đoạn 60 s theo lưới khung xuất (`_grid_ranges`, `_chunk_windows`), mỗi đoạn `build_and_render(_part=)` với
+    `-ss X -t span` + `select` đúng khung + `setpts=PTS+o0/TB` (chữ / phụ đề / mờ dần theo giờ xuất) + `-frames:v n`,
+    2 đoạn song song; âm thanh trộn 1 lần; nối concat `-c copy`. Mã đoạn = lệnh + `_file_sig` + `_ass_slice` -> sửa vài câu
+    xuất lại chỉ mã hoá đoạn có câu đó (thử 3 phút: lần đầu 15 s vs 18 s, sửa 1 câu 1,7 s). LỖI TÌM RA khi thử: sau
+    overlay ảnh là yuva420p -> `fade` tính khác bản 1 lần (26 khung đầu tối hơn) -> thêm `format=yuv420p` trước bước dời
+    mốc; giờ 4176/4176 khung, lệch tối đa 0,29/255.
+  * Đề xuất chưa làm (chờ người dùng chọn): "cắt video khớp lời thoại" (cách 1 cắt đoạn lặng / cách 2 kéo giãn hình theo
+    giọng lồng), "Tạo Shorts tự động" (kiểu AutoShorts).
+
 ## Vấn đề đang mở
+- 2.0.74: chờ người dùng thử Kéo dọc trên video thật, "Lọc câu nghe nhầm" (± nửa cung hợp lý bao nhiêu, có đánh dấu nhầm
+  câu thoại thật không), dịch có từ đệm (AI có thêm từ quá đà không), Ctrl+Z, bản xem trước nhẹ với video 4K / 60 khung,
+  xuất lại nhanh phim dài (nghe / xem chỗ nối đoạn 60 s), báo card bị chiếm (cần nvidia-smi trong PATH – có sẵn khi cài
+  driver NVIDIA).
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
 - fa-zh (căn từng chữ) chưa chạy thật (sandbox không tải được ModelScope) – nếu lỗi tool tự dùng cách dự phòng theo độ to giọng.

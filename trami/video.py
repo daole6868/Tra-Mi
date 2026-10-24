@@ -109,6 +109,66 @@ def patch_feather(w: int, h: int) -> int:
 
 
 BLUR_KINDS = (("box", "Mờ thường"), ("gauss", "Mờ mịn (kính mờ)"), ("pixel", "Khảm ô vuông (pixel)"))
+STRETCH_FROM = (("both", "Từ 2 mép trên + dưới (nối dần, ít lộ nhất)"), ("above", "Kéo từ mép trên xuống"),
+                ("below", "Kéo từ mép dưới lên"))
+STRIP = 2    # Kéo dọc: số dòng điểm ảnh ngay sát ngoài vùng chữ được kéo dài phủ kín vùng
+
+
+def stretch_rows(H: int, y: int, h: int, side: str = "both") -> tuple[int | None, int | None]:
+    """Kéo dọc: hàng bắt đầu của dải STRIP dòng phía trên / phía dưới vùng chữ (None = không dùng phía đó). Vùng sát
+    mép khung thì tự dùng phía còn lại."""
+    top = y - STRIP if y >= STRIP else None
+    bot = y + h if y + h + STRIP <= H else None
+    if side == "above" and top is not None:
+        bot = None
+    elif side == "below" and bot is not None:
+        top = None
+    if top is None and bot is None:
+        top = max(0, min(H - STRIP, y))
+    return (None if top is None else top // 2 * 2), (None if bot is None else bot // 2 * 2)
+
+
+def stretch_filter(hs: dict, W: int, H: int, x: int, y: int, w: int, h: int, src: str, tag: str) -> tuple[str, str]:
+    """Chuỗi lọc FFmpeg "Kéo dọc": dải điểm ảnh sát mép trên / dưới vùng chữ kéo giãn phủ kín vùng (2 mép: nối dần từ
+    màu mép trên xuống màu mép dưới) -> không còn điểm ảnh nào của chữ cũ; làm mịn ngang cho đỡ vệt sọc.
+    Trả (đoạn lọc, nhãn đầu ra cỡ w × h)."""
+    top, bot = stretch_rows(H, y, h, hs.get("stretch_from") or "both")
+    sm = max(0.0, float(hs.get("stretch_smooth", 3) or 0))
+    parts, labs = [], []
+    for name, row in (("t", top), ("b", bot)):
+        if row is not None:
+            labs.append(f"st{name}{tag}")
+    parts.append(f"[{src}]split={len(labs)}" + "".join(f"[{lb}i]" for lb in labs))
+    for lb, row in zip(labs, [r for r in (top, bot) if r is not None]):
+        parts.append(f"[{lb}i]crop={w}:{STRIP}:{x}:{row},scale={w}:{h}:flags=bilinear,setsar=1[{lb}]")
+    out = labs[0]
+    if len(labs) == 2:
+        parts.append(f"[{labs[0]}][{labs[1]}]blend=all_expr='A*(H-1-Y)/(H-1)+B*Y/(H-1)'[stj{tag}]")
+        out = f"stj{tag}"
+    if sm >= 0.5:
+        parts.append(f"[{out}]gblur=sigma={sm:.1f}:sigmaV=0.01[sts{tag}]")
+        out = f"sts{tag}"
+    return ";".join(parts), out
+
+
+def stretch_fill(img, x0: int, y0: int, x1: int, y1: int, side: str = "both", smooth: float = 3.0):
+    """Kéo dọc cho ảnh numpy BGR (Xem thử 1 khung) – cùng cách với `stretch_filter`. Trả ảnh vùng (h × w × 3, float)."""
+    import numpy as np
+
+    H = img.shape[0]
+    h = y1 - y0
+    top, bot = stretch_rows(H, y0, h, side)
+    rows = [img[r:r + STRIP, x0:x1].astype(np.float32).mean(0) for r in (top, bot) if r is not None]
+    if len(rows) == 2:
+        t = (np.arange(h, dtype=np.float32) / max(1, h - 1))[:, None, None]
+        out = rows[0][None] * (1 - t) + rows[1][None] * t
+    else:
+        out = np.repeat(rows[0][None], h, axis=0)
+    if smooth >= 0.5:
+        import cv2
+
+        out = cv2.GaussianBlur(out, (0, 0), sigmaX=float(smooth), sigmaY=0.01)
+    return out
 
 
 def shape_px(hs: dict, w: int, h: int) -> tuple[float, float]:
@@ -234,19 +294,194 @@ def out_time(t: float, keep: list[tuple[float, float]], speed: float = 1.0) -> f
     return acc / (speed or 1.0)
 
 
+# ------------------------------------------------------------------ xuất theo từng đoạn + nhớ đoạn đã xuất
+# Phim dài: hình chia thành đoạn CHUNK_SEC giây (theo giờ XUẤT, đúng lưới khung), mỗi đoạn mã hoá riêng với "mã" = lệnh
+# FFmpeg của đoạn + file nguồn + các dòng phụ đề / chữ nằm trong đoạn; âm thanh trộn 1 lần cho cả phim; nối các đoạn
+# bằng concat không nén lại. Xuất lại sau khi sửa vài câu -> chỉ mã hoá lại các đoạn có câu đổi (vài chục giây thay vì
+# cả giờ). Không chia khi có chèn video / đổi tốc độ (giờ xuất không theo lưới giờ gốc) hoặc video ngắn.
+CHUNK_SEC = 60.0
+CHUNK_MIN_DUR = 600.0       # video xuất ≥ 10 phút mới chia đoạn
+CHUNK_JOBS = 2              # số đoạn mã hoá cùng lúc
+
+
+def can_chunk(spec: dict, settings: dict, info, speed: float, final_dur: float) -> bool:
+    return bool(settings.get("export_chunks", True) and info.has_video and abs(speed - 1) < 1e-3
+                and not spec.get("inserts") and final_dur >= CHUNK_MIN_DUR)
+
+
+def _grid_ranges(keep: list[tuple[float, float]], fps: float) -> list[tuple[int, int]]:
+    """Khung (chỉ số lưới k/fps theo giây gốc, gồm cả 2 đầu) của từng đoạn giữ lại."""
+    import math
+
+    out = []
+    for a, b in keep:
+        lo, hi = math.ceil(a * fps - 1e-6), math.ceil(b * fps - 1e-6) - 1
+        if hi >= lo:
+            out.append((lo, hi))
+    return out
+
+
+def _chunk_windows(ranges: list[tuple[int, int]], k0: int, k1: int) -> list[tuple[int, int]]:
+    """Khung gốc (lo, hi) ứng với khung xuất [k0, k1) – ghép các đoạn giữ lại theo thứ tự."""
+    out, pos = [], 0
+    for lo, hi in ranges:
+        n = hi - lo + 1
+        a, b = max(k0, pos), min(k1, pos + n)
+        if b > a:
+            out.append((lo + a - pos, lo + b - 1 - pos))
+        pos += n
+    return out
+
+
+def _ass_slice(path: Path, t0: float, t1: float) -> str:
+    """Phần file ASS ảnh hưởng tới khoảng [t0, t1] giờ xuất: đầu file (kiểu chữ) + các dòng Dialogue chạm khoảng đó."""
+    if not path.exists():
+        return ""
+
+    def sec(x: str) -> float:
+        h, m, s = x.strip().split(":")
+        return int(h) * 3600 + int(m) * 60 + float(s)
+
+    head, dlg = [], []
+    for ln in path.read_text("utf-8", errors="replace").splitlines():
+        if ln.startswith("Dialogue:"):
+            parts = ln.split(",", 3)
+            try:
+                a, b = sec(parts[1]), sec(parts[2])
+            except (IndexError, ValueError):
+                dlg.append(ln)
+                continue
+            if b >= t0 - 0.05 and a <= t1 + 0.05:
+                dlg.append(ln)
+        else:
+            head.append(ln)
+    return "\n".join(head + dlg)
+
+
+def _file_sig(args: list[str]) -> list:
+    """Kích thước + giờ sửa của mọi file đầu vào (-i) – thay file cùng tên thì mã đoạn đổi."""
+    sig = []
+    for k, a in enumerate(args[:-1]):
+        if a == "-i":
+            p = Path(args[k + 1])
+            try:
+                st = p.stat()
+                sig.append([str(p), st.st_size, int(st.st_mtime)])
+            except OSError:
+                sig.append([str(p), 0, 0])
+    return sig
+
+
+def _render_chunked(src: Path, out: Path, spec: dict, settings: dict, work: Path, segments, info, keep,
+                    progress: ProgressCB | None, cancel) -> Path:
+    import hashlib
+    import json
+    from concurrent.futures import ThreadPoolExecutor
+
+    fps = float(spec.get("fps") or 0) or (info.fps if 1 <= (info.fps or 0) <= 120 else 25.0)
+    ranges = _grid_ranges(keep, fps)
+    total = sum(hi - lo + 1 for lo, hi in ranges)
+    if total <= 0:
+        raise ValueError("Không còn đoạn video nào sau khi cắt.")
+    per = max(1, int(round(CHUNK_SEC * fps)))
+    cdir = work / "chunks"
+    cdir.mkdir(parents=True, exist_ok=True)
+    chunks = []          # (đường dẫn, lệnh, số khung, nhãn)
+    for j, k0 in enumerate(range(0, total, per)):
+        k1 = min(total, k0 + per)
+        win = _chunk_windows(ranges, k0, k1)
+        lo_m, hi_m = win[0][0], win[-1][1]
+        X = max(0.0, lo_m / fps - 1.0)       # giải mã từ 1 s trước khung đầu (bộ fps cần khung trước để lấp lưới)
+        vp = {"X": X, "span": (hi_m + 1) / fps - X + 0.5, "fps": fps, "n": k1 - k0, "o0": k0 / fps,
+              "expr": "+".join(f"between(t,{(a - 0.5) / fps:.6f},{(b + 0.5) / fps:.6f})" for a, b in win),
+              "prebuilt": j > 0}
+        tmp = cdir / "_chunk.mp4"
+        args = build_and_render(src, tmp, spec, settings, work, segments, None, cancel, _part={"video": vp, "info": info})
+        t0, t1 = k0 / fps, k1 / fps
+        key = json.dumps({"a": [a for a in args if a != str(tmp.resolve())], "f": _file_sig(args),
+                          "sub": _ass_slice(work / "burn.ass", t0, t1),
+                          "txt": _ass_slice(work / "overlay_text.ass", t0, t1)}, ensure_ascii=False)
+        path = cdir / f"c_{hashlib.sha1(key.encode()).hexdigest()[:20]}.mp4"
+        args[-1] = str(path.with_suffix(".part.mp4").resolve())
+        chunks.append((path, args, k1 - k0, j))
+    todo = [c for c in chunks if not (c[0].exists() and c[0].stat().st_size > 0)]
+    done_frames = [sum(c[2] for c in chunks) - sum(c[2] for c in todo)]
+    lock = __import__("threading").Lock()
+    if progress:
+        progress(0.0, f"Xuất theo đoạn: {len(chunks)} đoạn, dùng lại {len(chunks) - len(todo)} đoạn đã xuất, "
+                      f"mã hoá {len(todo)} đoạn")
+
+    def run(c):
+        path, args, n, j = c
+        part = Path(args[-1])
+
+        def pr(x, m):
+            if progress:
+                with lock:
+                    frac = (done_frames[0] + x * n) / total
+                progress(0.88 * frac, f"Đang xuất đoạn {j + 1}/{len(chunks)} (mã hoá lại {len(todo)} đoạn có thay đổi)")
+        ff.run(args, n / fps, pr, cancel, "Đang xuất", cwd=work)
+        part.replace(path)
+        with lock:
+            done_frames[0] += n
+
+    if todo:
+        with ThreadPoolExecutor(max_workers=min(CHUNK_JOBS, len(todo))) as ex:
+            list(ex.map(run, todo))
+    # âm thanh: trộn cả phim 1 lần (như xuất thường), nhớ theo lệnh + file nguồn
+    aud = None
+    tmp_a = cdir / "_audio.m4a"
+    a_args = build_and_render(src, tmp_a, spec, settings, work, segments, None, cancel, _part={"audio": True, "info": info})
+    if a_args:
+        key = json.dumps({"a": [a for a in a_args if a != str(tmp_a.resolve())], "f": _file_sig(a_args)},
+                         ensure_ascii=False)
+        aud = cdir / f"a_{hashlib.sha1(key.encode()).hexdigest()[:20]}.m4a"
+        if not (aud.exists() and aud.stat().st_size > 0):
+            a_args[-1] = str(aud.with_suffix(".part.m4a").resolve())
+
+            def pa(x, m):
+                if progress:
+                    progress(0.88 + 0.08 * x, "Đang trộn âm thanh")
+            ff.run(a_args, total / fps, pa, cancel, "Đang trộn âm thanh", cwd=work)
+            Path(a_args[-1]).replace(aud)
+    lst = cdir / "list.txt"
+    lst.write_text("".join("file '" + c[0].resolve().as_posix().replace("'", "'\\''") + "'\n" for c in chunks),
+                   "utf-8")
+    cmd = ["-f", "concat", "-safe", "0", "-i", str(lst.resolve())]
+    if aud:
+        cmd += ["-i", str(aud.resolve()), "-map", "0:v", "-map", "1:a", "-shortest"]
+    cmd += ["-c", "copy", "-movflags", "+faststart", str(out.resolve())]
+    (work / "last_ffmpeg_cmd.txt").write_text(" ".join(chunks[0][1]) + "\n\n" + " ".join(cmd), "utf-8")
+    ff.run(cmd, total / fps, (lambda x, m: progress(0.96 + 0.04 * x, "Đang nối các đoạn")) if progress else None,
+           cancel, "Đang nối các đoạn", cwd=work)
+    keepn = {c[0].name for c in chunks} | ({aud.name} if aud else set())
+    for old in list(cdir.glob("c_*.mp4")) + list(cdir.glob("a_*.m4a")) + list(cdir.glob("*.part.*")):
+        if old.name not in keepn:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    if progress:
+        progress(1.0, f"Đã xuất ({len(chunks) - len(todo)}/{len(chunks)} đoạn dùng lại, mã hoá {len(todo)} đoạn)")
+    return out
+
+
 def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dict, work_dir: str | Path,
                      segments: list[Segment] | None = None, progress: ProgressCB | None = None,
-                     cancel: Callable[[], bool] | None = None) -> Path:
+                     cancel: Callable[[], bool] | None = None, _part: dict | None = None):
+    """Xuất video (1 lần mã hoá). Video dài -> chia đoạn + nhớ đoạn đã xuất (`_render_chunked`).
+    _part (dùng nội bộ khi chia đoạn): {"video": {...1 đoạn...}} / {"audio": True} -> chỉ TRẢ VỀ lệnh FFmpeg của phần
+    đó (không chạy); src lúc đó đã là video đã xoá phụ đề (nếu có)."""
     src, out, work = Path(src), Path(out), Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
-    info = ff.probe(src)
+    info = (_part or {}).get("info") or ff.probe(src)
     if not info.has_video:
         raise ff.FFmpegError("File đầu vào không có hình ảnh.")
     W, H, dur = info.width, info.height, info.duration
 
     # Tiền xử lý: xoá phụ đề bằng AI inpaint (tạo video trung gian; đã chạy với đúng vùng/tuỳ chọn -> dùng lại)
     hs = spec.get("hardsub") or {}
-    if needs_clean(hs):
+    if needs_clean(hs) and _part is None:
         cached = inpainted_file(src, hs, settings, work)
         if cached.exists():
             if progress:
@@ -268,6 +503,14 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
     speed = float(spec.get("speed") or 1.0)
     speed = min(4.0, max(0.25, speed))
     final_dur = sum(b - a for a, b in keep) / speed
+    if _part is None and can_chunk(spec, settings, info, speed, final_dur):
+        def pc(x, m):
+            if progress:
+                progress(base_p + span_p * x, m)
+        return _render_chunked(src, out, spec, settings, work, segments, info, keep, pc, cancel)
+    do_video = _part is None or "video" in _part
+    do_audio = _part is None or "audio" in _part
+    vpart = (_part or {}).get("video")
 
     # ---- 1. cắt / ghép các đoạn giữ lại
     #  - Cắt đầu/cuối: seek ngay ở đầu vào (-ss/-t) -> không phải giải mã phần bị bỏ, rất nhanh với video dài.
@@ -279,6 +522,8 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
         in_opts += ["-ss", f"{seek0:.3f}"]
     if seek1 < dur - 0.05 or seek0 > 0.01:
         in_opts += ["-t", f"{seek1 - seek0:.3f}"]
+    if vpart:   # 1 đoạn của bản xuất chia đoạn: chỉ giải mã đúng khúc nguồn của đoạn đó
+        in_opts = ["-ss", f"{vpart['X']:.3f}", "-t", f"{vpart['span']:.3f}"]
     inputs: list[str] = in_opts + ["-i", str(src.resolve())]
     n_in = 1
     fc: list[str] = []
@@ -290,334 +535,373 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
 
     mexpr = mute_expr(spec.get("mute_spans") or [], seek0)
     mute_f = f"volume=volume=0:enable='{mexpr}'," if mexpr else ""
-    if len(keep) == 1:
+    expr = "+".join(f"between(t,{a:.3f},{b - 0.001:.3f})" for a, b in rel_keep)
+    if vpart:
+        # mốc thời gian GỐC (cộng lại phần đã seek) -> lưới khung cố định theo giây gốc, giống nhau ở mọi đoạn ->
+        # chọn đúng các khung của đoạn (biên giữa 2 khung) -> các đoạn nối lại không thừa / thiếu khung nào
+        fc.append(f"[0:v]setpts=PTS+{vpart['X']:.6f}/TB,fps={vpart['fps']:.6f},select='{vpart['expr']}',"
+                  "setpts=N/FRAME_RATE/TB[v0]")
+    elif do_video and len(keep) == 1:
         fc.append("[0:v]setpts=PTS-STARTPTS[v0]")
-        if has_a:
-            fc.append(f"[0:a]{mute_f}asetpts=PTS-STARTPTS[a0]")
-    else:
-        expr = "+".join(f"between(t,{a:.3f},{b - 0.001:.3f})" for a, b in rel_keep)
+    elif do_video:
         fc.append(f"[0:v]fps={fps:.5f},select='{expr}',setpts=N/FRAME_RATE/TB[v0]")
-        if has_a:
+    if do_audio and has_a:
+        if len(keep) == 1:
+            fc.append(f"[0:a]{mute_f}asetpts=PTS-STARTPTS[a0]")
+        else:
             fc.append(f"[0:a]aresample=44100,{mute_f}aselect='{expr}',asetpts=N/SR/TB[a0]")
     v = "v0"
-
-    # ---- 2. che/xoá phụ đề cũ (toạ độ khung gốc)
-    mode = hs.get("mode", "none")
-    if mode in ("blur", "box", "delogo", "patch") and hs.get("regions"):
-        for k, r in enumerate(hs["regions"]):
-            x, y = int(float(r["x"]) * W), int(float(r["y"]) * H)
-            w, h = _even(float(r["w"]) * W), _even(float(r["h"]) * H)
-            w, h = min(w, W - x), min(h, H - y)
-            rad, fea = shape_px(hs, w, h)
-            shaped = rad >= 0.5 or fea >= 0.5      # bo góc / viền mờ dần: phủ qua mặt nạ alpha
-            if mode == "box" and shaped:
-                col = _hex(hs.get("box_color", "#000000"))
-                op = float(hs.get("box_opacity", 1.0))
-                fc.append(f"[{v}]split[hm{k}][hc{k}];[hc{k}]crop={w}:{h}:{x}:{y},drawbox=x=0:y=0:w=iw:h=ih:"
-                          f"color={col}@1:t=fill,format=yuva420p,split[ba{k}][bb{k}];"
-                          f"[bb{k}]format=gray,geq=lum='{mask_expr(w, h, rad, fea, 255 * op)}'[bm{k}];"
-                          f"[ba{k}][bm{k}]alphamerge[bl{k}];[hm{k}][bl{k}]overlay={x}:{y}[hb{k}]")
-            elif mode == "box":
-                col = _hex(hs.get("box_color", "#000000"))
-                op = float(hs.get("box_opacity", 1.0))
-                fc.append(f"[{v}]drawbox=x={x}:y={y}:w={w}:h={h}:color={col}@{op:.2f}:t=fill[hb{k}]")
-            elif mode == "patch":
-                # vá nền: chép dải hình ngay sát vùng chữ (theo từng khung, nên nền chuyển động vẫn khớp) đè lên,
-                # viền mờ dần cho hoà vào xung quanh
-                sy = min(H - h, max(0, int(patch_source(r, hs.get("patch_from", "auto")) * H)))
-                f = patch_feather(w, h)
-                fc.append(f"[{v}]split[hm{k}][hp{k}];[hp{k}]crop={w}:{h}:{x}:{sy},format=yuva420p,split[pa{k}][pb{k}];"
-                          f"[pb{k}]format=gray,geq=lum='255*min(1,min(min(X,W-1-X),min(Y,H-1-Y))/{f})'[pm{k}];"
-                          f"[pa{k}][pm{k}]alphamerge[pp{k}];[hm{k}][pp{k}]overlay={x}:{y}[hb{k}]")
-            elif mode == "delogo":
-                x1, y1 = max(1, x), max(1, y)
-                w1, h1 = min(w, W - x1 - 1), min(h, H - y1 - 1)
-                fc.append(f"[{v}]delogo=x={x1}:y={y1}:w={w1}:h={h1}[hb{k}]")
-            elif shaped:     # làm mờ bo góc / viền mờ dần hoà vào hình xung quanh
-                fc.append(f"[{v}]split[hm{k}][hc{k}];[hc{k}]crop={w}:{h}:{x}:{y},{blur_filter(hs, w, h)},"
-                          f"format=yuva420p,split[ba{k}][bb{k}];"
-                          f"[bb{k}]format=gray,geq=lum='{mask_expr(w, h, rad, fea)}'[bm{k}];"
-                          f"[ba{k}][bm{k}]alphamerge[bl{k}];[hm{k}][bl{k}]overlay={x}:{y}[hb{k}]")
-            else:
-                fc.append(f"[{v}]split[hm{k}][hc{k}];[hc{k}]crop={w}:{h}:{x}:{y},{blur_filter(hs, w, h)}[hbl{k}];"
-                          f"[hm{k}][hbl{k}]overlay={x}:{y}[hb{k}]")
-            v = f"hb{k}"
-
-    chain: list[str] = []
-    cw, ch = W, H
-    # ---- 3. crop
-    crop = spec.get("crop")
-    if crop and (float(crop.get("w", 1)) < 0.999 or float(crop.get("h", 1)) < 0.999):
-        cx, cy = int(float(crop["x"]) * W), int(float(crop["y"]) * H)
-        cw, ch = _even(float(crop["w"]) * W), _even(float(crop["h"]) * H)
-        cw, ch = min(cw, W - cx), min(ch, H - cy)
-        chain.append(f"crop={cw}:{ch}:{cx}:{cy}")
-    # ---- 4. lật / xoay
-    if spec.get("flip_h"):
-        chain.append("hflip")
-    if spec.get("flip_v"):
-        chain.append("vflip")
-    rot = int(spec.get("rotate") or 0) % 360
-    if rot == 90:
-        chain.append("transpose=1")
-        cw, ch = ch, cw
-    elif rot == 270:
-        chain.append("transpose=2")
-        cw, ch = ch, cw
-    elif rot == 180:
-        chain.append("hflip,vflip")
-    # ---- 5. phóng to nhẹ (lách bản quyền)
-    zoom = float(spec.get("zoom") or 1.0)
-    if zoom > 1.001:
-        zw, zh = _even(cw / zoom), _even(ch / zoom)
-        chain.append(f"crop={zw}:{zh}:(iw-{zw})/2:(ih-{zh})/2,scale={cw}:{ch}")
-    # ---- 6. màu sắc
-    col = spec.get("color") or {}
-    b, c, s_ = float(col.get("brightness", 0)), float(col.get("contrast", 1)), float(col.get("saturation", 1))
-    g = float(col.get("gamma", 1))
-    if abs(b) > 1e-3 or abs(c - 1) > 1e-3 or abs(s_ - 1) > 1e-3 or abs(g - 1) > 1e-3:
-        chain.append(f"eq=brightness={b:.3f}:contrast={c:.3f}:saturation={s_:.3f}:gamma={g:.3f}")
-    if col.get("sharpen"):
-        chain.append("unsharp=5:5:0.8:3:3:0.0")
-    if col.get("denoise"):
-        chain.append("hqdn3d=2:1:3:3")
-    # ---- 7. tốc độ
-    if abs(speed - 1) > 1e-3:
-        chain.append(f"setpts=PTS/{speed:.4f}")
-    if spec.get("fps"):
-        chain.append(f"fps={float(spec['fps'])}")
-    if chain:
-        fc.append(f"[{v}]{','.join(chain)}[vc]")
-        v = "vc"
-
-    # ---- 8. tỉ lệ khung hình / độ phân giải
-    aspect = spec.get("aspect", "original")
-    res = spec.get("resolution", "original")
-    TW, TH = target_size(cw, ch, aspect, res)
-    if (TW, TH) != (cw, ch):
-        amode = spec.get("aspect_mode", "blur")
-        if aspect in ASPECTS and amode == "crop":
-            fc.append(f"[{v}]scale={TW}:{TH}:force_original_aspect_ratio=increase,crop={TW}:{TH},setsar=1[vr]")
-        elif aspect in ASPECTS and amode == "pad":
-            fc.append(f"[{v}]scale={TW}:{TH}:force_original_aspect_ratio=decrease,"
-                      f"pad={TW}:{TH}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[vr]")
-        elif aspect in ASPECTS:
-            fc.append(f"[{v}]split[bg0][fg0];[bg0]scale={TW}:{TH}:force_original_aspect_ratio=increase,"
-                      f"crop={TW}:{TH},boxblur=luma_radius=min(h\\,w)/20:luma_power=2,eq=brightness=-0.08[bg1];"
-                      f"[fg0]scale={TW}:{TH}:force_original_aspect_ratio=decrease[fg1];"
-                      f"[bg1][fg1]overlay=(W-w)/2:(H-h)/2,setsar=1[vr]")
-        else:
-            fc.append(f"[{v}]scale={TW}:{TH}:flags=lanczos,setsar=1[vr]")
-        v = "vr"
-
-    # ---- 9. logo / watermark ảnh
-    wm = spec.get("watermark") or {}
-    if wm.get("path") and Path(wm["path"]).exists():
-        inputs += ["-loop", "1", "-i", str(Path(wm["path"]).resolve())]
-        wi = n_in
-        n_in += 1
-        sc = float(wm.get("scale", 0.15))
-        op = float(wm.get("opacity", 0.85))
-        m = int(min(TW, TH) * 0.03)
-        px, py = POSITIONS.get(wm.get("position", "top-right"), POSITIONS["top-right"])
-        fc.append(f"[{wi}:v]scale={_even(TW * sc)}:-1,format=rgba,colorchannelmixer=aa={op:.2f}[wm]")
-        fc.append(f"[{v}][wm]overlay={px.format(m=m)}:{py.format(m=m)}:shortest=1[vw]")
-        v = "vw"
-
-    # thư mục font cục bộ để libass/drawtext dùng đường dẫn tương đối (tránh lỗi escape trên Windows)
-    fonts_local = work / "fonts"
-    fonts_local.mkdir(parents=True, exist_ok=True)
-    for f in FONTS_DIR.glob("*.[ot]tf"):          # chép cả font mới thêm vào bản cập nhật (vd. Bangers)
-        dst = fonts_local / f.name
-        if not dst.exists() or dst.stat().st_size != f.stat().st_size:
-            shutil.copy2(f, dst)
-
-    # ---- 10. chữ chạy / chữ tĩnh (vẽ bằng ASS -> không cần drawtext, chạy với mọi bản FFmpeg có libass)
-    tx = spec.get("text") or {}
-    if (tx.get("content") or "").strip():
-        overlay_text_ass(work / "overlay_text.ass", tx, TW, TH, final_dur)
-        fc.append(f"[{v}]subtitles=overlay_text.ass:fontsdir=fonts[vt]")
-        v = "vt"
-
-    # ---- 11. phụ đề mới
-    sub = spec.get("subtitles") or {}
-    if sub.get("burn") and segments:
-        segs = [Segment(s.start, s.end, s.text, s.trans, extra={"kv": s.extra["kv"]} if s.extra.get("kv") else {})
-                for s in segments]
-        if not full:
-            segs = remap_after_cut(segs, keep)
-        segs = scale_time(segs, speed)
-        style = dict(settings.get("sub_style") or {})
-        style.update(sub.get("style") or {})
-        which = sub.get("which", "trans")
-        save_subtitles(segs, work / "burn.ass", which=which, style=style, width=TW, height=TH)
-        fc.append(f"[{v}]subtitles=burn.ass:fontsdir=fonts[vs]")
-        v = "vs"
-
-    # ---- 11b. video chèn thêm (timeline: "Chèn video…") – ghép vào đúng chỗ trên video XUẤT RA (sau khi cắt / đổi
-    # tốc độ); đoạn chèn giữ hình + tiếng của chính nó, không có phụ đề / lồng tiếng
-    ins = []
-    for it in spec.get("inserts") or []:
-        ip = Path(it.get("path") or "")
-        if not ip.exists():
-            raise FileNotFoundError(f"Không tìm thấy video chèn: {ip}")
-        ii = ff.probe(ip)
-        if not ii.has_video or ii.duration <= 0.05:
-            continue
-        at = out_time(float(it.get("at") or 0), keep, speed)
-        ins.append((min(at, final_dur), ip, ii))
-    ins.sort(key=lambda x: x[0])
+    ins: list = []
     main_dur = final_dur
-    cuts_at = [0.0] + [x[0] for x in ins] + [main_dur]
-    if ins:
-        k = len(ins) + 1
-        fc.append(f"[{v}]split={k}" + "".join(f"[vm{i}]" for i in range(k)))
-        for i in range(k):
-            fc.append(f"[vm{i}]trim=start={cuts_at[i]:.3f}:end={cuts_at[i + 1]:.3f},setpts=PTS-STARTPTS,"
-                      f"fps={fps:.5f},format=yuv420p[vp{i}]")
-        for j, (_at, ip, ii) in enumerate(ins):
-            inputs += ["-i", str(ip.resolve())]
-            ins[j] = (_at, ip, ii, n_in)
-            fc.append(f"[{n_in}:v]scale={TW}:{TH}:force_original_aspect_ratio=decrease,pad={TW}:{TH}:(ow-iw)/2:"
-                      f"(oh-ih)/2,setsar=1,fps={fps:.5f},format=yuv420p,setpts=PTS-STARTPTS[vi{j}]")
-            n_in += 1
-        final_dur = main_dur + sum(ii.duration for _a, _p, ii, _n in ins)
-
-    # ---- 12. hiệu ứng mờ dần
+    cuts_at = [0.0, main_dur]
     fade = spec.get("fade") or {}
     fin, fout = float(fade.get("in") or 0), float(fade.get("out") or 0)
-    fl = []
-    if fin > 0:
-        fl.append(f"fade=t=in:st=0:d={fin}")
-    if fout > 0:
-        fl.append(f"fade=t=out:st={max(0, final_dur - fout):.3f}:d={fout}")
-    if fl and not ins:
-        fc.append(f"[{v}]{','.join(fl)}[vf]")
-        v = "vf"
-    if not ins:
-        fc.append(f"[{v}]format=yuv420p[vout]")
+    TW = TH = 0
 
-    # ================= ÂM THANH (cách trộn dùng chung với bộ trộn trực tiếp trong trình phát: trami/audiomix.py)
-    from .audiomix import audio_settings, gains as mix_gains, pitch_filter, use_stems
+    if do_video:
+        # ---- 2. che/xoá phụ đề cũ (toạ độ khung gốc)
+        mode = hs.get("mode", "none")
+        if mode in ("blur", "box", "delogo", "patch", "stretch") and hs.get("regions"):
+            for k, r in enumerate(hs["regions"]):
+                x, y = int(float(r["x"]) * W), int(float(r["y"]) * H)
+                w, h = _even(float(r["w"]) * W), _even(float(r["h"]) * H)
+                w, h = min(w, W - x), min(h, H - y)
+                rad, fea = shape_px(hs, w, h)
+                shaped = rad >= 0.5 or fea >= 0.5      # bo góc / viền mờ dần: phủ qua mặt nạ alpha
+                if mode == "box" and shaped:
+                    col = _hex(hs.get("box_color", "#000000"))
+                    op = float(hs.get("box_opacity", 1.0))
+                    fc.append(f"[{v}]split[hm{k}][hc{k}];[hc{k}]crop={w}:{h}:{x}:{y},drawbox=x=0:y=0:w=iw:h=ih:"
+                              f"color={col}@1:t=fill,format=yuva420p,split[ba{k}][bb{k}];"
+                              f"[bb{k}]format=gray,geq=lum='{mask_expr(w, h, rad, fea, 255 * op)}'[bm{k}];"
+                              f"[ba{k}][bm{k}]alphamerge[bl{k}];[hm{k}][bl{k}]overlay={x}:{y}[hb{k}]")
+                elif mode == "box":
+                    col = _hex(hs.get("box_color", "#000000"))
+                    op = float(hs.get("box_opacity", 1.0))
+                    fc.append(f"[{v}]drawbox=x={x}:y={y}:w={w}:h={h}:color={col}@{op:.2f}:t=fill[hb{k}]")
+                elif mode == "patch":
+                    # vá nền: chép dải hình ngay sát vùng chữ (theo từng khung, nên nền chuyển động vẫn khớp) đè lên,
+                    # viền mờ dần cho hoà vào xung quanh
+                    sy = min(H - h, max(0, int(patch_source(r, hs.get("patch_from", "auto")) * H)))
+                    f = patch_feather(w, h)
+                    fc.append(f"[{v}]split[hm{k}][hp{k}];[hp{k}]crop={w}:{h}:{x}:{sy},format=yuva420p,split[pa{k}][pb{k}];"
+                              f"[pb{k}]format=gray,geq=lum='255*min(1,min(min(X,W-1-X),min(Y,H-1-Y))/{f})'[pm{k}];"
+                              f"[pa{k}][pm{k}]alphamerge[pp{k}];[hm{k}][pp{k}]overlay={x}:{y}[hb{k}]")
+                elif mode == "stretch":
+                    # kéo dọc: dòng điểm ảnh sát mép vùng kéo dài phủ kín chữ (theo từng khung -> cảnh động vẫn khớp màu)
+                    x, y = x // 2 * 2, y // 2 * 2
+                    sf, sl = stretch_filter(hs, W, H, x, y, w, h, f"hc{k}", f"{k}")
+                    if shaped:
+                        fc.append(f"[{v}]split[hm{k}][hc{k}];{sf};[{sl}]format=yuva420p,split[ba{k}][bb{k}];"
+                                  f"[bb{k}]format=gray,geq=lum='{mask_expr(w, h, rad, fea)}'[bm{k}];"
+                                  f"[ba{k}][bm{k}]alphamerge[bl{k}];[hm{k}][bl{k}]overlay={x}:{y}[hb{k}]")
+                    else:
+                        fc.append(f"[{v}]split[hm{k}][hc{k}];{sf};[hm{k}][{sl}]overlay={x}:{y}[hb{k}]")
+                elif mode == "delogo":
+                    x1, y1 = max(1, x), max(1, y)
+                    w1, h1 = min(w, W - x1 - 1), min(h, H - y1 - 1)
+                    fc.append(f"[{v}]delogo=x={x1}:y={y1}:w={w1}:h={h1}[hb{k}]")
+                elif shaped:     # làm mờ bo góc / viền mờ dần hoà vào hình xung quanh
+                    fc.append(f"[{v}]split[hm{k}][hc{k}];[hc{k}]crop={w}:{h}:{x}:{y},{blur_filter(hs, w, h)},"
+                              f"format=yuva420p,split[ba{k}][bb{k}];"
+                              f"[bb{k}]format=gray,geq=lum='{mask_expr(w, h, rad, fea)}'[bm{k}];"
+                              f"[ba{k}][bm{k}]alphamerge[bl{k}];[hm{k}][bl{k}]overlay={x}:{y}[hb{k}]")
+                else:
+                    fc.append(f"[{v}]split[hm{k}][hc{k}];[hc{k}]crop={w}:{h}:{x}:{y},{blur_filter(hs, w, h)}[hbl{k}];"
+                              f"[hm{k}][hbl{k}]overlay={x}:{y}[hb{k}]")
+                v = f"hb{k}"
 
-    amix_inputs: list[str] = []
-    dub = spec.get("dub") or {}
-    use_dub = bool(dub.get("enabled") and dub.get("wav") and Path(dub["wav"]).exists())
-    aset = audio_settings(spec)
-    bgm = spec.get("bgm") or {}
-    has_bgm = bool(bgm.get("path") and Path(bgm["path"]).exists())
-    bg_ok = bool(dub.get("bg_wav") and Path(dub["bg_wav"]).exists())
-    stems_on = use_stems(aset, bg_ok, use_dub)
-    g = mix_gains(aset, stems_on, use_dub, has_bgm)
-    pf = pitch_filter(float(aset.get("pitch") or 1.0))
-    tempo = (',' + ','.join(_atempo_chain(speed))) if abs(speed - 1) > 1e-3 else ''
-    counter = [0]
-    span = seek1 - seek0  # độ dài đoạn video đầu vào sau khi seek
+        chain: list[str] = []
+        cw, ch = W, H
+        # ---- 3. crop
+        crop = spec.get("crop")
+        if crop and (float(crop.get("w", 1)) < 0.999 or float(crop.get("h", 1)) < 0.999):
+            cx, cy = int(float(crop["x"]) * W), int(float(crop["y"]) * H)
+            cw, ch = _even(float(crop["w"]) * W), _even(float(crop["h"]) * H)
+            cw, ch = min(cw, W - cx), min(ch, H - cy)
+            chain.append(f"crop={cw}:{ch}:{cx}:{cy}")
+        # ---- 4. lật / xoay
+        if spec.get("flip_h"):
+            chain.append("hflip")
+        if spec.get("flip_v"):
+            chain.append("vflip")
+        rot = int(spec.get("rotate") or 0) % 360
+        if rot == 90:
+            chain.append("transpose=1")
+            cw, ch = ch, cw
+        elif rot == 270:
+            chain.append("transpose=2")
+            cw, ch = ch, cw
+        elif rot == 180:
+            chain.append("hflip,vflip")
+        # ---- 5. phóng to nhẹ (lách bản quyền)
+        zoom = float(spec.get("zoom") or 1.0)
+        if zoom > 1.001:
+            zw, zh = _even(cw / zoom), _even(ch / zoom)
+            chain.append(f"crop={zw}:{zh}:(iw-{zw})/2:(ih-{zh})/2,scale={cw}:{ch}")
+        # ---- 6. màu sắc
+        col = spec.get("color") or {}
+        b, c, s_ = float(col.get("brightness", 0)), float(col.get("contrast", 1)), float(col.get("saturation", 1))
+        g = float(col.get("gamma", 1))
+        if abs(b) > 1e-3 or abs(c - 1) > 1e-3 or abs(s_ - 1) > 1e-3 or abs(g - 1) > 1e-3:
+            chain.append(f"eq=brightness={b:.3f}:contrast={c:.3f}:saturation={s_:.3f}:gamma={g:.3f}")
+        if col.get("sharpen"):
+            chain.append("unsharp=5:5:0.8:3:3:0.0")
+        if col.get("denoise"):
+            chain.append("hqdn3d=2:1:3:3")
+        # ---- 7. tốc độ
+        if abs(speed - 1) > 1e-3:
+            chain.append(f"setpts=PTS/{speed:.4f}")
+        if spec.get("fps") and not vpart:      # chia đoạn: đã đưa về đúng số khung/giây ở bước 1
+            chain.append(f"fps={float(spec['fps'])}")
+        if chain:
+            fc.append(f"[{v}]{','.join(chain)}[vc]")
+            v = "vc"
 
-    def ext_audio(path: str, pre: str = "") -> str:
-        """Thêm 1 file âm thanh ngoài (cùng mốc thời gian với video gốc), cắt giống video. Trả về nhãn."""
-        nonlocal n_in
-        inputs.extend(in_opts + ["-i", str(Path(path).resolve())])
-        idx = n_in
-        n_in += 1
-        counter[0] += 1
-        lab = f"ex{counter[0]}"
-        pre_f = (pre + ",") if pre else ""
-        if len(keep) == 1:
-            fc.append(f"[{idx}:a]aresample=44100,{pre_f}asetpts=PTS-STARTPTS,apad=whole_dur={span:.3f},"
-                      f"atrim=0:{span:.3f}[{lab}]")
-        else:
-            expr = "+".join(f"between(t,{a:.3f},{b - 0.001:.3f})" for a, b in rel_keep)
-            fc.append(f"[{idx}:a]aresample=44100,{pre_f}apad=whole_dur={span:.3f},atrim=0:{span:.3f},"
-                      f"aselect='{expr}',asetpts=N/SR/TB[{lab}]")
-        return lab
+        # ---- 8. tỉ lệ khung hình / độ phân giải
+        aspect = spec.get("aspect", "original")
+        res = spec.get("resolution", "original")
+        TW, TH = target_size(cw, ch, aspect, res)
+        if (TW, TH) != (cw, ch):
+            amode = spec.get("aspect_mode", "blur")
+            if aspect in ASPECTS and amode == "crop":
+                fc.append(f"[{v}]scale={TW}:{TH}:force_original_aspect_ratio=increase,crop={TW}:{TH},setsar=1[vr]")
+            elif aspect in ASPECTS and amode == "pad":
+                fc.append(f"[{v}]scale={TW}:{TH}:force_original_aspect_ratio=decrease,"
+                          f"pad={TW}:{TH}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[vr]")
+            elif aspect in ASPECTS:
+                fc.append(f"[{v}]split[bg0][fg0];[bg0]scale={TW}:{TH}:force_original_aspect_ratio=increase,"
+                          f"crop={TW}:{TH},boxblur=luma_radius=min(h\\,w)/20:luma_power=2,eq=brightness=-0.08[bg1];"
+                          f"[fg0]scale={TW}:{TH}:force_original_aspect_ratio=decrease[fg1];"
+                          f"[bg1][fg1]overlay=(W-w)/2:(H-h)/2,setsar=1[vr]")
+            else:
+                fc.append(f"[{v}]scale={TW}:{TH}:flags=lanczos,setsar=1[vr]")
+            v = "vr"
 
-    if stems_on:
-        # nền = nhạc + hiệu ứng đã tách (không còn giọng Trung)
-        if g["bg"] > 0.001:
-            lab = ext_audio(dub["bg_wav"], mute_f.rstrip(","))
-            fc.append(f"[{lab}]volume={g['bg']:.3f}{tempo}[bgx]")
-            amix_inputs.append("[bgx]")
-        # giọng gốc đã tách: nhỏ / tắt, riêng đoạn hát giữ to (nếu bật "giữ nguyên đoạn hát")
-        voc = dub.get("vocals_wav")
-        spans = dub.get("song_spans") or []
-        if voc and Path(voc).exists() and (g["voice"] > 0.001 or (spans and g["voice_song"] > 0.001)):
-            # mốc thời gian lúc này là của file gốc (trước khi cắt) vì -ss đã dời về 0 tại seek0
-            cond = "+".join(f"between(t,{a - seek0:.3f},{b - seek0:.3f})" for a, b in spans) or "0"
-            pre = f"volume='if({cond},{g['voice_song']:.3f},{g['voice']:.3f})':eval=frame" + (f",{pf}" if pf else "") \
-                + (f",{mute_f.rstrip(',')}" if mute_f else "")
-            lab = ext_audio(voc, pre)
-            fc.append(f"[{lab}]anull{tempo}[vcx]")
-            amix_inputs.append("[vcx]")
-    elif has_a and g["orig"] > 0.001:
-        af = [f"volume={g['orig']:.3f}"] + _atempo_chain(speed)
-        if pf:
-            af.insert(0, pf)
-        fc.append(f"[a0]aresample=44100,{','.join(af)}[ao]")
-        amix_inputs.append("[ao]")
-    duck = has_bgm and use_dub and aset.get("duck", True) and g["dub"] > 0.001 and g["bgm"] > 0.001
-    if use_dub and g["dub"] > 0.001:
-        lab = ext_audio(dub["wav"])
-        split = ",asplit=2[dso][dsk]" if duck else "[dso]"
-        fc.append(f"[{lab}]volume={g['dub']:.3f}{tempo}{split}")
-        amix_inputs.append("[dso]")
-    if has_a and "[ao]" not in amix_inputs:
-        fc.append("[a0]anullsink")  # âm thanh gốc không dùng tới
-    if has_bgm and g["bgm"] > 0.001:
-        inputs += ["-stream_loop", "-1", "-i", str(Path(bgm["path"]).resolve())]
-        bi = n_in
-        n_in += 1
-        fc.append(f"[{bi}:a]aresample=44100,aformat=channel_layouts=stereo,volume={g['bgm']:.3f},"
-                  f"atrim=0:{final_dur:.3f}" + ("[bgr]" if duck else "[bgo]"))
-        if duck:
-            # giọng lồng làm "chìa khoá": có lời -> nhạc giảm ~10–16 dB trong 20 ms, hết lời -> lên lại trong 0,4 s
-            fc.append("[dsk]aformat=channel_layouts=stereo[dsk2];"
-                      "[bgr][dsk2]sidechaincompress=threshold=0.02:ratio=8:attack=20:release=400[bgo]")
-        amix_inputs.append("[bgo]")
-    if ins and not amix_inputs:   # video gốc không có tiếng nhưng đoạn chèn có -> nền im lặng cho phần video gốc
-        fc.append(f"anullsrc=r=44100:cl=stereo,atrim=0:{main_dur:.3f}[silm]")
-        amix_inputs.append("[silm]")
-    if amix_inputs:
-        if len(amix_inputs) == 1:
-            fc.append(f"{amix_inputs[0]}anull[amx]")
-        else:
-            fc.append("".join(amix_inputs) + f"amix=inputs={len(amix_inputs)}:duration=first:"
-                      f"dropout_transition=0:normalize=0[amx]")
+        # ---- 9. logo / watermark ảnh
+        wm = spec.get("watermark") or {}
+        if wm.get("path") and Path(wm["path"]).exists():
+            inputs += ["-loop", "1", "-i", str(Path(wm["path"]).resolve())]
+            wi = n_in
+            n_in += 1
+            sc = float(wm.get("scale", 0.15))
+            op = float(wm.get("opacity", 0.85))
+            m = int(min(TW, TH) * 0.03)
+            px, py = POSITIONS.get(wm.get("position", "top-right"), POSITIONS["top-right"])
+            fc.append(f"[{wi}:v]scale={_even(TW * sc)}:-1,format=rgba,colorchannelmixer=aa={op:.2f}[wm]")
+            fc.append(f"[{v}][wm]overlay={px.format(m=m)}:{py.format(m=m)}:shortest=1[vw]")
+            v = "vw"
+
+        # thư mục font cục bộ để libass/drawtext dùng đường dẫn tương đối (tránh lỗi escape trên Windows)
+        fonts_local = work / "fonts"
+        fonts_local.mkdir(parents=True, exist_ok=True)
+        for f in FONTS_DIR.glob("*.[ot]tf"):          # chép cả font mới thêm vào bản cập nhật (vd. Bangers)
+            dst = fonts_local / f.name
+            if not dst.exists() or dst.stat().st_size != f.stat().st_size:
+                shutil.copy2(f, dst)
+
+        if vpart:   # đoạn của bản chia đoạn: dời mốc khung về giờ XUẤT thật -> chữ / phụ đề / mờ dần đúng chỗ
+            fc.append(f"[{v}]format=yuv420p,setpts=PTS+{vpart['o0']:.6f}/TB[voff]")
+            v = "voff"
+        # ---- 10. chữ chạy / chữ tĩnh (vẽ bằng ASS -> không cần drawtext, chạy với mọi bản FFmpeg có libass)
+        tx = spec.get("text") or {}
+        if (tx.get("content") or "").strip():
+            if not (vpart and vpart.get("prebuilt")):
+                overlay_text_ass(work / "overlay_text.ass", tx, TW, TH, final_dur)
+            fc.append(f"[{v}]subtitles=overlay_text.ass:fontsdir=fonts[vt]")
+            v = "vt"
+
+        # ---- 11. phụ đề mới
+        sub = spec.get("subtitles") or {}
+        if sub.get("burn") and segments:
+            segs = [Segment(s.start, s.end, s.text, s.trans, extra={"kv": s.extra["kv"]} if s.extra.get("kv") else {})
+                    for s in segments]
+            if not full:
+                segs = remap_after_cut(segs, keep)
+            segs = scale_time(segs, speed)
+            style = dict(settings.get("sub_style") or {})
+            style.update(sub.get("style") or {})
+            which = sub.get("which", "trans")
+            if not (vpart and vpart.get("prebuilt")):   # các đoạn dùng chung 1 file phụ đề (dựng ở đoạn đầu)
+                save_subtitles(segs, work / "burn.ass", which=which, style=style, width=TW, height=TH)
+            fc.append(f"[{v}]subtitles=burn.ass:fontsdir=fonts[vs]")
+            v = "vs"
+
+        # ---- 11b. video chèn thêm (timeline: "Chèn video…") – ghép vào đúng chỗ trên video XUẤT RA (sau khi cắt / đổi
+        # tốc độ); đoạn chèn giữ hình + tiếng của chính nó, không có phụ đề / lồng tiếng
+        ins = []
+        for it in spec.get("inserts") or []:
+            ip = Path(it.get("path") or "")
+            if not ip.exists():
+                raise FileNotFoundError(f"Không tìm thấy video chèn: {ip}")
+            ii = ff.probe(ip)
+            if not ii.has_video or ii.duration <= 0.05:
+                continue
+            at = out_time(float(it.get("at") or 0), keep, speed)
+            ins.append((min(at, final_dur), ip, ii))
+        ins.sort(key=lambda x: x[0])
+        main_dur = final_dur
+        cuts_at = [0.0] + [x[0] for x in ins] + [main_dur]
         if ins:
             k = len(ins) + 1
-            fc.append(f"[amx]aformat=sample_rates=44100:channel_layouts=stereo,apad=whole_dur={main_dur:.3f},"
-                      f"atrim=0:{main_dur:.3f},asplit={k}" + "".join(f"[am{i}]" for i in range(k)))
+            fc.append(f"[{v}]split={k}" + "".join(f"[vm{i}]" for i in range(k)))
             for i in range(k):
-                fc.append(f"[am{i}]atrim=start={cuts_at[i]:.3f}:end={cuts_at[i + 1]:.3f},asetpts=PTS-STARTPTS[ap{i}]")
-            for j, (_at, _ip, ii, idx) in enumerate(ins):
-                if ii.has_audio:
-                    fc.append(f"[{idx}:a]aresample=44100,aformat=sample_rates=44100:channel_layouts=stereo,"
-                              f"apad=whole_dur={ii.duration:.3f},atrim=0:{ii.duration:.3f},asetpts=PTS-STARTPTS[ai{j}]")
-                else:
-                    fc.append(f"anullsrc=r=44100:cl=stereo,atrim=0:{ii.duration:.3f}[ai{j}]")
-            order = []
-            for i in range(k):
-                order.append(f"[vp{i}][ap{i}]")
-                if i < len(ins):
-                    order.append(f"[vi{i}][ai{i}]")
-            fc.append("".join(order) + f"concat=n={2 * k - 1}:v=1:a=1[vcat][amx2]")
-            # mờ dần áp cho cả video sau khi ghép
-            vf = []
-            if fin > 0:
-                vf.append(f"fade=t=in:st=0:d={fin}")
-            if fout > 0:
-                vf.append(f"fade=t=out:st={max(0, final_dur - fout):.3f}:d={fout}")
-            fc.append("[vcat]" + (",".join(vf) + "," if vf else "") + "format=yuv420p[vout2]")
-            amx_lab = "amx2"
-        else:
-            amx_lab = "amx"
-        afl = ["alimiter=limit=0.95"]
-        if fin > 0:
-            afl.append(f"afade=t=in:st=0:d={fin}")
-        if fout > 0:
-            afl.append(f"afade=t=out:st={max(0, final_dur - fout):.3f}:d={fout}")
-        fc.append(f"[{amx_lab}]{','.join(afl)}[aout]")
+                fc.append(f"[vm{i}]trim=start={cuts_at[i]:.3f}:end={cuts_at[i + 1]:.3f},setpts=PTS-STARTPTS,"
+                          f"fps={fps:.5f},format=yuv420p[vp{i}]")
+            for j, (_at, ip, ii) in enumerate(ins):
+                inputs += ["-i", str(ip.resolve())]
+                ins[j] = (_at, ip, ii, n_in)
+                fc.append(f"[{n_in}:v]scale={TW}:{TH}:force_original_aspect_ratio=decrease,pad={TW}:{TH}:(ow-iw)/2:"
+                          f"(oh-ih)/2,setsar=1,fps={fps:.5f},format=yuv420p,setpts=PTS-STARTPTS[vi{j}]")
+                n_in += 1
+            final_dur = main_dur + sum(ii.duration for _a, _p, ii, _n in ins)
 
+        # ---- 12. hiệu ứng mờ dần
+        fade = spec.get("fade") or {}
+        fin, fout = float(fade.get("in") or 0), float(fade.get("out") or 0)
+        fl = []
+        if fin > 0:
+            fl.append(f"fade=t=in:st=0:d={fin}")
+        if fout > 0:
+            fl.append(f"fade=t=out:st={max(0, final_dur - fout):.3f}:d={fout}")
+        if fl and not ins:
+            fc.append(f"[{v}]{','.join(fl)}[vf]")
+            v = "vf"
+        if vpart:
+            fc.append(f"[{v}]setpts=PTS-STARTPTS,format=yuv420p[vout]")
+        elif not ins:
+            fc.append(f"[{v}]format=yuv420p[vout]")
+
+    # ================= ÂM THANH (cách trộn dùng chung với bộ trộn trực tiếp trong trình phát: trami/audiomix.py)
+    amix_inputs: list[str] = []
+    if do_audio:
+        from .audiomix import audio_settings, gains as mix_gains, pitch_filter, use_stems
+
+        dub = spec.get("dub") or {}
+        use_dub = bool(dub.get("enabled") and dub.get("wav") and Path(dub["wav"]).exists())
+        aset = audio_settings(spec)
+        bgm = spec.get("bgm") or {}
+        has_bgm = bool(bgm.get("path") and Path(bgm["path"]).exists())
+        bg_ok = bool(dub.get("bg_wav") and Path(dub["bg_wav"]).exists())
+        stems_on = use_stems(aset, bg_ok, use_dub)
+        g = mix_gains(aset, stems_on, use_dub, has_bgm)
+        pf = pitch_filter(float(aset.get("pitch") or 1.0))
+        tempo = (',' + ','.join(_atempo_chain(speed))) if abs(speed - 1) > 1e-3 else ''
+        counter = [0]
+        span = seek1 - seek0  # độ dài đoạn video đầu vào sau khi seek
+
+        def ext_audio(path: str, pre: str = "") -> str:
+            """Thêm 1 file âm thanh ngoài (cùng mốc thời gian với video gốc), cắt giống video. Trả về nhãn."""
+            nonlocal n_in
+            inputs.extend(in_opts + ["-i", str(Path(path).resolve())])
+            idx = n_in
+            n_in += 1
+            counter[0] += 1
+            lab = f"ex{counter[0]}"
+            pre_f = (pre + ",") if pre else ""
+            if len(keep) == 1:
+                fc.append(f"[{idx}:a]aresample=44100,{pre_f}asetpts=PTS-STARTPTS,apad=whole_dur={span:.3f},"
+                          f"atrim=0:{span:.3f}[{lab}]")
+            else:
+                expr = "+".join(f"between(t,{a:.3f},{b - 0.001:.3f})" for a, b in rel_keep)
+                fc.append(f"[{idx}:a]aresample=44100,{pre_f}apad=whole_dur={span:.3f},atrim=0:{span:.3f},"
+                          f"aselect='{expr}',asetpts=N/SR/TB[{lab}]")
+            return lab
+
+        if stems_on:
+            # nền = nhạc + hiệu ứng đã tách (không còn giọng Trung)
+            if g["bg"] > 0.001:
+                lab = ext_audio(dub["bg_wav"], mute_f.rstrip(","))
+                fc.append(f"[{lab}]volume={g['bg']:.3f}{tempo}[bgx]")
+                amix_inputs.append("[bgx]")
+            # giọng gốc đã tách: nhỏ / tắt, riêng đoạn hát giữ to (nếu bật "giữ nguyên đoạn hát")
+            voc = dub.get("vocals_wav")
+            spans = dub.get("song_spans") or []
+            if voc and Path(voc).exists() and (g["voice"] > 0.001 or (spans and g["voice_song"] > 0.001)):
+                # mốc thời gian lúc này là của file gốc (trước khi cắt) vì -ss đã dời về 0 tại seek0
+                cond = "+".join(f"between(t,{a - seek0:.3f},{b - seek0:.3f})" for a, b in spans) or "0"
+                pre = f"volume='if({cond},{g['voice_song']:.3f},{g['voice']:.3f})':eval=frame" + (f",{pf}" if pf else "") \
+                    + (f",{mute_f.rstrip(',')}" if mute_f else "")
+                lab = ext_audio(voc, pre)
+                fc.append(f"[{lab}]anull{tempo}[vcx]")
+                amix_inputs.append("[vcx]")
+        elif has_a and g["orig"] > 0.001:
+            af = [f"volume={g['orig']:.3f}"] + _atempo_chain(speed)
+            if pf:
+                af.insert(0, pf)
+            fc.append(f"[a0]aresample=44100,{','.join(af)}[ao]")
+            amix_inputs.append("[ao]")
+        duck = has_bgm and use_dub and aset.get("duck", True) and g["dub"] > 0.001 and g["bgm"] > 0.001
+        if use_dub and g["dub"] > 0.001:
+            lab = ext_audio(dub["wav"])
+            split = ",asplit=2[dso][dsk]" if duck else "[dso]"
+            fc.append(f"[{lab}]volume={g['dub']:.3f}{tempo}{split}")
+            amix_inputs.append("[dso]")
+        if has_a and "[ao]" not in amix_inputs:
+            fc.append("[a0]anullsink")  # âm thanh gốc không dùng tới
+        if has_bgm and g["bgm"] > 0.001:
+            inputs += ["-stream_loop", "-1", "-i", str(Path(bgm["path"]).resolve())]
+            bi = n_in
+            n_in += 1
+            fc.append(f"[{bi}:a]aresample=44100,aformat=channel_layouts=stereo,volume={g['bgm']:.3f},"
+                      f"atrim=0:{final_dur:.3f}" + ("[bgr]" if duck else "[bgo]"))
+            if duck:
+                # giọng lồng làm "chìa khoá": có lời -> nhạc giảm ~10–16 dB trong 20 ms, hết lời -> lên lại trong 0,4 s
+                fc.append("[dsk]aformat=channel_layouts=stereo[dsk2];"
+                          "[bgr][dsk2]sidechaincompress=threshold=0.02:ratio=8:attack=20:release=400[bgo]")
+            amix_inputs.append("[bgo]")
+        if ins and not amix_inputs:   # video gốc không có tiếng nhưng đoạn chèn có -> nền im lặng cho phần video gốc
+            fc.append(f"anullsrc=r=44100:cl=stereo,atrim=0:{main_dur:.3f}[silm]")
+            amix_inputs.append("[silm]")
+        if amix_inputs:
+            if len(amix_inputs) == 1:
+                fc.append(f"{amix_inputs[0]}anull[amx]")
+            else:
+                fc.append("".join(amix_inputs) + f"amix=inputs={len(amix_inputs)}:duration=first:"
+                          f"dropout_transition=0:normalize=0[amx]")
+            if ins:
+                k = len(ins) + 1
+                fc.append(f"[amx]aformat=sample_rates=44100:channel_layouts=stereo,apad=whole_dur={main_dur:.3f},"
+                          f"atrim=0:{main_dur:.3f},asplit={k}" + "".join(f"[am{i}]" for i in range(k)))
+                for i in range(k):
+                    fc.append(f"[am{i}]atrim=start={cuts_at[i]:.3f}:end={cuts_at[i + 1]:.3f},asetpts=PTS-STARTPTS[ap{i}]")
+                for j, (_at, _ip, ii, idx) in enumerate(ins):
+                    if ii.has_audio:
+                        fc.append(f"[{idx}:a]aresample=44100,aformat=sample_rates=44100:channel_layouts=stereo,"
+                                  f"apad=whole_dur={ii.duration:.3f},atrim=0:{ii.duration:.3f},asetpts=PTS-STARTPTS[ai{j}]")
+                    else:
+                        fc.append(f"anullsrc=r=44100:cl=stereo,atrim=0:{ii.duration:.3f}[ai{j}]")
+                order = []
+                for i in range(k):
+                    order.append(f"[vp{i}][ap{i}]")
+                    if i < len(ins):
+                        order.append(f"[vi{i}][ai{i}]")
+                fc.append("".join(order) + f"concat=n={2 * k - 1}:v=1:a=1[vcat][amx2]")
+                # mờ dần áp cho cả video sau khi ghép
+                vf = []
+                if fin > 0:
+                    vf.append(f"fade=t=in:st=0:d={fin}")
+                if fout > 0:
+                    vf.append(f"fade=t=out:st={max(0, final_dur - fout):.3f}:d={fout}")
+                fc.append("[vcat]" + (",".join(vf) + "," if vf else "") + "format=yuv420p[vout2]")
+                amx_lab = "amx2"
+            else:
+                amx_lab = "amx"
+            afl = ["alimiter=limit=0.95"]
+            if fin > 0:
+                afl.append(f"afade=t=in:st=0:d={fin}")
+            if fout > 0:
+                afl.append(f"afade=t=out:st={max(0, final_dur - fout):.3f}:d={fout}")
+            fc.append(f"[{amx_lab}]{','.join(afl)}[aout]")
+
+    if vpart:      # 1 đoạn hình (không tiếng), đúng số khung
+        return inputs + ["-filter_complex", ";".join(fc), "-map", "[vout]", "-an"] + \
+            ff.video_encode_args(settings, spec.get("crf")) + ["-frames:v", str(vpart["n"]), str(out.resolve())]
+    if _part is not None:   # chỉ âm thanh (cả phim, trộn 1 lần)
+        if not amix_inputs:
+            return None
+        return inputs + ["-filter_complex", ";".join(fc), "-map", "[aout]"] + ff.audio_encode_args(settings) + \
+            ["-t", f"{final_dur:.3f}", str(out.resolve())]
     args = inputs + ["-filter_complex", ";".join(fc), "-map", "[vout2]" if ins else "[vout]"]
     if amix_inputs:
         args += ["-map", "[aout]"] + ff.audio_encode_args(settings)
