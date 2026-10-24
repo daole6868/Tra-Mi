@@ -515,6 +515,7 @@ class VieneuWorker:
         self.lock = threading.Lock()
         self.fused = "1"      # CUDA graph của VieNeu (nhanh); tắt nếu GPU báo lỗi chụp graph
         self._q: queue.Queue = queue.Queue()   # dòng stdout của tiến trình (luồng _pump đọc)
+        self.last_used = time.time()           # gpu.reap_idle: để không lâu thì tắt, trả bộ nhớ card
 
     flag = "--vieneu-worker"
     log_name = "vieneu.txt"
@@ -616,6 +617,7 @@ class VieneuWorker:
         with self.lock:
             if not self.proc or self.proc.poll() is not None:
                 self._start(progress, cancel)
+            self.last_used = time.time()
 
     def synth(self, text: str, out: str | Path, voice: str | None = None, ref_audio: str | None = None,
               ref_text: str | None = None, duration: float | None = None, params: dict | None = None,
@@ -645,6 +647,7 @@ class VieneuWorker:
                         self.stop()
                         continue
                     raise RuntimeError(r["error"])
+                self.last_used = time.time()
                 return Path(out)
         raise RuntimeError(f"{self.title} không đọc được câu này")
 

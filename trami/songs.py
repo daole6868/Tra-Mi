@@ -31,9 +31,22 @@ FAST_CPS = 5.5      # câu > 5,5 chữ Hán / giây là nói, không phải hát
 _HAN = re.compile(r"[㐀-鿿]")
 
 
-def f0_frames(a: np.ndarray, sr: int = SR, fmin: float = 70.0, fmax: float = 900.0) -> tuple[np.ndarray, np.ndarray]:
+try:   # FFT nhiều luồng, nhả khoá Python trong lúc tính (giao diện không giật); không có scipy thì dùng numpy
+    from scipy import fft as _fft
+
+    def _rfft(x, n):
+        return _fft.rfft(x, n, workers=-1)
+
+    def _irfft(x, n):
+        return _fft.irfft(x, n, workers=-1)
+except ImportError:  # pragma: no cover
+    _rfft, _irfft = np.fft.rfft, np.fft.irfft
+
+
+def f0_frames(a: np.ndarray, sr: int = SR, fmin: float = 70.0, fmax: float = 900.0,
+              active_only: bool = False) -> tuple[np.ndarray, np.ndarray]:
     """Cao độ (Hz, NaN = không hữu thanh) + độ to mỗi khung 20 ms – hàm sai lệch chuẩn hoá kiểu YIN, tính cả lô bằng
-    FFT."""
+    FFT. active_only: chỉ tính cao độ ở khung đủ to (> 10 % mức to của đoạn) – khung lặng `note_share` vốn bỏ qua."""
     a = np.asarray(a, np.float64)
     n, hop = int(0.04 * sr), int(HOP * sr)
     hi, lo = int(sr / fmin), max(2, int(sr / fmax))
@@ -41,27 +54,40 @@ def f0_frames(a: np.ndarray, sr: int = SR, fmin: float = 70.0, fmax: float = 900
     N = (len(a) - L) // hop if len(a) > L else 0
     if N <= 0:
         return np.zeros(0), np.zeros(0)
-    F = a[np.arange(N)[:, None] * hop + np.arange(L)[None, :]]
-    rms = np.sqrt((F[:, :n] ** 2).mean(1))
+    idx = np.arange(N)[:, None] * hop
+    rms = np.sqrt((a[idx + np.arange(n)[None, :]] ** 2).mean(1))
+    f0 = np.full(N, np.nan)
+    keep = np.arange(N)
+    if active_only and rms.any():
+        keep = np.flatnonzero(rms > 0.1 * np.percentile(rms, 95))
+        if not len(keep):
+            return f0, rms
+    F = a[idx[keep] + np.arange(L)[None, :]]
     nfft = 1 << int(np.ceil(np.log2(L + n)))
-    corr = np.fft.irfft(np.fft.rfft(F, nfft) * np.conj(np.fft.rfft(F[:, :n], nfft)), nfft)[:, 1:hi + 1]
+    corr = _irfft(_rfft(F, nfft) * np.conj(_rfft(F[:, :n], nfft)), nfft)[:, 1:hi + 1]
+    N = len(keep)
     sq = np.concatenate([np.zeros((N, 1)), np.cumsum(F * F, 1)], 1)
     lags = np.arange(1, hi + 1)
     d = sq[:, [n]] + (sq[:, lags + n] - sq[:, lags]) - 2 * corr
     cm = d * lags / np.maximum(np.cumsum(d, 1), 1e-12)
     below = cm[:, lo - 1:] < 0.15
-    f0 = np.full(N, np.nan)
-    for i in np.flatnonzero(below.any(1)):
-        t = int(np.argmax(below[i])) + lo - 1
-        while t + 1 < hi and cm[i, t + 1] < cm[i, t]:   # xuống tới đáy gần nhất
-            t += 1
-        f0[i] = sr / (t + 1)
+    rows = np.flatnonzero(below.any(1))
+    if len(rows):
+        # tính cả lô (trước: vòng Python từng khung – phim 1 giờ ~10 s giữ luồng, giao diện giật)
+        sub = cm[rows]
+        first = np.argmax(below[rows], axis=1) + lo - 1          # ô đầu tiên dưới ngưỡng
+        cols = np.arange(sub.shape[1])[None, :]
+        rising = np.zeros_like(sub, dtype=bool)
+        rising[:, :-1] = sub[:, 1:] >= sub[:, :-1]                # từ ô này sang ô sau không giảm nữa = đáy
+        rising[:, -1] = True
+        stop = np.where(rising & (cols >= first[:, None]), cols, sub.shape[1] - 1).min(axis=1)
+        f0[keep[rows]] = sr / (stop + 1)
     return f0, rms
 
 
 def note_share(a: np.ndarray, sr: int = SR) -> float:
     """Tỉ lệ thời gian hữu thanh nằm trong nốt ngân (0..1)."""
-    f0, rms = f0_frames(a, sr)
+    f0, rms = f0_frames(a, sr, active_only=True)
     if len(f0) < NOTE_LEN or not rms.any():
         return 0.0
     act = rms > 0.1 * np.percentile(rms, 95)

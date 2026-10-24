@@ -325,6 +325,28 @@ class SpeakerDelegate(QStyledItemDelegate):
         p.restore()
 
 
+class WrapDelegate(QStyledItemDelegate):
+    """Cột chữ xuống dòng (Tiếng Trung / Tiếng Việt): đo chiều cao theo ĐÚNG bề rộng chữ còn lại sau phần đệm của ô
+    (stylesheet `QTableView::item { padding: 4px 6px }`) – cách đo mặc định của Qt bỏ qua phần đệm nên câu dài bị
+    thiếu 1 hàng, hiện "…"."""
+    PAD_W, PAD_H = 16, 12
+
+    def sizeHint(self, opt, idx):
+        from PySide6.QtCore import QRect, QSize
+        from PySide6.QtGui import QFontMetrics
+
+        base = super().sizeHint(opt, idx)
+        text = idx.data(Qt.ItemDataRole.DisplayRole)
+        view = self.parent()
+        w = (view.columnWidth(idx.column()) if view is not None else opt.rect.width()) - self.PAD_W
+        if not text or w <= 20:
+            return base
+        o = type(opt)(opt)
+        self.initStyleOption(o, idx)
+        h = QFontMetrics(o.font).boundingRect(QRect(0, 0, w, 100000), int(Qt.TextFlag.TextWordWrap), str(text)).height()
+        return QSize(base.width(), max(base.height(), h + self.PAD_H))
+
+
 class VoiceDelegate(QStyledItemDelegate):
     """Ô "Giọng" của từng câu: chọn trong danh sách giọng (mục đầu = theo người nói)."""
 

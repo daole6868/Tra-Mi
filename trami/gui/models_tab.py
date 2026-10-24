@@ -146,9 +146,11 @@ class ModelsTab(QWidget):
             if j and j.status in ("queued", "running"):
                 return
         st = load_settings()
+        # VieNeu / ECAPA nạp thử mô hình lên card đồ hoạ khi tải -> tính là việc GPU (chờ việc GPU khác xong)
         job = manager.submit("model", f"Tải mô hình: {models.BY_KEY[key].name}",
                              lambda j: (models.download(key, j.update, j.cancelled, st) or
-                                        {"message": f"Đã tải xong {models.BY_KEY[key].name}"}))
+                                        {"message": f"Đã tải xong {models.BY_KEY[key].name}"}),
+                             gpu=key in ("vieneu", "ecapa"))
         row.job_id = job.id
         row.show_job(job)
         self.win.jobs_changed()

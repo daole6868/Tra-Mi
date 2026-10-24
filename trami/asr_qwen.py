@@ -171,27 +171,47 @@ def transcribe_qwen(wav: str | Path, settings: dict, language: str = "zh", progr
     if not chunks:
         return []
     simplify = language in ("zh", "yue", "auto")
+    want_align = bool(settings.get("align_words", True))
     req = {"cmd": "asr", "wav": _wav_path(wav), "language": language, "prompt": hotwords(settings),
-           "align": bool(settings.get("align_words", True))}
-    size = STREAM_GROUP if on_chunk else len(chunks)
-    groups = [chunks[i:i + size] for i in range(0, len(chunks), size)]
-    segs: list[Segment] = []
-    align_error = ""
+           "align": want_align}
+    if not on_chunk:   # 1 lần gọi: nghe hết rồi căn hết (bộ căn chỉ nạp sau khi nghe xong)
+        r = worker(settings).call(dict(req, spans=[list(c) for c in chunks]), progress, cancel)
+        segs = [x for (s, e), it in zip(chunks, r.get("items") or []) if (x := _segment(s, e, it, simplify))]
+        if r.get("align_error") and progress:
+            progress(1.0, "Không căn được thời gian bằng Qwen3 (" + r["align_error"][:80] + ") – dùng cách dự phòng")
+        return segs
+    # vừa tách vừa dịch: NGHE theo từng nhóm khúc (chưa căn) -> gửi câu nháp ngay; nghe xong cả phim mới CĂN 1 lần.
+    # (2.0.64 nghe + căn xen kẽ từng nhóm -> từ nhóm 2 bộ căn 0.6B nằm sẵn trên card trong lúc bộ nghe 1.7B chạy -> đỉnh
+    # bộ nhớ cao hơn cách thường ~1,2 GB, card nhỏ tràn sang RAM -> chậm hẳn)
+    groups = [chunks[i:i + STREAM_GROUP] for i in range(0, len(chunks), STREAM_GROUP)]
+    a_end = 0.8 if want_align else 1.0
+    raw: list[tuple[float, float, str]] = []
     for g, part in enumerate(groups):
-        lo, hi = g / len(groups), (g + 1) / len(groups)
+        lo, hi = a_end * g / len(groups), a_end * (g + 1) / len(groups)
         pr = None
         if progress:
             def pr(x, m, lo=lo, hi=hi, g=g):
                 progress(lo + (hi - lo) * x, m + (f" (phần {g + 1}/{len(groups)})" if len(groups) > 1 else ""))
-        r = worker(settings).call(dict(req, spans=[list(c) for c in part]), pr, cancel)
-        new = [x for (s, e), it in zip(part, r.get("items") or []) if (x := _segment(s, e, it, simplify))]
-        segs += new
-        align_error = align_error or r.get("align_error") or ""
-        if on_chunk and new:
+        r = worker(settings).call(dict(req, spans=[list(c) for c in part], align=False), pr, cancel)
+        new = []
+        for (s, e), it in zip(part, r.get("items") or []):
+            text = (it.get("text") or "").strip()
+            raw.append((s, e, text))
+            if x := _segment(s, e, {"text": text}, simplify):
+                new.append(x)
+        if new:
             on_chunk(new)
-    if align_error and progress:
-        progress(1.0, "Không căn được thời gian bằng Qwen3 (" + align_error[:80] + ") – dùng cách dự phòng")
-    return segs
+    words: list = [[] for _ in raw]
+    if want_align and raw:
+        todo = [k for k, (_s, _e, t) in enumerate(raw) if t]
+        apr = (lambda x, m: progress(a_end + (1 - a_end) * x, m)) if progress else None
+        r = worker(settings).call({"cmd": "align", "wav": _wav_path(wav), "language": language,
+                                   "items": [[raw[k][0], raw[k][1], raw[k][2]] for k in todo]}, apr, cancel)
+        for k, it in zip(todo, r.get("items") or []):
+            words[k] = it.get("words") or []
+        if r.get("align_error") and progress:
+            progress(1.0, "Không căn được thời gian bằng Qwen3 (" + r["align_error"][:80] + ") – dùng cách dự phòng")
+    return [x for (s, e, t), w in zip(raw, words) if (x := _segment(s, e, {"text": t, "words": w}, simplify))]
 
 
 def qwen_decoder(settings: dict, language: str, work: Path) -> Callable[[np.ndarray], tuple[str, list[str]]]:

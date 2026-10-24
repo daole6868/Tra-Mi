@@ -23,6 +23,7 @@ from .common import run_async
 from .editors import RegionEditor, Timeline
 from .player import Player, fmt
 from .subs_model import (C_END, C_FIT, C_NODUB, C_SEL, C_SONG, C_SPK, C_START, C_VI, C_VOICE, C_ZH, SpeakerDelegate,
+                         WrapDelegate,
                          SubsFilter, SubsModel, VoiceDelegate)
 from .widgets import (Card, ColorButton, Form, GradientButton, IconButton, IconTabs, PillTabs, ProgressBar,
                       SectionCard, SliderRow, Switch, button, combo, flow, hbox, label, set_combo, wrap)
@@ -356,12 +357,22 @@ class ProjectPage(QWidget):
         hh.moveSection(hh.visualIndex(C_SEL), 0)          # Chọn | # | giờ | Người | Tiếng Trung | Tiếng Việt
         hh.sectionClicked.connect(lambda c: self._toggle_pick_all(self.proxy) if c == C_SEL else None)
         tv.setItemDelegateForColumn(C_SPK, SpeakerDelegate(tv))
+        self._wrap_delegate = WrapDelegate(tv)
+        for c in (C_ZH, C_VI):
+            tv.setItemDelegateForColumn(c, self._wrap_delegate)
         tv.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed |
                            QAbstractItemView.EditTrigger.AnyKeyPressed)
         for c in (C_SONG, C_NODUB, C_FIT, C_VOICE):   # cột của lồng tiếng: ở bảng câu tab Lồng tiếng
             tv.setColumnHidden(c, True)
         tv.clicked.connect(self._row_clicked)
         self.table = tv
+        tv.verticalScrollBar().valueChanged.connect(self._fit_visible)   # đo chiều cao dòng khi cuộn tới
+        self._refit_timer = QTimer(self, singleShot=True, interval=120)
+        self._refit_timer.timeout.connect(self._fit_rows)
+        # lọc / thêm / xoá câu / cột đổi bề rộng (mở dự án, kéo khung) -> đo lại các dòng đang hiện
+        for sig in (self.proxy.modelReset, self.proxy.layoutChanged, self.proxy.rowsInserted, self.proxy.rowsRemoved,
+                    tv.horizontalHeader().sectionResized):
+            sig.connect(lambda *_: self._refit_timer.start())
         self._edit_triggers = tv.editTriggers()
         self._live_draft = None   # mtime file câu nháp đang hiện (vừa tách vừa dịch)
         self.search = QLineEdit()
@@ -1704,6 +1715,10 @@ class ProjectPage(QWidget):
             return
         if self._live_draft == mt:
             return
+        # phim dài: dựng lại bảng + timeline vài trăm ms -> làm mới tối đa 1 lần / 3 s và chỉ khi đang xem trang dự án
+        if self._live_draft and (time.time() - getattr(self, "_live_draft_t", 0) < 3.0 or not self.isVisible()):
+            return
+        self._live_draft_t = time.time()
         segs = stream.read_draft(self.p.work)
         if segs is None:
             return
@@ -2628,8 +2643,27 @@ class ProjectPage(QWidget):
             self.win.toast(msg, "ok")
 
     def _fit_rows(self):
-        if len(self.model.segs) <= 3000:  # bảng quá dài thì bỏ qua cho nhanh
-            self.table.resizeRowsToContents()
+        """Chiều cao dòng theo chữ (xuống dòng): chỉ đo các dòng đang hiện + 1 đoạn quanh đó, dòng khác đo khi cuộn tới.
+        (Trước: resizeRowsToContents đo MỌI dòng mỗi lần mở dự án / xong 1 việc – phim 1500 câu ~0,9 s đứng giao diện.)"""
+        self._fitted: set[int] = set()
+        self._fit_visible()
+
+    def _fit_visible(self, *_):
+        tv = self.table
+        n = tv.model().rowCount() if tv.model() is not None else 0
+        if not n:
+            return
+        fitted = getattr(self, "_fitted", None)
+        if fitted is None:
+            fitted = self._fitted = set()
+        top = tv.rowAt(0)
+        bottom = tv.rowAt(max(0, tv.viewport().height() - 1))
+        top = 0 if top < 0 else top
+        bottom = min(n - 1, top + 60) if bottom < 0 else bottom
+        for r in range(max(0, top - 15), min(n, bottom + 30)):
+            if r not in fitted:
+                fitted.add(r)
+                tv.resizeRowToContents(r)
 
     def _update_count(self):
         segs = self.model.segs
@@ -2855,6 +2889,12 @@ class ProjectPage(QWidget):
         work = self.p.work / "render"
         st = dict(load_settings())
         st["inpaint_backend"] = self.hs_backend.currentData()
+        busy = manager.gpu_busy()
+        if busy and st["inpaint_backend"] == "lama":
+            # đang có việc GPU (nghe, lồng tiếng…): xem thử bằng OpenCV, không nạp LaMa lên card chạy chồng
+            st["inpaint_backend"] = "opencv"
+            self.win.toast(f"Đang chạy '{busy}' trên card đồ hoạ – ảnh xem thử vẽ bằng OpenCV (gần đúng), "
+                           "xuất video vẫn dùng LaMa", "warn")
         t = self.player.position()
         out = self.p.work / f"hs_preview_{int(time.time())}.jpg"
         src = self.p.source
@@ -3334,6 +3374,13 @@ class ProjectPage(QWidget):
                                            self.p.work / "tts" / f"omniref_{spk}.wav")
             if not ref:
                 return self.win.toast("Người nói này chưa có câu nào đủ rõ để lấy mẫu giọng", "warn")
+        if not vid.startswith("edge:"):
+            # giọng AI (VieNeu / OmniVoice) nạp mô hình lên card đồ hoạ: đang có việc GPU khác (nghe, tách giọng, xoá phụ
+            # đề…) thì đợi xong – chạy chồng làm cả 2 tràn bộ nhớ card, chậm hẳn. Đang lồng tiếng thì dùng chung tiến trình
+            busy = manager.gpu_busy({"dub", "redub"})
+            if busy:
+                return self.win.toast(f"Đang chạy '{busy}' trên card đồ hoạ – nghe thử giọng AI sau khi việc đó xong "
+                                      "(giọng Edge nghe thử được ngay)", "warn")
         self.win.toast("Đang tạo giọng nghe thử…")
         lang = pipeline.target_lang(self.p, self.settings)
         run_async(lambda: tts.preview_voice(vid, text, out, self.settings, ref, lang),

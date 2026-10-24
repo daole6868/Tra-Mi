@@ -102,9 +102,22 @@ def separate(src: str | Path, out_dir: str | Path, model: str | None = None,
     names = {"Vocals": "vocals", "Instrumental": "instrumental"}
     if not model.endswith(".yaml"):   # Mel-RoFormer xuất "vocals" + "other" (= nhạc nền); Demucs xuất 4 phần
         names["Other"] = "instrumental"
-    with tqdm_progress(progress, 0.15, 0.97, "Đang tách giọng nói khỏi nhạc nền – đoạn", cancel,
-                       download="Đang tải mô hình tách giọng"):
-        outs = sep.separate(str(mix), names)
+    try:
+        with tqdm_progress(progress, 0.15, 0.97, "Đang tách giọng nói khỏi nhạc nền – đoạn", cancel,
+                           download="Đang tải mô hình tách giọng"):
+            outs = sep.separate(str(mix), names)
+    finally:
+        # mô hình tách giọng chạy NGAY trong tiến trình giao diện: bỏ đi + trả bộ nhớ đệm CUDA, nếu không vài GB cứ
+        # nằm trên card khi Qwen3-ASR (tiến trình riêng) nạp -> tràn sang RAM, nghe chậm hẳn
+        for attr in ("model_instance", "model_instances"):
+            try:
+                setattr(sep, attr, None)
+            except Exception:  # noqa: BLE001
+                pass
+        del sep
+        from .gpu import free_cache
+
+        free_cache()
     paths = [Path(o) if Path(o).is_absolute() else tmp / o for o in outs]
     # nhận file theo ĐÚNG tên phần (tên file mặc định có cả tên mô hình, VD "..._(Other)_vocals_mel_band...")
     found_v = next((p for p in paths if p.stem.lower() == "vocals"), None) or \

@@ -3340,13 +3340,17 @@ def test_standard_skill_default_and_editable(tmp_path):
     assert [x["id"] for x in skills.all_skills(edited)].count("chuan") == 1
 
 
-def test_jobs_run_concurrently_with_project_and_gpu_rules():
+def test_jobs_run_concurrently_with_project_and_gpu_rules(monkeypatch):
     """Hàng đợi chạy nhiều việc cùng lúc: khác dự án chạy song song, cùng dự án lần lượt (trừ việc chỉ đọc), mỗi lúc
     chỉ 1 việc GPU; việc chờ ghi rõ vì sao."""
     import threading
     import time as _t
 
+    from trami import gpu
     from trami.jobs import JobManager
+
+    monkeypatch.setattr(gpu, "before_job", lambda kind: None)   # dọn card (gc) có test riêng – ở đây chỉ xét lịch chạy
+    monkeypatch.setattr(gpu, "after_job", lambda kind: None)
 
     m = JobManager(workers=4)
     live, peak, lock = set(), {}, threading.Lock()
@@ -3416,7 +3420,11 @@ def test_qwen_streams_chunk_groups(monkeypatch, tmp_path):
 
     class W:
         def call(self, req, progress=None, cancel=None):
-            calls.append(len(req["spans"]))
+            if req.get("cmd") == "align":
+                calls.append(("align", len(req["items"])))
+                return {"items": [{"words": [[ch, 0.1 * i, 0.1 * i + 0.08] for i, ch in enumerate(t[:-1])]}
+                                  for _a, _b, t in req["items"]]}
+            calls.append((len(req["spans"]), req.get("align")))
             if progress:
                 progress(1.0, "nghe")
             return {"items": [{"text": f"第{a:.0f}句话。", "words": []} for a, _ in req["spans"]]}
@@ -3426,10 +3434,12 @@ def test_qwen_streams_chunk_groups(monkeypatch, tmp_path):
     monkeypatch.setattr("trami.asr_funasr.load_wav16k", lambda w: np.zeros(16000 * 45, np.float32))
     monkeypatch.setattr("trami.align.chunk_spans", lambda spans, audio, max_gap, max_len: spans)
     segs = asr_qwen.transcribe_qwen(tmp_path / "a.wav", {}, "zh", None, None, on_chunk=lambda s: got.append(len(s)))
-    assert calls == [6, 6, 2] and got == [6, 6, 2] and len(segs) == 14
+    # nghe theo nhóm KHÔNG căn (bộ căn không nằm trên card lúc đang nghe), nghe xong căn 1 lần cả phim
+    assert calls == [(6, False), (6, False), (2, False), ("align", 14)] and got == [6, 6, 2] and len(segs) == 14
+    assert all(s.extra.get("ct") for s in segs)                 # câu cuối cùng có mốc từng chữ
     calls.clear()
     asr_qwen.transcribe_qwen(tmp_path / "a.wav", {}, "zh", None, None)
-    assert calls == [14]                                        # chạy thường: 1 lần như cũ
+    assert calls == [(14, True)]                                # chạy thường: 1 lần như cũ
 
 
 def test_auto_parallel_translates_and_reads_while_listening(monkeypatch):
@@ -3560,7 +3570,6 @@ def test_one_voice_for_all_applies_to_every_dub_button(monkeypatch):
     p = Project.create("một giọng")
     p.data["info"] = {"duration": 6}
     p.segments = [Segment(0.2, 1.0, "a", "Một", "S1"), Segment(1.5, 2.3, "b", "Hai", "S2")]
-    p.data["voices"] = {"S1": "edge:vi-VN-HoaiMyNeural"}
     p.save()
     st = {"translate_engine": "google", "tts_voice": "vi-VN-HoaiMyNeural", "dub_voice_all": "edge:vi-VN-NamMinhNeural"}
     pipeline.dub(p, None, settings=st, engine="edge")
@@ -3568,6 +3577,16 @@ def test_one_voice_for_all_applies_to_every_dub_button(monkeypatch):
     spoken.clear()
     pipeline.redub(p, [1], settings=st, engine="edge")
     assert spoken == ["vi-VN-NamMinhNeural"]
+    assert p.data["voice_all"] == "edge:vi-VN-NamMinhNeural"     # dự án nhớ giọng chung đã dùng
+    # dự án CŨ (trước 2.0.66) đã chọn giọng từng người, chưa có voice_all -> mặc định chung ở Cài đặt không đè lên
+    q = Project.create("dự án cũ")
+    q.data["info"] = {"duration": 6}
+    q.segments = [Segment(0.2, 1.0, "a", "Một", "S1"), Segment(1.5, 2.3, "b", "Hai", "S2")]
+    q.data["voices"] = {"S1": "edge:vi-VN-HoaiMyNeural", "S2": "edge:vi-VN-HoaiMyNeural"}
+    q.save()
+    spoken.clear()
+    pipeline.dub(q, None, settings=st, engine="edge")
+    assert spoken == ["vi-VN-HoaiMyNeural"] * 2 and "voice_all" not in q.data
     # dự án chọn giọng từng người -> không theo mặc định chung
     p.data["voice_all"] = ""
     p.data["voices"] = {"S1": "edge:vi-VN-HoaiMyNeural", "S2": "edge:vi-VN-NamMinhNeural"}
@@ -3575,3 +3594,57 @@ def test_one_voice_for_all_applies_to_every_dub_button(monkeypatch):
     spoken.clear()
     pipeline.redub(p, [0, 1], settings=st, engine="edge")
     assert spoken == ["vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural"]
+
+
+def test_gpu_memory_released_between_jobs(monkeypatch):
+    """Card đồ hoạ: trước việc GPU tắt tiến trình AI việc đó không dùng (đang đọc dở thì để nguyên), sau việc GPU bỏ mô
+    hình trong tiến trình giao diện; tiến trình đọc giọng để lâu tự tắt; xuất video còn phải xoá phụ đề AI là việc GPU."""
+    import threading
+    import time as _t
+
+    from trami import gpu, jobs, lama, pipeline, tts
+    from trami import asr_qwen
+    from trami.project import Project
+
+    class FakeProc:
+        def __init__(self):
+            self.alive = True
+
+        def poll(self):
+            return None if self.alive else 0
+
+    class W:
+        def __init__(self):
+            self.proc, self.lock, self.last_used, self.stopped = FakeProc(), threading.Lock(), _t.time(), 0
+
+        def stop(self):
+            self.stopped += 1
+            self.proc.alive = False
+
+    vn, qw = W(), W()
+    monkeypatch.setattr(tts, "_vn_model", vn)
+    monkeypatch.setattr(tts, "_omni_model", None)
+    monkeypatch.setattr(asr_qwen, "_worker", qw)
+    monkeypatch.setattr(lama, "_model", object())
+    gpu.before_job("recognize")                     # nghe: tắt VieNeu, giữ Qwen, bỏ LaMa trong giao diện
+    assert vn.stopped == 1 and qw.stopped == 0 and lama._model is None
+    vn.proc.alive = True
+    with vn.lock:                                   # VieNeu đang đọc dở (nghe thử) -> không tắt ngang
+        gpu.before_job("separate")
+    assert vn.stopped == 1
+    gpu.before_job("dub")                           # lồng tiếng: tắt Qwen, giữ VieNeu
+    assert qw.stopped == 1 and vn.stopped == 1
+    vn.last_used = _t.time() - gpu.IDLE_STOP - 5    # để không quá lâu -> tự tắt
+    assert gpu.reap_idle() == 1 and vn.stopped == 2
+
+    p = Project.create("xuất xoá AI")
+    p.data["source"] = __file__
+    e = p.edit
+    e["hardsub"] = {"mode": "inpaint", "regions": [{"x": 0.1, "y": 0.8, "w": 0.8, "h": 0.1}]}
+    p.data["edit"] = e
+    p.save()
+    monkeypatch.setattr(pipeline, "inpainted_video", lambda p, hs=None, settings=None: None)
+    assert jobs.needs_gpu("render", p.id)           # còn phải xoá phụ đề bằng AI -> chờ việc GPU khác
+    monkeypatch.setattr(pipeline, "inpainted_video", lambda p, hs=None, settings=None: "x.mp4")
+    assert not jobs.needs_gpu("render", p.id)       # đã xoá sẵn -> chỉ ghép video, chạy song song được
+    assert jobs.needs_gpu("recognize") and not jobs.needs_gpu("download")

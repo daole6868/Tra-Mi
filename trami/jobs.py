@@ -64,7 +64,7 @@ GPU_KINDS = {"auto", "recognize", "separate", "diarize", "inpaint", "dub", "redu
 READONLY_KINDS = {"preview", "tool"}
 
 
-def needs_gpu(kind: str) -> bool:
+def needs_gpu(kind: str, project_id: str = "") -> bool:
     if kind == "translate":   # dịch trên máy (Hy-MT2) mới dùng GPU; dịch bằng API / Google thì không
         try:
             from .config import load_settings
@@ -72,6 +72,18 @@ def needs_gpu(kind: str) -> bool:
             return load_settings().get("translate_engine") == "hymt"
         except Exception:  # noqa: BLE001
             return False
+    if kind == "render" and project_id:
+        # xuất video mà chưa có bản đã xoá phụ đề / gỡ logo -> bước xoá (LaMa, nền khung khác) chạy trên card đồ hoạ
+        try:
+            from . import pipeline
+            from .project import Project
+            from .video import needs_clean
+
+            p = Project(project_id)
+            return bool(p.data.get("source")) and needs_clean(pipeline.hardsub_spec(p)) and \
+                pipeline.inpainted_video(p) is None
+        except Exception:  # noqa: BLE001
+            return True
     return kind in GPU_KINDS
 
 
@@ -83,11 +95,23 @@ class JobManager:
         self.cv = threading.Condition()
         for i in range(workers):
             threading.Thread(target=self._worker, daemon=True, name=f"trami-job-{i}").start()
+        from . import gpu
+
+        gpu.start_reaper(self.gpu_busy)   # tiến trình đọc giọng để không lâu -> tắt, trả bộ nhớ card
+
+    def gpu_busy(self, allow: set[str] | None = None) -> str:
+        """Tên việc GPU đang chạy ("" = không có). allow: các loại việc không tính (dùng chung tiến trình)."""
+        with self.cv:   # luồng hàng đợi đang thêm / bớt việc -> đọc trong khoá
+            for jid in list(self.running):
+                j = self.jobs.get(jid)
+                if j and j.gpu and (not allow or j.kind not in allow):
+                    return j.title
+        return ""
 
     def submit(self, kind: str, title: str, fn: Callable[[Job], dict | None], project_id: str = "",
                gpu: bool | None = None) -> Job:
         job = Job(id=uuid.uuid4().hex[:10], kind=kind, title=title, project_id=project_id, _fn=fn,
-                  gpu=needs_gpu(kind) if gpu is None else bool(gpu))
+                  gpu=needs_gpu(kind, project_id) if gpu is None else bool(gpu))
         with self.cv:
             self.jobs[job.id] = job
             self.queue.append(job.id)
@@ -106,7 +130,8 @@ class JobManager:
         return True
 
     def list(self, project_id: str | None = None) -> list[dict]:
-        js = sorted(self.jobs.values(), key=lambda j: j.created, reverse=True)
+        with self.cv:
+            js = sorted(self.jobs.values(), key=lambda j: j.created, reverse=True)
         if project_id:
             js = [j for j in js if j.project_id == project_id]
         return [j.to_dict() for j in js[:100]]
@@ -124,7 +149,8 @@ class JobManager:
 
     def counts(self) -> tuple[int, int]:
         """(đang chạy, đang chờ)."""
-        st = [j.status for j in self.jobs.values()]
+        with self.cv:
+            st = [j.status for j in self.jobs.values()]
         return st.count("running"), st.count("queued")
 
     def _why_wait(self, job: Job) -> str:
@@ -167,6 +193,13 @@ class JobManager:
 
     def _run(self, job: Job):
         job.status, job.started, job.message = "running", time.time(), "Đang bắt đầu…"
+        if job.gpu:   # tắt tiến trình AI mà việc này không dùng -> đủ chỗ trên card, không tràn sang RAM (rất chậm)
+            try:
+                from . import gpu
+
+                gpu.before_job(job.kind)
+            except Exception:  # noqa: BLE001
+                pass
         try:
             # mọi lần gọi mạng trong tác vụ biết nút Huỷ + báo "mất mạng – đang chờ" vào dòng trạng thái
             with net.task(job.cancelled, lambda m, j=job: j.update(j.progress, m)):
@@ -184,6 +217,13 @@ class JobManager:
             log_error(job.title)
         finally:
             job.finished = time.time()
+            if job.gpu:   # bỏ mô hình nạp trong tiến trình giao diện + trả bộ nhớ đệm của card
+                try:
+                    from . import gpu
+
+                    gpu.after_job(job.kind)
+                except Exception:  # noqa: BLE001
+                    pass
             try:   # thư viện AI vừa nạp có thể để lại module "lười" làm PySide6 sập -> dọn đi
                 from .diarize import drop_broken_lazy_modules
 

@@ -163,6 +163,8 @@ def main(repo: str = "Qwen/Qwen3-ASR-1.7B-hf") -> None:
             want_align = req.get("cmd") == "align" or bool(req.get("align"))
             if texts is None:
                 texts = transcribe(clips, lang, req.get("prompt") or "", 0.0, 0.75 if want_align else 1.0)
+                if want_align and dev != "cpu":
+                    torch.cuda.empty_cache()   # trả bộ nhớ tạm của bước nghe trước khi nạp bộ căn thời gian
             words, err = [[] for _ in clips], ""
             if want_align:
                 try:   # căn thời gian lỗi -> vẫn trả lời đã nghe được (TraMi tự dùng cách căn dự phòng)

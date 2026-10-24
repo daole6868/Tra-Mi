@@ -369,6 +369,8 @@ def download(key: str, progress: Prog | None = None, cancel=None, settings: dict
     elif key == "vieneu":
         from .tts import _vieneu
 
-        _vieneu((settings or {}).get("vieneu_mode", "v3turbo")).ensure_started(progress, cancel)
+        w = _vieneu((settings or {}).get("vieneu_mode", "v3turbo"))
+        w.ensure_started(progress, cancel)
+        w.stop()   # chỉ để tải + kiểm tra nạp được; không giữ mô hình trên card (lúc lồng tiếng mở lại)
     if progress:
         progress(1.0, f"Đã tải xong {m.name}")

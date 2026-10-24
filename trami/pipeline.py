@@ -1246,6 +1246,8 @@ def voice_all(p: Project, settings: dict | None = None) -> str:
     """Giọng chung cho mọi người nói ("" = theo giọng từng người ở mục 2, "@auto" = tự gán nam / nữ)."""
     if "voice_all" in p.data:
         return p.data.get("voice_all") or ""
+    if any((p.data.get("voices") or {}).values()):   # dự án cũ đã chọn giọng từng người -> giữ, không lấy mặc định chung
+        return ""
     return (settings or load_settings()).get("dub_voice_all", "") or ""
 
 
@@ -1269,6 +1271,8 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     # "Giọng cho tất cả người nói" (tab Tự động / mục 2): dự án nhớ riêng, chưa chọn thì theo mặc định ở Cài đặt -> mọi
     # nút lồng tiếng (Bắt đầu dịch tự động, 3. Lồng tiếng, Tạo bản lồng tiếng, Tạo lại giọng) đọc cùng 1 giọng đó
     va = voice_all(p, settings)
+    if va and "voice_all" not in p.data:
+        p.data["voice_all"] = va   # mặc định chung lúc lồng lần đầu -> dự án nhớ luôn (đổi Cài đặt sau không ảnh hưởng)
     if not voice and va and va != "@auto":
         voices = {k["speaker"]: va for k in speaker_list(p)}
         p.data["voices"] = voices

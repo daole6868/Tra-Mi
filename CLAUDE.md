@@ -36,7 +36,9 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `LiveMix` của trình phát (`player.LiveAudio` + `_Feeder` ở QThread riêng, QAudioSink); cài đặt ở `edit["audio"]`, tab `gui/audio_tab.py`.
 - `trami/jobs.py` – hàng đợi NHIỀU luồng (từ 2.0.64, tối đa `MAX_RUNNING` 4): cùng dự án lần lượt (trừ `READONLY_KINDS`),
   mỗi lúc 1 việc GPU (`GPU_KINDS`, dịch Hy-MT2); `progress_hook` theo từng luồng; trang `main.JobsPage` "Việc đang làm".
-  `trami/stream.py` – `LivePipeline` (tab Tự động "Vừa tách vừa dịch"); `trami/gui/*` – giao diện `trami/gui/*` – giao diện (QPainter), `common.run_async`,
+  `trami/stream.py` – `LivePipeline` (tab Tự động "Vừa tách vừa dịch"); `trami/gpu.py` – trả bộ nhớ card giữa các
+  việc (`before_job` / `after_job` trong `jobs._run`, `reap_idle` tắt VieNeu/Omni để không 10 phút); `trami/gui/*` –
+  giao diện (QPainter), `common.run_async`,
   `WheelGuard` (lăn chuột không đổi ô chọn khi chưa bấm vào). Trang dự án bố cục kiểu trình dựng phim (từ 2.0.28):
   trái `IconTabs` + 9 tab (Âm thanh = tab 6, `TAB_AUDIO`…`TAB_EXPORT` = 8), giữa trình phát, phải `gui/inspector.LineInspector` (câu đang chọn), dưới `gui/timeline.TrackTimeline`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
@@ -68,7 +70,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `call` (gọi ở luồng phụ, Huỷ dừng ngay), `session` (requests có TCP keepalive). `jobs` chạy mọi tác vụ trong
   `net.task(cancel, report)` -> hàm gọi mạng tự lấy nút Huỷ + dòng trạng thái.
 - `trami/songs.py` – đoán cụm câu đang HÁT (nốt ngân trên giọng đã tách) -> 🎵; `pipeline.mark_song_lines` (♪ trong bản dịch).
-- `tests/test_core.py` – `python -m pytest -q tests` (117 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (118 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -934,6 +936,32 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `_redub_picked` thấy ô đang chọn 1 giọng mà câu tích chưa mang giọng đó -> áp trước khi đọc lại; thông báo tạo lại
   giọng ghi "giọng: <giọng thật đã đọc>" + cảnh báo giọng không dùng được (`stats["fallback"]`).
 
+- 2.0.68: "rà xung đột, bản mới chiếm GPU nhiều hơn hẳn khi Nghe & tách câu, thao tác chậm hơn – tối ưu hết".
+  * GPU: (1) tách giọng (audio-separator) chạy TRONG tiến trình giao diện, xong không trả bộ nhớ đệm CUDA (vài GB, nhất
+    là "Kết hợp" 2 mô hình) -> Qwen3-ASR (tiến trình riêng) nạp thêm ~5–6 GB -> card đầy, Windows lấy RAM thay -> chậm
+    hẳn. `separate.separate` bỏ mô hình + `gpu.free_cache()` ngay sau khi tách. (2) 2.0.64 "Vừa tách vừa dịch" nghe + căn
+    XEN KẼ từng nhóm -> từ nhóm 2 bộ căn 0.6B nằm trên card cùng bộ nghe 1.7B (+~1,2 GB đỉnh). Giờ `transcribe_qwen
+    (on_chunk=)` nghe từng nhóm `align=False` (câu nháp không mốc), nghe xong 1 lệnh `{"cmd":"align"}` cho cả phim;
+    worker `empty_cache` giữa nghe và căn. (3) `gpu.before_job` (mọi việc GPU): tắt tiến trình AI việc đó không dùng
+    (nghe / tách / xoá -> tắt VieNeu/Omni/Hy-MT2; lồng tiếng -> tắt Qwen/Hy-MT2; đang đọc dở – khoá bận – thì để nguyên)
+    + `drop_local_models` (LaMa, ECAPA, fa-zh, FunASR, Whisper trong tiến trình giao diện); `after_job` bỏ mô hình +
+    trả bộ nhớ đệm. `gpu.reap_idle` (luồng nền 30 s, khi không có việc GPU): VieNeu/Omni để không `IDLE_STOP` 10 phút
+    -> tắt (`VieneuWorker.last_used`). Tải mô hình VieNeu: nạp thử xong tắt tiến trình.
+  * Xung đột hàng đợi: `needs_gpu("render", pid)` = còn phải xoá phụ đề AI / gỡ logo (chưa có bản đã xoá) -> việc GPU;
+    tải mô hình VieNeu / ECAPA = việc GPU; Nghe thử giọng AI khi đang có việc GPU khác (trừ lồng tiếng) -> báo chờ
+    (`manager.gpu_busy(allow)`); "Xem thử 1 khung" xoá phụ đề khi đang có việc GPU -> vẽ bằng OpenCV. `jobs.list /
+    counts / gpu_busy` đọc trong khoá. Giọng chung ở Cài đặt (`dub_voice_all`) KHÔNG đè dự án cũ đã chọn giọng từng người
+    (`voice_all`: có `voices` -> ""), lồng lần đầu theo mặc định thì dự án nhớ luôn `voice_all`.
+  * Tốc độ: đo offscreen 1500 câu (2.0.63 -> 2.0.68): mở dự án 708 -> 143 ms, `reload` (mỗi khi xong 1 việc) 678 -> 79
+    ms – 95 % thời gian cũ là `resizeRowsToContents` đo MỌI dòng. Giờ `_fit_rows` / `_fit_visible` chỉ đo dòng đang hiện
+    (±15/30), đo tiếp khi cuộn / lọc / thêm xoá / đổi bề rộng cột (`_refit_timer` 120 ms). `subs_model.WrapDelegate` (cột
+    Trung / Việt) đo chiều cao theo bề rộng trừ phần đệm ô (Qt bỏ qua padding của stylesheet -> câu dài thiếu 1 hàng "…").
+    Đoán đoạn hát: `songs.f0_frames(active_only=)` chỉ tính FFT ở khung có tiếng, `scipy.fft` nhiều luồng (nhả GIL),
+    bỏ vòng Python từng khung (kết quả giống hệt 2.0.63, nhanh ~1,5 lần trở lên). Câu nháp "vừa tách vừa dịch" làm mới
+    bảng tối đa 1 lần / 3 s và chỉ khi đang xem trang dự án. Giao diện các thao tác khác (đổi tab, tích, sửa câu) bằng /
+    nhanh hơn 2.0.63 – không có chỗ chậm đi.
+  * Chưa làm: tách giọng ở tiến trình riêng (bỏ hẳn ~0,3–0,5 GB CUDA context còn lại trong giao diện sau khi tách).
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -974,6 +1002,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.62: chờ người dùng thử Gemini gói miễn phí thật (sandbox không gọi được Google API): thông báo 429 của Gemini
   qua endpoint tương thích OpenAI có đúng chữ "PerDay" / "retry in" như đã đoán không; `response_format` json_object có bị
   từ chối không (đã có tự bỏ khi 400).
+- 2.0.68: chờ người dùng đo lại GPU (Task Manager → GPU → Bộ nhớ GPU chuyên dụng) và thời gian "1. Nghe & tách câu" trên
+  máy thật – nếu vẫn tràn bộ nhớ card: đổi Qwen3 1.7B -> 0.6B ở Cài đặt, hoặc tách giọng 1 mô hình thay vì "Kết hợp".
 - 2.0.65: chờ người dùng cho biết bộ đọc / giọng đang chọn khi bị "chỉ 1 giọng" (dòng "giọng – S1: …" sau khi lồng sẽ
   cho thấy giọng thật đã đọc); nếu VieNeu / OmniVoice thật đọc mọi giọng như nhau thì lỗi nằm ở mô hình, cần file log.
 - 2.0.64: chờ người dùng thử "Vừa tách vừa dịch" trên phim thật (Qwen3 + Gemini / DeepSeek + Edge): câu dịch hiện dần ở tab
