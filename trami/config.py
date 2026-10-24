@@ -134,6 +134,10 @@ DEFAULT_SETTINGS: dict = {
     "yt_client_id": "", "yt_client_secret": "", "fb_app_id": "", "fb_app_secret": "",
     "browser_exe": "",                        # "Mở Chrome & điền sẵn": đường dẫn chrome.exe / msedge.exe (trống = tự tìm)
     "publish_privacy": "public", "publish_category": "24", "publish_notify": True, "publish_synthetic": False,
+    "channel_name": "",                       # tab Chữ & Logo: tên kênh cho logo mẫu
+    # Rút khoảng lặng / cắt bài hát (silence.py) – mức tìm đoạn để cắt, nhớ cho video sau
+    "silence": {"by": "speech", "db": -30, "min": 4.0, "max": 60.0, "keep": 1.5, "where": "split",
+                "skip_songs": True, "skip_head": 0.0, "skip_tail": 0.0, "song_pad": 15.0},
     # Tải video từ link: Bilibili đăng nhập bằng mã QR (sitelogin); trang khác lấy cookie từ trình duyệt / file
     "dl_browser": "",                         # "" / firefox / edge / chrome / brave / opera / vivaldi
     "dl_cookie_file": "",                     # file cookies.txt (Netscape) người dùng xuất từ trình duyệt

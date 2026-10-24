@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QDoubleSpinBox, QHBoxLayout, QMenu, QPushButton, QScrollBar, QVBoxLayout, QWidget
 
 from . import icons, theme
@@ -32,12 +32,16 @@ def _tc(t: float, step: float) -> str:
     return base + (f".{int(round((s % 1) * 10))}" if step < 1 else "")
 
 
+LAYER_COL = {"text": "#8B5CF6", "logo": "#14B8A6"}
+
+
 class _Canvas(QWidget):
     HEAD = 118      # cột tên track bên trái
     RULER = 24
     TRACKS = [("subs", "Phụ đề", "subtitles", 38), ("dub", "Lồng tiếng", "mic", 38),
               ("video", "Video", "film", 44), ("audio", "Tiếng gốc", "volume", 30)]
     MIN_SCALE, MAX_SCALE = 0.7, 1.3   # các dòng co / giãn theo chiều cao khung: không bị cắt, không thừa chỗ trống
+    LAYER_H, GROUP_H = 24, 20         # mỗi lớp phủ (chữ / logo) 1 dòng; dòng tiêu đề nhóm "Lớp phủ (N)"
 
     def __init__(self, tl: "TrackTimeline"):
         super().__init__(tl)
@@ -52,7 +56,27 @@ class _Canvas(QWidget):
         self._band = None      # (dòng, giây lúc bấm, x lúc bấm, giây hiện tại) – đang kéo quét chọn trên chỗ trống
         self._spress = None    # bấm giữ khối phụ đề: {"row", "x", "mode": move/l/r, "rows", "orig", "defer"}
         self._sghost = None    # đang kéo khối phụ đề: {câu: (đầu mới, cuối mới)}
+        self._lpress = None    # bấm giữ thanh lớp phủ: {"id", "x", "mode": move/l/r, "a", "b"}
+        self._lghost = None    # đang kéo thanh lớp phủ: (mã, đầu mới, cuối mới)
+        self._ppress = None    # bấm giữ mép đoạn chờ cắt: (chỉ số, "l"/"r", x, đầu, cuối)
+        self._pghost = None    # đang kéo mép đoạn chờ cắt: (chỉ số, đầu, cuối)
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+
+    def tracks(self) -> list[tuple[str, str, str, int]]:
+        """Các dòng đang hiện: Phụ đề, Lồng tiếng, [Lớp phủ (N) + mỗi lớp 1 dòng], Video, Tiếng gốc."""
+        out = list(self.TRACKS[:2])
+        L = self.tl.layers
+        if L:
+            out.append(("lgroup", f"Lớp phủ ({len(L)})", "layers", self.GROUP_H))
+            if not self.tl.layers_collapsed:
+                for x in reversed(L):     # lớp trên cùng (cuối danh sách) ở dòng đầu
+                    out.append(("L:" + x.get("id", ""), x.get("name") or "", "image" if x.get("kind") == "logo"
+                                else "text", self.LAYER_H))
+        return out + list(self.TRACKS[2:])
+
+    def update_min(self):
+        self.setMinimumHeight(self.RULER + 4 + sum(round(h * self.MIN_SCALE) + 6 for *_, h in self.tracks()))
+        self.updateGeometry()
 
     # ------------------------------------------------------------------ toạ độ
     def x(self, t: float) -> float:
@@ -62,12 +86,13 @@ class _Canvas(QWidget):
         return max(0.0, min(self.tl.duration, self.tl.t0 + (x - self.HEAD) / self.tl.pps))
 
     def _scale(self) -> float:
-        room = self.height() - self.RULER - 4 - 6 * len(self.TRACKS)
-        return max(self.MIN_SCALE, min(self.MAX_SCALE, room / sum(h for *_, h in self.TRACKS)))
+        tr = self.tracks()
+        room = self.height() - self.RULER - 4 - 6 * len(tr)
+        return max(self.MIN_SCALE, min(self.MAX_SCALE, room / sum(h for *_, h in tr)))
 
     def track_rect(self, key: str) -> QRectF:
         y, sc = self.RULER + 4, self._scale()
-        for k, _, _, h in self.TRACKS:
+        for k, _, _, h in self.tracks():
             h = round(h * sc)
             if k == key:
                 return QRectF(self.HEAD, y, self.width() - self.HEAD, h)
@@ -76,7 +101,7 @@ class _Canvas(QWidget):
 
     def track_at(self, pos: QPointF) -> str | None:
         """Dòng (track) dưới con trỏ – tính cả cột tên dòng bên trái."""
-        for k, *_ in self.TRACKS:
+        for k, *_ in self.tracks():
             r = self.track_rect(k)
             if r.top() <= pos.y() <= r.bottom():
                 return k
@@ -136,6 +161,56 @@ class _Canvas(QWidget):
         hi = max(b, segs[r + 1].start if r + 1 < len(segs) else dur)
         return {r: (a, min(hi, max(a + 0.2, b + d)))}
 
+    def _layer_span(self, L: dict) -> tuple[float, float]:
+        a = float(L.get("start") or 0)
+        b = float(L.get("end") or 0) or self.tl.duration
+        return a, min(b, self.tl.duration or b)
+
+    def _layer_hit(self, key: str, pos: QPointF) -> tuple[dict, str] | None:
+        """Thanh lớp phủ dưới con trỏ (dòng "L:<mã>") + chỗ bấm: mép trái / phải / thân."""
+        L = next((x for x in self.tl.layers if "L:" + x.get("id", "") == key), None)
+        if not L:
+            return None
+        a, b = self._layer_span(L)
+        xa, xb = self.x(a), self.x(b)
+        if not xa - 4 <= pos.x() <= xb + 4:
+            return None
+        if xb - xa >= 3 * self.EDGE:
+            if pos.x() - xa <= self.EDGE:
+                return L, "l"
+            if xb - pos.x() <= self.EDGE:
+                return L, "r"
+        return L, "move"
+
+    def _snap_t(self, t: float, skip: str = "") -> float:
+        """Hít mép thanh lớp phủ vào đầu phát / đầu, cuối video / mép lớp khác / đầu, cuối câu phụ đề (≤ 6 px)."""
+        tl = self.tl
+        cands = [0.0, tl.duration, tl.pos]
+        for L in tl.layers:
+            if L.get("id") != skip:
+                cands += list(self._layer_span(L))
+        tol = 6 / max(tl.pps, 1e-6)
+        best = min(cands, key=lambda c: abs(c - t))
+        if abs(best - t) <= tol:
+            return best
+        near = [x for s in tl.segs for x in (s.start, s.end) if abs(x - t) <= tol]
+        return min(near, key=lambda c: abs(c - t)) if near else t
+
+    def _pending_hit(self, pos: QPointF) -> tuple[int, str] | None:
+        """Đoạn chờ cắt (sọc đỏ trên dòng Video) dưới con trỏ: (chỉ số, "l"/"r"/"body")."""
+        if not self.tl.pending or not self.track_rect("video").contains(pos):
+            return None
+        for i, it in enumerate(self.tl.pending):
+            a, b = it["cut"]
+            xa, xb = self.x(a), self.x(b)
+            if xa - 3 <= pos.x() <= xb + 3:
+                if xb - xa >= 3 * self.EDGE and pos.x() - xa <= self.EDGE:
+                    return i, "l"
+                if xb - xa >= 3 * self.EDGE and xb - pos.x() <= self.EDGE:
+                    return i, "r"
+                return i, "body"
+        return None
+
     def _hit(self, pos: QPointF) -> int | None:
         """Câu nằm dưới con trỏ (track Phụ đề hoặc Lồng tiếng – cả khung nét đứt của câu chưa có giọng)."""
         if pos.x() < self.HEAD:
@@ -164,11 +239,36 @@ class _Canvas(QWidget):
             self.tl.seekRequested.emit(self.t(pos.x()))
             return
         key = self.track_at(pos)
+        if key == "lgroup":                          # tiêu đề nhóm lớp phủ: thu gọn / mở ra
+            self.tl.layers_collapsed = not self.tl.layers_collapsed
+            self.update_min()
+            self.update()
+            return
+        if key and key.startswith("L:"):            # dòng của 1 lớp phủ
+            lid = key[2:]
+            if pos.x() < self.HEAD:
+                self.tl.select_layer(lid, emit=True)
+                return
+            h = self._layer_hit(key, pos)
+            self.tl.select_layer(lid, emit=True)
+            if h:
+                L, mode = h
+                a, b = self._layer_span(L)
+                self._lpress = {"id": lid, "x": pos.x(), "mode": mode, "a": a, "b": b}
+            else:
+                self.tl.seekRequested.emit(self.t(pos.x()))
+            return
         if pos.x() < self.HEAD:                      # bấm tên dòng: chọn hết dòng đó
             if key:
                 self.tl.select_all(key)
             return
         if key is None:
+            return
+        ph = self._pending_hit(pos) if key == "video" else None
+        if ph is not None:                           # đoạn chờ cắt: bấm = bật / tắt, kéo mép = chỉnh
+            i, part = ph
+            a, b = self.tl.pending[i]["cut"]
+            self._ppress = (i, part, pos.x(), a, b)
             return
         t = self.t(pos.x())
         if key in ("subs", "dub"):
@@ -214,6 +314,40 @@ class _Canvas(QWidget):
         if self._drag and self.tl.duration:
             self.tl.seekRequested.emit(self.t(pos.x()))
             return
+        if self._lpress and e.buttons() & Qt.MouseButton.LeftButton:
+            lp = self._lpress
+            dx = pos.x() - lp["x"]
+            if self._lghost or abs(dx) > 3:
+                d = dx / self.tl.pps
+                dur = self.tl.duration
+                a, b = lp["a"], lp["b"]
+                if lp["mode"] == "move":
+                    d = max(-a, min(dur - b, d))
+                    na = self._snap_t(a + d, lp["id"])
+                    if abs(na - (a + d)) > 1e-6:
+                        d = na - a
+                    else:
+                        nb = self._snap_t(b + d, lp["id"])
+                        d = nb - b
+                    d = max(-a, min(dur - b, d))
+                    na, nb = a + d, b + d
+                elif lp["mode"] == "l":
+                    na, nb = max(0.0, min(b - 0.2, self._snap_t(a + d, lp["id"]))), b
+                else:
+                    na, nb = a, min(dur, max(a + 0.2, self._snap_t(b + d, lp["id"])))
+                self._lghost = (lp["id"], na, nb)
+                self.setCursor(Qt.CursorShape.ClosedHandCursor if lp["mode"] == "move" else Qt.CursorShape.SizeHorCursor)
+                self.tl.sel_label.setText(f"Lớp phủ · {_tc(na, 0.5)} → {_tc(nb, 0.5)}  ({nb - na:.1f} giây)")
+                self.update()
+            return
+        if self._ppress and e.buttons() & Qt.MouseButton.LeftButton:
+            i, part, x0, a, b = self._ppress
+            if part != "body" and (self._pghost or abs(pos.x() - x0) > 3):
+                t = self.t(pos.x())
+                self._pghost = (i, min(t, b - 0.1), b) if part == "l" else (i, a, max(t, a + 0.1))
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+                self.update()
+            return
         if self._spress and e.buttons() & Qt.MouseButton.LeftButton:
             dx = pos.x() - self._spress["x"]
             if self._sghost or abs(dx) > 4:   # kéo khối phụ đề: dời câu / đổi đầu, cuối câu
@@ -243,6 +377,32 @@ class _Canvas(QWidget):
                 self._band = (key, t0, x0, t1)
                 self.tl.select_span(key, min(t0, t1), max(t0, t1),
                                     add=bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier))
+            return
+        lkey = self.track_at(pos)
+        if lkey and (lkey.startswith("L:") or lkey == "lgroup"):
+            h = self._layer_hit(lkey, pos) if lkey.startswith("L:") and pos.x() >= self.HEAD else None
+            if lkey == "lgroup":
+                self.setToolTip("Bấm để " + ("mở ra" if self.tl.layers_collapsed else "thu gọn") + " các dòng lớp phủ")
+                self.setCursor(Qt.CursorShape.PointingHandCursor)
+            elif h:
+                L, mode = h
+                a, b = self._layer_span(L)
+                self.setToolTip(f"{L.get('name') or ''}: {_tc(a, 0.5)} → {_tc(b, 0.5)}\nKéo thanh để dời lúc hiện · "
+                                "kéo 2 mép để đổi lúc bắt đầu / kết thúc · chuột phải: thêm lựa chọn")
+                self.setCursor(Qt.CursorShape.SizeHorCursor if mode != "move" else Qt.CursorShape.OpenHandCursor)
+            else:
+                self.setToolTip("")
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._hover = None
+            return
+        ph = self._pending_hit(pos) if pos.x() >= self.HEAD else None
+        if ph is not None:
+            it = self.tl.pending[ph[0]]
+            a, b = it["cut"]
+            self.setToolTip(f"Chờ cắt ({'đã tích' if it.get('on') else 'bỏ qua'}): {_tc(a, 0.5)} → {_tc(b, 0.5)} "
+                            f"({b - a:.1f} giây)\nBấm để bật / tắt · kéo 2 mép để chỉnh")
+            self.setCursor(Qt.CursorShape.SizeHorCursor if ph[1] != "body" else Qt.CursorShape.PointingHandCursor)
+            self._hover = None
             return
         row = self._hit(pos)
         key = self.track_at(pos) if pos.x() >= self.HEAD else None
@@ -293,6 +453,26 @@ class _Canvas(QWidget):
     def mouseReleaseEvent(self, e):
         self._drag = False
         self._band = None
+        lp, lg = self._lpress, self._lghost
+        self._lpress = self._lghost = None
+        if lp:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            if lg and (abs(lg[1] - lp["a"]) >= 0.01 or abs(lg[2] - lp["b"]) >= 0.01):
+                self.tl._refresh_tools()
+                self.tl.layerTimed.emit(lg[0], round(lg[1], 3), round(lg[2], 3))
+            elif not lg:
+                self.tl.seekRequested.emit(self.t(e.position().x()))
+            self.update()
+            return
+        pp, pg = self._ppress, self._pghost
+        self._ppress = self._pghost = None
+        if pp:
+            if pg:
+                self.tl.pendingChanged.emit(pg[0], round(pg[1], 3), round(pg[2], 3))
+            else:
+                self.tl.pendingToggled.emit(pp[0])
+            self.update()
+            return
         sg, sp = self._sghost, self._spress
         self._spress = self._sghost = None
         if sp:
@@ -316,6 +496,9 @@ class _Canvas(QWidget):
 
     def keyPressEvent(self, e):
         k = e.key()
+        if k in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace) and self.tl.sel_track == "layer" and self.tl.sel_layer:
+            self.tl.layerAction.emit(self.tl.sel_layer, "delete")
+            return
         if k in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             act = {"subs": "sub_delete", "video": "v_delete", "audio": "a_mute", "dub": "dub_toggle"}.get(
                 self.tl.sel_track or "")
@@ -331,6 +514,17 @@ class _Canvas(QWidget):
         super().keyPressEvent(e)
 
     def contextMenuEvent(self, e):
+        key = self.track_at(QPointF(e.pos()))
+        if key and key.startswith("L:"):
+            lid = key[2:]
+            self.tl.select_layer(lid, emit=True)
+            m = QMenu(self)
+            for act, text in (("full", "Hiện suốt video"), ("from", "Bắt đầu tại đầu phát"),
+                              ("to", "Kết thúc tại đầu phát"), ("dup", "Nhân bản"), ("up", "Lên trên (che lớp khác)"),
+                              ("down", "Xuống dưới"), ("hide", "Ẩn / hiện"), ("delete", "Xoá lớp")):
+                m.addAction(text, lambda a=act: self.tl.layerAction.emit(lid, a))
+            m.exec(e.globalPos())
+            return
         d = self._dub_at(QPointF(e.pos()))
         if not d:
             return
@@ -363,8 +557,31 @@ class _Canvas(QWidget):
         W, H = self.width(), self.height()
         # cột tên track
         p.setFont(theme.font(8.8, QFont.Weight.DemiBold))
-        for key, name, ic, _h in self.TRACKS:
+        for key, name, ic, _h in self.tracks():
             r = self.track_rect(key)
+            if key == "lgroup":      # tiêu đề nhóm lớp phủ
+                p.setFont(theme.font(8, QFont.Weight.DemiBold))
+                p.setPen(QColor(theme.MUTED))
+                p.drawText(QRectF(10, r.top(), W - 12, r.height()), Qt.AlignmentFlag.AlignVCenter,
+                           ("▸ " if tl.layers_collapsed else "▾ ") + name + ("  – bấm để mở" if tl.layers_collapsed
+                                                                             else ""))
+                p.fillRect(QRectF(self.HEAD, r.center().y(), W - self.HEAD, 1), QColor(theme.BORDER))
+                p.setFont(theme.font(8.8, QFont.Weight.DemiBold))
+                continue
+            if key.startswith("L:"):
+                on = tl.sel_track == "layer" and tl.sel_layer == key[2:]
+                p.fillRect(QRectF(8, r.top(), self.HEAD - 14, r.height()), QColor(theme.CARD))
+                if on:
+                    p.fillRect(QRectF(8, r.top(), 3, r.height()), QColor(theme.ACCENT))
+                col = theme.ACCENT if on else theme.MUTED
+                icons.paint_icon(p, ic, QRectF(16, r.center().y() - 7, 14, 14), col, 1.7)
+                p.setPen(QColor(col))
+                p.setFont(theme.font(8))
+                p.drawText(QRectF(34, r.top(), self.HEAD - 40, r.height()), Qt.AlignmentFlag.AlignVCenter,
+                           p.fontMetrics().elidedText(name, Qt.TextElideMode.ElideRight, self.HEAD - 42))
+                p.setFont(theme.font(8.8, QFont.Weight.DemiBold))
+                p.fillRect(QRectF(self.HEAD, r.top(), W - self.HEAD, r.height()), QColor("#1A2130" if on else "#141A25"))
+                continue
             on = key == tl.sel_track
             p.fillRect(QRectF(8, r.top(), self.HEAD - 14, r.height()), QColor(theme.CARD))
             if on:     # dòng đang chọn: vạch cam bên trái + chữ cam
@@ -550,6 +767,60 @@ class _Canvas(QWidget):
             p.setPen(QColor("#FFFFFF"))
             p.setFont(theme.font(10, QFont.Weight.Bold))
             p.drawText(badge, Qt.AlignmentFlag.AlignCenter, "+")
+        # lớp phủ: mỗi lớp 1 thanh (đầu -> cuối), màu theo loại (chữ tím / logo xanh)
+        if tl.layers and not tl.layers_collapsed:
+            p.setFont(theme.font(7.8, QFont.Weight.Medium))
+            for L in tl.layers:
+                lid = L.get("id", "")
+                r0 = self.track_rect("L:" + lid)
+                if r0.isEmpty():
+                    continue
+                a, b = self._layer_span(L)
+                if self._lghost and self._lghost[0] == lid:
+                    p.setPen(QPen(theme.c("#FFFFFF", 90), 1, Qt.PenStyle.DashLine))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawRoundedRect(QRectF(self.x(a), r0.top() + 2, max(3.0, (b - a) * tl.pps), r0.height() - 4), 4, 4)
+                    a, b = self._lghost[1], self._lghost[2]
+                if b < t_lo or a > t_hi:
+                    continue
+                rr = QRectF(self.x(a), r0.top() + 2, max(3.0, (b - a) * tl.pps - 1), r0.height() - 4)
+                col = QColor(LAYER_COL.get(L.get("kind"), "#8B5CF6"))
+                sel = tl.sel_track == "layer" and tl.sel_layer == lid
+                fill = QColor(col)
+                fill.setAlpha(60 if L.get("hidden") else (230 if sel else 150))
+                p.setBrush(fill)
+                p.setPen(QPen(QColor("#FFFFFF"), 2) if sel else Qt.PenStyle.NoPen)
+                p.drawRoundedRect(rr, 4, 4)
+                if sel and rr.width() >= 3 * self.EDGE:
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.setBrush(QColor("#FFFFFF"))
+                    for xh in (rr.left() + 2.5, rr.right() - 4.5):
+                        p.drawRoundedRect(QRectF(xh, rr.center().y() - 6, 2, 12), 1, 1)
+                if rr.width() > 30:
+                    p.setPen(QColor("#FFFFFF"))
+                    txt = ("🚫 " if L.get("hidden") else "") + (L.get("name") or "")
+                    p.drawText(rr.adjusted(7, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter,
+                               p.fontMetrics().elidedText(txt, Qt.TextElideMode.ElideRight, int(rr.width() - 12)))
+        # đoạn chờ cắt (rút khoảng lặng / cắt bài hát): sọc đỏ trên dòng Video – đã tích đậm, bỏ qua nhạt
+        if tl.pending:
+            for i, it in enumerate(tl.pending):
+                a, b = it["cut"]
+                if self._pghost and self._pghost[0] == i:
+                    a, b = self._pghost[1], self._pghost[2]
+                if b < t_lo or a > t_hi:
+                    continue
+                rr = QRectF(self.x(a), rv.top() + 1, max(2.0, (b - a) * tl.pps), rv.height() - 2)
+                on = bool(it.get("on"))
+                p.fillRect(rr, QColor(20, 8, 8, 150) if on else QColor(0, 0, 0, 60))
+                p.setBrush(QBrush(QColor(248, 113, 113, 230 if on else 70), Qt.BrushStyle.BDiagPattern))
+                p.setPen(QPen(QColor("#F87171") if on else theme.c("#FFFFFF", 110), 2 if on else 1.2,
+                              Qt.PenStyle.SolidLine if on else Qt.PenStyle.DashLine))
+                p.drawRect(rr)
+                if rr.width() > 54:
+                    p.setFont(theme.font(7.6, QFont.Weight.DemiBold))
+                    p.setPen(QColor("#FFFFFF"))
+                    tag = ("🎵 " if it.get("kind") == "song" else "✂ ") + f"{b - a:.1f}s" + ("" if on else " (giữ)")
+                    p.drawText(rr, Qt.AlignmentFlag.AlignCenter, tag)
         # vùng đang quét chọn
         if self._band and abs(self._band[3] - self._band[1]) * tl.pps > 4:
             key, t0, _x0, t1 = self._band
@@ -659,6 +930,11 @@ class TrackTimeline(QWidget):
     dubReset = Signal(int)          # đặt đoạn giọng lồng về đúng lúc nhân vật nói
     subsMoved = Signal(list)        # kéo khối phụ đề: [(câu, đầu mới, cuối mới)]
     selectionChanged = Signal()
+    layerSelected = Signal(str)     # bấm thanh / tên dòng của 1 lớp phủ
+    layerTimed = Signal(str, float, float)   # kéo thanh lớp phủ: (mã, đầu, cuối) giây video gốc
+    layerAction = Signal(str, str)  # chuột phải / nút trên thanh: (mã, việc: full/from/to/dup/up/down/hide/delete)
+    pendingToggled = Signal(int)    # bấm đoạn chờ cắt: bật / tắt
+    pendingChanged = Signal(int, float, float)   # kéo mép đoạn chờ cắt
 
     # công cụ hiện trên thanh theo dòng đang chọn: (tên lệnh, icon, chữ, gợi ý)
     TOOLS = {
@@ -690,6 +966,13 @@ class TrackTimeline(QWidget):
                   ("v_insert", "film", "Chèn video…", "Chèn 1 video khác vào tại đầu phát (khi xuất)"),
                   ("v_insert_del", "x", "Bỏ video chèn", "Bỏ video chèn đang chọn (dấu + tím)"),
                   ("sel_all", "check", "Chọn hết", "Chọn mọi đoạn (Ctrl+A)")],
+        "layer": [("ly:full", "fit", "Suốt video", "Lớp đang chọn hiện suốt video"),
+                  ("ly:from", "clock", "Bắt đầu ở đây", "Lớp bắt đầu hiện tại đầu phát"),
+                  ("ly:to", "clock", "Kết thúc ở đây", "Lớp hết hiện tại đầu phát"),
+                  ("ly:dup", "stack", "Nhân bản", "Nhân bản lớp đang chọn"),
+                  ("ly:up", "chev_left", "Lên trên", "Đưa lên trên (che lớp khác)"),
+                  ("ly:down", "chev_right", "Xuống dưới", "Đưa xuống dưới"),
+                  ("ly:delete", "trash", "Xoá", "Xoá lớp đang chọn (phím Delete)")],
         "audio": [("v_split", "split", "Tách tại đầu phát", "Tách tiếng gốc + video thành 2 đoạn tại đầu phát"),
                   ("a_mute", "mute", "Tắt tiếng gốc", "Tắt tiếng gốc (nguyên bản / nhạc nền / giọng gốc đã tách) ở các "
                    "đoạn đang chọn – giọng lồng vẫn giữ"),
@@ -697,7 +980,7 @@ class TrackTimeline(QWidget):
                   ("v_unsplit", "merge", "Gộp đoạn", "Bỏ điểm tách giữa các đoạn đang chọn"),
                   ("sel_all", "check", "Chọn hết", "Chọn mọi đoạn (Ctrl+A)")],
     }
-    TRACK_NAMES = {"subs": "Phụ đề", "dub": "Lồng tiếng", "video": "Video", "audio": "Tiếng gốc"}
+    TRACK_NAMES = {"subs": "Phụ đề", "dub": "Lồng tiếng", "video": "Video", "audio": "Tiếng gốc", "layer": "Lớp phủ"}
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -720,6 +1003,10 @@ class TrackTimeline(QWidget):
         self.vsplits: list[float] = []
         self.inserts: list[dict] = []
         self.mute: list = []
+        self.layers: list[dict] = []          # lớp phủ chữ / logo (edit["layers"])
+        self.layers_collapsed = False
+        self.sel_layer = ""
+        self.pending: list[dict] = []         # đoạn chờ cắt (rút khoảng lặng / bài hát)
         self.thumbs: QPixmap | None = None
         self.thumb_step = 0.0
         self.thumb_count = 0
@@ -784,6 +1071,32 @@ class TrackTimeline(QWidget):
             self._opened = True
             self.fit(90)
         self._sync_bar()
+        self.canvas.update()
+
+    def set_layers(self, layers: list):
+        n_old = len(self.layers)
+        self.layers = [dict(L) for L in layers or []]
+        if self.sel_layer and not any(L.get("id") == self.sel_layer for L in self.layers):
+            self.sel_layer = ""
+            if self.sel_track == "layer":
+                self.sel_track = None
+                self._refresh_tools()
+        if len(self.layers) != n_old:
+            self.canvas.update_min()
+        self.canvas.update()
+
+    def select_layer(self, lid: str, emit: bool = False):
+        self.sel_layer = lid or ""
+        self.sel_track = "layer" if lid else (None if self.sel_track == "layer" else self.sel_track)
+        self.sel_rows, self.sel_pieces, self.sel_gap, self.sel_insert = set(), set(), None, None
+        self._refresh_tools()
+        self.canvas.update()
+        if emit:
+            self.layerSelected.emit(self.sel_layer)
+            self.selectionChanged.emit()
+
+    def set_pending(self, items: list):
+        self.pending = list(items or [])
         self.canvas.update()
 
     def set_thumbs(self, pm: QPixmap | None, step: float, count: int):
@@ -926,6 +1239,9 @@ class TrackTimeline(QWidget):
             txt = f"Phụ đề · khoảng trống {_tc(a, 0.5)} → {_tc(b, 0.5)}"
         elif track in ("subs", "dub"):
             txt = f"{self.TRACK_NAMES[track]} · " + (f"đã chọn {n_rows} câu" if n_rows else "chưa chọn câu nào")
+        elif track == "layer":
+            L = next((x for x in self.layers if x.get("id") == self.sel_layer), None)
+            txt = "Lớp phủ · " + ((L.get("name") or "") if L else "")
         elif track in ("video", "audio"):
             pcs = self.pieces()
             n = len(self.sel_pieces)
@@ -954,7 +1270,11 @@ class TrackTimeline(QWidget):
                 b.setProperty("full_text", text)
                 lay.addWidget(b)
                 continue
-            b = button(text, ic, tip, flat=True, on_click=lambda _=False, n=name: self.actionRequested.emit(n))
+            if name.startswith("ly:"):
+                b = button(text, ic, tip, flat=True,
+                           on_click=lambda _=False, n=name[3:]: self.layerAction.emit(self.sel_layer, n))
+            else:
+                b = button(text, ic, tip, flat=True, on_click=lambda _=False, n=name: self.actionRequested.emit(n))
             b.setProperty("full_text", text)
             lay.addWidget(b)
         self._fit_tools()

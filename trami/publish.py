@@ -981,12 +981,65 @@ def check_video(path: Path, platform: str, kind: str) -> tuple[str, str]:
     return "", ""
 
 
+def _videos(p) -> list[dict]:
+    return [o for o in p.data.get("outputs", []) if o.get("kind") == "video" and Path(o.get("path", "")).exists()]
+
+
 def latest_video(p) -> Path | None:
-    """Video xuất gần nhất của dự án (còn trên đĩa)."""
-    for o in reversed(p.data.get("outputs", [])):
-        if o.get("kind") == "video" and Path(o.get("path", "")).exists():
-            return Path(o["path"])
-    return None
+    """Video xuất gần nhất của dự án (còn trên đĩa) – bản chính (tỉ lệ chính) của lần xuất đó."""
+    outs = _videos(p)
+    if not outs:
+        return None
+    last = outs[-1]
+    if last.get("batch"):
+        last = next(o for o in outs if o.get("batch") == last["batch"])
+    return Path(last["path"])
+
+
+PORTRAIT_KINDS = {("youtube", "short"), ("facebook", "reel"), ("tiktok", "video")}
+
+
+def _is_portrait(o: dict) -> bool:
+    w, h = o.get("w"), o.get("h")
+    if w and h:
+        return h > w
+    from .video import aspect_wh
+
+    wh = aspect_wh(o.get("ratio"))
+    return bool(wh) and wh[0] < wh[1]
+
+
+def video_for(p, platform: str, kind: str, chosen: Path | None) -> Path | None:
+    """Bản xuất hợp nền tảng trong CÙNG lần xuất với file đang chọn: Shorts / Reels / TikTok -> bản dọc (ưu tiên 9:16),
+    YouTube / Facebook video -> bản ngang (ưu tiên 16:9). Không có bản hợp hơn -> giữ file đang chọn."""
+    if not chosen:
+        return chosen
+    outs = _videos(p)
+    me = next((o for o in outs if Path(o["path"]) == Path(chosen)), None)
+    if not me or not me.get("batch"):
+        return chosen
+    same = [o for o in outs if o.get("batch") == me["batch"]]
+    if len(same) < 2:
+        return chosen
+    want = (platform, kind) in PORTRAIT_KINDS
+    if _is_portrait(me) == want:
+        return chosen
+    cand = [o for o in same if _is_portrait(o) == want]
+    if not cand:
+        return chosen
+    pref = "9:16" if want else "16:9"
+    return Path(next((o for o in cand if o.get("ratio") == pref), cand[0])["path"])
+
+
+def batch_ratios(p, chosen: Path | None) -> list[str]:
+    """Các tỉ lệ của lần xuất chứa file đang chọn (để báo "kèm bản 9:16 cho Shorts / Reels")."""
+    if not chosen:
+        return []
+    outs = _videos(p)
+    me = next((o for o in outs if Path(o["path"]) == Path(chosen)), None)
+    if not me or not me.get("batch"):
+        return []
+    return [o.get("ratio") or "original" for o in outs if o.get("batch") == me["batch"] and o is not me]
 
 
 # ------------------------------------------------------------------ AI viết tiêu đề / mô tả / hashtag

@@ -26,6 +26,13 @@ DEFAULT_EDIT = {
                 "blur_strength": 20, "strength": "normal"},
     "flip_h": False, "flip_v": False, "rotate": 0, "zoom": 1.0, "speed": 1.0,
     "aspect": "original", "aspect_mode": "blur", "resolution": "original",
+    "aspect_pos": [0.5, 0.5],   # vị trí phim trong khung khi đổi tỉ lệ (0 = sát trái / trên, 0,5 = giữa)
+    "aspect_scale": 1.0,        # cỡ phim trong khung (1 = vừa khít; > 1 phóng to, phần tràn bị cắt)
+    "aspect_color": "#000000",  # màu nền khi Phần trống = Nền 1 màu
+    "extra_ratios": [],         # xuất thêm các tỉ lệ (mỗi tỉ lệ 1 file)
+    "ratio_over": {},           # chỉnh riêng từng tỉ lệ xuất thêm: {tỉ lệ: {aspect_mode, aspect_pos, layers{}, sub{}}}
+    "safe_zone": False,         # hiện vùng bị TikTok / Reels che trên khung xem trước
+    "layers": [],               # lớp phủ chữ / logo (trami/overlay.py)
     "color": {"brightness": 0, "contrast": 1, "saturation": 1, "gamma": 1, "sharpen": False, "denoise": False},
     "volume": 1.0, "mute_original": False, "pitch_shift": 0,
     "dub": {"enabled": False, "wav": "", "original_volume": 0.15, "dub_volume": 1.0},
@@ -136,7 +143,8 @@ class Project:
     def edit(self) -> dict:
         from .config import _deep_merge
 
-        return _deep_merge(DEFAULT_EDIT, self.data.get("edit") or {})
+        # bản sao mặc định riêng mỗi lần đọc: sửa danh sách / dict trong bản chỉnh sửa không làm hỏng DEFAULT_EDIT
+        return _deep_merge(json.loads(json.dumps(DEFAULT_EDIT)), self.data.get("edit") or {})
 
     def public(self) -> dict:
         d = dict(self.data)
@@ -144,9 +152,9 @@ class Project:
         d["edit"] = self.edit
         return d
 
-    def add_output(self, path: Path, kind: str):
+    def add_output(self, path: Path, kind: str, **extra):
         outs = self.data.setdefault("outputs", [])
-        outs.append({"path": str(path), "name": path.name, "kind": kind, "time": time.time()})
+        outs.append({"path": str(path), "name": path.name, "kind": kind, "time": time.time(), **extra})
         self.save()
 
     def set_status(self, step: str, value):

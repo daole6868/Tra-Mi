@@ -5087,3 +5087,322 @@ def test_browser_post_fills_and_stops_before_post(monkeypatch, tmp_path):
     finally:
         eng.close_profile("main")
         srv.shutdown()
+
+
+# ------------------------------------------------------------------ 2.0.79: tỉ lệ khung, lớp phủ chữ / logo, rút khoảng lặng
+
+def _frame_rgb(path, t, size=None):
+    """Đọc 1 khung (RGB numpy) của video tại t giây."""
+    from trami import ffmpeg as _ff
+
+    info = _ff.probe(path)
+    w, h = size or (info.width, info.height)
+    r = subprocess.run([_ff.ffmpeg_bin(), "-v", "error", "-ss", f"{t:.3f}", "-i", str(path), "-frames:v", "1",
+                        "-vf", f"scale={w}:{h}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"], capture_output=True)
+    return np.frombuffer(r.stdout, np.uint8).reshape(h, w, 3)
+
+
+def test_aspect_presets_fit_geometry_and_ratio_override():
+    from trami import video
+
+    assert set(video.PORTRAIT) | set(video.LANDSCAPE) <= set(video.ASPECTS)
+    assert len(set(video.PORTRAIT + video.LANDSCAPE)) == 13
+    assert video.aspect_wh("9:16") == (9, 16) and video.aspect_wh("original") is None
+    assert video.target_size(1920, 1080, "9:16", "1080p") == (1080, 1920)
+    assert video.target_size(1920, 1080, "5:7", "original") == (1080, 1512)
+    # phim ngang 16:9 trong khung dọc 9:16: vừa khít chiều ngang, lệch lên / xuống theo vị trí
+    x, y, w, h = video.fit_geometry(1920, 1080, 1080, 1920, {"aspect_mode": "blur", "aspect_pos": [0.5, 0.5]})
+    assert (round(x), round(w), round(h)) == (0, 1080, 608) and abs(y - (1920 - 607.5) / 2) < 1
+    _, y2, _, _ = video.fit_geometry(1920, 1080, 1080, 1920, {"aspect_pos": [0.5, 0.15]})
+    assert y2 < y
+    # phóng cho đầy khung: phủ kín, tràn 2 bên
+    x, y, w, h = video.fit_geometry(1920, 1080, 1080, 1920, {"aspect_mode": "crop"})
+    assert round(h) == 1920 and w > 1080 and x < 0
+    # cỡ phim 150 %
+    _, _, w, _ = video.fit_geometry(1920, 1080, 1080, 1920, {"aspect_scale": 1.5})
+    assert round(w) == 1620
+    e = {"aspect": "16:9", "aspect_mode": "blur", "layers": [{"id": "a", "x": 0.5, "y": 0.1}],
+         "subtitles": {"style": {"position": "bottom"}},
+         "ratio_over": {"9:16": {"aspect_mode": "color", "layers": {"a": {"y": 0.3}}, "sub": {"pos_y": 0.7}}}}
+    r = video.edit_for_ratio(e, "9:16")
+    assert r["aspect"] == "9:16" and r["aspect_mode"] == "color" and r["layers"][0]["y"] == 0.3
+    assert r["subtitles"]["style"]["pos_y"] == 0.7 and e["layers"][0]["y"] == 0.1     # bản chính không đổi
+
+
+def test_overlay_templates_render_and_migrate():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    from trami import overlay
+
+    overlay.ensure_qt()
+    for code, _name, _p in overlay.TEMPLATES + overlay.LOGO_TEMPLATES:
+        L = overlay.new_layer("text", template=code, channel="Phim Hay TV")
+        img, ox, oy = overlay.render(L, 1280, 720)
+        assert img.width() > 20 and img.height() > 10 and 0 < ox < img.width() and 0 < oy < img.height(), code
+        assert "{" not in L["text"]
+    assert overlay.new_layer("text", template="ch_circle", channel="Phim Hay")["text"] == "PH"
+    # xoay 90°: ảnh đổi chiều
+    L = overlay.new_layer("text", template="black_round")
+    a, _, _ = overlay.render(L, 1280, 720)
+    b, _, _ = overlay.render(dict(L, rot=90), 1280, 720)
+    assert abs(b.width() - a.height()) <= 6 and abs(b.height() - a.width()) <= 6
+    # dự án cũ: logo + chữ chạy -> lớp phủ
+    e = {"watermark": {"path": "/x/logo.png", "position": "top-right", "scale": 0.2, "opacity": 0.7},
+         "text": {"content": "Vietsub  by  me", "position": "scroll", "color": "#FF0000"}}
+    assert overlay.migrate(e) and not overlay.migrate(e)
+    lg, tx = e["layers"]
+    assert lg["kind"] == "logo" and lg["w"] == 0.2 and lg["opacity"] == 0.7 and lg["x"] > 0.8 and lg["y"] < 0.2
+    assert tx["text"] == "Vietsub by me" and tx["anim"] == "scroll" and tx["color"] == "#FF0000"
+    assert e["watermark"]["path"] == "" and e["text"]["content"] == ""
+    # hiệu ứng: xem trước và biểu thức FFmpeg cùng công thức
+    L = overlay.new_layer("text", anim="slide_l", fade_in=0.5)
+    x0, _dy, a0 = overlay.anim_state(L, 0.0, 5, 1280, 720, 200, 50, 100)
+    x1, _dy, a1 = overlay.anim_state(L, 0.5, 5, 1280, 720, 200, 50, 100)
+    assert x0 == 100 + 1280 * 0.5 + 200 and x1 == 100 and a0 == 0 and a1 == 1
+    xe, _ye = overlay.ffmpeg_xy(L, 2.0, 100, 50, 1280, 720, 200, 50)
+    assert "pow(1-min(1" in xe and "(t-2.000)/0.500" in xe
+    assert overlay.out_span({"start": 2, "end": 4}, 10, [(0, 1), (3, 10)]) == (1.0, 2.0)
+    assert overlay.out_span({"start": 1.2, "end": 2.8}, 10, [(0, 1), (3, 10)]) is None
+
+
+def test_render_aspect_color_layers_logo_gif(sample_video, tmp_path):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    import json as _json
+
+    from PIL import Image
+
+    from trami import overlay, video
+    from trami.config import load_settings
+    from trami.project import DEFAULT_EDIT
+
+    logo = tmp_path / "logo.png"
+    Image.new("RGBA", (100, 100), (255, 0, 255, 255)).save(logo)
+    gif = tmp_path / "a.gif"
+    frames = [Image.new("RGB", (40, 40), c) for c in ((0, 255, 0), (0, 0, 255))]
+    frames[0].save(gif, save_all=True, append_images=frames[1:], duration=200, loop=0)
+    spec = _json.loads(_json.dumps(DEFAULT_EDIT))
+    spec.update(aspect="9:16", aspect_mode="color", aspect_color="#204080", aspect_pos=[0.5, 0.2], resolution="480p")
+    spec["cuts"] = [[1.0, 2.0]]
+    spec["layers"] = [overlay.new_layer("logo", path=str(logo), w=0.2, x=0.5, y=0.85, start=2.5, end=5.0),
+                      overlay.new_layer("logo", path=str(gif), w=0.2, x=0.2, y=0.6),
+                      overlay.new_layer("text", template="brush_yellow", text="TIÊU ĐỀ", y=0.1)]
+    out = video.build_and_render(sample_video, tmp_path / "o.mp4", spec, load_settings(), tmp_path / "w", [])
+    info = ff.probe(out)
+    assert (info.width, info.height) == (480, 854) and abs(info.duration - 5.0) < 0.15
+    f = _frame_rgb(out, 3.0)     # giây xuất 3,0 = giây gốc 4,0 -> logo đang hiện
+    cy = int(854 * 0.85)
+    assert f[cy, 240, 0] > 200 and f[cy, 240, 1] < 70 and f[cy, 240, 2] > 200          # logo hồng tím
+    assert abs(int(f[int(854 * 0.97), 20, 2]) - 0x80) < 30                               # nền màu
+    f1 = _frame_rgb(out, 0.5)    # trước lúc logo hiện (giây gốc 0,5)
+    assert not (f1[cy, 240, 0] > 200 and f1[cy, 240, 1] < 70)
+    g = f[int(854 * 0.6), int(480 * 0.2)]
+    assert g[1] > 150 or g[2] > 150                                                      # GIF động
+    band = f[int(854 * 0.06):int(854 * 0.14)].reshape(-1, 3).astype(int)
+    assert ((band[:, 0] > 200) & (band[:, 1] > 170) & (band[:, 2] < 90)).sum() > 500      # nét cọ vàng của tiêu đề
+    # cùng 1 lớp, vẽ 2 lần: dùng lại ảnh PNG đã vẽ
+    n = len(list((tmp_path / "w" / "layers").glob("layer_*.png")))
+    video.build_and_render(sample_video, tmp_path / "o2.mp4", spec, load_settings(), tmp_path / "w", [])
+    assert len(list((tmp_path / "w" / "layers").glob("layer_*.png"))) == n == 2
+
+
+def test_chunked_render_with_layers_matches_whole(sample_video, tmp_path, monkeypatch):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    import json as _json
+
+    from trami import overlay, video
+    from trami.config import load_settings
+    from trami.project import DEFAULT_EDIT
+
+    spec = _json.loads(_json.dumps(DEFAULT_EDIT))
+    spec["layers"] = [overlay.new_layer("text", template="black_round", text="CHỮ", start=2.2, end=4.6,
+                                        anim="fade", fade_in=0.4, fade_out=0.4, x=0.5, y=0.3)]
+    st = load_settings()
+    whole = video.build_and_render(sample_video, tmp_path / "whole.mp4", spec, dict(st, export_chunks=False),
+                                   tmp_path / "w1", [])
+    monkeypatch.setattr(video, "CHUNK_SEC", 2.0)
+    monkeypatch.setattr(video, "CHUNK_MIN_DUR", 1.0)
+    chunk = video.build_and_render(sample_video, tmp_path / "chunk.mp4", spec, st, tmp_path / "w2", [])
+    assert len(list((tmp_path / "w2" / "chunks").glob("c_*.mp4"))) == 3
+    for t in (1.0, 2.4, 3.0, 4.4, 5.0):
+        a, b = _frame_rgb(whole, t).astype(int), _frame_rgb(chunk, t).astype(int)
+        assert np.abs(a - b).mean() < 3.0, t
+
+
+def test_silence_gaps_songs_and_summary(tmp_path):
+    from trami import silence
+
+    segs = [Segment(0.5, 2, "a", "a"), Segment(12, 14, "b", "b"), Segment(14.5, 16, "c", "c"),
+            Segment(30, 33, "la", "♪", extra={"song": True}), Segment(35, 38, "la", "♪", extra={"song": True}),
+            Segment(50, 52, "d", "d"), Segment(52.5, 54, "e", "e", extra={"dub_at": [52.5, 58.5]})]
+    o = silence.options({}, min=4, keep=1.5)
+    g = silence.find_gaps(segs, 70, o)
+    assert [(x["kind"], x["cut"]) for x in g] == [("gap", [2.75, 11.25]), ("gap", [16.75, 29.25]),
+                                                    ("gap", [38.75, 49.25]), ("tail", [60.0, 70.0])]
+    # giọng lồng đọc dài hơn câu (dub_at tới 58,5 s) -> khoảng lặng cuối bắt đầu từ 58,5
+    assert g[-1]["a"] == 58.5
+    # đoạn dài hơn mức tối đa: để nguyên; rút còn 0 = xoá hẳn; giữ phần sau câu trước
+    assert [x["a"] for x in silence.find_gaps(segs, 70, dict(o, max=12))] == [2.0, 38.0, 58.5]   # 14 s > 12: bỏ
+    assert silence.find_gaps(segs, 70, dict(o, keep=0))[0]["cut"] == [2.0, 12.0]
+    assert silence.find_gaps(segs, 70, dict(o, where="after"))[0]["cut"] == [3.5, 12.0]
+    assert silence.find_gaps(segs, 70, dict(o, skip_head=5))[0]["a"] == 5.0
+    # không cắt 🎵: khoảng lặng giữa 2 câu hát (33–35 s) bỏ qua; tắt -> vẫn bỏ (ngắn hơn 4 s)
+    assert all(not (30 <= x["a"] < 38) for x in g)
+    s = silence.find_songs(segs, 70, o)
+    assert s == [{"id": "s30.0", "kind": "song", "a": 16.3, "b": 49.7, "cut": [16.3, 49.7], "on": True, "lines": 2}]
+    items = silence.merge_items(g, s)
+    assert [x["kind"] for x in items] == ["gap", "song", "tail"]
+    items[0]["on"] = False
+    n, tot, before, after = silence.summary(items, 70, {}, [[60.5, 61]])
+    assert (n, tot) == (2, 3) and abs(before - 69.5) < 1e-6 and abs(after - (70 - 33.4 - 10)) < 1e-6
+    assert silence.new_cuts([[60.5, 61]], items) == [[16.3, 49.7], [60.0, 70.0]]
+    assert silence.preset_of({"min": 2, "keep": 0.5}) == "strong" and silence.preset_of({"min": 3, "keep": 1}) == "custom"
+
+
+def test_silence_loudness_quiet_spans(tmp_path):
+    from trami import silence
+
+    wav = tmp_path / "a.wav"
+    subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", "sine=f=440:d=2", "-f", "lavfi",
+                    "-i", "anullsrc=r=44100:cl=mono:d=3", "-f", "lavfi", "-i", "sine=f=440:d=2", "-filter_complex",
+                    "[0:a][1:a][2:a]concat=n=3:v=0:a=1", str(wav)], check=True)
+    db = silence.loudness(wav, tmp_path / "w", duration=7)
+    assert silence.has_loudness(wav, tmp_path / "w") and abs(len(db) * silence.HOP - 7) < 0.1
+    q = silence.quiet_spans(db, -30)
+    assert len(q) == 1 and abs(q[0][0] - 2) < 0.1 and abs(q[0][1] - 5) < 0.1
+    items = silence.find_gaps([], 7, silence.options({}, by="volume", min=2, keep=1), db)
+    assert len(items) == 1 and abs(items[0]["cut"][0] - 2.5) < 0.1 and abs(items[0]["cut"][1] - 4.5) < 0.1
+
+
+def test_render_extra_ratios_and_publish_picks_by_ratio(sample_video, tmp_path):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from trami import pipeline, publish
+    from trami.project import Project
+
+    p = Project.create("ratios")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [Segment(0.5, 2, "你好", "Xin chào")]
+    e = p.edit
+    e.update(aspect="16:9", resolution="480p", extra_ratios=["9:16", "1:1"],
+             ratio_over={"9:16": {"aspect_mode": "color", "aspect_color": "#FF0000"}})
+    p.data["edit"] = e
+    p.save()
+    main = pipeline.render(p, dict(pipeline.load_settings(), export_chunks=False))
+    outs = [o for o in Project(p.id).data["outputs"] if o["kind"] == "video"]
+    assert [o["ratio"] for o in outs] == ["16:9", "9:16", "1:1"] and len({o["batch"] for o in outs}) == 1
+    assert (outs[0]["w"], outs[0]["h"]) == (854, 480) and (outs[1]["w"], outs[1]["h"]) == (480, 854)
+    assert outs[1]["path"].endswith("_9x16.mp4") and Path(main) == Path(outs[0]["path"])
+    f = _frame_rgb(outs[1]["path"], 1.0)
+    assert f[10, 240, 0] > 200 and f[10, 240, 1] < 60      # bản 9:16 dùng nền đỏ riêng của nó
+    p = Project(p.id)
+    assert publish.latest_video(p) == Path(outs[0]["path"])
+    assert publish.video_for(p, "tiktok", "video", Path(main)) == Path(outs[1]["path"])
+    assert publish.video_for(p, "youtube", "short", Path(main)) == Path(outs[1]["path"])
+    assert publish.video_for(p, "youtube", "video", Path(main)) == Path(main)
+    assert publish.video_for(p, "youtube", "video", Path(outs[1]["path"])) == Path(main)
+    assert sorted(publish.batch_ratios(p, Path(main))) == ["1:1", "9:16"]
+
+
+def test_gui_aspect_layers_timeline_silence_undo(sample_video, tmp_path):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+
+    from trami import overlay, pipeline
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    theme.load_fonts()
+    app.setStyleSheet(theme.stylesheet())
+    p = Project.create("layers")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [Segment(0.2, 1.0, "你好", "Xin chào", "S1"), Segment(5.0, 5.8, "再见", "Tạm biệt", "S1")]
+    e = p.edit
+    e["text"] = {"content": "Vietsub", "position": "top-left", "color": "#FFFFFF"}
+    p.data["edit"] = e
+    p.save()
+    win = MainWindow()
+    win.resize(1600, 1000)
+    win.show()
+    win.open_project(p.id)
+    pp = win.project_page
+    for _ in range(10):
+        app.processEvents()
+    # chữ cũ -> lớp phủ (đã lưu), có dòng riêng trên timeline
+    assert [L["text"] for L in pp._layers] == ["Vietsub"] and Project(p.id).edit["text"]["content"] == ""
+    assert any(k.startswith("L:") for k, *_ in pp.tracks.canvas.tracks())
+    # tỉ lệ: chọn ở tab Chỉnh sửa -> tab Xuất cũng đổi (1 giá trị chung)
+    pp._aspect_changed("9:16")
+    assert pp.x_aspect.value == "9:16" and pp.e_aspect.value == "9:16"
+    pp.x_aspect._chip_clicked("4:5")
+    assert pp.e_aspect.value == "4:5"
+    pp._amode_changed("color")
+    assert pp.x_amode.currentData() == "color"
+    pp._save_edit_now()
+    assert Project(p.id).edit["aspect"] == "4:5" and Project(p.id).edit["aspect_mode"] == "color"
+    # thêm mẫu chữ cọ vàng, kéo trên video (ô Ngang / Dọc cập nhật), kéo trên timeline
+    pp.layers_tab.add_text("brush_yellow")
+    lid = pp.layers_tab.sel
+    pp._apply_live()
+    app.processEvents()
+    assert lid in pp.player.view.layers and pp.tracks.sel_layer == lid
+    pp.player.view.on_layer_changed(lid, {"x": 0.3, "y": 0.4})
+    assert abs(pp.layers_tab.p_x.value() - 30) < 1e-6
+    pp.tracks.layerTimed.emit(lid, 1.0, 3.0)
+    pp._save_edit_now()
+    L = next(x for x in Project(p.id).edit["layers"] if x["id"] == lid)
+    assert (L["x"], L["y"], L["start"], L["end"]) == (0.3, 0.4, 1.0, 3.0)
+    # đầu phát ngoài khoảng hiện -> lớp ẩn trên trình phát
+    pp._apply_live()
+    pp.player.update_layers(0.5)
+    assert not pp.player.view.layers[lid].isVisible()
+    pp.player.update_layers(2.0)
+    assert pp.player.view.layers[lid].isVisible()
+    # xem thử tỉ lệ xuất thêm: kéo lớp = chỉnh riêng cho tỉ lệ đó, bản chính giữ nguyên
+    pp.x_extra._toggle("16:9")
+    pp._ratio_preview("16:9")
+    pp.player.view.on_layer_changed(lid, {"x": 0.7})
+    pp._ratio_preview("")
+    pp._save_edit_now()
+    e = Project(p.id).edit
+    assert e["extra_ratios"] == ["16:9"] and e["ratio_over"]["16:9"]["layers"][lid] == {"x": 0.7}
+    assert next(x for x in e["layers"] if x["id"] == lid)["x"] == 0.3
+    # thư viện logo + thả vào video
+    from PIL import Image
+
+    img = tmp_path / "lg.png"
+    Image.new("RGBA", (64, 32), (0, 200, 0, 255)).save(img)
+    new = overlay.add_logos([img])
+    pp.layers_tab.fill_library()
+    pp.layers_tab.drop("lib:" + new[0]["id"], 0.8, 0.1)
+    assert pp._layers[-1]["kind"] == "logo" and pp._layers[-1]["x"] == 0.8
+    pp._layer_action(pp._layers[-1]["id"], "delete")
+    assert all(x["kind"] != "logo" for x in pp._layers)
+    # vùng an toàn: lớp ở sát trên bị báo + đưa vào vùng an toàn
+    pp.e_safe.setChecked(True)
+    pp.player.view.on_layer_changed(lid, {"y": 0.03})
+    pp._apply_live()
+    pp.player.update_layers(2.0)
+    app.processEvents()
+    assert any("TIÊU ĐỀ" in x for x in pp.player.view.safe_issues())
+    pp._safe_fix()
+    assert next(x for x in pp._layers if x["id"] == lid)["y"] > 0.12
+    # rút khoảng lặng: tìm, bỏ tích 1 đoạn, áp dụng -> cuts; Ctrl+Z hoàn tác
+    pp.sil.s_min.setValue(2.0)
+    pp.sil.s_keep.setValue(0.5)
+    pp.sil.scan()
+    assert pp.sil.items and pp.tracks.pending == pp.sil.items
+    cut = list(pp.sil.items[0]["cut"])
+    pp.sil.applyRequested.emit([it for it in pp.sil.items if it.get("on")])
+    assert Project(p.id).edit["cuts"] == [cut] and pp.sil.items == []
+    pp.undo()
+    assert Project(p.id).edit["cuts"] == []
+    pp.redo()
+    assert Project(p.id).edit["cuts"] == [cut]
+    for i in range(10):
+        pp.tabs.set_current(i)
+        app.processEvents()
+    win.close()

@@ -2423,7 +2423,7 @@ def old_sub_region(p: Project) -> dict | None:
     return None
 
 
-def effective_style(p: Project, style: dict) -> dict:
+def effective_style(p: Project, style: dict, ed: dict | None = None) -> dict:
     """Vị trí 'auto': đặt câu Việt vào đúng chỗ phụ đề Trung cũ (canh theo mép dưới của vùng chữ cũ).
     'custom' (kéo phụ đề trên video): giữ chỗ người dùng đặt, cỡ chữ tự động vẫn theo phụ đề cũ như 'auto'.
     Ghi thêm "lang" = tiếng của bản dịch -> chọn font có chữ Thái / Nhật / Hàn khi xuất và xem trước."""
@@ -2438,7 +2438,7 @@ def effective_style(p: Project, style: dict) -> dict:
         st["position"] = "bottom"
         if st.get("margin_v"):
             return st
-    ed = p.edit
+    ed = ed if ed is not None else p.edit
     reg = old_sub_region(p)
     if not reg or ed.get("crop") or ed.get("aspect", "original") != "original" or int(ed.get("rotate") or 0) \
             or ed.get("flip_v"):
@@ -2499,7 +2499,9 @@ def run_inpaint(p: Project, settings: dict | None = None, progress: Prog | None 
 
 def render(p: Project, settings: dict | None = None, progress: Prog | None = None, cancel=None,
            out_name: str | None = None) -> Path:
-    from .video import build_and_render
+    """Xuất video theo bản chỉnh sửa + các tỉ lệ xuất thêm (edit["extra_ratios"]: mỗi tỉ lệ 1 file "_9x16"…, phần
+    chỉnh riêng của tỉ lệ trong edit["ratio_over"]). Trả về file bản chính."""
+    from .video import build_and_render, edit_for_ratio, ratio_tag
 
     settings = settings or load_settings()
     edit = p.edit
@@ -2511,23 +2513,47 @@ def render(p: Project, settings: dict | None = None, progress: Prog | None = Non
         d["bg_wav"] = srcs["bg"][0]
         d["vocals_wav"] = srcs.get("voice", ("",))[0]
         d["song_spans"] = song_spans(p, settings)
-    from .config import _deep_merge
-
-    base_style = _deep_merge(settings.get("sub_style") or {}, (edit.get("subtitles") or {}).get("style") or {})
-    edit.setdefault("subtitles", {})["style"] = effective_style(p, base_style)
     name = out_name or (safe_name(Path(p.data.get("source", "video")).stem) + "_vietsub")
-    out = p.output_dir / f"{safe_name(name)}.mp4"
-    if out.exists():
-        out = p.output_dir / f"{safe_name(name)}_{time.strftime('%H%M%S')}.mp4"
-    segs = p.segments
-    if edit["subtitles"]["style"].get("karaoke"):
-        for k, sp in karaoke_spans(p, edit).items():
-            segs[k].extra["kv"] = sp
-    # câu có giọng lồng đọc sớm / bị lùi / đọc dài: phụ đề hiện theo đúng lúc giọng đọc
-    segs = subs_follow_dub(p, segs, edit, settings, (edit.get("subtitles") or {}).get("which", "trans"))
-    build_and_render(p.source, out, edit, settings, p.work / "render", segs, progress, cancel)
-    p.add_output(out, "video")
-    return out
+    stamp = time.strftime('%H%M%S')
+    batch = time.strftime('%Y%m%d-%H%M%S')
+    segs0 = p.segments
+    ratios = [edit.get("aspect", "original")] + [r for r in edit.get("extra_ratios") or []
+                                                if r != edit.get("aspect", "original")]
+    main_out = None
+    for k, ratio in enumerate(ratios):
+        e = edit if k == 0 else edit_for_ratio(edit, ratio)
+        if k:
+            e["_tag"] = ratio_tag(ratio)
+        from .config import _deep_merge
+
+        base_style = _deep_merge(settings.get("sub_style") or {}, (e.get("subtitles") or {}).get("style") or {})
+        e.setdefault("subtitles", {})["style"] = effective_style(p, base_style, e)
+        nm = name if k == 0 else f"{name}_{ratio_tag(ratio)}"
+        out = p.output_dir / f"{safe_name(nm)}.mp4"
+        if out.exists():
+            out = p.output_dir / f"{safe_name(nm)}_{stamp}.mp4"
+        segs = [Segment(s.start, s.end, s.text, s.trans, s.speaker, dict(s.extra)) for s in segs0]
+        if e["subtitles"]["style"].get("karaoke"):
+            for i, sp in karaoke_spans(p, e).items():
+                segs[i].extra["kv"] = sp
+        # câu có giọng lồng đọc sớm / bị lùi / đọc dài: phụ đề hiện theo đúng lúc giọng đọc
+        segs = subs_follow_dub(p, segs, e, settings, (e.get("subtitles") or {}).get("which", "trans"))
+        pr = progress
+        if progress and len(ratios) > 1:
+            pr = (lambda x, m, k=k, ratio=ratio: progress(  # noqa: E731
+                (k + x) / len(ratios), f"[{k + 1}/{len(ratios)} · {ratio if ratio != 'original' else 'gốc'}] {m}"))
+        build_and_render(p.source, out, e, settings, p.work / "render", segs, pr, cancel)
+        size = {}
+        try:
+            from . import ffmpeg as ff
+
+            vi = ff.probe(out)
+            size = {"w": vi.width, "h": vi.height}
+        except Exception:  # noqa: BLE001
+            pass
+        p.add_output(out, "video", ratio=ratio, batch=batch, **size)
+        main_out = main_out or out
+    return main_out
 
 
 # ------------------------------------------------------------------ tự động toàn bộ

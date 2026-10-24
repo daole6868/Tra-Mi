@@ -14,12 +14,68 @@ from .subtitle import Segment, remap_after_cut, scale_time, save_subtitles
 
 ProgressCB = Callable[[float, str], None]
 
-ASPECTS = {"16:9": (16, 9), "9:16": (9, 16), "1:1": (1, 1), "4:3": (4, 3), "3:4": (3, 4), "4:5": (4, 5)}
-POSITIONS = {
-    "top-left": ("{m}", "{m}"), "top-right": ("W-w-{m}", "{m}"), "bottom-left": ("{m}", "H-h-{m}"),
-    "bottom-right": ("W-w-{m}", "H-h-{m}"), "center": ("(W-w)/2", "(H-h)/2"),
-    "top": ("(W-w)/2", "{m}"), "bottom": ("(W-w)/2", "H-h-{m}"),
-}
+# tỉ lệ khung có sẵn: dọc (rộng < cao) và ngang – "1:1" có ở cả 2 nhóm
+PORTRAIT = ["1:1", "3:4", "9:16", "2:3", "3:5", "4:5", "5:7"]
+LANDSCAPE = ["1:1", "4:3", "16:9", "3:2", "5:3", "5:4", "7:5"]
+ASPECTS = {a: tuple(int(x) for x in a.split(":")) for a in PORTRAIT + LANDSCAPE}
+FILL_MODES = ("blur", "pad", "color", "crop")   # nền mờ / viền đen / nền màu / cắt cho đầy khung
+# vùng bị nút bấm / chữ của TikTok, Reels, Shorts che (theo khung dọc): trên 12 %, dưới 18 %, phải 14 %
+SAFE_ZONE = {"top": 0.12, "bottom": 0.18, "right": 0.14}
+
+
+def aspect_wh(aspect: str | None) -> tuple[float, float] | None:
+    """"9:16" -> (9, 16); "original" / sai -> None. Nhận cả tỉ lệ tự nhập "a:b"."""
+    if not aspect or aspect == "original":
+        return None
+    if aspect in ASPECTS:
+        return ASPECTS[aspect]
+    try:
+        a, b = (float(x) for x in str(aspect).replace("x", ":").split(":"))
+        return (a, b) if a > 0 and b > 0 else None
+    except ValueError:
+        return None
+
+
+def aspect_pos(spec: dict) -> tuple[float, float]:
+    """Vị trí phim trong khung (0 = sát trái / trên, 0,5 = giữa, 1 = sát phải / dưới)."""
+    pos = spec.get("aspect_pos") or [0.5, 0.5]
+    try:
+        return min(1.0, max(0.0, float(pos[0]))), min(1.0, max(0.0, float(pos[1])))
+    except (TypeError, ValueError, IndexError):
+        return 0.5, 0.5
+
+
+def fit_geometry(cw: float, ch: float, TW: float, TH: float, spec: dict) -> tuple[float, float, float, float]:
+    """Phim (cw × ch) đặt vào khung TW × TH theo cách lấp + phóng + vị trí: (trái, trên, rộng, cao) – có thể tràn
+    ra ngoài khung (phần tràn bị cắt). Dùng chung cho xuất video và khung xem trước."""
+    mode = spec.get("aspect_mode", "blur")
+    fz = min(4.0, max(0.2, float(spec.get("aspect_scale") or 1.0)))
+    base = (max if mode == "crop" else min)(TW / max(1e-6, cw), TH / max(1e-6, ch))
+    fw, fh = cw * base * fz, ch * base * fz
+    px, py = aspect_pos(spec)
+    return (TW - fw) * px, (TH - fh) * py, fw, fh
+
+
+def edit_for_ratio(edit: dict, ratio: str) -> dict:
+    """Bản chỉnh sửa cho 1 tỉ lệ xuất thêm: tỉ lệ đó + phần chỉnh riêng của tỉ lệ (nền, vị trí phim, vị trí lớp phủ /
+    phụ đề đã kéo khi xem thử tỉ lệ này) – edit["ratio_over"][tỉ lệ]."""
+    e = json.loads(json.dumps(edit))
+    e["aspect"] = ratio
+    ov = (edit.get("ratio_over") or {}).get(ratio) or {}
+    for k in ("aspect_mode", "aspect_pos", "aspect_scale", "aspect_color"):
+        if k in ov:
+            e[k] = ov[k]
+    lp = ov.get("layers") or {}
+    for L in e.get("layers") or []:
+        if L.get("id") in lp:
+            L.update(lp[L["id"]])
+    if ov.get("sub"):
+        e.setdefault("subtitles", {}).setdefault("style", {}).update(ov["sub"])
+    return e
+
+
+def ratio_tag(ratio: str) -> str:
+    return str(ratio).replace(":", "x")
 
 
 def keep_ranges(duration: float, trim: dict | None, cuts: list | None) -> list[tuple[float, float]]:
@@ -70,8 +126,9 @@ def _atempo_chain(speed: float) -> list[str]:
 def target_size(W: int, H: int, aspect: str, resolution: str) -> tuple[int, int]:
     """Kích thước khung hình đầu ra."""
     res_map = {"480p": 480, "720p": 720, "1080p": 1080, "1440p": 1440, "2160p": 2160}
-    if aspect in ASPECTS:
-        aw, ah = ASPECTS[aspect]
+    ar = aspect_wh(aspect)
+    if ar:
+        aw, ah = ar
         short = res_map.get(resolution) or min(W, H)
         if aw >= ah:
             h = short
@@ -384,7 +441,7 @@ def _render_chunked(src: Path, out: Path, spec: dict, settings: dict, work: Path
     if total <= 0:
         raise ValueError("Không còn đoạn video nào sau khi cắt.")
     per = max(1, int(round(CHUNK_SEC * fps)))
-    cdir = work / "chunks"
+    cdir = work / ("chunks_" + spec["_tag"] if spec.get("_tag") else "chunks")   # mỗi tỉ lệ xuất 1 kho đoạn riêng
     cdir.mkdir(parents=True, exist_ok=True)
     chunks = []          # (đường dẫn, lệnh, số khung, nhãn)
     for j, k0 in enumerate(range(0, total, per)):
@@ -399,8 +456,7 @@ def _render_chunked(src: Path, out: Path, spec: dict, settings: dict, work: Path
         args = build_and_render(src, tmp, spec, settings, work, segments, None, cancel, _part={"video": vp, "info": info})
         t0, t1 = k0 / fps, k1 / fps
         key = json.dumps({"a": [a for a in args if a != str(tmp.resolve())], "f": _file_sig(args),
-                          "sub": _ass_slice(work / "burn.ass", t0, t1),
-                          "txt": _ass_slice(work / "overlay_text.ass", t0, t1)}, ensure_ascii=False)
+                          "sub": _ass_slice(work / "burn.ass", t0, t1)}, ensure_ascii=False)
         path = cdir / f"c_{hashlib.sha1(key.encode()).hexdigest()[:20]}.mp4"
         args[-1] = str(path.with_suffix(".part.mp4").resolve())
         chunks.append((path, args, k1 - k0, j))
@@ -474,6 +530,11 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
     đó (không chạy); src lúc đó đã là video đã xoá phụ đề (nếu có)."""
     src, out, work = Path(src), Path(out), Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
+    if (spec.get("watermark") or {}).get("path") or ((spec.get("text") or {}).get("content") or "").strip():
+        from .overlay import migrate     # chữ / logo kiểu cũ -> lớp phủ
+
+        spec = json.loads(json.dumps(spec))
+        migrate(spec)
     info = (_part or {}).get("info") or ff.probe(src)
     if not info.has_video:
         raise ff.FFmpegError("File đầu vào không có hình ảnh.")
@@ -658,39 +719,35 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
             fc.append(f"[{v}]{','.join(chain)}[vc]")
             v = "vc"
 
-        # ---- 8. tỉ lệ khung hình / độ phân giải
+        # ---- 8. tỉ lệ khung hình / độ phân giải (nền mờ / đen / màu / cắt đầy khung + vị trí phim + phóng)
         aspect = spec.get("aspect", "original")
         res = spec.get("resolution", "original")
         TW, TH = target_size(cw, ch, aspect, res)
-        if (TW, TH) != (cw, ch):
+        if aspect_wh(aspect):
             amode = spec.get("aspect_mode", "blur")
-            if aspect in ASPECTS and amode == "crop":
-                fc.append(f"[{v}]scale={TW}:{TH}:force_original_aspect_ratio=increase,crop={TW}:{TH},setsar=1[vr]")
-            elif aspect in ASPECTS and amode == "pad":
-                fc.append(f"[{v}]scale={TW}:{TH}:force_original_aspect_ratio=decrease,"
-                          f"pad={TW}:{TH}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[vr]")
-            elif aspect in ASPECTS:
+            gx, gy, gw, gh = fit_geometry(cw, ch, TW, TH, spec)
+            fw, fh = _even(gw), _even(gh)
+            ox, oy = int(round(gx / 2)) * 2, int(round(gy / 2)) * 2
+            fg = [f"scale={fw}:{fh}"]
+            if ox < 0 or oy < 0 or ox + fw > TW or oy + fh > TH:    # phần phim tràn ra ngoài khung: cắt bỏ
+                x0, y0 = max(0, -ox), max(0, -oy)
+                vw, vh = min(fw - x0, TW - max(0, ox)), min(fh - y0, TH - max(0, oy))
+                vw, vh = max(2, vw // 2 * 2), max(2, vh // 2 * 2)
+                fg.append(f"crop={vw}:{vh}:{x0}:{y0}")
+                ox, oy, fw, fh = max(0, ox), max(0, oy), vw, vh
+            if (fw, fh) == (TW, TH):
+                fc.append(f"[{v}]{','.join(fg)},setsar=1[vr]")
+            elif amode == "blur":
                 fc.append(f"[{v}]split[bg0][fg0];[bg0]scale={TW}:{TH}:force_original_aspect_ratio=increase,"
                           f"crop={TW}:{TH},boxblur=luma_radius=min(h\\,w)/20:luma_power=2,eq=brightness=-0.08[bg1];"
-                          f"[fg0]scale={TW}:{TH}:force_original_aspect_ratio=decrease[fg1];"
-                          f"[bg1][fg1]overlay=(W-w)/2:(H-h)/2,setsar=1[vr]")
+                          f"[fg0]{','.join(fg)}[fg1];[bg1][fg1]overlay={ox}:{oy},setsar=1[vr]")
             else:
-                fc.append(f"[{v}]scale={TW}:{TH}:flags=lanczos,setsar=1[vr]")
+                col = "black" if amode in ("pad", "crop") else _hex(spec.get("aspect_color") or "#000000")
+                fc.append(f"[{v}]{','.join(fg)},pad={TW}:{TH}:{ox}:{oy}:color={col},setsar=1[vr]")
             v = "vr"
-
-        # ---- 9. logo / watermark ảnh
-        wm = spec.get("watermark") or {}
-        if wm.get("path") and Path(wm["path"]).exists():
-            inputs += ["-loop", "1", "-i", str(Path(wm["path"]).resolve())]
-            wi = n_in
-            n_in += 1
-            sc = float(wm.get("scale", 0.15))
-            op = float(wm.get("opacity", 0.85))
-            m = int(min(TW, TH) * 0.03)
-            px, py = POSITIONS.get(wm.get("position", "top-right"), POSITIONS["top-right"])
-            fc.append(f"[{wi}:v]scale={_even(TW * sc)}:-1,format=rgba,colorchannelmixer=aa={op:.2f}[wm]")
-            fc.append(f"[{v}][wm]overlay={px.format(m=m)}:{py.format(m=m)}:shortest=1[vw]")
-            v = "vw"
+        elif (TW, TH) != (cw, ch):
+            fc.append(f"[{v}]scale={TW}:{TH}:flags=lanczos,setsar=1[vr]")
+            v = "vr"
 
         # thư mục font cục bộ để libass/drawtext dùng đường dẫn tương đối (tránh lỗi escape trên Windows)
         fonts_local = work / "fonts"
@@ -703,13 +760,15 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
         if vpart:   # đoạn của bản chia đoạn: dời mốc khung về giờ XUẤT thật -> chữ / phụ đề / mờ dần đúng chỗ
             fc.append(f"[{v}]format=yuv420p,setpts=PTS+{vpart['o0']:.6f}/TB[voff]")
             v = "voff"
-        # ---- 10. chữ chạy / chữ tĩnh (vẽ bằng ASS -> không cần drawtext, chạy với mọi bản FFmpeg có libass)
-        tx = spec.get("text") or {}
-        if (tx.get("content") or "").strip():
-            if not (vpart and vpart.get("prebuilt")):
-                overlay_text_ass(work / "overlay_text.ass", tx, TW, TH, final_dur)
-            fc.append(f"[{v}]subtitles=overlay_text.ass:fontsdir=fonts[vt]")
-            v = "vt"
+        # ---- 10. lớp phủ: chữ + logo (trami/overlay.py – ảnh vẽ bằng Qt giống hệt khung xem trước; GIF động giải mã
+        # từng khung). Mốc theo giờ video XUẤT (đã dời theo đoạn cắt / tốc độ); đoạn của bản chia đoạn chỉ lấy lớp có mặt
+        from . import overlay
+
+        win = (vpart["o0"], vpart["o0"] + vpart["n"] / vpart["fps"]) if vpart else None
+        l_in, l_fc, v, n_in = overlay.build_overlays(spec.get("layers") or [], TW, TH, vpart["fps"] if vpart else fps,
+                                                     dur, keep, speed, work, v, n_in, win)
+        inputs += l_in
+        fc += l_fc
 
         # ---- 11. phụ đề mới
         sub = spec.get("subtitles") or {}
@@ -915,44 +974,6 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
 
     ff.run(args, final_dur, p3, cancel, "Đang xuất video", cwd=work)
     return out
-
-
-def overlay_text_ass(path: Path, tx: dict, TW: int, TH: int, duration: float) -> Path:
-    from .subtitle import _ass_escape, _hex_to_ass, fmt_ass_time
-
-    size = int(tx.get("size") or max(18, TH * 0.04))
-    m = int(min(TW, TH) * 0.03)
-    col = _hex_to_ass(tx.get("color", "#FFFFFF"))
-    pos = tx.get("position", "top-left")
-    an = {"top-left": 7, "top": 8, "top-right": 9, "bottom-left": 1, "bottom": 2, "bottom-right": 3, "center": 5}
-    text = _ass_escape(" ".join(tx["content"].split()))
-    if pos == "scroll":
-        # chạy từ phải sang trái, lặp lại suốt video
-        est_w = int(len(tx["content"]) * size * 0.6)
-        span = TW + est_w
-        speed = max(60, TW / 8)
-        one = span / speed
-        events = []
-        t = 0.0
-        while t < max(duration, 0.1):
-            events.append(f"Dialogue: 0,{fmt_ass_time(t)},{fmt_ass_time(t + one)},T,,0,0,0,,"
-                          f"{{\\an7\\move({TW},{m},{-est_w},{m})}}{text}")
-            t += one
-    else:
-        a = an.get(pos, 7)
-        x = m if a in (7, 1) else TW - m if a in (9, 3) else TW // 2
-        y = m if a in (7, 8, 9) else TH - m if a in (1, 2, 3) else TH // 2
-        events = [f"Dialogue: 0,{fmt_ass_time(0)},{fmt_ass_time(duration + 1)},T,,0,0,0,,"
-                  f"{{\\an{a}\\pos({x},{y})}}{text}"]
-    head = (f"[Script Info]\nScriptType: v4.00+\nPlayResX: {TW}\nPlayResY: {TH}\nScaledBorderAndShadow: yes\n\n"
-            "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
-            "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
-            "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-            f"Style: T,Be Vietnam Pro,{size},{col},{col},&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,"
-            f"{max(1, size / 16):.1f},1,7,0,0,0,1\n\n[Events]\n"
-            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
-    path.write_text(head + "\n".join(events) + "\n", "utf-8")
-    return path
 
 
 # ------------------------------------------------------------------ các thao tác nhanh

@@ -53,7 +53,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   việc (`before_job` / `after_job` trong `jobs._run`, `reap_idle` tắt VieNeu/Omni để không 10 phút); `trami/gui/*` –
   giao diện (QPainter), `common.run_async`,
   `WheelGuard` (lăn chuột không đổi ô chọn khi chưa bấm vào). Trang dự án bố cục kiểu trình dựng phim (từ 2.0.28):
-  trái `IconTabs` + 9 tab (Âm thanh = tab 6, `TAB_AUDIO`…`TAB_EXPORT` = 8), giữa trình phát, phải `gui/inspector.LineInspector` (câu đang chọn), dưới `gui/timeline.TrackTimeline`.
+  trái `IconTabs` + 10 tab (Chữ+Logo = tab 5 `TAB_LAYERS`, Lồng tiếng 6, Âm thanh 7, Tài liệu 8, `TAB_EXPORT` = 9), giữa
+  trình phát, phải `gui/inspector.LineInspector` (câu đang chọn), dưới `gui/timeline.TrackTimeline`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
   Chụp ảnh kiểm tra giao diện phải nạp theme như `run()`: `theme.load_fonts(); app.setFont(theme.font(10));
   app.setStyleSheet(theme.stylesheet())`.
@@ -104,6 +105,26 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `FB` / `TT` (thử lần lượt, không thấy -> "điền tay"), DỪNG ở nút Đăng (viền cam, không bấm); `fill_and_wait` chờ bạn
   bấm Đăng (YouTube / TikTok nhận ra) hoặc đóng tab; đăng nhập = Chrome THƯỜNG `open_login` (Google chặn đăng nhập trong
   trình duyệt bị điều khiển).
+- `trami/overlay.py` – lớp phủ chữ / logo (`edit["layers"]`, thứ tự = thứ tự chồng; giờ = giây video GỐC, end 0 = hết
+  video; x / y = tâm theo khung xuất; cỡ chữ × cạnh ngắn, logo × bề rộng khung): `render_text` / `render_logo` vẽ bằng Qt
+  (CÙNG hàm cho xem trước `player.LayerItem` và xuất), mẫu `TEMPLATES` (cọ vàng `_brush_path`…) + `LOGO_TEMPLATES` (tên
+  kênh), `FONTS` (13 font OFL có tiếng Việt trong fonts/), font riêng `data/fonts` (`add_user_font`), thư viện logo
+  `data/logos/index.json` (`add_logos`, GIF động `is_animated`), hiệu ứng `anim_state` = `ffmpeg_xy` + `fades`,
+  `build_overlays` (PNG `-loop 1` + `setpts` dời tới lúc hiện + `fade alpha` + `overlay eof_action=pass`; GIF `-ignore_loop 0`;
+  xuất từng đoạn chỉ lấy lớp có mặt trong đoạn), `migrate` (edit["text"] / ["watermark"] cũ -> lớp). `ensure_qt` tạo
+  QApplication ẩn khi chạy dòng lệnh. GUI `gui/layers_tab.LayersTab` (tab Chữ+Logo).
+- Tỉ lệ khung (`video.PORTRAIT` / `LANDSCAPE`, `aspect_wh`, `fit_geometry` dùng chung xuất + `VideoView._fit`): edit
+  `aspect_mode` blur / pad / color / crop, `aspect_color`, `aspect_pos` [x, y], `aspect_scale`; `extra_ratios` +
+  `ratio_over[tỉ lệ]` (`edit_for_ratio`: nền, vị trí phim, `layers{mã: {x,y…}}`, `sub{}`) -> `pipeline.render` xuất mỗi
+  tỉ lệ 1 file `_9x16` (kho đoạn `chunks_<tỉ lệ>`), outputs có `ratio` / `batch` / `w` / `h` -> `publish.video_for`
+  (Shorts / Reels / TikTok bản dọc). `gui/aspect_ui` (`AspectPicker` ở tab Chỉnh sửa + tab Xuất, nối nhau;
+  `ExtraRatios` + 👁 `_ratio_preview`). Vùng an toàn `video.SAFE_ZONE` (`player.SafeZoneItem`, `VideoView.safe_issues`,
+  `_safe_fix`). Nền mờ xem trước thật `player.BackdropItem`.
+- `trami/silence.py` – rút khoảng lặng (`find_gaps`: theo lời thoại = ngoài câu + `dub_at`, theo âm lượng `loudness`
+  8 kHz / 50 ms lưu `work/loud_50ms.npy`, hoặc cả hai; min / max / keep / where / skip_songs / skip_head / tail) + cắt bài
+  hát (`find_songs`: cụm câu 🎵 nới tới sát lời thoại ≤ `song_pad`) -> `new_cuts` gộp vào edit["cuts"]. GUI
+  `gui/silence_ui.SilenceCard` (tab Chỉnh sửa), timeline `pending` (sọc đỏ). Ảnh chụp hoàn tác (`project_page._snap`)
+  gồm cả cuts + layers.
 - `trami/songs.py` – đoán cụm câu đang HÁT (nốt ngân trên giọng đã tách) -> 🎵; `pipeline.mark_song_lines` (♪ trong bản dịch).
 - Đóng gói: `Subvideo.spec` (gom `collect_submodules("trami")` + `collect_all` các gói AI nạp động, `module_collection_mode`
   "pyz+py" cho transformers / torch / omnivoice / vieneu / funasr / speechbrain, loại gradio / tensorflow / matplotlib…),
@@ -111,7 +132,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (148 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (156 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1259,7 +1280,43 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     `publish.publish` chờ tới khi đóng tab; Facebook gắn file qua hộp chọn file. Chưa chạy trên trang thật (sandbox không
     đăng nhập được YouTube / Facebook / TikTok) – bộ chọn có thể phải sửa theo giao diện thật.
 
+- 2.0.79: người dùng xem TaoClip (MIT) + ảnh mẫu (tiêu đề nền cọ vàng, bảng tỉ lệ dọc / ngang) -> làm trọn gói A–D +
+  "nút cắt đoạn bài hát".
+  * A tỉ lệ: 13 tỉ lệ (dọc 1:1 3:4 9:16 2:3 3:5 4:5 5:7, ngang 1:1 4:3 16:9 3:2 5:3 5:4 7:5) + Gốc, bộ chọn có hình minh
+    hoạ ở tab Chỉnh sửa và tab Xuất (1 giá trị chung, `_aspect_changed`), Phần trống: nền mờ / viền đen / nền màu / phóng
+    đầy khung, Vị trí phim (giữa / lệch lên / xuống / trái / phải / tự chỉnh), Cỡ phim 40–300 %; xuất: scale -> crop phần
+    tràn -> pad màu / overlay lên nền mờ (toạ độ chẵn). Xem trước: `fit_geometry` y hệt + nền mờ thật (khung đang chiếu
+    thu nhỏ 40 px rồi phóng). Vùng an toàn TikTok / Reels (trên 12 %, dưới 18 %, phải 14 %) + cảnh báo + đưa phụ đề
+    (custom, pos_y 0,805, độ dài dòng ≤ 72 %) và lớp phủ vào vùng an toàn. Xuất thêm tỉ lệ + 👁 xem thử, khi xem thử kéo
+    chữ / logo / phụ đề hoặc đổi Phần trống / Vị trí = `ratio_over` riêng tỉ lệ đó. Đăng video: Shorts / Reels / TikTok tự
+    lấy bản dọc cùng lần xuất, YouTube / Facebook video bản ngang.
+  * B / C lớp phủ (tab mới "Chữ+Logo", tab 5): 8 mẫu chữ + 5 logo mẫu tên kênh, thuộc tính đầy đủ, 11 font OFL mới
+    (Anton, Paytone One, Barlow Condensed ExtraBold, Chakra Petch, Bungee, Baloo 2, Lobster, Pacifico, Dancing Script,
+    Pattaya, Patrick Hand – cũng thêm vào ô Font chữ phụ đề; đã thử libass vẽ đủ dấu tiếng Việt), nạp font riêng, thư viện
+    logo nhiều file + kéo thả vào video (`VideoView.dropEvent`, mime `application/x-subvideo-logo`), GIF động (xem trước
+    QMovie, xuất FFmpeg). Kéo lớp trên video (hít giữa khung), 4 góc phóng to. Timeline: nhóm "Lớp phủ (N)" thu gọn được,
+    mỗi lớp 1 dòng ("L:<mã>"), kéo thân / 2 mép (hít đầu phát, đầu cuối video, mép lớp khác, đầu cuối câu), chuột phải +
+    thanh công cụ (suốt video / bắt đầu – kết thúc ở đầu phát / nhân bản / lên trên / xuống dưới / ẩn / xoá), Delete.
+    Logo + chữ chạy cũ tự chuyển thành lớp khi mở dự án / khi xuất (`overlay.migrate`); thẻ "Logo & chữ" ở tab Chỉnh sửa
+    chỉ còn nút mở tab mới. Thử: xuất 9:16 nền màu + cắt giữa + logo PNG (đúng màu, đúng lúc), GIF, chữ cọ vàng; xuất từng
+    đoạn có lớp phủ trùng bản 1 lần (lệch trung bình < 3/255).
+  * D khoảng lặng / bài hát (thẻ ở tab Chỉnh sửa): Tìm theo lời thoại / âm lượng (ngưỡng dB) / cả hai, Dài từ … đến … (đoạn
+    dài hơn max để nguyên), Rút còn (0 = xoá), Phần giữ lại (chia đều / sau câu trước / trước câu sau; đầu video giữ phần
+    sát câu đầu, cuối video giữ phần sau câu cuối), Không cắt 🎵, Không cắt N s đầu / cuối, mẫu Nhẹ (6 → 2) / Vừa (4 → 1,5) /
+    Mạnh (2 → 0,5) / Tuỳ chỉnh (đổi mức -> tìm lại ngay, giữ các đoạn đã bỏ tích theo mã đầu khoảng). "Tìm / cắt đoạn bài
+    hát": chưa có câu 🎵 mà đã tách giọng -> tự chạy Tìm câu hát rồi tìm (`_detect_songs(then=)`, `_after_job`). Bảng ☑ / # /
+    Loại / Từ – Đến / Dài / Cắt bỏ / Còn lại / ▶ Xem (phát 2 s trước → nhảy qua đoạn cắt → dừng 2 s sau,
+    `_junction_cut`), Tích hết / Bỏ hết / Chỉ tích đoạn dài hơn, "Đã chọn 37/42 đoạn · video 45:10 → 40:58", Phát thử bản
+    đã cắt (cuts tạm cho trình phát), Áp dụng cắt (Ctrl+Z hoàn tác – ảnh chụp hoàn tác giờ gồm cuts + layers; lấy lại 1 đoạn:
+    chọn trên dòng Video → Khôi phục).
+  * `Project.edit` trả bản sao sâu của DEFAULT_EDIT (trước đây list / dict mặc định dùng chung). `effective_style(p,
+    style, ed)`. `Project.add_output(**extra)`.
+
 ## Vấn đề đang mở
+- 2.0.79: chờ người dùng thử trên máy thật: xuất 9:16 + 16:9 cùng lúc, kéo chữ / logo khi xem thử từng tỉ lệ, GIF logo
+  động, font riêng, nét cọ vàng có đẹp không; "Rút khoảng lặng" trên phim dài (theo âm lượng đo 1 lần ~ vài chục giây) và
+  "Tìm / cắt đoạn bài hát" (bài hát có được cắt trọn kể cả nhạc dạo không, có cắt nhầm lời thoại không). Chưa làm: hiệu
+  ứng phóng to / gõ chữ cho lớp chữ, kéo xoay trên video (đang dùng thanh Nghiêng / xoay).
 - 2.0.78: chờ người dùng cài `playwright` (`.venv\Scripts\python -m pip install playwright`), Đăng nhập YouTube /
   Facebook / TikTok ở Cài đặt → Chrome (điền sẵn), rồi thử Đăng: ô nào báo "điền tay" thì cần bộ chọn mới (xin ảnh chụp
   trang hoặc dòng tiến độ); xem Google có chặn phiên đăng nhập khi Chrome bị điều khiển không.

@@ -495,6 +495,29 @@ def _cpu(p: QPainter):
         p.drawLine(QPointF(18, v), QPointF(21, v))
 
 
+def _eye_off(p: QPainter):
+    _eye(p)
+    p.drawLine(QPointF(4, 20), QPointF(20, 4))
+
+
+def _aspect(p: QPainter):
+    p.drawRoundedRect(QRectF(2.5, 6.5, 13, 9), 1.8, 1.8)
+    p.drawRoundedRect(QRectF(14.5, 3.5, 7, 13), 1.8, 1.8)
+    p.drawLine(QPointF(5, 20), QPointF(13, 20))
+
+
+def _silence(p: QPainter):
+    for x, h in ((3, 4), (6, 9), (9, 5)):
+        p.drawLine(QPointF(x, 12 - h / 2), QPointF(x, 12 + h / 2))
+    for x, h in ((16, 6), (19, 10), (22, 4)):
+        p.drawLine(QPointF(x - 0.5, 12 - h / 2), QPointF(x - 0.5, 12 + h / 2))
+    path = _p()
+    path.moveTo(11.5, 7)
+    path.lineTo(13.5, 12)
+    path.lineTo(11.5, 17)
+    p.drawPath(path)
+
+
 ICONS = {
     "home": _home, "folder": _folder, "link": _link, "upload": _upload, "download": _download, "film": _film,
     "subtitles": _subtitles, "eraser": _eraser, "scissors": _scissors, "palette": _palette, "mic": _mic,
@@ -505,6 +528,7 @@ ICONS = {
     "split": _split, "merge": _merge, "sparkle": _sparkle, "stack": _stack, "chev_left": _chev_left,
     "chev_right": _chev_right, "chev_down": _chev_down, "info": _info, "cpu": _cpu, "minus": _minus, "fit": _fit,
     "panel_right": _panel_right, "mute": _mute, "undo": _undo, "redo": _redo, "share": _share,
+    "eye_off": _eye_off, "aspect": _aspect, "silence": _silence,
 }
 
 

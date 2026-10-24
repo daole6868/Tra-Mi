@@ -423,7 +423,10 @@ class PublishCard(SectionCard):
 
     # ---------------- video / ảnh bìa
     def _show_file(self):
-        self.v_name.setText(self.file.name if self.file else "Chưa có video xuất – bấm Xuất video ở trên trước")
+        more = publish.batch_ratios(self.page.p, self.file) if self.page.p and self.file else []
+        self.v_name.setText((self.file.name + (f"  (+ bản {', '.join(more)} – Shorts / Reels / TikTok tự dùng bản dọc, "
+                                               "YouTube / Facebook video dùng bản ngang)" if more else ""))
+                            if self.file else "Chưa có video xuất – bấm Xuất video ở trên trước")
         if self.file:
             self.v_name.setToolTip(str(self.file))
         self._check()
@@ -536,7 +539,9 @@ class PublishCard(SectionCard):
                 self.page.win.toast(f"{publish.PLATFORMS[plat]}: tài khoản không còn – chọn lại nơi đăng", "warn")
                 continue
             item = dict(base, platform=plat, kind=w["kind"].currentData(), target=target)
-            err, _ = publish.check_video(self.file, plat, item["kind"])
+            vf = publish.video_for(p, plat, item["kind"], self.file) or self.file   # bản dọc / ngang hợp nền tảng
+            item["file"] = str(vf)
+            err, _ = publish.check_video(vf, plat, item["kind"])
             if err:
                 self.page.win.toast(f"{publish.PLATFORMS[plat]}: {err}", "err")
                 continue
@@ -557,17 +562,18 @@ class PublishCard(SectionCard):
 
     def _manual(self, item: dict):
         """Tự tải lên: chép nội dung vào bộ nhớ tạm, ghi file .txt cạnh video, mở trang tải lên + thư mục video."""
-        text, txt, url = publish.prepare_manual(self.file, item, item["platform"], item["kind"])
+        vf = Path(item.get("file") or self.file)
+        text, txt, url = publish.prepare_manual(vf, item, item["platform"], item["kind"])
         QGuiApplication.clipboard().setText(text)
         QDesktopServices.openUrl(QUrl(url))
-        _reveal(self.file)
+        _reveal(vf)
         publish.save_post(self.page.p, {"id": f"m{int(time.time() * 1000)}", "time": time.time(),
                                         "platform": item["platform"], "kind": item["kind"], "via": "manual",
-                                        "account": "Tự tải lên", "title": item["title"], "file": str(self.file),
+                                        "account": "Tự tải lên", "title": item["title"], "file": str(vf),
                                         "url": "", "status": "prepared", "warn": ""})
         self.fill_history()
         self.page.win.toast(f"Đã chép nội dung + mở trang đăng {publish.PLATFORMS[item['platform']]} – kéo file "
-                            f"{self.file.name} vào trang đó, dán nội dung (Ctrl+V). Nội dung cũng lưu ở {txt.name}",
+                            f"{vf.name} vào trang đó, dán nội dung (Ctrl+V). Nội dung cũng lưu ở {txt.name}",
                             "ok")
 
     # ---------------- lịch sử

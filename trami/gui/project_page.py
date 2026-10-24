@@ -59,6 +59,10 @@ class ProjectPage(QWidget):
         self.settings = load_settings()
         self.cut_a: float | None = None
         self._mirrors: list[tuple[QComboBox, QComboBox]] = []   # ô chọn ở tab Phụ đề <-> ô gốc ở tab Tự động
+        self._ratio_view = ""          # đang 👁 xem thử 1 tỉ lệ xuất thêm (tab Xuất)
+        self._ratio_over: dict = {}    # chỉnh riêng từng tỉ lệ xuất thêm (edit["ratio_over"])
+        self._junction_cut = None      # ▶ xem chỗ nối 1 đoạn chờ cắt
+        self._after_job: dict = {}     # việc nền xong -> gọi tiếp (mã việc -> hàm)
 
         self._save_edit_timer = QTimer(self, singleShot=True, interval=500, timeout=self._save_edit_now)
         self._live_timer = QTimer(self, singleShot=True, interval=40, timeout=self._apply_live)
@@ -137,11 +141,12 @@ class ProjectPage(QWidget):
 
         # ---------------- trái: thanh công cụ dạng icon + nội dung từng bước
         self.tabs = IconTabs([("Tự động", "bolt"), ("Phụ đề", "subtitles"), ("Xoá phụ đề", "eraser"),
-                              ("Chỉnh sửa", "scissors"), ("Kiểu chữ", "palette"), ("Lồng tiếng", "mic"),
-                              ("Âm thanh", "volume"), ("Tài liệu", "download"), ("Xuất", "export")])
+                              ("Chỉnh sửa", "scissors"), ("Kiểu chữ", "palette"), ("Chữ+Logo", "text"),
+                              ("Lồng tiếng", "mic"), ("Âm thanh", "volume"), ("Tài liệu", "download"),
+                              ("Xuất", "export")])
         self.stack = QStackedWidget()
         for build in (self._tab_auto, self._tab_subs, self._tab_hardsub, self._tab_edit, self._tab_style,
-                      self._tab_dub, self._tab_audio, self._tab_models, self._tab_export):
+                      self._tab_layers, self._tab_dub, self._tab_audio, self._tab_models, self._tab_export):
             self.stack.addWidget(build())
         self.tabs.changed.connect(self._tab_changed)
         tools = Card(padding=theme.PANEL_PAD)
@@ -185,6 +190,12 @@ class ProjectPage(QWidget):
         self.tracks.dubMoved.connect(self._dub_moved)
         self.tracks.subsMoved.connect(self._subs_moved)
         self.tracks.dubReset.connect(lambda r: self._dub_moved(r, None))
+        self.tracks.layerSelected.connect(lambda lid: self._layer_selected(lid, from_tl=True))
+        self.tracks.layerTimed.connect(lambda lid, a, b: self.layers_tab.set_span(lid, a, b))
+        self.tracks.layerAction.connect(self._layer_action)
+        self.tracks.pendingToggled.connect(lambda i: self.sil.set_on(i, not self.sil.items[i].get("on"))
+                                           if 0 <= i < len(self.sil.items) else None)
+        self.tracks.pendingChanged.connect(lambda i, a, b: self.sil.set_cut(i, a, b))
         bottom = Card(padding=theme.PANEL_PAD)
         bottom.add(self.tracks)
         self.tl_card = bottom
@@ -551,7 +562,7 @@ class ProjectPage(QWidget):
         return scroll(w)
 
     # ================================================================== TAB: Xoá phụ đề cũ
-    TAB_HARDSUB, TAB_STYLE, TAB_DUB, TAB_AUDIO, TAB_MODELS, TAB_EXPORT = 2, 4, 5, 6, 7, 8
+    TAB_HARDSUB, TAB_STYLE, TAB_LAYERS, TAB_DUB, TAB_AUDIO, TAB_MODELS, TAB_EXPORT = 2, 4, 5, 6, 7, 8, 9
     HS_MODES = [("none", "Không xoá", "x"), ("inpaint", "Xoá sạch (AI)", "sparkle"), ("stretch", "Kéo dọc", "layers"),
                 ("patch", "Vá nền", "image"), ("blur", "Làm mờ", "eye"), ("box", "Che dải màu", "stack"),
                 ("delogo", "Delogo", "eraser")]
@@ -775,11 +786,45 @@ class ProjectPage(QWidget):
         cut.add(self.cut_label)
         self.cuts_list = label("", "muted", wrap=True)
         cut.add(self.cuts_list)
+        # --- rút khoảng lặng / cắt bài hát
+        from .silence_ui import SilenceCard
+
+        self.sil = SilenceCard(self)
+        self.sil.itemsChanged.connect(self._silence_items)
+        self.sil.previewToggled.connect(lambda on: self._silence_items(self.sil.items))
+        self.sil.playJunction.connect(self._play_junction)
+        self.sil.applyRequested.connect(self._apply_silence)
         # --- khung hình
-        frame = SectionCard("Khung hình", "crop")
+        from .aspect_ui import AspectPicker
+
+        frame = SectionCard("Khung hình", "aspect", "Tỉ lệ dọc cho TikTok / Reels / Shorts, ngang cho YouTube – xem ngay "
+                            "trên video bên phải. Tab Xuất dùng chung lựa chọn này.")
+        self.e_aspect = AspectPicker()
+        self.e_aspect.changed.connect(self._aspect_changed)
+        frame.add(self.e_aspect)
+        self.e_ratio_note = label("", "warn", wrap=True)
+        self.e_ratio_bar = flow(self.e_ratio_note, button("Về tỉ lệ chính", "x", flat=True,
+                                                          on_click=lambda: self._ratio_preview("")))
+        self.e_ratio_bar.hide()
+        frame.add(self.e_ratio_bar)
         f2 = Form()
-        self.e_aspect = f2.row("Tỉ lệ khung", combo(C.ASPECTS, "original"))
-        self.e_amode = f2.row("Cách lấp đầy", combo(C.ASPECT_MODES, "blur"))
+        self.frame_form = f2
+        self.e_amode = f2.row("Phần trống", combo(C.ASPECT_MODES, "blur"),
+                              "Khi phim không cùng tỉ lệ với khung: nền mờ (lấy chính hình phim làm mờ), viền đen, nền "
+                              "1 màu, hoặc phóng phim cho đầy khung (cắt bớt 2 bên / trên dưới)")
+        self.e_acolor = f2.row("Màu nền", ColorButton("#000000"))
+        self.e_apos = f2.row("Vị trí phim", combo(C.FILM_POS, "c"),
+                             "Đặt phim lệch lên / xuống để chừa chỗ cho tiêu đề, chữ ghi chú")
+        self.e_aposx = f2.row("Ngang (% từ trái)", SliderRow(0, 100, 1, 50, 0))
+        self.e_aposy = f2.row("Dọc (% từ trên)", SliderRow(0, 100, 1, 50, 0))
+        self.e_ascale = f2.row("Cỡ phim trong khung", SliderRow(40, 300, 5, 100, 0, suffix=" %"),
+                               "100 % = vừa khít khung; lớn hơn = phóng to (phần tràn bị cắt), nhỏ hơn = thu nhỏ")
+        self.e_safe = f2.row("Hiện vùng bị TikTok / Reels che", Switch(),
+                             "Tô đỏ vùng nút bấm, tên kênh, chú thích của TikTok / Reels / Shorts che mất (trên 12 %, "
+                             "dưới 18 %, phải 14 %) – chỉ để xem, không có trong video xuất")
+        self.e_safe_warn = label("", "warn", wrap=True)
+        self.e_safe_fix = button("Đưa phụ đề + chữ vào vùng an toàn", "fit", flat=True, on_click=self._safe_fix)
+        f2.row("", flow(self.e_safe_warn, self.e_safe_fix))
         self.e_res = f2.row("Độ phân giải", combo(C.RESOLUTIONS, "original"))
         self.e_rot = f2.row("Xoay", combo([("0", "0°"), ("90", "90°"), ("180", "180°"), ("270", "270°")], "0"))
         self.e_fliph = f2.row("Lật ngang (gương)", Switch())
@@ -790,6 +835,13 @@ class ProjectPage(QWidget):
         f2.row("Crop khung", hbox(button("Chọn vùng crop", "crop", on_click=self._crop_dialog),
                                   button("Bỏ crop", "x", on_click=self._clear_crop), self.crop_info, None))
         frame.add(f2)
+        self.e_amode.currentIndexChanged.connect(lambda *_: self._amode_changed(self.e_amode.currentData()))
+        self.e_apos.currentIndexChanged.connect(self._film_pos_preset)
+        for w in (self.e_aposx, self.e_aposy):
+            w.changed.connect(self._film_pos_slider)
+        self.e_ascale.changed.connect(lambda *_: self._frame_live())
+        self.e_acolor.changed.connect(lambda *_: self._frame_live())
+        self.e_safe.toggledOn.connect(lambda *_: (sv(), self._update_safe()))
         # --- màu
         color = SectionCard("Màu sắc & hình ảnh", "palette")
         f3 = Form()
@@ -800,42 +852,29 @@ class ProjectPage(QWidget):
         self.e_sharpen = f3.row("Làm nét", Switch())
         self.e_denoise = f3.row("Khử nhiễu hình", Switch())
         color.add(f3)
-        # --- logo & chữ
-        brand = SectionCard("Logo & chữ", "image")
-        f5 = Form()
-        self.wm_name = label("Chưa chọn", "muted")
-        f5.row("Logo (PNG)", hbox(button("Chọn ảnh…", "image", on_click=lambda: self._pick_asset("watermark")),
-                                  button("", "x", "Bỏ logo", flat=True, on_click=lambda: self._clear_asset("watermark")),
-                                  self.wm_name, None))
-        self.e_wmpos = f5.row("Vị trí logo", combo(C.POSITIONS, "top-right"))
-        self.e_wmscale = f5.row("Cỡ logo", SliderRow(0.05, 0.5, 0.01, 0.15))
-        self.e_wmop = f5.row("Độ rõ logo", SliderRow(0.1, 1, 0.05, 0.85))
-        self.e_text = f5.row("Chữ trên video", QLineEdit())
-        self.e_text.setPlaceholderText("VD: Vietsub by …")
-        self.e_textpos = f5.row("Vị trí chữ", combo(C.POSITIONS[:5] + [("scroll", "Chữ chạy ngang")], "top-left"))
-        self.e_textcolor = f5.row("Màu chữ", ColorButton("#FFFFFF"))
-        brand.add(f5)
+        # --- logo & chữ: đã chuyển sang tab "Chữ & Logo" (nhiều lớp, mỗi lớp 1 dòng trên timeline)
+        brand = SectionCard("Logo & chữ", "text", "Thêm tiêu đề, ghi chú, chữ chạy, logo (nhiều logo, GIF động) ở tab "
+                            "Chữ+Logo – mỗi chữ / logo 1 dòng riêng trên timeline, kéo để đổi lúc hiện.")
+        brand.add(flow(button("Mở tab Chữ+Logo", "text", on_click=lambda: self.tabs.set_current(self.TAB_LAYERS))))  # tab "Chữ+Logo"
         fx = SectionCard("Hiệu ứng", "sparkle")
         f6 = Form()
         self.e_fin = f6.row("Mờ dần đầu (giây)", SliderRow(0, 5, 0.1, 0, 1))
         self.e_fout = f6.row("Mờ dần cuối (giây)", SliderRow(0, 5, 0.1, 0, 1))
         fx.add(f6)
 
-        for w in (self.e_aspect, self.e_amode, self.e_res, self.e_rot, self.e_wmpos, self.e_textpos):
+        for w in (self.e_res, self.e_rot):
             w.currentIndexChanged.connect(sv)
         for w in (self.e_zoom, self.e_speed, self.e_bright, self.e_contrast, self.e_sat, self.e_gamma,
-                  self.e_wmscale, self.e_wmop, self.e_fin, self.e_fout):
+                  self.e_fin, self.e_fout):
             w.changed.connect(sv)
         for w in (self.e_fliph, self.e_flipv, self.e_sharpen, self.e_denoise):
             w.toggledOn.connect(sv)
-        self.e_text.textChanged.connect(sv)
-        self.e_textcolor.changed.connect(sv)
 
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 2, 0)
         v.setSpacing(theme.GAP)
-        for c in (cut, frame, color, brand, fx):
+        for c in (cut, self.sil, frame, color, brand, fx):
             v.addWidget(c)
         v.addStretch(1)
         return scroll(w)
@@ -885,9 +924,13 @@ class ProjectPage(QWidget):
         f = Form()
         self.st_burn = f.row("Ghép phụ đề vào video", Switch(True))
         self.st_which = f.row("Hiển thị", combo(C.WHICH[:3], "trans"))
+        from ..overlay import FONTS as _LAYER_FONTS
+
         self.st_font = f.row("Font chữ", combo([("Be Vietnam Pro", "Be Vietnam Pro – gọn, rõ (mặc định)"),
-                                                 ("Bangers", "Bangers – kiểu truyện tranh, chữ hoa nghiêng"),
-                                                 ("Arial", "Arial"), ("Roboto", "Roboto"), ("Tahoma", "Tahoma"),
+                                                 ("Bangers", "Bangers – kiểu truyện tranh, chữ hoa nghiêng")] +
+                                                [(fam, name) for fam, name in _LAYER_FONTS
+                                                 if fam not in ("Be Vietnam Pro", "Bangers")] +
+                                                [("Arial", "Arial"), ("Roboto", "Roboto"), ("Tahoma", "Tahoma"),
                                                  ("Segoe UI", "Segoe UI"), ("Times New Roman", "Times New Roman")],
                                                 "Be Vietnam Pro"))
         self.st_size = f.row("Cỡ chữ (0 = tự động)", QSpinBox())
@@ -996,6 +1039,10 @@ class ProjectPage(QWidget):
         """Kéo phụ đề / 4 chấm của nền hộp trên video -> ghi vào tab Kiểu chữ (lưu lại, xuất đúng như vậy)."""
         if not self.p:
             return
+        if self._ratio_view and "pos_x" in d:    # đang xem thử tỉ lệ xuất thêm: vị trí phụ đề riêng cho tỉ lệ đó
+            self._ratio_over.setdefault(self._ratio_view, {}).setdefault("sub", {}).update(
+                {"position": "custom", "pos_x": float(d["pos_x"]), "pos_y": float(d["pos_y"])})
+            d = {k: v for k, v in d.items() if k not in ("pos_x", "pos_y", "position")}
         if "pos_x" in d:
             self.st_posx.set(float(d["pos_x"]) * 100)
             self.st_posy.set(float(d["pos_y"]) * 100)
@@ -1306,6 +1353,28 @@ class ProjectPage(QWidget):
         self.x_crf = f.row("Chất lượng", combo([("16", "Rất cao (file lớn)"), ("20", "Cao (khuyên dùng)"),
                                                 ("23", "Trung bình"), ("28", "Nhẹ")], "20"))
         card.add(f)
+        from .aspect_ui import AspectPicker, ExtraRatios
+
+        card.add(label("Tỉ lệ khung (chung với tab Chỉnh sửa)", "muted"))
+        self.x_aspect = AspectPicker()
+        self.x_aspect.changed.connect(self._aspect_changed)
+        card.add(self.x_aspect)
+        f_x = Form()
+        self.x_amode = f_x.row("Phần trống", combo(C.ASPECT_MODES, "blur"))
+        self.x_amode.currentIndexChanged.connect(lambda *_: self._amode_changed(self.x_amode.currentData()))
+        card.add(f_x)
+        card.add(label("Xuất thêm tỉ lệ (mỗi tỉ lệ 1 file, cùng lúc với bản chính) – 👁 xem thử trên video bên phải; "
+                       "khi đang xem thử, kéo chữ / logo / phụ đề hoặc đổi Phần trống / Vị trí phim = chỉnh riêng cho tỉ "
+                       "lệ đó", "muted", wrap=True))
+        self.x_extra = ExtraRatios()
+        self.x_extra.changed.connect(lambda v: (self._save_edit_timer.start(), self._update_summary()))
+        self.x_extra.preview.connect(self._ratio_preview)
+        card.add(self.x_extra)
+        self.x_ratio_note = label("", "warn", wrap=True)
+        self.x_ratio_back = button("Về tỉ lệ chính", "x", flat=True, on_click=lambda: self._ratio_preview(""))
+        self.x_ratio_bar = flow(self.x_ratio_note, self.x_ratio_back)
+        self.x_ratio_bar.hide()
+        card.add(self.x_ratio_bar)
         self.x_summary = label("", "muted", wrap=True)
         card.add(self.x_summary)
         go = GradientButton("Xuất video", "film", big=True)
@@ -1365,6 +1434,12 @@ class ProjectPage(QWidget):
 
     def populate(self, reload_media: bool = True):
         p = self.p
+        from .. import overlay
+
+        raw = p.data.get("edit") or {}
+        if overlay.migrate(raw):     # dự án cũ: chữ chạy / logo -> lớp phủ (tab Chữ & Logo)
+            p.data["edit"] = raw
+            p.save()
         self.loading = True
         try:
             self.name.setText(p.data.get("name", ""))
@@ -1605,8 +1680,12 @@ class ProjectPage(QWidget):
         self.hs_editor.extra = [dict(r) for r in self._hs_lists["logos" if self._hs_target == "regions" else "regions"]]
         self.e_start.setValue(float(e["trim"].get("start") or 0))
         self.e_end.setValue(float(e["trim"].get("end") or 0))
-        set_combo(self.e_aspect, e["aspect"])
-        set_combo(self.e_amode, e["aspect_mode"])
+        self._ratio_over = __import__("json").loads(__import__("json").dumps(e.get("ratio_over") or {}))
+        if getattr(self, "_ratio_view", "") and self._ratio_view not in (e.get("extra_ratios") or []):
+            self._ratio_view = ""
+        self._set_frame_widgets(e)
+        self.layers_tab.set_layers(e.get("layers") or [])
+        self.x_extra.set_values(e.get("extra_ratios") or [], e.get("aspect", "original"))
         set_combo(self.e_res, e["resolution"])
         set_combo(self.e_rot, str(int(e.get("rotate") or 0)))
         self.e_fliph.setChecked(bool(e["flip_h"]))
@@ -1623,13 +1702,6 @@ class ProjectPage(QWidget):
         from ..audiomix import audio_settings
 
         self.audio_tab.fill(audio_settings(e), bool(e["dub"].get("enabled")), e["bgm"].get("path", ""))
-        self.wm_name.setText(Path(e["watermark"]["path"]).name if e["watermark"].get("path") else "Chưa chọn")
-        set_combo(self.e_wmpos, e["watermark"].get("position", "top-right"))
-        self.e_wmscale.set(e["watermark"].get("scale", 0.15))
-        self.e_wmop.set(e["watermark"].get("opacity", 0.85))
-        self.e_text.setText(e["text"].get("content", ""))
-        set_combo(self.e_textpos, e["text"].get("position", "top-left"))
-        self.e_textcolor.set(e["text"].get("color", "#FFFFFF"))
         self.e_fin.set(e["fade"].get("in", 0))
         self.e_fout.set(e["fade"].get("out", 0))
         self.crop_info.setText(f"Crop {e['crop']['w'] * 100:.0f}% × {e['crop']['h'] * 100:.0f}%" if e.get("crop") else "Không crop")
@@ -1657,7 +1729,7 @@ class ProjectPage(QWidget):
             "cuts": e.get("cuts", []), "crop": e.get("crop"),
             "vsplits": e.get("vsplits", []), "inserts": e.get("inserts", []), "mute_spans": e.get("mute_spans", []),
             "hardsub": self._hs_widgets(),
-            "aspect": self.e_aspect.currentData(), "aspect_mode": self.e_amode.currentData(),
+            **self._frame_edit(e),
             "resolution": self.e_res.currentData(), "rotate": int(self.e_rot.currentData()),
             "flip_h": self.e_fliph.isChecked(), "flip_v": self.e_flipv.isChecked(),
             "zoom": self.e_zoom.value(), "speed": self.e_speed.value(),
@@ -1666,10 +1738,8 @@ class ProjectPage(QWidget):
                       "sharpen": self.e_sharpen.isChecked(), "denoise": self.e_denoise.isChecked()},
             "audio": aud,
             "bgm": {"path": e["bgm"].get("path", ""), "volume": aud["bgm"], "duck": aud["duck"]},
-            "watermark": {"path": e["watermark"].get("path", ""), "position": self.e_wmpos.currentData(),
-                          "scale": self.e_wmscale.value(), "opacity": self.e_wmop.value()},
-            "text": {"content": self.e_text.text(), "position": self.e_textpos.currentData(),
-                     "color": self.e_textcolor.color},
+            "watermark": e.get("watermark") or {}, "text": e.get("text") or {},
+            "layers": [dict(L) for L in self._layers],
             "fade": {"in": self.e_fin.value(), "out": self.e_fout.value()},
             "subtitles": {"burn": self.st_burn.isChecked(), "which": self.st_which.currentData(),
                           "style": self.current_style()},
@@ -1765,9 +1835,12 @@ class ProjectPage(QWidget):
     def _snap(self) -> str:
         import json
 
-        # không dùng to_dict (asdict chép sâu từng câu – 2.600 câu ~55 ms); json tự chép phần extra
-        return json.dumps([{"start": s.start, "end": s.end, "text": s.text, "trans": s.trans, "speaker": s.speaker,
-                            "extra": s.extra} for s in self.model.segs])
+        # không dùng to_dict (asdict chép sâu từng câu – 2.600 câu ~55 ms); json tự chép phần extra.
+        # Kèm đoạn cắt + lớp phủ -> Ctrl+Z hoàn tác được cả "Áp dụng cắt" và sửa chữ / logo
+        cuts = ((self.p.data.get("edit") or {}).get("cuts") or []) if self.p else []
+        return json.dumps({"s": [{"start": s.start, "end": s.end, "text": s.text, "trans": s.trans,
+                                  "speaker": s.speaker, "extra": s.extra} for s in self.model.segs],
+                           "c": cuts, "l": self._layers})
 
     def _undo_reset(self):
         """Mở dự án: bắt đầu lịch sử hoàn tác mới."""
@@ -1821,7 +1894,13 @@ class ProjectPage(QWidget):
         dst.append(cur)
         old = {(round(s.start, 3), round(s.end, 3), s.text, s.trans, json.dumps(s.extra, sort_keys=True))
                for s in self.model.segs}
-        segs = [Segment.from_dict(d) for d in json.loads(snap)]
+        snap_d = json.loads(snap)
+        if isinstance(snap_d, list):      # ảnh chụp kiểu cũ (chỉ danh sách câu)
+            snap_d = {"s": snap_d, "c": None, "l": None}
+        segs = [Segment.from_dict(d) for d in snap_d["s"]]
+        e = self.p.edit
+        edit_changed = (snap_d.get("c") is not None and snap_d["c"] != (e.get("cuts") or [])) or \
+            (snap_d.get("l") is not None and snap_d["l"] != self._layers)
         self._undo_busy = True
         try:
             self.model.set_segments(segs)
@@ -1831,6 +1910,22 @@ class ProjectPage(QWidget):
             self._save_segs_now()
         finally:
             self._undo_busy = False
+        if edit_changed:     # đoạn cắt / lớp phủ của bước đó
+            self.p.reload()
+            e = self.p.edit
+            if snap_d.get("c") is not None:
+                e["cuts"] = snap_d["c"]
+            if snap_d.get("l") is not None:
+                e["layers"] = snap_d["l"]
+            self.p.data["edit"] = e
+            self.p.save()
+            self._undo_busy = True
+            try:
+                self.layers_tab.set_layers(e.get("layers") or [])
+            finally:
+                self._undo_busy = False
+            self._update_cuts_label()
+            self._apply_live()
         self._sel_row = -1
         self._update_timeline()
         self._update_undo_btns()
@@ -1954,6 +2049,9 @@ class ProjectPage(QWidget):
                 self._load_media()
             elif j["kind"] == "inpaint":
                 self._sync_clean()
+            cb = self._after_job.pop(j["id"], None)
+            if cb and j.get("status") == "done":
+                cb(j.get("result") if isinstance(j.get("result"), dict) else {})
 
     def _auto_opts(self) -> dict:
         which = self.a_which.currentData()
@@ -2529,12 +2627,15 @@ class ProjectPage(QWidget):
             self._stop_at = None
             if self.player.playing():
                 self.player.toggle()      # "Nghe câu": phát hết câu thì dừng
+            if self._junction_cut:
+                self._junction_cut = None
+                self._live_timer.start()
         segs = self.model.segs
         idx = next((i for i, s in enumerate(segs) if s.start <= t < s.end), -1)
         if idx != self.model.active:
             self.model.set_active(idx)
             if idx >= 0 and self.follow.isChecked() and self.player.playing():
-                table, proxy = {1: (self.table, self.proxy), 5: (self.dub_table, self.dub_proxy)}.get(
+                table, proxy = {1: (self.table, self.proxy), self.TAB_DUB: (self.dub_table, self.dub_proxy)}.get(
                     self.stack.currentIndex(), (None, None))
                 pi = proxy.mapFromSource(self.model.index(idx, 0)) if proxy else None
                 if pi is not None and pi.isValid():
@@ -2548,7 +2649,12 @@ class ProjectPage(QWidget):
             return
         self.player.show_subs = self.ov_show.isChecked()
         which = self.ov_which.currentData()
-        st = pipeline.effective_style(self.p, self.current_style())
+        style = self.current_style()
+        ed_v = None
+        if self._ratio_view:      # xem thử tỉ lệ xuất thêm: phụ đề đặt riêng cho tỉ lệ đó (nếu đã kéo)
+            style.update((self._ratio_over.get(self._ratio_view) or {}).get("sub") or {})
+            ed_v = dict(self.p.edit, aspect=self._ratio_view)
+        st = pipeline.effective_style(self.p, style, ed_v)
         if st.get("margin_v_rel") is not None:
             st["margin_v"] = st["margin_v_rel"] * self.player.view.out_h
         segs = self.model.segs
@@ -3254,6 +3360,284 @@ class ProjectPage(QWidget):
         self._update_cuts_label()
         self._update_timeline()
 
+    # ================================================================== TAB: Chữ & Logo
+    def _tab_layers(self):
+        from .layers_tab import LayersTab
+
+        self.layers_tab = LayersTab(self)
+        self.layers_tab.changed.connect(self._layers_changed)
+        self.layers_tab.selected.connect(lambda lid: self._layer_selected(lid))
+        v = self.player.view
+        v.on_layer_select = lambda lid: self._layer_selected(lid, from_video=True)
+        v.on_layer_changed = self._layer_moved
+        v.on_drop = lambda data, x, y: self.layers_tab.drop(data, x, y)
+        return scroll(self.layers_tab)
+
+    @property
+    def _layers(self) -> list:
+        return self.layers_tab.layers if hasattr(self, "layers_tab") else []
+
+    def duration(self) -> float:
+        return float((self.p.data.get("info") or {}).get("duration") or 0) if self.p else 0.0
+
+    def _layers_changed(self):
+        if self.loading or not self.p:
+            return
+        self._save_edit_timer.start()
+        self._live_timer.start()
+        self.tracks.set_layers(self._layers)
+        self._undo_mark(join=True)
+
+    def _layer_selected(self, lid: str, from_tl: bool = False, from_video: bool = False):
+        self.player.view.select_layer(lid)
+        if not from_tl:
+            self.tracks.select_layer(lid)
+        if self.layers_tab.sel != lid:
+            self.layers_tab.select(lid)
+        if lid and (from_tl or from_video) and self.stack.currentIndex() != self.TAB_LAYERS:
+            self.tabs.set_current(self.TAB_LAYERS)
+
+    def _layer_moved(self, lid: str, ch: dict):
+        """Kéo / phóng 1 lớp trên video. Đang xem thử tỉ lệ xuất thêm -> chỉ chỉnh riêng cho tỉ lệ đó."""
+        if self._ratio_view:
+            self._ratio_over.setdefault(self._ratio_view, {}).setdefault("layers", {}).setdefault(lid, {}).update(ch)
+            self._save_edit_timer.start()
+            self._live_timer.start()
+            return
+        self.layers_tab.update_layer(lid, ch)
+
+    def _layer_action(self, lid: str, act: str):
+        from .. import overlay
+
+        t = self.layers_tab
+        L = next((x for x in t.layers if x.get("id") == lid), None)
+        if not L:
+            return
+        t.select(lid)
+        dur, pos = self.duration(), self.player.position()
+        a, b = overlay.src_span(L, dur)
+        if act == "full":
+            t.full_span(lid)
+        elif act == "from":
+            t.set_span(lid, pos, b if b > pos + 0.2 else min(dur or pos + 5, pos + 5))
+        elif act == "to":
+            t.set_span(lid, a if a < pos - 0.2 else max(0.0, pos - 5), pos)
+        elif act == "dup":
+            t.duplicate()
+        elif act in ("up", "down"):
+            t.move(+1 if act == "up" else -1)
+        elif act == "hide":
+            t.toggle_hidden()
+        elif act == "delete":
+            t.delete(lid)
+
+    # ================================================================== khung hình: tỉ lệ, phần trống, vị trí phim
+    FILM_POS = {"c": (0.5, 0.5), "up": (0.5, 0.15), "down": (0.5, 0.85), "left": (0.15, 0.5), "right": (0.85, 0.5)}
+
+    def _frame_widgets(self) -> dict:
+        x, y = self.e_aposx.value() / 100, self.e_aposy.value() / 100
+        return {"aspect_mode": self.e_amode.currentData(), "aspect_color": self.e_acolor.color,
+                "aspect_pos": [round(x, 3), round(y, 3)], "aspect_scale": round(self.e_ascale.value() / 100, 3)}
+
+    def _frame_edit(self, e: dict) -> dict:
+        """Các khoá khung hình của bản chỉnh sửa. Đang xem thử 1 tỉ lệ xuất thêm: ô Phần trống / Vị trí / Cỡ phim là
+        của tỉ lệ đó (ghi vào ratio_over), bản chính giữ nguyên như đã lưu."""
+        fr = self._frame_widgets()
+        ro = self._ratio_over
+        if self._ratio_view:
+            ro.setdefault(self._ratio_view, {}).update(fr)
+            main = {k: e.get(k) for k in fr}
+        else:
+            main = fr
+        return {"aspect": self.e_aspect.value, **main, "extra_ratios": list(self.x_extra.values),
+                "ratio_over": ro, "safe_zone": self.e_safe.isChecked()}
+
+    def _set_frame_widgets(self, e: dict):
+        from ..video import aspect_pos, edit_for_ratio
+
+        src = edit_for_ratio({**e, "ratio_over": self._ratio_over}, self._ratio_view) if self._ratio_view else e
+        self.e_aspect.set_value(e.get("aspect", "original"))
+        self.x_aspect.set_value(e.get("aspect", "original"))
+        for cb in (self.e_amode, self.x_amode, self.e_apos):
+            cb.blockSignals(True)
+        set_combo(self.e_amode, src.get("aspect_mode", "blur"))
+        set_combo(self.x_amode, src.get("aspect_mode", "blur"))
+        x, y = aspect_pos(src)
+        set_combo(self.e_apos, next((k for k, v in self.FILM_POS.items() if abs(v[0] - x) < 1e-3 and
+                                     abs(v[1] - y) < 1e-3), "custom"))
+        for cb in (self.e_amode, self.x_amode, self.e_apos):
+            cb.blockSignals(False)
+        self.e_acolor.set(src.get("aspect_color") or "#000000")
+        self.e_aposx.set(x * 100)
+        self.e_aposy.set(y * 100)
+        self.e_ascale.set(float(src.get("aspect_scale") or 1.0) * 100)
+        self.e_safe.blockSignals(True)
+        self.e_safe.setChecked(bool(e.get("safe_zone")))
+        self.e_safe.blockSignals(False)
+        self._frame_rows()
+
+    def _frame_rows(self):
+        on = self.e_aspect.value != "original" or bool(self._ratio_view)
+        mode = self.e_amode.currentData()
+        f = self.frame_form
+        for w in (self.e_amode, self.e_apos, self.e_ascale, self.e_safe):
+            f.setRowVisible(w, on)
+        f.setRowVisible(self.e_acolor, on and mode == "color")
+        custom = self.e_apos.currentData() == "custom"
+        f.setRowVisible(self.e_aposx, on and custom)
+        f.setRowVisible(self.e_aposy, on and custom)
+        self.x_amode.setEnabled(on)
+
+    def _frame_live(self):
+        self._frame_rows()
+        if not self.loading:
+            self._save_edit_timer.start()
+            self._live_timer.start()
+
+    def _aspect_changed(self, r: str):
+        """Chọn tỉ lệ ở tab Chỉnh sửa hoặc tab Xuất: cả 2 bộ chọn cùng đổi (1 giá trị chung)."""
+        self.e_aspect.set_value(r)
+        self.x_aspect.set_value(r)
+        self.x_extra.set_values(self.x_extra.values, r)
+        if self._ratio_view:
+            self._ratio_preview("")
+        self._frame_live()
+        self._update_safe()
+
+    def _amode_changed(self, m: str):
+        for cb in (self.e_amode, self.x_amode):
+            if cb.currentData() != m:
+                cb.blockSignals(True)
+                set_combo(cb, m)
+                cb.blockSignals(False)
+        self._frame_live()
+
+    def _film_pos_preset(self, *_):
+        code = self.e_apos.currentData()
+        if code in self.FILM_POS:
+            x, y = self.FILM_POS[code]
+            self.e_aposx.set(x * 100)
+            self.e_aposy.set(y * 100)
+        self._frame_live()
+
+    def _film_pos_slider(self, *_):
+        if self.e_apos.currentData() != "custom":
+            self.e_apos.blockSignals(True)
+            set_combo(self.e_apos, "custom")
+            self.e_apos.blockSignals(False)
+        self._frame_live()
+
+    def _ratio_preview(self, r: str):
+        """👁 Xem thử 1 tỉ lệ xuất thêm trên trình phát ("" = về tỉ lệ chính)."""
+        if not self.p:
+            return
+        self.flush()
+        self._ratio_view = r or ""
+        self.x_extra.set_viewing(self._ratio_view)
+        self.loading = True
+        try:
+            self._set_frame_widgets(self.p.edit)
+        finally:
+            self.loading = False
+        if r:
+            extra = r in self.x_extra.values
+            msg = (f"👁 Đang xem thử khung {r}: kéo chữ / logo / phụ đề, đổi Phần trống / Vị trí phim = chỉnh riêng cho "
+                   f"{r}" + ("" if extra else " (chưa tích xuất thêm tỉ lệ này)"))
+            self.x_ratio_note.setText(msg)
+            self.e_ratio_note.setText(msg)
+        self.x_ratio_bar.setVisible(bool(r))
+        self.e_ratio_bar.setVisible(bool(r))
+        self._apply_live()
+
+    def _update_safe(self):
+        on = self.e_safe.isChecked()
+        v = self.player.view
+        v.set_safe_zone(on)
+        if not on:
+            self.e_safe_warn.setText("")
+            self.e_safe_fix.setVisible(False)
+            return
+        issues = v.safe_issues()
+        self.e_safe_warn.setText(("⚠ Nằm trong vùng bị che: " + ", ".join(issues[:4]) +
+                                  (f" và {len(issues) - 4} lớp khác" if len(issues) > 4 else ""))
+                                 if issues else "✓ Phụ đề và chữ đều nằm trong vùng an toàn")
+        self.e_safe_fix.setVisible(bool(issues))
+
+    def _safe_fix(self):
+        """Đưa phụ đề + các lớp chữ / logo nằm trong vùng bị che vào vùng an toàn."""
+        from ..video import SAFE_ZONE
+
+        top, bot, right = SAFE_ZONE["top"], SAFE_ZONE["bottom"], SAFE_ZONE["right"]
+        v = self.player.view
+        if "phụ đề" in v.safe_issues():
+            d = {"position": "custom", "pos_x": 0.5, "pos_y": round(1 - bot - 0.015, 4)}
+            if self._ratio_view:
+                self._ratio_over.setdefault(self._ratio_view, {}).setdefault("sub", {}).update(
+                    {**d, "line_width": min(float(self.current_style().get("line_width") or 0.9), 1 - 2 * right)})
+            else:
+                set_combo(self.st_pos, "custom")
+                self.st_posx.set(50)
+                self.st_posy.set(d["pos_y"] * 100)
+                self.st_lwidth.set(min(self.st_lwidth.value(), (1 - 2 * right) * 100))
+                self._style_rows()
+        fr = v.canvas.rect()
+        zones = v.safe.zones()
+        for lid, it in list(v.layers.items()):
+            r = it._rect()
+            if not it.isVisible() or not any(z.intersects(r) for z in zones):
+                continue
+            w, h = r.width() / fr.width(), r.height() / fr.height()
+            x = min(max(w / 2, (r.center().x() - fr.left()) / fr.width()), 1 - right - w / 2)
+            y = min(max(top + h / 2, (r.center().y() - fr.top()) / fr.height()), 1 - bot - h / 2)
+            # tâm lớp (x, y) lệch so với tâm ảnh (bóng đổ, nét cọ) -> dời đúng bằng độ lệch của tâm ảnh
+            L = it.layer
+            dx = x - (r.center().x() - fr.left()) / fr.width()
+            dy = y - (r.center().y() - fr.top()) / fr.height()
+            self._layer_moved(lid, {"x": round(float(L.get("x", 0.5)) + dx, 4),
+                                    "y": round(float(L.get("y", 0.5)) + dy, 4)})
+        self._save_edit_timer.start()
+        self._live_timer.start()
+        self.win.toast("Đã đưa phụ đề / chữ vào vùng an toàn", "ok")
+
+    # ================================================================== rút khoảng lặng / cắt bài hát
+    def _silence_items(self, items: list):
+        self.tracks.set_pending(items)
+        self._live_timer.start()     # "Phát thử bản đã cắt": trình phát bỏ qua các đoạn đã tích
+
+    def _play_junction(self, it: dict):
+        """▶ Xem chỗ nối: phát từ 2 s trước đoạn cắt, nhảy qua đoạn cắt, dừng 2 s sau."""
+        a, b = it["cut"]
+        self._junction_cut = [a, b]
+        self._apply_live()
+        self.player.seek(max(0.0, a - 2.0))
+        self._stop_at = b + 2.0
+        if not self.player.playing():
+            self.player.toggle()
+
+    def _apply_silence(self, items: list):
+        from .. import silence
+
+        if not self.p or not items:
+            return
+        self.flush()
+        self.p.reload()
+        e = self.p.edit
+        before = sum(b - a for a, b in __import__("trami.video", fromlist=["keep_ranges"]).keep_ranges(
+            self.duration(), e.get("trim"), e.get("cuts")))
+        e["cuts"] = silence.new_cuts(e.get("cuts"), items)
+        self.p.data["edit"] = e
+        self.p.save()
+        self._undo_mark()
+        after = sum(b - a for a, b in __import__("trami.video", fromlist=["keep_ranges"]).keep_ranges(
+            self.duration(), e.get("trim"), e.get("cuts")))
+        self.sil.clear()
+        self._update_cuts_label()
+        self._update_timeline()
+        self._update_summary()
+        self._apply_live()
+        self.win.toast(f"Đã cắt {len(items)} đoạn, bớt {fmt(before - after, False)} – Ctrl+Z để hoàn tác; lấy lại 1 "
+                       "đoạn: chọn đoạn đó trên dòng Video của timeline → Khôi phục", "ok")
+
     def _update_cuts_label(self):
         cuts = self.p.edit.get("cuts", []) if self.p else []
         self.cuts_list.setText("\n".join(f"✂ Xoá {fmt(a)} → {fmt(b)}" for a, b in cuts) or "Chưa có đoạn cắt nào")
@@ -3270,6 +3654,7 @@ class ProjectPage(QWidget):
         self.tracks.mark = self.timeline.mark
         self.tracks.set_data(d, self.model.segs, clips, keep, e.get("cuts", []),
                              e.get("vsplits", []), e.get("inserts", []), e.get("mute_spans", []))
+        self.tracks.set_layers(self._layers)
 
     def _crop_dialog(self):
         from PySide6.QtWidgets import QDialog, QDialogButtonBox
@@ -3317,7 +3702,7 @@ class ProjectPage(QWidget):
         e[kind]["path"] = path
         self.p.data["edit"] = e
         self.p.save()
-        (self.audio_tab.bgm_name if kind == "bgm" else self.wm_name).setText(Path(path).name)
+        self.audio_tab.bgm_name.setText(Path(path).name)
         self._update_summary()
         if kind == "bgm":
             self._update_player_audio(force=True)
@@ -3328,7 +3713,7 @@ class ProjectPage(QWidget):
         e[kind]["path"] = ""
         self.p.data["edit"] = e
         self.p.save()
-        (self.audio_tab.bgm_name if kind == "bgm" else self.wm_name).setText("Chưa chọn")
+        self.audio_tab.bgm_name.setText("Chưa chọn")
         if kind == "bgm":
             self._update_player_audio(force=True)
 
@@ -3739,7 +4124,7 @@ class ProjectPage(QWidget):
         self.model.set_picked(rows)
         self.win.toast(f"Đã tích {len(rows)} câu chưa có giọng – bấm 'Tạo lại giọng các câu đã tích' để đọc bù", "ok")
 
-    def _detect_songs(self):
+    def _detect_songs(self, then=None):
         skip = self.d_skipsong.isChecked()
 
         def fn(j, p):
@@ -3749,7 +4134,9 @@ class ProjectPage(QWidget):
             rows = [i for i, x in enumerate(p.segments) if x.extra.get("song_by") == "pitch"]
             return {"message": (f"Tìm được {n} câu đang hát – đã đánh dấu 🎵 và tích sẵn (bấm 'Đặt / bỏ 🎵' nếu câu nào "
                                 "là lời thoại)") if n else "Không thấy thêm đoạn hát nào", "pick": rows if n else []}
-        self.submit("redub" if pipeline.has_dub(self.p) else "join", "Tìm câu hát", fn)
+        job = self.submit("redub" if pipeline.has_dub(self.p) else "join", "Tìm câu hát", fn)
+        if then and job is not None:
+            self._after_job[job.id] = lambda res: then(len(res.get("pick") or []))
 
     def _delete_picked(self):
         rows = [r for r in sorted(self.model.selected) if 0 <= r < len(self.model.segs)]
@@ -4203,10 +4590,25 @@ class ProjectPage(QWidget):
             ed = self.collect_edit()
         except Exception:  # noqa: BLE001 – giao diện chưa dựng xong
             return
+        if self._ratio_view:      # 👁 xem thử 1 tỉ lệ xuất thêm (với phần chỉnh riêng của tỉ lệ đó)
+            from ..video import edit_for_ratio
+
+            ed = edit_for_ratio(ed, self._ratio_view)
+        extra = []
+        if getattr(self, "sil", None) is not None and self.sil.preview.isChecked():
+            extra += self.sil.on_cuts()           # phát thử bản đã cắt
+        if self._junction_cut:
+            extra.append(self._junction_cut)      # ▶ xem chỗ nối
+        if extra:
+            from ..audiomix import merge_spans
+
+            ed = dict(ed, cuts=merge_spans(list(ed.get("cuts") or []) + extra))
         i = self.p.data.get("info", {})
         self.player.set_edit(ed, i.get("width", 0), i.get("height", 0), i.get("duration", 0))
+        self.player.view.select_layer(self.layers_tab.sel)
         self._refresh_overlay()
         self._sync_clean()
+        QTimer.singleShot(0, self._update_safe)
 
     def _update_summary(self):
         if not self.p:
@@ -4228,6 +4630,12 @@ class ProjectPage(QWidget):
             items.append("Crop khung hình")
         if e["aspect"] != "original" or e["resolution"] != "original":
             items.append(f"Khung hình: {e['aspect']} · {e['resolution']}")
+        if e.get("extra_ratios"):
+            items.append("Xuất thêm tỉ lệ: " + ", ".join(r for r in e["extra_ratios"] if r != e["aspect"]))
+        lay = [L for L in e.get("layers") or [] if not L.get("hidden")]
+        if lay:
+            nt = sum(1 for L in lay if L.get("kind") != "logo")
+            items.append(f"Lớp phủ: {nt} chữ, {len(lay) - nt} logo")
         if e["flip_h"] or e["flip_v"] or e.get("rotate"):
             items.append("Lật / xoay")
         if abs(e["speed"] - 1) > 1e-3:

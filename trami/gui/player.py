@@ -777,6 +777,335 @@ class HardsubOverlay(QGraphicsItem):
             self.on_changed(regs)
 
 
+class BackdropItem(QGraphicsItem):
+    """Nền mờ thật khi đổi tỉ lệ khung (như video xuất): khung hình đang chiếu thu nhỏ rồi phóng to phủ kín khung."""
+
+    def __init__(self, video, parent):
+        super().__init__(parent)
+        self.video = video
+        self.rect = QRectF()
+        self.on = False
+        self._img: QImage | None = None
+        self._last = 0.0
+        self._connected = False
+        self.setZValue(-1)
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+
+    def boundingRect(self):
+        return self.rect
+
+    def set_state(self, on: bool, rect: QRectF):
+        self.prepareGeometryChange()
+        self.rect = QRectF(rect)
+        self.on = on
+        sink = self.video.videoSink()
+        if on and not self._connected:
+            sink.videoFrameChanged.connect(self._on_frame)
+            self._connected = True
+            self._on_frame(sink.videoFrame(), force=True)
+        elif not on and self._connected:
+            try:
+                sink.videoFrameChanged.disconnect(self._on_frame)
+            except (RuntimeError, TypeError):
+                pass
+            self._connected = False
+            self._img = None
+        self.update()
+
+    def _on_frame(self, frame, force: bool = False):
+        now = time.monotonic()
+        if not force and now - self._last < 0.12:     # ~8 lần/giây là đủ cho nền mờ
+            return
+        if frame is None or not frame.isValid():
+            return
+        self._last = now
+        img = frame.toImage()
+        if img.isNull():
+            return
+        small = img.scaled(40, max(2, int(40 * img.height() / max(1, img.width()))),
+                           Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        self._img = small.scaled(small.width() * 2, small.height() * 2, Qt.AspectRatioMode.IgnoreAspectRatio,
+                                 Qt.TransformationMode.SmoothTransformation)
+        self.update()
+
+    def paint(self, p: QPainter, opt, widget=None):
+        if not self.on or self._img is None:
+            return
+        r, img = self.rect, self._img
+        k = max(r.width() / img.width(), r.height() / img.height())
+        w, h = img.width() * k, img.height() * k
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        p.drawImage(QRectF(r.center().x() - w / 2, r.center().y() - h / 2, w, h), img)
+        p.fillRect(r, QColor(0, 0, 0, 40))
+
+
+class LayerItem(QGraphicsItem):
+    """1 lớp phủ (chữ / logo) trên khung xem trước – ảnh vẽ bằng đúng hàm của video xuất (trami/overlay.py).
+    Kéo để dời, kéo 4 góc để phóng to / thu nhỏ; thả chuột -> on_changed(mã lớp, {khoá: giá trị})."""
+    HANDLE = 9
+
+    def __init__(self, view: "VideoView", layer: dict):
+        super().__init__(view.canvas)
+        self.view = view
+        self.layer = dict(layer)
+        self._img: QImage | None = None
+        self._key = None
+        self._o = (0.0, 0.0)
+        self._state = (0.0, 0.0, 1.0)    # (mép trái, dời y, độ hiện) theo điểm ảnh khung xuất – hiệu ứng
+        self._drag = None
+        self._hover = ""
+        self._movie = None
+        self._frame = None
+        self.selected = False
+        self.editable = True
+        self.setAcceptHoverEvents(True)
+        self.setZValue(5)
+
+    # ---------------------------------------------------------------- dữ liệu
+    def set_layer(self, layer: dict):
+        from ..overlay import LOOK_KEYS
+
+        if self._drag:     # đang kéo: không để bản lưu cũ ghi đè chỗ đang kéo
+            keep = {k: self.layer.get(k) for k in ("x", "y", "size", "w")}
+            layer = {**layer, **keep}
+        if any(layer.get(k) != self.layer.get(k) for k in LOOK_KEYS):
+            self._img = None       # đổi hình dạng (chữ, font, màu, cỡ…) -> vẽ lại ảnh; chỉ dời chỗ thì không
+        self.layer = dict(layer)
+        self._ensure_movie()
+        self.prepareGeometryChange()
+        self.update()
+
+    def _ensure_movie(self):
+        from .. import overlay
+
+        path = self.layer.get("path") if self.layer.get("kind") == "logo" else ""
+        anim = bool(path) and overlay.is_animated(path)
+        if anim and (self._movie is None or self._movie.fileName() != path):
+            from PySide6.QtGui import QMovie
+
+            self._movie = QMovie(path)
+            self._movie.frameChanged.connect(self._movie_frame)
+            self._movie.start()
+        elif not anim and self._movie is not None:
+            self._movie.stop()
+            self._movie = None
+            self._frame = None
+
+    def _movie_frame(self, _n):
+        if self._movie is not None and self.isVisible():
+            self._frame = self._movie.currentImage()
+            self._img = None
+            self.update()
+
+    def stop(self):
+        if self._movie is not None:
+            self._movie.stop()
+            self._movie = None
+
+    def _scale(self) -> float:
+        return self.view.canvas.rect().width() / max(1, self.view.out_w)
+
+    def _image(self):
+        from .. import overlay
+
+        TW, TH = self.view.out_w, self.view.out_h
+        sc = self._scale()
+        key = (TW, TH, round(sc, 4))
+        if key != self._key or self._img is None:
+            try:
+                self._img, ox, oy = overlay.render(self.layer, TW, TH, sc, self._frame)
+                self._o = (ox, oy)
+            except Exception:  # noqa: BLE001 – ảnh / font lỗi: không làm hỏng trình phát
+                self._img = QImage()
+                self._o = (0.0, 0.0)
+            self._key = key
+        return self._img
+
+    def _rect(self) -> QRectF:
+        img = self._image()
+        fr = self.view.canvas.rect()
+        sc = self._scale()
+        cx = fr.left() + float(self.layer.get("x", 0.5)) * fr.width()
+        cy = fr.top() + float(self.layer.get("y", 0.5)) * fr.height()
+        left = cx - self._o[0]
+        if not img or img.isNull():
+            return QRectF(cx - 20, cy - 10, 40, 20)
+        x_out, dy, _a = self._state
+        if self.layer.get("anim") in ("scroll",) or str(self.layer.get("anim", "")).startswith("slide"):
+            left = fr.left() + x_out * sc
+        return QRectF(left, cy - self._o[1] + dy * sc, img.width(), img.height())
+
+    def set_time(self, rel: float | None, length: float):
+        """rel = giây kể từ lúc lớp hiện trên video xuất (None = không hiện lúc này)."""
+        from .. import overlay
+
+        vis = rel is not None and not self.layer.get("hidden")
+        if vis:
+            img = self._image()
+            fr = self.view.canvas.rect()
+            sc = self._scale() or 1
+            cx = float(self.layer.get("x", 0.5)) * self.view.out_w
+            left = cx - self._o[0] / sc
+            st = overlay.anim_state(self.layer, rel, length, self.view.out_w, self.view.out_h,
+                                    (img.width() if img else 0) / sc, (img.height() if img else 0) / sc, left)
+            if st != self._state:
+                self.prepareGeometryChange()
+                self._state = st
+            self.setOpacity(max(0.0, min(1.0, st[2])))
+            _ = fr
+        if vis != self.isVisible():
+            self.setVisible(vis)
+
+    def boundingRect(self):
+        return self._rect().adjusted(-self.HANDLE, -self.HANDLE, self.HANDLE, self.HANDLE)
+
+    def shape(self):
+        path = QPainterPath()
+        path.addRect(self._rect().adjusted(-4, -4, 4, 4))
+        return path
+
+    def paint(self, p: QPainter, opt, widget=None):
+        img = self._image()
+        r = self._rect()
+        if img and not img.isNull():
+            p.drawImage(r.topLeft(), img)
+        if self.editable and (self.selected or self._hover or self._drag):
+            pen = QPen(QColor(theme.ACCENT if self.selected else "#FFFFFF"), 1.4, Qt.PenStyle.DashLine)
+            pen.setCosmetic(True)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(r)
+            if self.selected:
+                p.setPen(QPen(QColor(theme.ACCENT), 1.5))
+                p.setBrush(QColor("#FFFFFF"))
+                for c in (r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight()):
+                    p.drawRoundedRect(QRectF(c.x() - 4.5, c.y() - 4.5, 9, 9), 2, 2)
+
+    # ---------------------------------------------------------------- chuột
+    def _hit(self, pos) -> str:
+        r = self._rect()
+        if self.selected:
+            for k, c in (("TL", r.topLeft()), ("TR", r.topRight()), ("BL", r.bottomLeft()), ("BR", r.bottomRight())):
+                if abs(pos.x() - c.x()) <= self.HANDLE and abs(pos.y() - c.y()) <= self.HANDLE:
+                    return k
+        return "move" if r.adjusted(-4, -4, 4, 4).contains(pos) else ""
+
+    def hoverMoveEvent(self, e):
+        from .editors import REGION_CURSORS
+
+        if not self.editable:
+            return
+        k = self._hit(e.pos())
+        if k != self._hover:
+            self._hover = k
+            if k:
+                self.setCursor(REGION_CURSORS[k])
+            else:
+                self.unsetCursor()
+            self.update()
+
+    def hoverLeaveEvent(self, e):
+        self._hover = ""
+        self.unsetCursor()
+        self.update()
+
+    def mousePressEvent(self, e):
+        if not self.editable or e.button() != Qt.MouseButton.LeftButton:
+            e.ignore()
+            return
+        k = self._hit(e.pos())
+        if not k:
+            e.ignore()
+            return
+        if self.view.on_layer_select:
+            self.view.on_layer_select(self.layer.get("id"))
+        r = self._rect()
+        size_key = "w" if self.layer.get("kind") == "logo" else "size"
+        self._drag = (k, e.scenePos(), float(self.layer.get("x", 0.5)), float(self.layer.get("y", 0.5)),
+                      float(self.layer.get(size_key) or 0.06), r.center(), size_key)
+        e.accept()
+
+    def mouseMoveEvent(self, e):
+        if not self._drag:
+            return
+        k, p0, x0, y0, s0, c0, size_key = self._drag
+        fr = self.view.canvas.rect()
+        if k == "move":
+            d = e.scenePos() - p0
+            x, y = x0 + d.x() / fr.width(), y0 + d.y() / fr.height()
+            snap = 7 / max(1.0, fr.width())
+            if abs(x - 0.5) < snap:     # hít vào giữa khung
+                x = 0.5
+            if abs(y - 0.5) < 7 / max(1.0, fr.height()):
+                y = 0.5
+            self.layer["x"], self.layer["y"] = round(min(1.05, max(-0.05, x)), 4), round(min(1.05, max(-0.05, y)), 4)
+        else:
+            dist0 = max(4.0, (p0 - c0).manhattanLength())
+            f = max(0.1, (e.scenePos() - c0).manhattanLength() / dist0)
+            lo, hi = (0.02, 1.5) if size_key == "w" else (0.01, 0.4)
+            self.layer[size_key] = round(min(hi, max(lo, s0 * f)), 4)
+            self._img = None
+        self.prepareGeometryChange()
+        self.update()
+
+    def mouseReleaseEvent(self, e):
+        if not self._drag:
+            return
+        k, *_r, size_key = self._drag
+        self._drag = None
+        ch = {"x": self.layer["x"], "y": self.layer["y"]} if k == "move" else {size_key: self.layer[size_key]}
+        if self.view.on_layer_changed:
+            self.view.on_layer_changed(self.layer.get("id"), ch)
+        self.update()
+
+
+class SafeZoneItem(QGraphicsItem):
+    """Vùng bị nút bấm / tên kênh / chú thích của TikTok, Reels, Shorts che – tô đỏ mờ để tránh đặt chữ vào đó."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.rect = QRectF()
+        self.setZValue(50)
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self.setVisible(False)
+
+    def boundingRect(self):
+        return self.rect
+
+    def set_rect(self, r: QRectF):
+        self.prepareGeometryChange()
+        self.rect = QRectF(r)
+
+    def zones(self) -> list[QRectF]:
+        from ..video import SAFE_ZONE
+
+        r = self.rect
+        top = QRectF(r.left(), r.top(), r.width(), r.height() * SAFE_ZONE["top"])
+        bot = QRectF(r.left(), r.bottom() - r.height() * SAFE_ZONE["bottom"], r.width(), r.height() * SAFE_ZONE["bottom"])
+        right = QRectF(r.right() - r.width() * SAFE_ZONE["right"], top.bottom(), r.width() * SAFE_ZONE["right"],
+                       bot.top() - top.bottom())
+        return [top, bot, right]
+
+    def paint(self, p: QPainter, opt, widget=None):
+        z = self.zones()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(239, 68, 68, 60))
+        for r in z:
+            p.drawRect(r)
+        pen = QPen(QColor(248, 113, 113, 220), 1.2, Qt.PenStyle.DashLine)
+        pen.setCosmetic(True)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        safe = QRectF(self.rect.left(), z[0].bottom(), self.rect.width() - z[2].width(), z[1].top() - z[0].bottom())
+        p.drawRect(safe)
+        p.setPen(QColor(255, 230, 230, 230))
+        p.setFont(theme.font(7.5))
+        p.drawText(z[0].adjusted(6, 0, -6, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   "Vùng bị nút / tên kênh che (TikTok · Reels · Shorts)")
+        p.drawText(z[1].adjusted(6, 0, -6, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   "Chú thích + nhạc của TikTok / Reels che vùng này")
+
+
 class VideoView(QGraphicsView):
     """Khung xem: mô phỏng khung hình đầu ra (tỉ lệ khung, crop, lật, xoay, phóng to, màu) ngay khi chỉnh."""
 
@@ -795,6 +1124,15 @@ class VideoView(QGraphicsView):
         self.clip.setPen(QPen(Qt.PenStyle.NoPen))
         self.clip.setFlag(QGraphicsItem.GraphicsItemFlag.ItemClipsChildrenToShape, True)
         self.video = QGraphicsVideoItem(self.clip)
+        self.backdrop = BackdropItem(self.video, self.canvas)
+        self.safe = SafeZoneItem(self.canvas)
+        self.layers: dict[str, LayerItem] = {}   # lớp phủ chữ / logo theo mã lớp
+        self.layer_sel = ""
+        self.layers_editable = True
+        self.on_layer_select = None    # bấm 1 lớp trên video -> on_layer_select(mã)
+        self.on_layer_changed = None   # kéo / phóng lớp xong -> on_layer_changed(mã, {khoá: giá trị})
+        self.on_drop = None            # thả logo từ thư viện vào video -> on_drop(dữ liệu, x 0..1, y 0..1)
+        self.setAcceptDrops(True)
         self.hs = HardsubOverlay(self.video)
         self.color = ColorEffect()
         self.color.setEnabled(False)
@@ -810,6 +1148,7 @@ class VideoView(QGraphicsView):
         self.edit: dict = {}
         self.src_w = self.src_h = 0
         self.out_h = 1080
+        self.out_w = 1920
         self.on_layout = None   # gọi lại khi khung thay đổi (để vẽ lại phụ đề)
         self.video.nativeSizeChanged.connect(self._native)
         self.setMinimumHeight(220)
@@ -837,7 +1176,7 @@ class VideoView(QGraphicsView):
         self._fit()
 
     def _fit(self):
-        from ..video import ASPECTS, target_size
+        from ..video import aspect_wh, fit_geometry, target_size
 
         w, h = self.viewport().width(), self.viewport().height()
         self.scene_.setSceneRect(0, 0, w, h)
@@ -855,20 +1194,28 @@ class VideoView(QGraphicsView):
         if rot in (90, 270):
             rw, rh = rh, rw
         aspect = e.get("aspect", "original")
-        if aspect in ASPECTS:
-            aw, ah = ASPECTS[aspect]
-        else:
-            aw, ah = rw, rh
+        ar = aspect_wh(aspect)
+        aw, ah = ar if ar else (rw, rh)
         # khung đầu ra vừa khít ô xem
         k = min(w / aw, h / ah)
         fw, fh = aw * k, ah * k
         frame = QRectF((w - fw) / 2, (h - fh) / 2, fw, fh)
         mode = e.get("aspect_mode", "blur")
         self.canvas.setRect(frame)
-        self.canvas.setBrush(QBrush(QColor("#000" if mode == "pad" or aspect not in ASPECTS else "#20232b")))
-        sc = (max if (aspect in ASPECTS and mode == "crop") else min)(fw / rw, fh / rh)
-        content = QRectF(frame.center().x() - rw * sc / 2, frame.center().y() - rh * sc / 2, rw * sc, rh * sc)
+        bg = (e.get("aspect_color") or "#000000") if (ar and mode == "color") else \
+            "#000" if (mode in ("pad", "crop") or not ar) else "#20232b"
+        self.canvas.setBrush(QBrush(QColor(bg)))
+        if ar:   # cùng cách đặt phim vào khung như khi xuất (cách lấp, phóng, vị trí)
+            gx, gy, gw, gh = fit_geometry(rw, rh, fw, fh, e)
+            content = QRectF(frame.left() + gx, frame.top() + gy, gw, gh)
+            sc = gw / rw
+        else:
+            sc = min(fw / rw, fh / rh)
+            content = QRectF(frame.center().x() - rw * sc / 2, frame.center().y() - rh * sc / 2, rw * sc, rh * sc)
         self.clip.setRect(content)
+        covered = content.contains(frame.adjusted(1, 1, -1, -1))      # phim phủ kín khung -> không cần nền
+        self.backdrop.set_state(bool(ar) and mode == "blur" and not covered, frame)
+        self.safe.set_rect(frame)
         # đặt video: tâm vùng crop -> tâm nội dung, lật, xoay, phóng
         kk = sc * zoom
         self.hs.prepareGeometryChange()
@@ -880,25 +1227,112 @@ class VideoView(QGraphicsView):
         t = t * QTransform().rotate(rot)
         t = t * QTransform.fromTranslate(content.center().x(), content.center().y())
         self.video.setTransform(t)
-        # chiều cao khung đầu ra thật (phụ đề tính theo nó)
+        # kích thước khung đầu ra thật (phụ đề, lớp phủ tính theo nó)
         if self.src_w and self.src_h:
             sw, sh = self.src_w * cw, self.src_h * ch
             if rot in (90, 270):
                 sw, sh = sh, sw
-            self.out_h = target_size(int(sw), int(sh), aspect, e.get("resolution", "original"))[1]
+            self.out_w, self.out_h = target_size(int(sw), int(sh), aspect, e.get("resolution", "original"))
         else:
-            self.out_h = 1080
+            self.out_w, self.out_h = int(round(1080 * aw / ah)) // 2 * 2, 1080
+        for it in self.layers.values():
+            it.prepareGeometryChange()
+            it.update()
         if self.on_layout:
             self.on_layout()
+
+    # ------------------------------------------------------------ lớp phủ chữ / logo
+    def set_layers(self, layers: list):
+        """Đồng bộ các lớp phủ với danh sách (thêm / bỏ / đổi thứ tự chồng)."""
+        ids = []
+        for z, L in enumerate(layers or []):
+            lid = L.get("id")
+            if not lid:
+                continue
+            ids.append(lid)
+            it = self.layers.get(lid)
+            if it is None:
+                it = self.layers[lid] = LayerItem(self, L)
+                it.set_layer(L)
+            elif it.layer != L:
+                it.set_layer(L)
+            it.setZValue(5 + z * 0.01)
+            it.selected = lid == self.layer_sel
+            it.editable = self.layers_editable
+            it.setAcceptHoverEvents(self.layers_editable)
+            it.setAcceptedMouseButtons(Qt.MouseButton.LeftButton if self.layers_editable else Qt.MouseButton.NoButton)
+        for lid in [k for k in self.layers if k not in ids]:
+            it = self.layers.pop(lid)
+            it.stop()
+            it.setParentItem(None)
+            self.scene_.removeItem(it)
+
+    def select_layer(self, lid: str):
+        self.layer_sel = lid or ""
+        for k, it in self.layers.items():
+            if it.selected != (k == self.layer_sel):
+                it.selected = k == self.layer_sel
+                it.update()
+
+    def set_safe_zone(self, on: bool):
+        self.safe.setVisible(bool(on))
+
+    def safe_issues(self) -> list[str]:
+        """Chữ nằm trong vùng bị nút / chú thích TikTok – Reels che: ["phụ đề", "Chữ · …"]."""
+        from .. import overlay
+
+        zones = self.safe.zones()
+        out = []
+        g = self.sub._geometry() if self.sub.parts or self.sub.show_frame else None
+        if g and any(z.intersects(g["outer"]) for z in zones):
+            out.append("phụ đề")
+        for it in self.layers.values():
+            if it.isVisible() and any(z.intersects(it._rect()) for z in zones):
+                out.append(overlay.text_name(it.layer))
+        return out
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasFormat("application/x-subvideo-logo") or e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragEnterEvent(e)
+
+    def dragMoveEvent(self, e):
+        if e.mimeData().hasFormat("application/x-subvideo-logo") or e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragMoveEvent(e)
+
+    def dropEvent(self, e):
+        md = e.mimeData()
+        fr = self.canvas.rect()
+        pt = self.mapToScene(e.position().toPoint())
+        rx = (pt.x() - fr.left()) / max(1.0, fr.width())
+        ry = (pt.y() - fr.top()) / max(1.0, fr.height())
+        data = None
+        if md.hasFormat("application/x-subvideo-logo"):
+            data = bytes(md.data("application/x-subvideo-logo")).decode("utf-8")
+        elif md.hasUrls():
+            data = "file:" + md.urls()[0].toLocalFile()
+        if data and self.on_drop and 0 <= rx <= 1 and 0 <= ry <= 1:
+            self.on_drop(data, rx, ry)
+            e.acceptProposedAction()
 
     def video_rect(self) -> QRectF:
         return self.canvas.rect()
 
     def set_tool(self, regions: bool, sub_frame: bool = False):
-        """regions: tab Xoá phụ đề – chuột chỉnh vùng che; còn lại chuột kéo phụ đề (sub_frame: tab Kiểu chữ)."""
+        """regions: tab Xoá phụ đề – chuột chỉnh vùng che; còn lại chuột kéo phụ đề (sub_frame: tab Kiểu chữ) và lớp
+        phủ chữ / logo."""
         self.hs.set_editing(regions)
         self.sub.show_frame = sub_frame and not regions
         self.sub.set_editable(not regions)
+        self.layers_editable = not regions
+        for it in self.layers.values():
+            it.editable = not regions
+            it.setAcceptHoverEvents(not regions)
+            it.setAcceptedMouseButtons(Qt.MouseButton.NoButton if regions else Qt.MouseButton.LeftButton)
+            it.update()
 
 
 class _Feeder(QObject):
@@ -1086,6 +1520,8 @@ class Player(QWidget):
         self._kara_cache: dict = {}
         self._clock = (0.0, 0.0)
         self._kara_timer = QTimer(self, interval=33, timeout=self._kara_tick)
+        self._anim_timer = QTimer(self, interval=33, timeout=self._anim_tick)   # lớp phủ có hiệu ứng (trượt / chạy)
+        self.speed = 1.0
 
         self.btn_play = IconButton("play", "Phát / dừng (phím Space)", 40, accent=True)
         self.btn_back = IconButton("chev_left", "Lùi 1 khung hình", 32)
@@ -1209,6 +1645,7 @@ class Player(QWidget):
         else:
             self._kara_timer.stop()
             self.update_sub(self.position())
+        self.update_layers(self.position())
 
     def set_edit(self, edit: dict, src_w: int = 0, src_h: int = 0, duration: float = 0.0):
         """Áp các chỉnh sửa (khung hình, màu, tốc độ, đoạn cắt) lên trình phát để xem ngay."""
@@ -1216,7 +1653,9 @@ class Player(QWidget):
 
         edit = edit or {}
         self.view.set_edit(edit, src_w, src_h)
+        self.view.set_layers(edit.get("layers") or [])
         rate = min(4.0, max(0.25, float(edit.get("speed") or 1.0)))
+        self.speed = rate
         if abs(self.mp.playbackRate() - rate) > 1e-3:
             self.mp.setPlaybackRate(rate)
         if self.live.mix is not None:
@@ -1229,6 +1668,7 @@ class Player(QWidget):
         if self.keep == [(0.0, dur)] or (len(self.keep) == 1 and self.keep[0][0] <= 0.001
                                          and abs(self.keep[0][1] - dur) < 0.01):
             self.keep = []
+        self.update_layers()
 
     def _skip_cut(self, t: float) -> bool:
         """Đang phát vào đoạn đã cắt -> nhảy qua. Trả về True nếu đã tua."""
@@ -1258,6 +1698,7 @@ class Player(QWidget):
             self.slider.blockSignals(False)
         self.time.setText(f"{fmt(t)} / {fmt(self._dur, False)}")
         self.update_sub(t)
+        self.update_layers(t)
         self.positionChanged.emit(t)
 
     # ------------------------------------------------------------ phụ đề
@@ -1272,6 +1713,38 @@ class Player(QWidget):
         elif not style.get("karaoke"):
             self._kara_timer.stop()
         self.update_sub(self.position())
+
+    # ------------------------------------------------------------ lớp phủ chữ / logo
+    def update_layers(self, t: float | None = None):
+        """Hiện / ẩn từng lớp phủ theo đầu phát + hiệu ứng (giờ tính theo video XUẤT: bỏ đoạn cắt, tính tốc độ)."""
+        from .. import overlay
+        from ..video import out_time
+
+        if not self.view.layers:
+            return
+        t = self.position() if t is None else t
+        dur = self._dur or 0.0
+        keep = self.keep or [(0.0, dur or 1e9)]
+        in_keep = not self.keep or any(a - 0.02 <= t < b for a, b in self.keep)
+        any_anim = False
+        for it in self.view.layers.values():
+            L = it.layer
+            a, b = overlay.src_span(L, dur or 1e9)
+            if a <= t < b and in_keep:
+                A = out_time(a, keep, self.speed)
+                it.set_time(out_time(t, keep, self.speed) - A, out_time(b, keep, self.speed) - A)
+            else:
+                it.set_time(None, 0)
+            any_anim = any_anim or (L.get("anim") or "none") != "none" or bool(L.get("fade_in") or L.get("fade_out"))
+        if self.playing() and any_anim and not self._anim_timer.isActive():
+            self._anim_timer.start()
+
+    def _anim_tick(self):
+        if not self.playing():
+            self._anim_timer.stop()
+            return
+        t0, at = self._clock
+        self.update_layers(t0 + min(0.5, time.monotonic() - at) * self.mp.playbackRate())
 
     def _kara_tick(self):
         """Khi phát: vẽ lại phụ đề ~30 lần/giây theo đồng hồ nội suy (vị trí video chỉ báo vài lần/giây)."""

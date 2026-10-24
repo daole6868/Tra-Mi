@@ -56,9 +56,14 @@ def relabel(cb: QComboBox, choices: list[tuple[str, str]]):
         for k, name in choices:
             if cb.itemData(i) == k:
                 cb.setItemText(i, name)
-ASPECTS = [("original", "Giữ nguyên"), ("9:16", "9:16 – TikTok/Reels/Shorts"), ("16:9", "16:9 – YouTube/Facebook"),
-           ("1:1", "1:1 vuông"), ("4:5", "4:5 – Facebook dọc"), ("4:3", "4:3"), ("3:4", "3:4")]
-ASPECT_MODES = [("blur", "Nền mờ"), ("pad", "Viền đen"), ("crop", "Cắt cho đầy khung")]
+ASPECTS = [("original", "Giữ nguyên"), ("9:16", "9:16 dọc – TikTok / Reels / Shorts"),
+           ("16:9", "16:9 ngang – YouTube / Facebook"), ("1:1", "1:1 vuông"), ("4:5", "4:5 dọc – Facebook / Instagram"),
+           ("3:4", "3:4 dọc"), ("2:3", "2:3 dọc – Pinterest"), ("3:5", "3:5 dọc"), ("5:7", "5:7 dọc"),
+           ("4:3", "4:3 ngang"), ("3:2", "3:2 ngang"), ("5:3", "5:3 ngang"), ("5:4", "5:4 ngang"), ("7:5", "7:5 ngang")]
+ASPECT_MODES = [("blur", "Nền mờ (từ chính hình phim)"), ("pad", "Viền đen"), ("color", "Nền 1 màu"),
+                ("crop", "Phóng cho đầy khung (cắt bớt)")]
+FILM_POS = [("c", "Giữa"), ("up", "Lệch lên – chừa chỗ chữ ở dưới"), ("down", "Lệch xuống – chừa chỗ tiêu đề ở trên"),
+            ("left", "Lệch trái"), ("right", "Lệch phải"), ("custom", "Tự chỉnh")]
 RESOLUTIONS = [("original", "Giữ nguyên"), ("480p", "480p"), ("720p", "720p HD"), ("1080p", "1080p Full HD"),
                ("1440p", "2K"), ("2160p", "4K")]
 POSITIONS = [("top-right", "Trên phải"), ("top-left", "Trên trái"), ("top", "Trên giữa"),
