@@ -132,6 +132,7 @@ DEFAULT_SETTINGS: dict = {
     # đăng video (publish.py): Zernio / API riêng YouTube (dự án Google Cloud) / API riêng Facebook (app Meta)
     "zernio_api_key": "", "zernio_profile_id": "",
     "yt_client_id": "", "yt_client_secret": "", "fb_app_id": "", "fb_app_secret": "",
+    "browser_exe": "",                        # "Mở Chrome & điền sẵn": đường dẫn chrome.exe / msedge.exe (trống = tự tìm)
     "publish_privacy": "public", "publish_category": "24", "publish_notify": True, "publish_synthetic": False,
     # Tải video từ link: Bilibili đăng nhập bằng mã QR (sitelogin); trang khác lấy cookie từ trình duyệt / file
     "dl_browser": "",                         # "" / firefox / edge / chrome / brave / opera / vivaldi

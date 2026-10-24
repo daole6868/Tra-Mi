@@ -630,7 +630,7 @@ class SettingsPage(QWidget):
         ("export_chunks", "export_chunks", "b"),
         ("jobs_parallel", "jobs_parallel", "b"), ("vram_check", "vram_check", "b"), ("proxy_mode", "proxy_mode", "c"),
         ("zn_key", "zernio_api_key", "t"), ("yt_cid", "yt_client_id", "t"), ("yt_sec", "yt_client_secret", "t"),
-        ("fb_app", "fb_app_id", "t"), ("fb_sec", "fb_app_secret", "t"),
+        ("fb_app", "fb_app_id", "t"), ("fb_sec", "fb_app_secret", "t"), ("br_exe", "browser_exe", "t"),
     ]
 
     def __init__(self, win):

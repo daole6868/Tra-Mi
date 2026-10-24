@@ -15,7 +15,7 @@ PKGS = ("faster_whisper", "ctranslate2", "rapidocr_onnxruntime", "onnxruntime", 
         "deep_translator", "imageio_ffmpeg", "funasr", "modelscope", "audio_separator", "speechbrain", "hyperpyyaml",
         "vieneu", "vieneu_utils", "sea_g2p", "omnivoice", "transformers", "tokenizers", "safetensors", "accelerate",
         "huggingface_hub", "hf_xet", "librosa", "soundfile", "torchaudio", "torchcodec", "kaldi_native_fbank",
-        "sentencepiece", "einops", "rotary_embedding_torch", "beartype", "onnx", "pydub")
+        "sentencepiece", "einops", "rotary_embedding_torch", "beartype", "onnx", "pydub", "playwright")
 for pkg in PKGS:
     if importlib.util.find_spec(pkg) is None:
         continue

@@ -46,17 +46,19 @@ CHUNK = 8 * 1024 * 1024          # YouTube: mỗi lần gửi 8 MB (bội số c
 LOGIN_WAIT = 300                 # chờ đăng nhập trên trình duyệt tối đa 5 phút
 ZERNIO_WAIT = 20 * 60            # chờ Zernio đăng xong tối đa 20 phút (YouTube xử lý video dài lâu)
 
-PLATFORMS = {"youtube": "YouTube", "facebook": "Facebook"}
+PLATFORMS = {"youtube": "YouTube", "facebook": "Facebook", "tiktok": "TikTok"}
 KINDS = {"youtube": [("video", "Video thường"), ("short", "Shorts")],
-         "facebook": [("video", "Video"), ("reel", "Reels")]}
+         "facebook": [("video", "Video"), ("reel", "Reels")],
+         "tiktok": [("video", "Video")]}
 PRIVACY = [("public", "Công khai"), ("unlisted", "Không công khai"), ("private", "Riêng tư")]
 YT_CATEGORIES = [("24", "Giải trí"), ("1", "Phim & hoạt hình"), ("23", "Hài kịch"), ("22", "Mọi người & blog"),
                  ("20", "Trò chơi"), ("27", "Giáo dục"), ("10", "Âm nhạc"), ("25", "Tin tức & chính trị")]
-VIA_NAMES = {"zernio": "Zernio", "api": "API riêng", "manual": "Tự tải lên"}
+VIA_NAMES = {"zernio": "Zernio", "api": "API riêng", "browser": "Chrome điền sẵn", "manual": "Tự tải lên"}
 UPLOAD_PAGES = {("youtube", "video"): "https://www.youtube.com/upload",
                 ("youtube", "short"): "https://www.youtube.com/upload",
                 ("facebook", "video"): "https://business.facebook.com/latest/composer",
-                ("facebook", "reel"): "https://www.facebook.com/reels/create"}
+                ("facebook", "reel"): "https://www.facebook.com/reels/create",
+                ("tiktok", "video"): "https://www.tiktok.com/tiktokstudio/upload"}
 REEL_MAX = 90.0                  # Reels Facebook đăng qua API: 3–90 giây, video dọc
 SHORT_MAX = 180.0                # YouTube Shorts: ≤ 3 phút, dọc / vuông
 
@@ -114,6 +116,10 @@ def targets(platform: str) -> list[dict]:
                  "account": a} for a in load_accounts("facebook")]
     out += [{"id": "zn:" + a["id"], "via": "zernio", "platform": platform, "name": a.get("name") or a["id"],
              "account": a} for a in load_accounts("zernio") if a.get("platform") == platform]
+    from .browser_post import profiles
+
+    out += [{"id": "br:" + b["id"], "via": "browser", "platform": platform, "name": b["name"], "account": b}
+            for b in profiles()]
     out.append({"id": "manual:" + platform, "via": "manual", "platform": platform, "name": "Tự tải lên",
                 "account": {}})
     return out
@@ -122,6 +128,8 @@ def targets(platform: str) -> list[dict]:
 def target_label(t: dict) -> str:
     if t["via"] == "manual":
         return "Tự tải lên (mở trang đăng, tự kéo file vào)"
+    if t["via"] == "browser":
+        return f"Chrome · {t['name']} (điền sẵn)"
     return f"{t['name']} · {VIA_NAMES[t['via']]}"
 
 
@@ -751,7 +759,7 @@ class Zernio:
         out = []
         for a in self._list(d, "accounts"):
             plat = str(a.get("platform") or "").lower()
-            if plat not in PLATFORMS:
+            if plat not in ("youtube", "facebook"):
                 continue
             aid = str(a.get("_id") or a.get("id") or "")
             name = a.get("displayName") or a.get("name") or a.get("username") or aid
@@ -963,6 +971,8 @@ def check_video(path: Path, platform: str, kind: str) -> tuple[str, str]:
                     "hoặc cắt ngắn (tab Xuất → Chia thành nhiều phần)."), ""
         if w and h and w >= h:
             return "", "Reels cần video dọc 9:16 – video này nằm ngang, Facebook có thể từ chối."
+    if platform == "tiktok" and d > 600:
+        return "", "TikTok trên máy tính nhận video tới 60 phút (một số tài khoản chỉ 10 phút)."
     if platform == "youtube" and kind == "short":
         if d > SHORT_MAX:
             return "", f"Shorts chỉ ≤ 3 phút – video {d / 60:.1f} phút sẽ thành video thường."
@@ -985,6 +995,7 @@ META_RULES = {
     ("youtube", "short"): (70, "1–2 câu ngắn gây tò mò", 5),
     ("facebook", "video"): (80, "2–3 câu cuốn hút + 1 câu hỏi gợi người xem bình luận", 5),
     ("facebook", "reel"): (60, "1–2 câu ngắn gây tò mò", 5),
+    ("tiktok", "video"): (60, "1–2 câu ngắn gây tò mò, giọng trẻ trung", 5),
 }
 
 META_PROMPT = """Bạn viết nội dung đăng video cho {where}. Video dài {dur}, đã dịch và lồng tiếng {lang_name}.
@@ -1032,7 +1043,7 @@ def ai_metadata(p, settings: dict, platform: str, kind: str, engine: str | None 
     tmax, desc, ntag = META_RULES.get((platform, kind), META_RULES[("youtube", "video")])
     dur = p.data.get("info", {}).get("duration") or (segs[-1].end if segs else 0)
     where = {"youtube": "YouTube Shorts" if kind == "short" else "YouTube",
-             "facebook": "Facebook Reels" if kind == "reel" else "Facebook (Trang)"}[platform]
+             "facebook": "Facebook Reels" if kind == "reel" else "Facebook (Trang)", "tiktok": "TikTok"}[platform]
     system = META_PROMPT.format(where=where, dur=f"{int(dur) // 60} phút {int(dur) % 60} giây", lang_name=lang_name,
                                 tmax=tmax, desc=desc, ntag=ntag)
     user = (f"TÊN DỰ ÁN: {p.data.get('name', '')}\n"
@@ -1101,7 +1112,7 @@ def save_draft(p, d: dict) -> None:
 
 
 STATUS_NAMES = {"published": "✓ Đã đăng", "scheduled": "⏰ Đã hẹn giờ", "processing": "… Đang xử lý",
-                "prepared": "📋 Đã chuẩn bị", "failed": "✗ Lỗi"}
+                "prepared": "📋 Đã chuẩn bị", "browser": "🌐 Điền sẵn trên Chrome", "failed": "✗ Lỗi"}
 
 
 # ------------------------------------------------------------------ đăng (chạy trong việc nền "publish")
@@ -1122,6 +1133,10 @@ def publish(p, settings: dict, item: dict, progress: Prog | None = None) -> dict
         res = yt_upload(settings, target["account"], path, meta, progress)
     elif target["via"] == "api" and platform == "facebook":
         res = fb_upload(settings, target["account"], path, meta, progress)
+    elif target["via"] == "browser":
+        from . import browser_post
+
+        res = browser_post.fill_and_wait(settings, target["account"]["id"], dict(meta, file=str(path)), progress)
     else:
         raise PublishError("Cách 'Tự tải lên' không chạy nền – dùng nút Chuẩn bị đăng.")
     rec = {"id": uuid.uuid4().hex[:10], "time": time.time(), "platform": platform, "kind": kind,

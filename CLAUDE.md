@@ -98,6 +98,12 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `prepare_manual`, `ai_metadata` (AI viết tiêu đề / mô tả / hashtag), tài khoản `data/accounts/{youtube,facebook,zernio}.json`,
   lịch sử `<dự án>/posts.json`, nháp `publish_draft.json` (không đụng project.json). Việc "publish" = `jobs.NET_KINDS` +
   READONLY (không chờ / không chặn việc khác). GUI `gui/publish_ui.py`: `AccountCards` (Cài đặt) + `PublishCard` (tab Xuất).
+  `trami/browser_post.py` – "Mở Chrome & điền sẵn" (YouTube / Facebook Business Suite / TikTok Studio): Playwright
+  điều khiển Chrome / Edge đã cài (`find_browser`, Cài đặt `browser_exe`) với hồ sơ riêng `data/browser/<hồ sơ>`
+  (`profiles` trong `data/accounts/browser.json`), 1 luồng `_Engine` giữ mọi cửa sổ (lệnh qua hàng đợi), bộ chọn `YT` /
+  `FB` / `TT` (thử lần lượt, không thấy -> "điền tay"), DỪNG ở nút Đăng (viền cam, không bấm); `fill_and_wait` chờ bạn
+  bấm Đăng (YouTube / TikTok nhận ra) hoặc đóng tab; đăng nhập = Chrome THƯỜNG `open_login` (Google chặn đăng nhập trong
+  trình duyệt bị điều khiển).
 - `trami/songs.py` – đoán cụm câu đang HÁT (nốt ngân trên giọng đã tách) -> 🎵; `pipeline.mark_song_lines` (♪ trong bản dịch).
 - Đóng gói: `Subvideo.spec` (gom `collect_submodules("trami")` + `collect_all` các gói AI nạp động, `module_collection_mode`
   "pyz+py" cho transformers / torch / omnivoice / vieneu / funasr / speechbrain, loại gradio / tensorflow / matplotlib…),
@@ -105,7 +111,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (147 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (148 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1227,7 +1233,36 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     chặn việc khác khi chạy lần lượt), giao diện offscreen (Tự tải lên + việc nền + bảng Đã đăng). Chưa gọi thật Google /
     Meta / Zernio (sandbox chặn).
 
+- 2.0.78: người dùng hỏi "tự làm công cụ mở Chrome rồi đăng bài được không" -> được (kể cả TikTok công khai, không cần
+  duyệt app) nhưng điều khoản YouTube / Facebook / TikTok cấm tự động hoàn toàn + giao diện hay đổi -> làm kiểu BÁN TỰ
+  ĐỘNG: tool điền, người dùng bấm Đăng. Người dùng đồng ý -> cách thứ 4 "Mở Chrome & điền sẵn":
+  * `trami/browser_post.py` (xem Cấu trúc). Playwright `launch_persistent_context(executable_path=Chrome/Edge thật,
+    no_viewport, --start-maximized)` – không ẩn dấu hiệu tự động (không dùng mẹo né phát hiện). Hồ sơ đang mở bởi cửa sổ
+    đăng nhập -> báo đóng cửa sổ đó; cửa sổ tool bị bạn đóng -> lần sau tự mở lại. Nhiều nền tảng cùng hồ sơ -> nhiều tab.
+  * YouTube (youtube.com/upload -> Studio): `input[type=file]` của ytcp-uploads-file-picker, `#title-textarea #textbox`
+    (≤ 100 ký tự, bỏ < >), `#description-textarea #textbox` (mô tả + hashtag, Shorts thêm #Shorts), ảnh bìa
+    `ytcp-thumbnails-compact-editor-uploader input[type=file]`, `VIDEO_MADE_FOR_KIDS_(NOT_)MFK`, nội dung AI
+    `VIDEO_HAS_ALTERED_CONTENT_YES`, `#next-button` ×3 (chờ hết aria-disabled), PUBLIC / UNLISTED / PRIVATE (hẹn giờ:
+    mở `#second-container-expand-button`, nhắc ngày giờ), lấy link youtu.be, viền `#done-button`; đã đăng = hiện
+    `ytcp-video-share-dialog` / `ytcp-uploads-still-processing-dialog`. Facebook (business.facebook.com/latest/composer,
+    reels_composer): ô file / nút "Thêm video" + hộp chọn file, ô tiêu đề nếu có, ô soạn `[contenteditable][role=textbox]`,
+    viền nút Đăng / Chia sẻ ngay; nhắc chọn đúng Trang. TikTok (tiktokstudio/upload): file, chú thích DraftEditor (≤ 2200),
+    viền `button[data-e2e=post_video_button]`; đã đăng = chuyển tới /tiktokstudio/content. Gõ chữ: chọn hết + xoá +
+    `keyboard.insert_text` từng dòng (Enter giữa các dòng); ô input / textarea dùng fill.
+  * `publish`: nền tảng TikTok (chỉ Chrome điền sẵn + Tự tải lên), nơi đăng `br:<hồ sơ>` "Chrome · Hồ sơ 1 (điền
+    sẵn)", trạng thái "🌐 Điền sẵn trên Chrome" (YouTube / TikTok bấm Đăng xong -> "✓ Đã đăng" + link). Việc nền chờ tới
+    khi bạn đóng tab (Huỷ = thôi chờ, tab giữ nguyên). Cài đặt thẻ "Chrome (điền sẵn)": hồ sơ (Thêm / Đổi tên / Xoá),
+    Trình duyệt (chọn exe), Đăng nhập YouTube / Facebook / TikTok, Hướng dẫn, dòng báo thiếu Playwright / không thấy Chrome.
+    requirements.txt + Subvideo.spec thêm `playwright` (không cần `playwright install`).
+  * Thử: chromium thật (chạy ẩn) trên 3 trang giả có đúng bộ chọn: gắn file, tiêu đề / mô tả / hashtag, ảnh bìa, khán giả,
+    3 lần Tiếp, chế độ hiển thị, link, nút Đăng chỉ được viền (không bấm); bấm Xuất bản -> nhận ra đã đăng; TikTok qua
+    `publish.publish` chờ tới khi đóng tab; Facebook gắn file qua hộp chọn file. Chưa chạy trên trang thật (sandbox không
+    đăng nhập được YouTube / Facebook / TikTok) – bộ chọn có thể phải sửa theo giao diện thật.
+
 ## Vấn đề đang mở
+- 2.0.78: chờ người dùng cài `playwright` (`.venv\Scripts\python -m pip install playwright`), Đăng nhập YouTube /
+  Facebook / TikTok ở Cài đặt → Chrome (điền sẵn), rồi thử Đăng: ô nào báo "điền tay" thì cần bộ chọn mới (xin ảnh chụp
+  trang hoặc dòng tiến độ); xem Google có chặn phiên đăng nhập khi Chrome bị điều khiển không.
 - 2.0.77: chờ người dùng thử đăng thật: Zernio (key + kết nối YouTube / Facebook, đăng ngay / hẹn giờ, link bài đăng),
   YouTube API riêng (tạo dự án Google Cloud theo Hướng dẫn, đăng nhập 127.0.0.1, video có bị khoá Riêng tư không),
   Facebook API riêng (đăng nhập localhost / dán mã, đăng video + Reels lên Trang; nếu Meta báo lỗi tham số

@@ -4962,3 +4962,128 @@ def test_publish_gui_manual_and_job(sample_video, monkeypatch):
     pp.job_finished(js[0])
     assert pub.hist.rowCount() == 2
     win.close()
+
+
+_FAKE_YT = """<html><body>
+<ytcp-uploads-dialog><ytcp-uploads-file-picker><input type="file" id="f"></ytcp-uploads-file-picker>
+<div id="form" style="display:none">
+ <div id="title-textarea"><div id="textbox" contenteditable="true">ten_file</div></div>
+ <div id="description-textarea"><div id="textbox" contenteditable="true"></div></div>
+ <ytcp-thumbnails-compact-editor-uploader><input type="file" id="th"></ytcp-thumbnails-compact-editor-uploader>
+ <div name="VIDEO_MADE_FOR_KIDS_NOT_MFK" onclick="window.kids='no'">Không dành cho trẻ em</div>
+ <div name="VIDEO_MADE_FOR_KIDS_MFK" onclick="window.kids='yes'">Dành cho trẻ em</div>
+ <div id="next-button" onclick="window.step=(window.step||0)+1">Tiếp</div>
+ <div name="PUBLIC" onclick="window.vis='public'">Công khai</div>
+ <div name="UNLISTED" onclick="window.vis='unlisted'">Không công khai</div>
+ <a href="https://youtu.be/ABC123">https://youtu.be/ABC123</a>
+ <div id="done-button" onclick="window.done=1;document.body.insertAdjacentHTML('beforeend',
+   '<ytcp-video-share-dialog><a href=&quot;https://youtu.be/ABC123&quot;>link</a></ytcp-video-share-dialog>')">Xuất bản</div>
+</div></ytcp-uploads-dialog>
+<script>document.getElementById('f').onchange=()=>{window.fname=document.getElementById('f').files[0].name;
+ setTimeout(()=>document.getElementById('form').style.display='block',300)};
+ document.getElementById('th').onchange=()=>{window.thumb=1};</script></body></html>"""
+
+_FAKE_TT = """<html><body><input type="file" accept="video/*" id="f">
+<div id="ed" style="display:none" class="DraftEditor-root"><div class="public-DraftEditor-content" contenteditable="true">x.mp4</div></div>
+<button data-e2e="post_video_button" onclick="window.posted=1">Đăng</button>
+<script>document.getElementById('f').onchange=()=>{document.getElementById('ed').style.display='block'};</script>
+</body></html>"""
+
+_FAKE_FB = """<html><body><button id="add" onclick="const i=document.createElement('input');i.type='file';
+ i.onchange=()=>{window.fbfile=i.files[0].name};i.click()">Thêm video</button>
+<div role="textbox" contenteditable="true" id="cap" style="min-height:40px"></div>
+<button onclick="window.posted=1">Đăng</button></body></html>"""
+
+
+def test_browser_post_fills_and_stops_before_post(monkeypatch, tmp_path):
+    """Mở Chrome & điền sẵn: chromium thật (chạy ẩn) trên 3 trang giả – gắn file, điền tiêu đề / mô tả / hashtag, chọn
+    khán giả + chế độ hiển thị, KHÔNG bấm Đăng; bấm Đăng (YouTube) -> nhận ra đã đăng + link; đóng tab -> xong."""
+    pytest.importorskip("playwright")
+    import glob
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from trami import browser_post as bp, publish
+    from trami.project import Project
+
+    exe = (glob.glob("/opt/pw-browsers/chromium-*/chrome-linux/chrome") or [""])[0]
+    if not exe:
+        pytest.skip("không có chromium")
+    pages = {"/yt": _FAKE_YT, "/tt": _FAKE_TT, "/fb": _FAKE_FB}
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            b = pages.get(self.path.split("?")[0], "").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            self.wfile.write(b)
+
+        def log_message(self, *a):
+            pass
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    monkeypatch.setattr(bp, "HEADLESS", True)
+    monkeypatch.setattr(bp, "YT_URL", base + "/yt")
+    monkeypatch.setattr(bp, "TT_URL", base + "/tt")
+    monkeypatch.setattr(bp, "FB_URLS", {"video": base + "/fb", "reel": base + "/fb"})
+    monkeypatch.setattr(bp, "WAIT_FORM", 10)
+    monkeypatch.setattr(publish, "check_video", lambda *a: ("", ""))
+    s = {"browser_exe": exe}
+    vid = tmp_path / "phim.mp4"
+    vid.write_bytes(b"0" * 1000)
+    thumb = tmp_path / "bia.jpg"
+    thumb.write_bytes(b"\xff\xd8")
+    eng = bp.engine()
+    js = lambda tok, expr: eng.call(lambda e: e.pages[tok][0].evaluate(expr))  # noqa: E731
+    try:
+        assert bp.problem(s) == ""
+        # YouTube: điền rồi dừng; "bấm Xuất bản" -> nhận ra đã đăng
+        item = {"platform": "youtube", "kind": "short", "file": str(vid), "title": "Phim <hay>", "description": "Dòng 1\nDòng 2",
+                "hashtags": ["phim"], "privacy": "unlisted", "thumbnail": str(thumb)}
+        tok, rep = eng.call(bp._do_fill, s, "main", item)
+        assert rep["need_login"] is False and rep["miss"] == [], rep
+        assert {"gắn file video", "tiêu đề", "mô tả", "ảnh bìa", "chế độ hiển thị"} <= set(rep["done"])
+        assert js(tok, "window.fname") == "phim.mp4" and js(tok, "window.thumb") == 1
+        assert js(tok, "document.querySelector('#title-textarea #textbox').innerText") == "Phim hay"
+        d = js(tok, "document.querySelector('#description-textarea #textbox').innerText")
+        assert "Dòng 1" in d and "Dòng 2" in d and "#Shorts #phim" in d
+        assert js(tok, "[window.kids, window.step, window.vis, window.done || 0]") == ["no", 3, "unlisted", 0]
+        assert rep["url"] == "https://youtu.be/ABC123"
+        assert js(tok, "document.querySelector('#done-button').style.outlineStyle") == "solid"   # viền cam, chưa bấm
+        assert eng.call(bp._state, tok) == {"closed": False, "published": False, "url": "https://youtu.be/ABC123"}
+        js(tok, "document.querySelector('#done-button').click()")
+        assert eng.call(bp._state, tok)["published"] is True
+        # TikTok qua publish.publish: chờ tới khi đóng tab
+        p = Project.create("br")
+        t = next(x for x in publish.targets("tiktok") if x["via"] == "browser")
+        assert [x["via"] for x in publish.targets("tiktok")] == ["browser", "manual"]
+        box = {}
+        th = threading.Thread(target=lambda: box.update(r=publish.publish(
+            p, s, {"platform": "tiktok", "kind": "video", "target": t, "file": str(vid), "title": "T",
+                   "description": "Hay quá", "hashtags": "#a #b"}, lambda f, m: box.update(msg=m))))
+        th.start()
+        for _ in range(100):
+            if eng.pages and "Đã điền sẵn" in box.get("msg", ""):
+                break
+            time.sleep(0.1)
+        [(ttok, (page_tt, plat, _r))] = [(k, v) for k, v in eng.pages.items() if v[1] == "tiktok"]
+        cap = eng.call(lambda e: page_tt.evaluate("document.querySelector('.public-DraftEditor-content').innerText"))
+        assert cap.replace("\n\n", "\n").split("\n") == ["Hay quá", "#a #b"] or "Hay quá" in cap and "#a #b" in cap
+        assert eng.call(lambda e: page_tt.evaluate("window.posted || 0")) == 0
+        eng.call(lambda e: page_tt.close())
+        th.join(10)
+        assert box["r"]["status"] == "browser" and box["r"]["via"] == "browser"
+        assert publish.load_posts(p)[-1]["platform"] == "tiktok"
+        # Facebook: không có ô chọn file -> bấm "Thêm video" và đưa file vào hộp chọn file
+        tok, rep = eng.call(bp._do_fill, s, "main", {"platform": "facebook", "kind": "video", "file": str(vid),
+                                                     "title": "", "description": "Mô tả FB", "hashtags": ["x"]})
+        assert "gắn file video" in rep["done"] and "nội dung bài đăng" in rep["done"], rep
+        assert js(tok, "window.fbfile") == "phim.mp4" and js(tok, "window.posted || 0") == 0
+        assert "Mô tả FB" in js(tok, "document.getElementById('cap').innerText")
+    finally:
+        eng.close_profile("main")
+        srv.shutdown()

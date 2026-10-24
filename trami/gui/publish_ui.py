@@ -13,11 +13,11 @@ from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (QAbstractItemView, QDateTimeEdit, QFileDialog, QHeaderView, QInputDialog, QLineEdit,
                                QMessageBox, QPlainTextEdit, QTableWidget, QTableWidgetItem, QVBoxLayout)
 
-from .. import publish
+from .. import browser_post, publish
 from ..config import load_settings, save_settings
 from . import icons, theme
 from .common import run_async
-from .widgets import Form, GradientButton, SectionCard, Switch, button, combo, flow, label, set_combo
+from .widgets import Form, GradientButton, SectionCard, Switch, button, combo, flow, hbox, label, set_combo
 
 ZN_HELP = """<b>Zernio</b> là dịch vụ đăng bài đã được YouTube và Meta duyệt, nên video lên <b>Công khai ngay</b>.<br><br>
 1. Đăng ký tài khoản ở <b>zernio.com</b> → mục <b>API Keys</b> → tạo key → dán vào ô <i>API key</i> → <b>Lưu cài đặt</b>.<br>
@@ -49,6 +49,18 @@ quản lý (Facebook không cho đăng lên trang cá nhân).<br><br>
 bấm <b>Dán mã truy cập…</b><br><br>
 <b>Lưu ý:</b> bài đăng từ app đang ở chế độ Development có thể chỉ quản trị viên thấy. Người khác không thấy bài thì chuyển
 app sang <b>Live</b> (cần link chính sách bảo mật) hoặc đăng qua Zernio."""
+
+
+BR_HELP = """<b>Mở Chrome &amp; điền sẵn</b> – miễn phí, đăng được YouTube, Facebook (Trang), TikTok; bài lên <b>Công
+khai ngay</b> vì chính bạn bấm Đăng trên trang của họ.<br><br>
+1. Cài Playwright 1 lần: mở cửa sổ lệnh ở thư mục tool, chạy<br><code>.venv\\Scripts\\python -m pip install playwright</code><br>
+(không cần tải trình duyệt – tool dùng Chrome / Edge có sẵn trên máy).<br>
+2. Bấm <b>Đăng nhập YouTube / Facebook / TikTok</b>: Chrome mở với hồ sơ riêng của Subvideo → đăng nhập như bình thường →
+<b>đóng cửa sổ Chrome đó</b>. Chỉ làm 1 lần. Nhiều kênh / nhiều tài khoản: bấm <b>Thêm…</b> để có hồ sơ khác.<br>
+3. Tab Xuất → Đăng video: chọn nơi đăng <i>Chrome · Hồ sơ 1</i> → <b>Đăng</b>. Tool mở Chrome, gắn video, điền tiêu đề, mô
+tả, hashtag, chọn khán giả / chế độ hiển thị rồi viền cam nút Đăng. Bạn kiểm tra, bấm Đăng, xong thì đóng tab.<br><br>
+<b>Lưu ý:</b> tool KHÔNG tự bấm Đăng. Trang YouTube / Facebook / TikTok đổi giao diện thì có ô tool chưa điền được – tool
+báo "điền tay" ở dòng tiến độ. Hồ sơ Chrome của tool tách riêng với Chrome bạn dùng hằng ngày."""
 
 
 def _secret() -> QLineEdit:
@@ -113,12 +125,32 @@ class AccountCards:
         fb.add(self.fb_out)
         self.fb_box = QVBoxLayout()
         fb.add(self.fb_box)
-        self.cards = [z, y, fb]
+        br = SectionCard("Chrome (điền sẵn)", "globe", "Tool mở Chrome, gắn video, điền tiêu đề / mô tả / hashtag rồi dừng "
+                                                       "ở nút Đăng – bạn tự bấm. YouTube, Facebook, TikTok · miễn phí.")
+        f = Form()
+        self.br_prof = combo([])
+        self.br_prof.setMinimumContentsLength(14)
+        f.row("Hồ sơ Chrome", hbox(self.br_prof,
+                                   button("Thêm…", "plus", "Hồ sơ mới cho kênh / tài khoản khác", flat=True,
+                                          on_click=self._br_add),
+                                   button("Đổi tên…", flat=True, on_click=self._br_rename),
+                                   button("Xoá", "trash", "Xoá hồ sơ (mất đăng nhập đã lưu trong hồ sơ)", flat=True,
+                                          on_click=self._br_remove), None))
+        self.br_exe = QLineEdit()
+        self.br_exe.setPlaceholderText("(tự tìm Chrome / Edge)")
+        f.row("Trình duyệt", hbox(self.br_exe, button("Chọn…", "folder", flat=True, on_click=self._br_pick)))
+        br.add(f)
+        br.add(flow(*[button(f"Đăng nhập {publish.PLATFORMS[k]}", "link", flat=True,
+                             on_click=lambda _=False, k=k: self._br_login(k)) for k in ("youtube", "facebook", "tiktok")],
+                    button("Hướng dẫn", "info", flat=True, on_click=lambda: self._help("Chrome (điền sẵn)", BR_HELP))))
+        self.br_out = label("", "muted", wrap=True)
+        br.add(self.br_out)
+        self.cards = [z, y, fb, br]
         self.refresh()
 
     # (thuộc tính, khoá cài đặt, kiểu) cho SettingsPage.KEYS
     KEYS = [("zn_key", "zernio_api_key"), ("yt_cid", "yt_client_id"), ("yt_sec", "yt_client_secret"),
-            ("fb_app", "fb_app_id"), ("fb_sec", "fb_app_secret")]
+            ("fb_app", "fb_app_id"), ("fb_sec", "fb_app_secret"), ("br_exe", "browser_exe")]
 
     def _save(self) -> dict:
         save_settings(self.page.collect())
@@ -146,6 +178,15 @@ class AccountCards:
                 lb = label(("📺 " if kind == "youtube" else "📄 ") + name + (f"  · {a['user']}" if a.get("user") else ""))
                 box.addWidget(flow(lb, button("Bỏ", "x", "Bỏ tài khoản này khỏi Subvideo", flat=True,
                                               on_click=lambda _=False, t=pre + a["id"]: self._remove(t))))
+        cur = self.br_prof.currentData()
+        self.br_prof.clear()
+        for b in browser_post.profiles():
+            self.br_prof.addItem(b["name"], b["id"])
+        set_combo(self.br_prof, cur)
+        why = browser_post.problem(load_settings())
+        self.br_out.setText("✗ " + why if why else
+                            f"✓ Trình duyệt: {browser_post.find_browser(load_settings())} – bấm Đăng nhập 1 lần cho mỗi "
+                            "trang, đăng nhập xong đóng cửa sổ Chrome đó.")
         zn = publish.load_accounts("zernio")
         self.zn_out.setText(("Đã kết nối: " + " · ".join(f"{publish.PLATFORMS[a['platform']]}: {a['name']}" for a in zn))
                             if zn else "Chưa có tài khoản – bấm Kết nối rồi Tải lại danh sách.")
@@ -153,6 +194,48 @@ class AccountCards:
     def _remove(self, tid: str):
         publish.remove_account(tid)
         self.refresh()
+
+    # ---------------- Chrome (điền sẵn)
+    def _br_add(self):
+        name, ok = QInputDialog.getText(self.page, "Hồ sơ Chrome mới", "Tên hồ sơ (vd. Kênh phim 2):")
+        if ok:
+            b = browser_post.add_profile(name)
+            self.refresh()
+            set_combo(self.br_prof, b["id"])
+
+    def _br_rename(self):
+        pid = self.br_prof.currentData()
+        name, ok = QInputDialog.getText(self.page, "Đổi tên hồ sơ", "Tên mới:", text=self.br_prof.currentText())
+        if ok and pid:
+            browser_post.rename_profile(pid, name)
+            self.refresh()
+
+    def _br_remove(self):
+        pid = self.br_prof.currentData()
+        if not pid or QMessageBox.question(self.page, "Xoá hồ sơ Chrome",
+                                           f"Xoá hồ sơ '{self.br_prof.currentText()}'? Đăng nhập đã lưu trong hồ sơ này "
+                                           "sẽ mất.") != QMessageBox.StandardButton.Yes:
+            return
+        browser_post.remove_profile(pid)
+        self.refresh()
+
+    def _br_pick(self):
+        f, _ = QFileDialog.getOpenFileName(self.page, "Chọn chrome.exe / msedge.exe", "", "Trình duyệt (*.exe);;Tất cả (*)")
+        if f:
+            self.br_exe.setText(f)
+            self._save()
+            self.refresh()
+
+    def _br_login(self, platform: str):
+        s = self._save()
+        pid = self.br_prof.currentData() or "main"
+        name = self.br_prof.currentText()
+        self.br_out.setText("Đang mở Chrome…")
+        run_async(lambda: browser_post.open_login(s, pid, platform),
+                  lambda _: self.br_out.setText(f"Đã mở Chrome (hồ sơ {name}) ở trang đăng nhập "
+                                                f"{publish.PLATFORMS[platform]} – đăng nhập xong ĐÓNG cửa sổ đó rồi mới "
+                                                "bấm Đăng ở tab Xuất."),
+                  lambda m: self.br_out.setText("✗ " + m))
 
     # ---------------- Zernio
     def _zn_connect(self, platform: str):
@@ -219,7 +302,8 @@ class PublishCard(SectionCard):
     hashtag (AI viết), quyền riêng tư, danh mục, hẹn giờ, ảnh bìa, nhãn nội dung AI, nút Đăng, lịch sử đăng."""
 
     def __init__(self, page):
-        super().__init__("Đăng video", "share", "YouTube và Facebook (Trang). Thêm tài khoản ở Cài đặt → Đăng video.")
+        super().__init__("Đăng video", "share", "YouTube, Facebook (Trang), TikTok. Thêm tài khoản ở Cài đặt → Đăng "
+                                                "video.")
         self.page = page
         self.file: Path | None = None
         self.thumb = ""
@@ -231,7 +315,7 @@ class PublishCard(SectionCard):
                             button("Bản xuất mới nhất", "refresh", flat=True, on_click=self._use_latest),
                             button("Chọn file…", "folder", flat=True, on_click=self._pick_file)))
         self.plat: dict[str, dict] = {}
-        for plat in ("youtube", "facebook"):
+        for plat in ("youtube", "facebook", "tiktok"):
             sw = Switch(plat == "youtube")
             tg = combo([])
             tg.setMinimumContentsLength(22)
@@ -388,6 +472,10 @@ class PublishCard(SectionCard):
             tid = w["target"].currentData() or ""
             if tid.startswith("yt:"):
                 msgs.append("YouTube qua API riêng: dự án Google chưa được duyệt thì video bị khoá Riêng tư.")
+            if tid.startswith("br:"):
+                why = browser_post.problem(load_settings())
+                if why:
+                    msgs.append(why)
             if self.file:
                 err, warn = publish.check_video(self.file, plat, w["kind"].currentData())
                 msgs += [x for x in (err, warn) if x]
@@ -425,7 +513,7 @@ class PublishCard(SectionCard):
             return self.page.win.toast("Chưa có video – bấm Xuất video trước hoặc Chọn file…", "warn")
         on = [k for k, w in self.plat.items() if w["on"].isChecked()]
         if not on:
-            return self.page.win.toast("Bật YouTube hoặc Facebook để đăng", "warn")
+            return self.page.win.toast("Bật YouTube, Facebook hoặc TikTok để đăng", "warn")
         if not self.title.text().strip() and not self.desc.toPlainText().strip():
             return self.page.win.toast("Nhập tiêu đề / mô tả (hoặc bấm AI viết)", "warn")
         s = load_settings()

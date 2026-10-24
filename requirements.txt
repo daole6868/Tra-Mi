@@ -10,3 +10,4 @@ deep-translator>=1.11
 edge-tts>=7.3.1             # giọng đọc Microsoft (bản cũ bị Microsoft từ chối 403 từ 10/2026)
 yt-dlp>=2026.8.19           # tải video Douyin/Bilibili/YouTube… (cũ thì Bilibili báo 412)
 imageio-ffmpeg>=0.5.1       # FFmpeg dự phòng
+playwright>=1.49            # "Mở Chrome & điền sẵn" khi đăng video (dùng Chrome / Edge có sẵn, không tải trình duyệt)
