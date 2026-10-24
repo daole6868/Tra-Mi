@@ -67,7 +67,10 @@ def load_wav16k(path: str | Path) -> np.ndarray:
     raw = subprocess.run([ff.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-i", str(path), "-ac", "1",
                           "-ar", str(SR), "-f", "s16le", "pipe:1"], capture_output=True,
                          creationflags=ff._NO_WINDOW).stdout
-    return np.frombuffer(raw, np.int16).astype(np.float32) / 32768.0
+    a = np.frombuffer(raw, np.int16).astype(np.float32)
+    del raw
+    a *= 1.0 / 32768.0      # tại chỗ: phim 1,5 giờ đỡ 1 bản sao 350 MB
+    return a
 
 
 def parse_sensevoice(text: str) -> tuple[str, list[str]]:

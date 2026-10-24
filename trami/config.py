@@ -110,7 +110,8 @@ DEFAULT_SETTINGS: dict = {
     "dub_skip_songs": True,           # không lồng tiếng các câu đang hát -> giữ nguyên bài hát gốc
     "dub_drop_interj": True,          # lồng tiếng Việt: xoá câu chỉ có 1–2 tiếng cảm thán (A!, Ừm., Ái!) trước khi đọc
     "dub_voice_all": "",              # 1 giọng cho MỌI người nói (tab Tự động / Lồng tiếng mục 2), "@auto" = tự gán nam / nữ
-    "auto_parallel": True,            # tab Tự động: vừa tách vừa dịch (nghe tới đâu dịch tới đó, Edge đọc trước giọng)
+    "auto_parallel": False,           # tab Tự động: vừa tách vừa dịch (nghe tới đâu dịch tới đó, Edge đọc trước giọng)
+    "jobs_parallel": False,           # chạy nhiều việc cùng lúc (tắt = lần lượt từng việc, như trước 2.0.64: ít RAM / GPU)
     "song_detect": True,              # khi nghe: đoán cụm câu đang hát (nốt ngân trên giọng đã tách) -> 🎵
     # Xoá phụ đề
     "inpaint_backend": "lama",        # lama (AI, đẹp) / opencv (nhanh)

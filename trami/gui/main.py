@@ -521,7 +521,7 @@ class BatchPage(QWidget):
                 "hardsub_mode": self.hardsub.currentData(), "burn": which != "none",
                 "which": which if which != "none" else "trans", "dub": self.dub.isChecked(),
                 "tts_engine": self.tts.currentData(), "separate": True,
-                "parallel": bool(load_settings().get("auto_parallel", True))}
+                "parallel": bool(load_settings().get("auto_parallel", False))}
         aspect = self.aspect.currentData()
         n = 0
         for it in items:
@@ -627,6 +627,7 @@ class SettingsPage(QWidget):
         ("dub_fit", "dub_fit", "b"), ("dub_short", "dub_auto_shorten", "b"),
         ("maxspeed", "tts_max_speedup", "f"), ("inpaint", "inpaint_backend", "c"),
         ("codec", "video_codec", "c"), ("crf", "video_crf", "i"), ("preset", "video_preset", "c"),
+        ("jobs_parallel", "jobs_parallel", "b"),
     ]
 
     def __init__(self, win):
@@ -681,6 +682,9 @@ class SettingsPage(QWidget):
                              "Câu dài hơn mới chia đôi (ở dấu phẩy / chỗ nghỉ gần giữa); dấu phẩy nói liền không tách")
         self.asr_beam = f.row("Beam size (Whisper)", spin(1, 10))
         self.asr_vad = f.row("Lọc đoạn không có tiếng nói", Switch())
+        self.jobs_parallel = f.row("Chạy nhiều việc cùng lúc", Switch(),
+                                   "Tắt (khuyên dùng): bấm nhiều việc thì chạy lần lượt từng việc – ít RAM / GPU nhất. "
+                                   "Bật: việc của dự án khác / việc dùng mạng chạy song song (tốn RAM hơn)")
         a.add(f)
 
         b = SectionCard("Tách giọng & người nói", "layers")

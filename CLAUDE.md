@@ -26,7 +26,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `preview_voice`, `plan_layout` (xếp giọng theo thời gian, thuần – không đụng âm thanh; `OVERFLOW_MODES`). VieNeu API: `Vieneu(mode="v3turbo").infer(text, voice="<tên preset>" | ref_audio=...)` → numpy 48 kHz.
 - `trami/asr_qwen.py` + `qwen_asr_worker.py` (Qwen3-ASR + Qwen3-ForcedAligner, tiến trình riêng `--qwen-asr-worker`,
   transformers ≥ 5.13, mặc định từ 2.0.29), `trami/asr.py` (faster-whisper), `asr_funasr.py` (SenseVoice/Paraformer, `mark_songs`), `diarize.py` (ECAPA),
-  `separate.py` (audio-separator BS-RoFormer), `lama.py` + `inpaint.py` (xoá chữ), `ocr.py` (RapidOCR),
+  `separate.py` (audio-separator; phim > ~13 phút tách từng đoạn 10 phút `plan_chunks` / `_Joiner`), `lama.py` + `inpaint.py` (xoá chữ), `ocr.py` (RapidOCR),
   `skills.py` (kỹ năng dịch AI: sửa lỗi nghe & nối câu, hồ sơ phim, kiểm tra bản dịch, kỹ năng riêng – `gui/skills_dialog.py`),
   `translate.py` (`LLMClient` gọi HTTP: anthropic / OpenAI-compatible / gemini / deepseek / ollama; Google gtx;
   Hy-MT2 trên máy qua `hymt_worker.py`), `voicefix.py` (đọc số, phát hiện giọng AI hỏng, cân âm lượng),
@@ -35,8 +35,9 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `vieneu:trend:<mã>` = giọng dựng sẵn + kiểu đọc + hiệu ứng) + `voicefx.py` (hiệu ứng giọng chỉ bằng numpy).
 - `trami/audiomix.py` – quy tắc trộn âm thanh dùng chung cho xuất video (`video.build_and_render`) và bộ trộn trực tiếp
   `LiveMix` của trình phát (`player.LiveAudio` + `_Feeder` ở QThread riêng, QAudioSink); cài đặt ở `edit["audio"]`, tab `gui/audio_tab.py`.
-- `trami/jobs.py` – hàng đợi NHIỀU luồng (từ 2.0.64, tối đa `MAX_RUNNING` 4): cùng dự án lần lượt (trừ `READONLY_KINDS`),
-  mỗi lúc 1 việc GPU (`GPU_KINDS`, dịch Hy-MT2); `progress_hook` theo từng luồng; trang `main.JobsPage` "Việc đang làm".
+- `trami/jobs.py` – hàng đợi: MẶC ĐỊNH LẦN LƯỢT từng việc (2.0.70, `max_running()` = 1); Cài đặt "Chạy nhiều việc cùng
+  lúc" (`jobs_parallel`) -> tối đa `MAX_RUNNING` 4: cùng dự án lần lượt (trừ `READONLY_KINDS`), mỗi lúc 1 việc GPU
+  (`GPU_KINDS`, dịch Hy-MT2); `progress_hook` theo từng luồng; trang `main.JobsPage` "Việc đang làm".
   `trami/stream.py` – `LivePipeline` (tab Tự động "Vừa tách vừa dịch"); `trami/gpu.py` – trả bộ nhớ card giữa các
   việc (`before_job` / `after_job` trong `jobs._run`, `reap_idle` tắt VieNeu/Omni để không 10 phút); `trami/gui/*` –
   giao diện (QPainter), `common.run_async`,
@@ -71,7 +72,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `call` (gọi ở luồng phụ, Huỷ dừng ngay), `session` (requests có TCP keepalive). `jobs` chạy mọi tác vụ trong
   `net.task(cancel, report)` -> hàm gọi mạng tự lấy nút Huỷ + dòng trạng thái.
 - `trami/songs.py` – đoán cụm câu đang HÁT (nốt ngân trên giọng đã tách) -> 🎵; `pipeline.mark_song_lines` (♪ trong bản dịch).
-- `tests/test_core.py` – `python -m pytest -q tests` (119 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (122 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -989,6 +990,28 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     giảm méo + vọng 22 % / 15 % -> 10 %); cao độ đúng ±2 %, độ dài đúng, không tiếng lách tách (trừ robot / loa vốn
     có); 24 kHz ~0,02–0,15 s / câu 4 s. Chưa nghe bằng VieNeu thật (sandbox không tải được mô hình HF).
 
+- 2.0.70: "chỉ bấm 1. Nghe & tách câu mà RAM / GPU chạy full (RAM 28,6/31,7 GB, GPU chuyên dụng 7,5/8 GB + dùng chung
+  4,2 GB), bản cũ không bị; quay về chạy lần lượt; gửi zip ĐẦY ĐỦ" (phim 1354 câu ~1–1,5 giờ, RTX 4060 laptop 8 GB).
+  * RAM: audio-separator (mdxc RoFormer) giữ CẢ BÀI trong RAM: bản trộn + tensor + `result` + `counter` (2 phần × 2
+    kênh, trên CPU khi chạy CUDA – chỉ MPS mới để trên card) + bản sao khi ghi file. Đo bằng bộ tách giả cùng kiểu
+    cấp phát: 30 phút 4,8 GB, 1,5 giờ vượt 15 GB (máy thử bị tắt) – bản thật còn nhiều bản sao hơn. Sửa
+    `separate.py`: ≤ ~13 phút tách cả bài như cũ (`_separate_whole`); dài hơn `_separate_chunked`: `plan_chunks` đoạn
+    `CHUNK_SEC` 600 s chồng `OVERLAP_SEC` 6 s (đoạn cuối < 1/3 gộp vào trước), mỗi mô hình nạp 1 lần, cắt đoạn bằng
+    `wave` (đúng mẫu), `_Joiner` ghi dần ra wav 16 bit, nối mượt 4 s giữa vùng chồng (bỏ `MARGIN_SEC` 1 s mép – mép
+    đoạn tách kém), `_read_stem` (wav lạ -> FFmpeg); "Kết hợp" = tự `_average` từng khối 30 s (= avg_wave của thư viện,
+    không cần bản thư viện có ensemble). Đo: 1,6 GB dù phim dài bao nhiêu; test nối với bộ tách giả làm mép xấu: lệch
+    < 0,2 %, đúng độ dài.
+  * GPU: bộ nghe Qwen3 đọc 8 khúc 28 s / lô và giữ cả bộ nghe 1.7B lẫn bộ căn 0.6B trên card -> card 8 GB tràn, Windows
+    KHÔNG báo hết bộ nhớ mà lấy RAM thay ("bộ nhớ GPU dùng chung") -> chậm hẳn. `qwen_asr_worker.plan_batches`: khúc
+    dài đi cùng khúc dài, mỗi lô ≤ `budget` giây tính cả đệm; `vram_plan`: < 11 GB -> 60 s / lô + chỉ 1 mô hình trên card
+    (`drop` / `get_model` / `get_aligner` nạp lại khi cần, ~vài giây; `TRAMI_QWEN_ONE_MODEL=1` để thử); 11–16 GB 112 s;
+    ≥ 16 GB 224 s. Đã chạy thật tiến trình với mô hình Qwen3 tí hon (transformers 5.19): nạp / bỏ / nạp lại đúng.
+  * Hàng đợi: mặc định 1 việc mỗi lúc (`jobs.max_running`, đọc Cài đặt mỗi 2 s; việc chờ ghi "chờ việc trước xong
+    (chạy lần lượt từng việc)"); Cài đặt → Nhận dạng giọng nói "Chạy nhiều việc cùng lúc" (`jobs_parallel`, tắt). "Vừa
+    tách vừa dịch" (`auto_parallel`) mặc định TẮT. `asr_funasr.load_wav16k` chia tỉ lệ tại chỗ (1,5 giờ: 830 -> 500 MB).
+  * Các bước khác của "Nghe & tách câu" đo trên 1,5 giờ (VAD theo độ to, nghe lại đoạn sót, nối câu, đoán đoạn hát):
+    0,1–0,5 GB, không phải nguyên nhân.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -1029,6 +1052,9 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.62: chờ người dùng thử Gemini gói miễn phí thật (sandbox không gọi được Google API): thông báo 429 của Gemini
   qua endpoint tương thích OpenAI có đúng chữ "PerDay" / "retry in" như đã đoán không; `response_format` json_object có bị
   từ chối không (đã có tự bỏ khi 400).
+- 2.0.70: chờ người dùng chạy lại "1. Nghe & tách câu" trên phim 1354 câu và xem Task Manager (RAM, "Bộ nhớ GPU dùng
+  chung" phải ~0 khi Qwen3 nghe); nghe thử chỗ nối các đoạn 10 phút của bản tách (tab Âm thanh → Nghe riêng nhạc nền
+  quanh phút 10, 20…). Nếu còn tràn card: Cài đặt → Qwen3-ASR 0.6B.
 - 2.0.69: chờ người dùng nghe thử 20 giọng trend với VieNeu thật (tab Lồng tiếng mục 2 → nút ▶ cạnh ô giọng) – giọng
   nào chưa hay thì chỉnh `fx` trong `trend_voices.PRESETS`. Có thể làm tiếp: cho áp hiệu ứng trend lên giọng bất kỳ
   (giọng mẫu của bạn, Edge, OmniVoice).

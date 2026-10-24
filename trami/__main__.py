@@ -48,7 +48,7 @@ def cli_translate(args):
         "which": args.hien_thi,
         "render": not args.chi_phude,
         "denoise": args.loc_nhieu,
-        "parallel": bool(load_settings().get("auto_parallel", True)),
+        "parallel": bool(load_settings().get("auto_parallel", False)),
     }
     from .sitelogin import extract_url
 

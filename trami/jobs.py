@@ -1,6 +1,7 @@
-"""Hàng đợi tác vụ nền: chạy NHIỀU việc cùng lúc, báo tiến độ, huỷ được.
+"""Hàng đợi tác vụ nền: báo tiến độ, huỷ được.
 
-Quy tắc chia luồng (chạy được ngay thì chạy, không phải chờ hết việc trước):
+Mặc định chạy LẦN LƯỢT từng việc (như trước 2.0.64 – ít RAM / GPU nhất). Bật "Chạy nhiều việc cùng lúc" ở Cài đặt
+(`jobs_parallel`) thì chạy được ngay là chạy theo các quy tắc:
 - tối đa MAX_RUNNING việc cùng lúc;
 - 2 việc của CÙNG 1 dự án không chạy cùng lúc (cùng ghi 1 file dự án -> mất dữ liệu); khác dự án thì chạy song song;
 - 2 việc nặng GPU (nghe, tách giọng, đọc giọng AI, xoá phụ đề AI…) không chạy cùng lúc (tránh hết bộ nhớ card đồ hoạ);
@@ -58,6 +59,21 @@ class Job:
 
 
 MAX_RUNNING = 4
+_limit_cache = [0.0, 1]
+
+
+def max_running() -> int:
+    """Số việc chạy cùng lúc: 1 (mặc định, lần lượt) hoặc MAX_RUNNING khi bật ở Cài đặt (đọc lại mỗi 2 s)."""
+    now = time.time()
+    if now - _limit_cache[0] > 2.0:
+        try:
+            from .config import load_settings
+
+            _limit_cache[1] = MAX_RUNNING if load_settings().get("jobs_parallel") else 1
+        except Exception:  # noqa: BLE001
+            _limit_cache[1] = 1
+        _limit_cache[0] = now
+    return _limit_cache[1]
 # việc nặng GPU (mỗi lúc 1 việc); việc khác (mạng / CPU) chạy song song
 GPU_KINDS = {"auto", "recognize", "separate", "diarize", "inpaint", "dub", "redub", "realign"}
 # việc chỉ ĐỌC dự án (không ghi project.json) -> chạy được song song với việc khác của cùng dự án
@@ -156,7 +172,10 @@ class JobManager:
     def _why_wait(self, job: Job) -> str:
         """Vì sao việc này chưa chạy được ('' = chạy được ngay)."""
         run = [self.jobs[r] for r in self.running]
-        if len(run) >= MAX_RUNNING:
+        limit = max_running()
+        if limit == 1 and run:
+            return "chờ việc trước xong (chạy lần lượt từng việc)"
+        if len(run) >= limit:
             return f"chờ – đang chạy {len(run)} việc"
         if job.project_id and job.kind not in READONLY_KINDS and any(
                 r.project_id == job.project_id and r.kind not in READONLY_KINDS for r in run):

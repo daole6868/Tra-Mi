@@ -288,7 +288,7 @@ class ProjectPage(QWidget):
         f.row("Giọng lồng", v_row,
               "1 giọng cho MỌI người nói – áp cho mọi nút lồng tiếng (cả '3. Lồng tiếng', 'Tạo bản lồng tiếng') và nhớ làm "
               "mặc định cho video sau. 'Theo giọng từng người nói' = chọn giọng từng người ở tab Lồng tiếng mục 2")
-        self.a_parallel = f.row("Vừa tách vừa dịch", Switch(bool(s.get("auto_parallel", True))),
+        self.a_parallel = f.row("Vừa tách vừa dịch", Switch(bool(s.get("auto_parallel", False))),
                                 "Nghe tới đâu dịch tới đó: đủ 'Số câu mỗi lần gửi' của công cụ dịch (Cài đặt → Công cụ "
                                 "dịch) là gửi đi luôn, câu dịch hiện ngay ở tab Phụ đề; Edge đọc trước giọng các câu đã "
                                 "dịch. Nghe xong, câu bị đổi (nghe lại đoạn sót / tách người nói) được dịch / đọc lại. "
@@ -1842,7 +1842,7 @@ class ProjectPage(QWidget):
             self.a_clean.setChecked(bool(st.get("ai_clean_before_translate", True)))
             self.a_review.setChecked(bool(st.get("ai_review_after_translate", False)))
             self.d_interj.setChecked(bool(st.get("dub_drop_interj", True)))
-            self.a_parallel.setChecked(bool(st.get("auto_parallel", True)))
+            self.a_parallel.setChecked(bool(st.get("auto_parallel", False)))
         finally:
             self.loading = was
         self._update_engine_label()

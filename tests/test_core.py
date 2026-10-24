@@ -3349,8 +3349,11 @@ def test_jobs_run_concurrently_with_project_and_gpu_rules(monkeypatch):
     from trami import gpu
     from trami.jobs import JobManager
 
+    from trami import jobs as jobs_mod
+
     monkeypatch.setattr(gpu, "before_job", lambda kind: None)   # dọn card (gc) có test riêng – ở đây chỉ xét lịch chạy
     monkeypatch.setattr(gpu, "after_job", lambda kind: None)
+    monkeypatch.setattr(jobs_mod, "max_running", lambda: 4)     # đã bật "Chạy nhiều việc cùng lúc" ở Cài đặt
 
     m = JobManager(workers=4)
     live, peak, lock = set(), {}, threading.Lock()
@@ -3727,3 +3730,114 @@ def test_trend_voices_vieneu(monkeypatch, tmp_path):
     assert [c[0] for c in calls[n:]] == ["Hôm nay vui quá"]            # đổi hiệu ứng: chỉ đọc lại giọng đó
     out = tts.preview_voice("vieneu:trend:soc_chuot", "Xin chào", tmp_path / "pv", {})
     assert out.exists() and tts.read_wav_rate(out) == 24000
+
+
+@pytest.mark.parametrize("model", ["vocals_mel_band_roformer.ckpt",
+                                   "ens:model_bs_roformer_ep_317_sdr_12.9755.ckpt+vocals_mel_band_roformer.ckpt"])
+def test_separate_long_audio_in_chunks(tmp_path, monkeypatch, model):
+    """Phim dài: tách từng đoạn (mỗi mô hình nạp 1 lần), nối mượt chỗ chồng, đúng độ dài; mép đoạn tách kém (thư viện
+    làm mép xấu) không lộ ra vì vùng nối bỏ mép; kết hợp 2 mô hình = trung bình."""
+    import types
+    import wave as wv
+
+    from trami import separate as sp
+
+    monkeypatch.setattr(sp, "CHUNK_SEC", 4.0)
+    monkeypatch.setattr(sp, "OVERLAP_SEC", 1.5)
+    monkeypatch.setattr(sp, "MARGIN_SEC", 0.4)
+    sr = 44100
+    t = np.arange(int(13.3 * sr)) / sr
+    mix = np.stack([0.5 * np.sin(2 * np.pi * (200 + 30 * t) * t), 0.4 * np.sin(2 * np.pi * 310 * t)], 1)
+    src = tmp_path / "a.wav"
+    with wv.open(str(src), "wb") as w:
+        w.setnchannels(2), w.setsampwidth(2), w.setframerate(sr)
+        w.writeframes((mix * 32767).astype(np.int16).tobytes())
+    calls = {"init": 0, "load": [], "sep": 0}
+    gain = {sp.BS_ROFORMER: 0.6, sp.KIM_ROFORMER: 0.8}
+
+    class FakeSep:
+        def __init__(self, output_dir, model_file_dir, output_format, log_level, **kw):
+            self.out = Path(output_dir)
+            calls["init"] += 1
+            assert not kw                       # tự kết hợp, không cần bản thư viện có ensemble
+
+        def load_model(self, model_filename):
+            calls["load"].append(model_filename)
+            self.g = gain[model_filename]
+
+        def separate(self, path, names):
+            calls["sep"] += 1
+            with wv.open(path, "rb") as r:
+                a = np.frombuffer(r.readframes(r.getnframes()), np.int16).reshape(-1, 2).astype(np.float32)
+            edge = int(0.3 * sr)
+            for name, g in (("vocals", self.g), ("instrumental", 1 - self.g)):
+                y = a * g
+                y[:edge] = 0
+                y[-edge:] = 0                     # mép đoạn tách kém
+                with wv.open(str(self.out / f"{name}.wav"), "wb") as w:
+                    w.setnchannels(2), w.setsampwidth(2), w.setframerate(sr)
+                    w.writeframes(y.astype(np.int16).tobytes())
+            return ["vocals.wav", "instrumental.wav"]
+
+    mod = types.ModuleType("audio_separator.separator")
+    mod.Separator = FakeSep
+    monkeypatch.setitem(sys.modules, "audio_separator", types.ModuleType("audio_separator"))
+    monkeypatch.setitem(sys.modules, "audio_separator.separator", mod)
+    monkeypatch.setattr(sp, "available", lambda: True)
+    chunks = sp.plan_chunks(len(t))
+    assert len(chunks) == 3 and chunks[0][0] == 0 and chunks[-1][1] == len(t)
+    assert all(b > c for (_, b), (c, _) in zip(chunks, chunks[1:]))          # 2 đoạn liền luôn chồng nhau
+    v, i = sp.separate(src, tmp_path / "stems", model)
+    models = sp.model_list(model)
+    assert calls["init"] == len(models) and calls["load"] == models and calls["sep"] == 3 * len(models)
+    g = np.mean([gain[m] for m in models])
+    for f, want in ((v, g), (i, 1 - g)):
+        with wv.open(str(f), "rb") as r:
+            y = np.frombuffer(r.readframes(r.getnframes()), np.int16).reshape(-1, 2) / 32767
+        assert len(y) == len(t)
+        inner = slice(int(0.3 * sr), len(t) - int(0.3 * sr))   # mép đầu / cuối cả bài vốn bị fake làm câm
+        assert np.abs(y[inner] - mix[inner] * want).max() < 0.002
+    assert (tmp_path / "stems" / "model.txt").read_text("utf-8") == model
+    assert not (tmp_path / "stems" / "_sep").exists() and not (tmp_path / "stems" / "mix44k.wav").exists()
+
+
+def test_jobs_sequential_by_default_and_qwen_batches(monkeypatch):
+    """Mặc định chạy LẦN LƯỢT từng việc (như trước 2.0.64); bộ nghe Qwen3 chia lô theo độ dài, card 8 GB lô nhỏ +
+    chỉ 1 mô hình trên card."""
+    import threading
+    import time as _t
+
+    from trami import gpu, jobs as jobs_mod
+    from trami.config import DEFAULT_SETTINGS
+    from trami.jobs import JobManager
+    from trami.qwen_asr_worker import plan_batches, vram_plan
+
+    assert DEFAULT_SETTINGS["jobs_parallel"] is False and DEFAULT_SETTINGS["auto_parallel"] is False
+    monkeypatch.setattr(jobs_mod, "_limit_cache", [0.0, 1])
+    monkeypatch.setattr(gpu, "before_job", lambda kind: None)
+    monkeypatch.setattr(gpu, "after_job", lambda kind: None)
+    assert jobs_mod.max_running() == 1
+    m = JobManager(workers=4)
+    gate, live, peak = threading.Event(), [0], [0]
+
+    def fn(j):
+        live[0] += 1
+        peak[0] = max(peak[0], live[0])
+        gate.wait(2)
+        live[0] -= 1
+    a = m.submit("translate", "A", fn, "p1")
+    b = m.submit("download", "B", fn, "p2")          # khác dự án, không dùng GPU – vẫn phải chờ
+    _t.sleep(0.4)
+    assert m.jobs[b.id].status == "queued" and "lần lượt" in m.jobs[b.id].message
+    gate.set()
+    t0 = _t.time()
+    while any(m.jobs[x.id].status in ("queued", "running") for x in (a, b)) and _t.time() - t0 < 5:
+        _t.sleep(0.05)
+    assert peak[0] == 1 and m.jobs[b.id].status == "done"
+    lens = [28, 3, 27, 5, 10, 28, 2, 9, 15, 26]
+    budget, one = vram_plan(8 * 1024 ** 3)
+    assert one and budget <= 60
+    bs = plan_batches(lens, list(range(len(lens))), budget)
+    assert sorted(k for x in bs for k in x) == list(range(len(lens)))
+    assert all(max(lens[k] for k in x) * len(x) <= budget or len(x) == 1 for x in bs)
+    assert vram_plan(24 * 1024 ** 3) == (224.0, False)
