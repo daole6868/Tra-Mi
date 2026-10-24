@@ -1242,6 +1242,13 @@ def dub_default_voice(voice: str | None, engine: str, settings: dict) -> str:
     return f"edge:{settings.get('tts_voice')}" if engine == "edge" else "vieneu:"
 
 
+def voice_all(p: Project, settings: dict | None = None) -> str:
+    """Giọng chung cho mọi người nói ("" = theo giọng từng người ở mục 2, "@auto" = tự gán nam / nữ)."""
+    if "voice_all" in p.data:
+        return p.data.get("voice_all") or ""
+    return (settings or load_settings()).get("dub_voice_all", "") or ""
+
+
 def dub(p: Project, voice: str | None = None, rate: str | None = None, settings: dict | None = None,
         progress: Prog | None = None, cancel=None, engine: str | None = None, inplace: bool = False,
         only: list[int] | None = None) -> Path:
@@ -1259,6 +1266,13 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     engine = engine or settings.get("tts_engine", "edge")
     default_voice = dub_default_voice(voice, engine, settings)
     voices = dict(p.data.get("voices") or {})
+    # "Giọng cho tất cả người nói" (tab Tự động / mục 2): dự án nhớ riêng, chưa chọn thì theo mặc định ở Cài đặt -> mọi
+    # nút lồng tiếng (Bắt đầu dịch tự động, 3. Lồng tiếng, Tạo bản lồng tiếng, Tạo lại giọng) đọc cùng 1 giọng đó
+    va = voice_all(p, settings)
+    if not voice and va and va != "@auto":
+        voices = {k["speaker"]: va for k in speaker_list(p)}
+        p.data["voices"] = voices
+        default_voice = va
     auto_voiced = 0
     if not inplace and only is None and not voice:
         # nhiều người nói mà chưa ai được chọn giọng -> trước đây cả phim đọc 1 giọng mặc định; giờ tự gán mỗi người 1
@@ -2364,7 +2378,9 @@ def _auto_voices(p: Project, opts: dict, settings: dict) -> None:
     """Giọng chọn ở tab Tự động: 1 giọng cho mọi người nói, hoặc "@auto" = tự gán giọng nam / nữ theo từng người nói.
     Để trống = giữ giọng đã chọn ở tab Lồng tiếng mục 2."""
     v = opts.get("voice") or ""
+    p.data["voice_all"] = v
     if not v:
+        p.save()
         return
     spks = [x["speaker"] for x in speaker_list(p)]
     if v == "@auto":

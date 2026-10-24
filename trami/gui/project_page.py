@@ -269,15 +269,16 @@ class ProjectPage(QWidget):
             lambda: None if self.loading or self.d_engine.currentData() == self.a_tts.currentData()
             else set_combo(self.d_engine, self.a_tts.currentData()))
         # giọng lồng: cùng danh sách giọng với tab Lồng tiếng mục 2
-        self.a_voice = combo([("", "(Theo giọng ở tab Lồng tiếng mục 2)")], "")
+        self.a_voice = combo([("", "(Theo giọng từng người nói – mục 2)")], "")
         self.a_voice.setMinimumWidth(240)
+        self.a_voice.currentIndexChanged.connect(self._voice_all_changed)
         a_play = IconButton("play", "Nghe thử giọng này", 32)
         a_play.clicked.connect(self._preview_auto_voice)
         v_row = hbox(self.a_voice, a_play)
         v_row.setStretch(0, 1)
         f.row("Giọng lồng", v_row,
-              "1 giọng cho mọi người nói, hoặc 'Tự gán giọng nam / nữ' theo chất giọng từng nhân vật. Để mặc định = "
-              "dùng giọng đã chọn cho từng người nói ở tab Lồng tiếng mục 2")
+              "1 giọng cho MỌI người nói – áp cho mọi nút lồng tiếng (cả '3. Lồng tiếng', 'Tạo bản lồng tiếng') và nhớ làm "
+              "mặc định cho video sau. 'Theo giọng từng người nói' = chọn giọng từng người ở tab Lồng tiếng mục 2")
         self.a_parallel = f.row("Vừa tách vừa dịch", Switch(bool(s.get("auto_parallel", True))),
                                 "Nghe tới đâu dịch tới đó: đủ 'Số câu mỗi lần gửi' của công cụ dịch (Cài đặt → Công cụ "
                                 "dịch) là gửi đi luôn, câu dịch hiện ngay ở tab Phụ đề; Edge đọc trước giọng các câu đã "
@@ -957,6 +958,15 @@ class ProjectPage(QWidget):
         row = hbox(label("Bộ đọc mặc định", "muted"), self.d_engine)
         row.setStretch(1, 1)
         spk.add(row)
+        self.d_voice_all = self._mirror(self.a_voice)
+        self.d_voice_all.setMinimumContentsLength(22)
+        self.d_voice_all.setToolTip("1 giọng cho MỌI người nói – dùng cho mọi nút lồng tiếng và nhớ làm mặc định cho video "
+                                    "sau. Để '(Theo giọng từng người nói)' thì chọn giọng từng người ở bảng dưới")
+        va_play = IconButton("play", "Nghe thử giọng này", 32)
+        va_play.clicked.connect(self._preview_auto_voice)
+        va_row = hbox(label("Giọng cho tất cả", "muted"), self.d_voice_all, va_play)
+        va_row.setStretch(1, 1)
+        spk.add(va_row)
         spk.add(hbox(button("Phân biệt người nói", "users", on_click=self.run_diarize),
                      button("Tự gán giọng khác nhau", "wand", on_click=self._auto_voices), None))
         self.spk_table = QTableWidget(0, 4)
@@ -3049,15 +3059,45 @@ class ProjectPage(QWidget):
 
     def _fill_auto_voices(self, voices: list[dict]):
         """Ô "Giọng lồng" ở tab Tự động = danh sách giọng của mục 2 (+ tự gán nam / nữ)."""
-        cur = self.a_voice.currentData() or ""
+        cur = pipeline.voice_all(self.p, self.settings) if self.p else (self.a_voice.currentData() or "")
         was, self.loading = self.loading, True
         self.a_voice.clear()
-        self.a_voice.addItem("(Theo giọng ở tab Lồng tiếng mục 2)", "")
+        self.a_voice.addItem("(Theo giọng từng người nói – mục 2)", "")
         self.a_voice.addItem("🎲 Tự gán giọng nam / nữ theo từng người nói", "@auto")
         for v in voices:
             self.a_voice.addItem(v["name"], v["id"])
         set_combo(self.a_voice, cur)
         self.loading = was
+
+    def _voice_all_changed(self, *_):
+        """Chọn 1 giọng cho tất cả người nói (tab Tự động / mục 2): áp ngay cho dự án (mọi người nói, bỏ giọng riêng
+        từng câu) và nhớ làm mặc định cho video sau."""
+        if self.loading or not self.p:
+            return
+        v = self.a_voice.currentData() or ""
+        self._save_setting("dub_voice_all", v)
+        self.p.reload()
+        self.p.data["voice_all"] = v
+        self.p.save()
+        if v == "@auto":
+            return self._auto_voices()
+        if not v:
+            return self._update_voice_note()
+        self.p.data["voices"] = {x["speaker"]: v for x in pipeline.speaker_list(self.p)}
+        self.p.save()
+        own = [r for r, x in enumerate(self.model.segs) if x.extra.get("voice")]
+        for r in own:   # giọng riêng từng câu đè lên giọng chung -> bỏ
+            self.model.setData(self.model.index(r, C_VOICE), "")
+        if own:
+            self._save_segs_now()
+        self.loading = True
+        try:
+            self._fill_speakers()
+        finally:
+            self.loading = False
+        self.win.toast(f"Mọi người nói dùng giọng {self.a_voice.currentText()}"
+                       + (f" (bỏ giọng riêng của {len(own)} câu)" if own else "")
+                       + " – bấm Tạo bản lồng tiếng để đọc lại", "ok")
 
     def _preview_auto_voice(self):
         vid = self.a_voice.currentData() or ""
@@ -3072,6 +3112,11 @@ class ProjectPage(QWidget):
             return
         self.p.reload()
         self.p.data.setdefault("voices", {})[spk] = vid
+        if self.p.data.get("voice_all") or pipeline.voice_all(self.p, self.settings):
+            self.p.data["voice_all"] = ""   # chọn giọng từng người -> dự án này thôi dùng 1 giọng chung
+            was, self.loading = self.loading, True
+            set_combo(self.a_voice, "")
+            self.loading = was
         self.p.save()
         # câu của người này đang có giọng riêng (Đổi giọng câu đã tích / khung Câu đang chọn) -> giọng riêng đè lên giọng
         # vừa chọn, đọc lại bao nhiêu lần cũng ra giọng cũ -> hỏi có dùng giọng mới cho cả các câu đó không
@@ -3097,7 +3142,10 @@ class ProjectPage(QWidget):
         defaults = sum(1 for r in range(n_spk) if isinstance(self.spk_table.cellWidget(r, 2), QComboBox)
                        and not self.spk_table.cellWidget(r, 2).currentData())
         hint = ""
-        if n_spk == 1 and len(self.model.segs) > 1:
+        va = pipeline.voice_all(self.p, self.settings) if self.p else ""
+        if va and va != "@auto":
+            hint = f" · mọi người nói dùng 1 giọng: {self.a_voice.currentText()}"
+        elif n_spk == 1 and len(self.model.segs) > 1:
             hint = (" · ⚠ chỉ có 1 người nói (S1) nên cả phim 1 giọng – muốn mỗi nhân vật 1 giọng: Cài đặt → Số người nói "
                     "đặt 0 (tự đoán, không để 1), rồi bấm 'Phân biệt người nói' ở mục 2; hoặc tích câu rồi đổi giọng riêng")
         elif n_spk > 1 and defaults == n_spk:

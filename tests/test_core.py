@@ -3540,3 +3540,38 @@ def test_dub_voices_never_silently_single(monkeypatch):
     pipeline._auto_voices(p, {"voice": "edge:vi-VN-NamMinhNeural"}, st)
     assert set(p.data["voices"].values()) == {"edge:vi-VN-NamMinhNeural"}
     assert not any(s.extra.get("voice") for s in p.segments)
+
+
+def test_one_voice_for_all_applies_to_every_dub_button(monkeypatch):
+    """"Giọng cho tất cả" (tab Tự động / mục 2): mọi lần lồng tiếng (đầy đủ, tạo lại giọng câu đã tích) đọc đúng giọng đó
+    cho mọi người nói; dự án mới lấy mặc định ở Cài đặt; dự án đã chọn giọng từng người ("") thì theo mục 2."""
+    from trami import pipeline, tts
+    from trami.project import Project
+
+    spoken = []
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, p, voice in items:
+            spoken.append(voice)
+            _fake_audio(p, 0.5, 300)
+        return []
+
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    p = Project.create("một giọng")
+    p.data["info"] = {"duration": 6}
+    p.segments = [Segment(0.2, 1.0, "a", "Một", "S1"), Segment(1.5, 2.3, "b", "Hai", "S2")]
+    p.data["voices"] = {"S1": "edge:vi-VN-HoaiMyNeural"}
+    p.save()
+    st = {"translate_engine": "google", "tts_voice": "vi-VN-HoaiMyNeural", "dub_voice_all": "edge:vi-VN-NamMinhNeural"}
+    pipeline.dub(p, None, settings=st, engine="edge")
+    assert spoken == ["vi-VN-NamMinhNeural"] * 2 and set(p.data["voices"].values()) == {"edge:vi-VN-NamMinhNeural"}
+    spoken.clear()
+    pipeline.redub(p, [1], settings=st, engine="edge")
+    assert spoken == ["vi-VN-NamMinhNeural"]
+    # dự án chọn giọng từng người -> không theo mặc định chung
+    p.data["voice_all"] = ""
+    p.data["voices"] = {"S1": "edge:vi-VN-HoaiMyNeural", "S2": "edge:vi-VN-NamMinhNeural"}
+    p.save()
+    spoken.clear()
+    pipeline.redub(p, [0, 1], settings=st, engine="edge")
+    assert spoken == ["vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural"]

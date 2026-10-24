@@ -68,7 +68,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `call` (gọi ở luồng phụ, Huỷ dừng ngay), `session` (requests có TCP keepalive). `jobs` chạy mọi tác vụ trong
   `net.task(cancel, report)` -> hàm gọi mạng tự lấy nút Huỷ + dòng trạng thái.
 - `trami/songs.py` – đoán cụm câu đang HÁT (nốt ngân trên giọng đã tách) -> 🎵; `pipeline.mark_song_lines` (♪ trong bản dịch).
-- `tests/test_core.py` – `python -m pytest -q tests` (116 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (117 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -918,6 +918,16 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `_set_voice` (mục 2): người nói có câu giọng riêng -> hỏi dùng giọng mới cho cả các câu đó; tab Tự động chọn giọng
   (`_auto_voices`) bỏ giọng riêng từng câu; dòng "Giọng đọc –" ở mục 3 báo "chỉ có 1 người nói…" / "chưa chọn giọng:
   tự gán…" / "N câu có giọng riêng (đè lên giọng người nói)". Lưu ý: Edge tiếng Việt chỉ có 2 giọng (Hoài My, Nam Minh).
+
+- 2.0.66: "chọn giọng 🎙 Ngọc (nữ miền Bắc) – thu âm sạch mà lồng ra giọng khác, mỗi video 1 giọng khác". Nguyên nhân: ô
+  "Giọng lồng" tab Tự động (2.0.64) CHỈ áp khi bấm "Bắt đầu dịch tự động"; "3. Lồng tiếng" / "Tạo bản lồng tiếng" / Tạo lại
+  giọng dùng giọng từng người ở mục 2 – để mặc định thì 2.0.65 tự gán giọng khác nhau theo người nói / nam nữ -> mỗi video
+  khác. Sửa: 1 giọng chung `pipeline.voice_all(p, settings)` = `p.data["voice_all"]` (dự án), chưa có -> Cài đặt
+  `dub_voice_all` (mặc định cho video sau); `dub` (mọi kiểu, kể cả redub) có giọng chung -> mọi người nói giọng đó. GUI: ô
+  `a_voice` (tab Tự động) + ô gương `d_voice_all` "Giọng cho tất cả" ở mục 2 (`_mirror`), đổi -> `_voice_all_changed`
+  (lưu Cài đặt + dự án, gán mọi người nói, bỏ giọng riêng từng câu, điền lại bảng; "@auto" -> Tự gán); chọn giọng 1 người ở
+  bảng mục 2 -> dự án về `voice_all = ""`; dòng "Giọng đọc" ghi "mọi người nói dùng 1 giọng: …". Giả lập 2 video (VieNeu
+  giả, file mẫu Ngọc): mọi câu đọc bằng đúng file mẫu Ngọc.
 
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
