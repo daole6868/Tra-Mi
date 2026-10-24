@@ -629,6 +629,8 @@ class SettingsPage(QWidget):
         ("codec", "video_codec", "c"), ("crf", "video_crf", "i"), ("preset", "video_preset", "c"),
         ("export_chunks", "export_chunks", "b"),
         ("jobs_parallel", "jobs_parallel", "b"), ("vram_check", "vram_check", "b"), ("proxy_mode", "proxy_mode", "c"),
+        ("zn_key", "zernio_api_key", "t"), ("yt_cid", "yt_client_id", "t"), ("yt_sec", "yt_client_secret", "t"),
+        ("fb_app", "fb_app_id", "t"), ("fb_sec", "fb_app_secret", "t"),
     ]
 
     def __init__(self, win):
@@ -820,6 +822,20 @@ class SettingsPage(QWidget):
         eg.setColumnStretch(0, 1)
         eg.setColumnStretch(1, 1)
         v.addLayout(eg)
+        # --- đăng video: Zernio / YouTube (API riêng) / Facebook (API riêng)
+        from .publish_ui import AccountCards
+
+        self.pub = AccountCards(self)
+        for attr, _k in AccountCards.KEYS:
+            setattr(self, attr, getattr(self.pub, attr))
+        v.addWidget(label("Đăng video", "h2"))
+        pg = QGridLayout()
+        pg.setSpacing(16)
+        for i, card in enumerate(self.pub.cards):
+            pg.addWidget(card, i // 2, i % 2)
+        pg.setColumnStretch(0, 1)
+        pg.setColumnStretch(1, 1)
+        v.addLayout(pg)
         save = GradientButton("Lưu cài đặt", "save", big=True)
         save.clicked.connect(self.save)
         v.addWidget(save)
@@ -851,6 +867,7 @@ class SettingsPage(QWidget):
                 w["keys"].set_keys(api_keys(raw, eng))
             w["batch"].setValue(engine_batch(raw, eng))
             w["rpm"].setValue(engine_rpm(raw, eng))
+        self.pub.refresh()
         self.refresh_status()
 
     def refresh_status(self):
@@ -916,7 +933,8 @@ class SettingsPage(QWidget):
             d[f"{eng}_rpm"] = int(w["rpm"].value())
         cur = load_settings()
         for k in list(d):
-            if (k.endswith("_api_key") or k == "hf_token") and isinstance(d[k], str) and d[k].startswith("••••"):
+            if (k.endswith("_api_key") or k.endswith("_secret") or k == "hf_token") and isinstance(d[k], str) \
+                    and d[k].startswith("••••"):
                 d[k] = cur.get(k, "")
         return d
 

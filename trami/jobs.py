@@ -77,10 +77,12 @@ def max_running() -> int:
 # việc nặng GPU (mỗi lúc 1 việc); việc khác (mạng / CPU) chạy song song
 GPU_KINDS = {"auto", "recognize", "separate", "diarize", "inpaint", "dub", "redub", "realign"}
 # việc chỉ ĐỌC dự án (không ghi project.json) -> chạy được song song với việc khác của cùng dự án
-READONLY_KINDS = {"preview", "tool"}
+READONLY_KINDS = {"preview", "tool", "publish"}   # publish chỉ ghi posts.json riêng
 # việc rất nhẹ (vài giây, không dùng card): xếp lại bản lồng sau khi xoá / kéo / gộp câu -> không phải chờ việc dài của
 # dự án khác dù đang chạy lần lượt (vẫn chờ việc khác của CÙNG dự án vì cùng ghi project.json)
 LIGHT_KINDS = {"relayout"}
+# việc chỉ dùng mạng (đăng video): không chờ việc dài khác, không chặn việc khác dù đang chạy lần lượt
+NET_KINDS = {"publish"}
 
 
 def needs_gpu(kind: str, project_id: str = "") -> bool:
@@ -175,12 +177,13 @@ class JobManager:
     def _why_wait(self, job: Job) -> str:
         """Vì sao việc này chưa chạy được ('' = chạy được ngay)."""
         run = [self.jobs[r] for r in self.running]
+        busy = [r for r in run if r.kind not in NET_KINDS]   # đang đăng video (chỉ dùng mạng) -> không tính
         limit = max_running()
-        light = job.kind in LIGHT_KINDS
-        if limit == 1 and run and not light:
+        light = job.kind in LIGHT_KINDS or job.kind in NET_KINDS
+        if limit == 1 and busy and not light:
             return "chờ việc trước xong (chạy lần lượt từng việc)"
-        if len(run) >= limit and not light:
-            return f"chờ – đang chạy {len(run)} việc"
+        if len(busy) >= limit and not light:
+            return f"chờ – đang chạy {len(busy)} việc"
         if job.project_id and job.kind not in READONLY_KINDS and any(
                 r.project_id == job.project_id and r.kind not in READONLY_KINDS for r in run):
             return "chờ việc khác của dự án này xong"

@@ -129,6 +129,10 @@ DEFAULT_SETTINGS: dict = {
     "ai_song_filter": True,                   # trước khi dịch cả phim lần đầu: AI lọc lời bài hát (🎵) + chữ không phải thoại
     "ai_join_engine": "auto",                 # AI nối câu theo nghĩa sau khi tách câu: auto (công cụ dịch nếu là AI) / off / tên AI
     "asr_relisten": True,                     # nghe lại chỗ cắt khúc giữa lúc đang nói (bỏ dấu "。" giả bộ nghe tự đặt)
+    # đăng video (publish.py): Zernio / API riêng YouTube (dự án Google Cloud) / API riêng Facebook (app Meta)
+    "zernio_api_key": "", "zernio_profile_id": "",
+    "yt_client_id": "", "yt_client_secret": "", "fb_app_id": "", "fb_app_secret": "",
+    "publish_privacy": "public", "publish_category": "24", "publish_notify": True, "publish_synthetic": False,
     # Tải video từ link: Bilibili đăng nhập bằng mã QR (sitelogin); trang khác lấy cookie từ trình duyệt / file
     "dl_browser": "",                         # "" / firefox / edge / chrome / brave / opera / vivaldi
     "dl_cookie_file": "",                     # file cookies.txt (Netscape) người dùng xuất từ trình duyệt
@@ -344,6 +348,6 @@ def public_settings(s: dict | None = None) -> dict:
     """Ẩn bớt API key khi gửi ra giao diện."""
     s = dict(s or load_settings())
     for k in list(s):
-        if (k.endswith("_api_key") or k == "hf_token") and s[k]:
+        if (k.endswith("_api_key") or k.endswith("_secret") or k == "hf_token") and s[k]:
             s[k] = "••••" + s[k][-4:]
     return s

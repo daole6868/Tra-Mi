@@ -91,6 +91,13 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - Xuất chia đoạn (`video._render_chunked`, `export_chunks`): phim ≥ 10 phút, đoạn 60 s theo lưới khung xuất, mã đoạn = lệnh +
   file nguồn + dòng ASS trong đoạn -> `work/render/chunks/c_<mã>.mp4`, âm thanh trộn 1 lần `a_<mã>.m4a`, concat `-c copy`.
   `gpu.wait_for_vram` (nvidia-smi) trước việc GPU; hoàn tác `project_page._undo/_redo` (ảnh chụp JSON danh sách câu).
+- `trami/publish.py` – đăng video YouTube / Facebook (Trang): `Zernio` (zernio.com/api/v1: profiles, connect/<nền tảng>,
+  accounts, media/presign -> PUT, posts, posts/<id>), API riêng `yt_login` / `yt_upload` (OAuth máy tính + PKCE qua
+  `_Catcher` 127.0.0.1, tải lên nối tiếp 308/Range, thumbnails.set) và `fb_login` / `fb_use_token` / `fb_upload` (Graph
+  `FB_VER`, Resumable Upload API + `fbuploader_video_file_chunk`; Reels `video_reels` start → rupload → finish), Tự tải lên
+  `prepare_manual`, `ai_metadata` (AI viết tiêu đề / mô tả / hashtag), tài khoản `data/accounts/{youtube,facebook,zernio}.json`,
+  lịch sử `<dự án>/posts.json`, nháp `publish_draft.json` (không đụng project.json). Việc "publish" = `jobs.NET_KINDS` +
+  READONLY (không chờ / không chặn việc khác). GUI `gui/publish_ui.py`: `AccountCards` (Cài đặt) + `PublishCard` (tab Xuất).
 - `trami/songs.py` – đoán cụm câu đang HÁT (nốt ngân trên giọng đã tách) -> 🎵; `pipeline.mark_song_lines` (♪ trong bản dịch).
 - Đóng gói: `Subvideo.spec` (gom `collect_submodules("trami")` + `collect_all` các gói AI nạp động, `module_collection_mode`
   "pyz+py" cho transformers / torch / omnivoice / vieneu / funasr / speechbrain, loại gradio / tensorflow / matplotlib…),
@@ -98,7 +105,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (142 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (147 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1185,7 +1192,46 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     459–460, 751–752, 849–850 (chuyển đuôi); giữ nguyên 91–93, 131–133, 806. 549 / 739 cần nghe lại (âm thanh thật),
     106 / 107 cần AI nối câu.
 
+- 2.0.77: "đăng lên YouTube với Facebook, còn nền tảng nào như TikTok" – tra điều kiện từng nền tảng: YouTube Data API dự án
+  chưa qua audit -> video tải lên bị KHOÁ Riêng tư (hạn mức mặc định vài video / ngày); Facebook chỉ đăng lên Trang, app
+  chưa duyệt (Development) dùng được cho quản trị app nhưng bài có thể chỉ admin thấy; TikTok app chưa audit chỉ đăng "Chỉ
+  mình tôi", tài khoản phải để riêng tư, ≤ 5 người / ngày. HaizFlow đăng qua Zernio (dịch vụ trung gian đã được duyệt ->
+  Công khai ngay; 2 tài khoản miễn phí, sau đó ~6 USD / tài khoản / tháng). Người dùng chọn "làm cả 3 cách" + YouTube
+  (+ Shorts) + Facebook Page (Reels / video). API Zernio đọc từ SDK chính thức `late-sdk` (Apache-2.0, PyPI) – không chép mã
+  HaizFlow; Google / Meta theo tài liệu chính thức (sandbox không tới được developers.facebook.com / zernio.com).
+  * `trami/publish.py` (xem Cấu trúc). Mọi lần gọi mạng qua `_http` (Huỷ ngay, mất mạng chờ rồi gửi tiếp, 429 / 5xx thử lại);
+    tải lên bằng `_Slice` (file-like có độ dài: Content-Length, báo % / MB / MB/s, Huỷ giữa chừng). YouTube: phiên
+    resumable, gửi từng 8 MB, lỗi -> hỏi `bytes */N` rồi gửi tiếp từ Range; 401 -> làm mới mã; hẹn giờ = Riêng tư +
+    publishAt (UTC); Shorts tự thêm #Shorts; bỏ < > khỏi tiêu đề / mô tả; video trả về không đúng quyền riêng tư đã chọn
+    -> cảnh báo "dự án chưa được Google duyệt"; ảnh bìa lỗi 403 -> nhắc xác minh số điện thoại. Facebook video: phiên
+    `/{app}/uploads` (mã người dùng) -> POST thân file + `file_offset`, lỗi -> GET offset rồi gửi tiếp -> `/{trang}/videos`
+    (mã Trang, `thumb`, hẹn giờ `published=false` + `scheduled_publish_time`); Reels: start -> rupload (offset, file_size)
+    -> finish PUBLISHED / SCHEDULED; `check_video` chặn Reels ngoài 3–90 s, cảnh báo ngang / Shorts > 3 phút. Đăng nhập
+    Facebook: http://localhost:<cổng> (Meta tự cho phép khi app ở Development) hoặc dán mã từ Graph API Explorer -> đổi mã
+    60 ngày (App Secret) -> mã Trang (không hết hạn). Zernio: hồ sơ đầu tiên / tạo "Subvideo" (`zernio_profile_id`),
+    presign -> PUT -> `/posts` (publishNow hoặc scheduledFor UTC; YouTube title / visibility / madeForKids /
+    containsSyntheticMedia / notifySubscribers / categoryId; Facebook Reels contentType "reel"; x-request-id chống đăng
+    trùng) -> hỏi trạng thái mỗi 6 s ≤ 20 phút -> link bài đăng; còn "Đang xử lý" thì nút Cập nhật (`refresh_status`).
+  * Cài đặt: `zernio_api_key`, `yt_client_id` / `yt_client_secret` (nạp client_secret.json), `fb_app_id` /
+    `fb_app_secret`, `publish_privacy` / `publish_category` / `publish_notify` / `publish_synthetic` (nhớ lần đăng
+    trước). `public_settings` / `collect` ẩn cả khoá `*_secret`. Icon mới `share`.
+  * Tab Xuất mục "Đăng video" (`PublishCard`): video = bản xuất mới nhất (`latest_video`, xuất xong tự đổi) / Chọn file;
+    YouTube + Facebook mỗi bên công tắc + Nơi đăng (`targets`: API riêng / Zernio / Tự tải lên) + Kiểu; tiêu đề, mô tả,
+    hashtag, *AI viết…* (`pick_ai`: công cụ dịch AI đang chọn, không thì AI đầu tiên có key); quyền riêng tư, danh mục,
+    hẹn giờ, ảnh bìa (Chọn ảnh / Lấy khung đang xem = `ff.snapshot` tại vị trí trình phát), báo người đăng ký, nội dung
+    AI; Đăng -> mỗi nền tảng 1 việc "publish" (Tự tải lên: chép nội dung vào bộ nhớ tạm + ghi `<video>.<nền tảng>.txt` +
+    mở trang tải lên + mở thư mục chọn sẵn file); bảng "Đã đăng" (Mở / Cập nhật / Chép link).
+  * Thử: máy chủ giả YouTube (rớt 1 lần giữa chừng -> gửi tiếp, đủ từng byte, làm mới mã hết hạn, hẹn giờ), Facebook (nhận
+    nửa file rồi lỗi -> gửi tiếp từ offset, Reels), Zernio (tạo hồ sơ, tài khoản, tải lên, đăng ngay / hẹn giờ, trạng
+    thái + link), đăng nhập Google / Facebook qua cổng trên máy với trình duyệt giả, hàng đợi (đăng không chờ / không
+    chặn việc khác khi chạy lần lượt), giao diện offscreen (Tự tải lên + việc nền + bảng Đã đăng). Chưa gọi thật Google /
+    Meta / Zernio (sandbox chặn).
+
 ## Vấn đề đang mở
+- 2.0.77: chờ người dùng thử đăng thật: Zernio (key + kết nối YouTube / Facebook, đăng ngay / hẹn giờ, link bài đăng),
+  YouTube API riêng (tạo dự án Google Cloud theo Hướng dẫn, đăng nhập 127.0.0.1, video có bị khoá Riêng tư không),
+  Facebook API riêng (đăng nhập localhost / dán mã, đăng video + Reels lên Trang; nếu Meta báo lỗi tham số
+  `fbuploader_video_file_chunk` / quyền `publish_video` thì sửa theo thông báo lỗi). TikTok chưa làm (người dùng chưa chọn).
 - 2.0.76: chờ người dùng chạy lại "1. Nghe & tách câu" (Qwen3) trên phim thật: số chỗ cắt khúc được nghe lại / gộp, câu
   có còn bị cắt đôi kiểu "就连夫人都。" | "…" không; AI nối câu (Gemini / DeepSeek…) có gộp nhầm 2 lượt nói không
   (khôi phục bằng "Hoàn tác nối" / Ctrl+Z). Nghe lại chỉ có với Qwen3-ASR (SenseVoice / Whisper chưa).

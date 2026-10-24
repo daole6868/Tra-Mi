@@ -1311,6 +1311,9 @@ class ProjectPage(QWidget):
         go = GradientButton("Xuất video", "film", big=True)
         go.clicked.connect(self.run_render)
         card.add(go)
+        from .publish_ui import PublishCard
+
+        self.pub = PublishCard(self)
         subs = SectionCard("Xuất phụ đề", "subtitles")
         self.x_srt_trans = button("SRT tiếng Việt", on_click=lambda: self._export_sub("srt", "trans"))
         subs.add(hbox(self.x_srt_trans,
@@ -1337,7 +1340,7 @@ class ProjectPage(QWidget):
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 2, 0)
         v.setSpacing(theme.GAP)
-        for c in (card, subs, tools, outs):
+        for c in (card, self.pub, subs, tools, outs):
             v.addWidget(c)
         v.addStretch(1)
         return scroll(w)
@@ -1384,6 +1387,8 @@ class ProjectPage(QWidget):
             self._fill_dub_layout()
             self.sync_engine()
             self._fill_outputs()
+            if reload_media:
+                self.pub.load()
             self._update_summary()
             self._update_timeline()
             self._refresh_overlay()
@@ -1941,6 +1946,10 @@ class ProjectPage(QWidget):
             if pick:   # tích sẵn các câu vừa làm (AI rút gọn…) để thấy ngay / nghe / sửa tiếp
                 self.model.set_picked(range(len(self.model.segs)), False)
                 self.model.set_picked([r for r in pick if 0 <= r < len(self.model.segs)])
+            if j["kind"] == "render" and j.get("status") == "done":
+                self.pub._use_latest()          # mục Đăng video dùng ngay bản vừa xuất
+            elif j["kind"] == "publish":
+                self.pub.fill_history()
             if j["kind"] in ("preview", "download"):
                 self._load_media()
             elif j["kind"] == "inpaint":
@@ -4272,6 +4281,7 @@ class ProjectPage(QWidget):
             self._grab_frame()
         if i == self.TAB_EXPORT:
             self._update_summary()
+            self.pub.load()
 
     def _rename(self):
         if self.p and self.name.text().strip():

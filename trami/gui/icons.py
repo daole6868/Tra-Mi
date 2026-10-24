@@ -50,6 +50,13 @@ def _link(p: QPainter):
     p.drawRoundedRect(QRectF(11.5, 8.5, 10, 6.5), 3.2, 3.2)
 
 
+def _share(p: QPainter):
+    for x, y in ((18, 5.5), (6, 12), (18, 18.5)):
+        p.drawEllipse(QPointF(x, y), 2.6, 2.6)
+    p.drawLine(QPointF(8.3, 10.7), QPointF(15.7, 6.8))
+    p.drawLine(QPointF(8.3, 13.3), QPointF(15.7, 17.2))
+
+
 def _upload(p: QPainter):
     p.drawLine(QPointF(12, 15), QPointF(12, 4))
     p.drawLine(QPointF(7.5, 8.5), QPointF(12, 4))
@@ -497,7 +504,7 @@ ICONS = {
     "eye": _eye, "image": _image, "text": _text, "volume": _volume, "crop": _crop, "list": _list,
     "split": _split, "merge": _merge, "sparkle": _sparkle, "stack": _stack, "chev_left": _chev_left,
     "chev_right": _chev_right, "chev_down": _chev_down, "info": _info, "cpu": _cpu, "minus": _minus, "fit": _fit,
-    "panel_right": _panel_right, "mute": _mute, "undo": _undo, "redo": _redo,
+    "panel_right": _panel_right, "mute": _mute, "undo": _undo, "redo": _redo, "share": _share,
 }
 
 

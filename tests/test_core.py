@@ -4557,3 +4557,408 @@ def test_ai_join_project_and_undo(monkeypatch):
     assert pipeline.undo_join(p, st) == 3 and p.segments[1].text == "你自己算。"
     with pytest.raises(ValueError, match="chưa có API key"):
         pipeline.ai_join(p, {"ai_join_engine": "gemini"})
+
+
+# ------------------------------------------------------------------ đăng video (máy chủ giả YouTube / Facebook / Zernio)
+class _FakeSocial:
+    """Máy chủ giả: Google OAuth + YouTube tải lên nối tiếp (rớt 1 lần giữa chừng), Facebook (phiên tải lên nối tiếp,
+    Reels), Zernio (hồ sơ, tài khoản, chỗ tải lên ký sẵn, bài đăng)."""
+
+    def __init__(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from urllib.parse import parse_qs, urlparse
+
+        st = self.st = {"yt": b"", "yt_failed": False, "fb": b"", "fb_failed": False, "reel": b"", "zn": b"",
+                        "calls": [], "yt_meta": None, "fb_post": None, "reel_finish": None, "zn_post": None,
+                        "tokens": []}
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def _send(self, code, obj=None, headers=None):
+                body = json.dumps(obj).encode() if obj is not None else b""
+                self.send_response(code)
+                for k, v in (headers or {}).items():
+                    self.send_header(k, v)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _body(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                return self.rfile.read(n) if n else b""
+
+            def _route(self, method):
+                u = urlparse(self.path)
+                q = {k: v[0] for k, v in parse_qs(u.query).items()}
+                path = u.path
+                st["calls"].append((method, path))
+                body = self._body()
+                form = {k: v[0] for k, v in parse_qs(body.decode("latin-1")).items()} \
+                    if self.headers.get("Content-Type", "").startswith("application/x-www-form") else {}
+                b = outer.base
+                # ---------------- Google / YouTube
+                if path == "/g/token":
+                    st["tokens"].append(form.get("grant_type"))
+                    if form.get("grant_type") == "authorization_code":
+                        assert form.get("code") == "GCODE" and form.get("code_verifier")
+                        return self._send(200, {"access_token": "AT1", "expires_in": 3600, "refresh_token": "RT1"})
+                    return self._send(200, {"access_token": "AT2", "expires_in": 3600})
+                if path == "/yt/api/channels":
+                    return self._send(200, {"items": [{"id": "UC1", "snippet": {"title": "Kênh Thử"}}]})
+                if path == "/yt/upload/videos":
+                    assert self.headers["Authorization"] == "Bearer AT2"      # token hết hạn đã được làm mới
+                    st["yt_meta"] = json.loads(body)
+                    st["yt_total"] = int(self.headers["X-Upload-Content-Length"])
+                    return self._send(200, {}, {"Location": b + "/yt/session/1"})
+                if path == "/yt/session/1":
+                    total = st["yt_total"]
+                    rng = self.headers.get("Content-Range", "")
+                    have = len(st["yt"])
+                    if rng.startswith("bytes */"):
+                        return self._send(308, None, {"Range": f"bytes=0-{have - 1}"} if have else {})
+                    a = int(rng.split(" ")[1].split("-")[0])
+                    if a > 0 and not st["yt_failed"]:
+                        st["yt_failed"] = True                                  # rớt giữa chừng 1 lần
+                        return self._send(503, {"error": {"message": "backend"}})
+                    assert a == have
+                    st["yt"] += body
+                    if len(st["yt"]) >= total:
+                        return self._send(200, {"id": "VID1", "status": {"privacyStatus": "private"}})
+                    return self._send(308, None, {"Range": f"bytes=0-{len(st['yt']) - 1}"})
+                if path == "/yt/upload/thumbnails/set":
+                    return self._send(403, {"error": {"message": "The user doesn't have permissions"}})
+                # ---------------- Facebook
+                if path == "/fb/v23.0/oauth/access_token":
+                    return self._send(200, {"access_token": "LONG" if q.get("fb_exchange_token") else "SHORT"})
+                if path == "/fb/v23.0/me":
+                    return self._send(200, {"id": "U1", "name": "Đào"})
+                if path == "/fb/v23.0/me/accounts":
+                    assert q.get("access_token") == "LONG"
+                    return self._send(200, {"data": [{"id": "P1", "name": "Trang 1", "access_token": "PT1"}],
+                                            "paging": {"next": b + "/fb/v23.0/me/accounts2?access_token=LONG"}})
+                if path == "/fb/v23.0/me/accounts2":
+                    return self._send(200, {"data": [{"id": "P2", "name": "Trang 2", "access_token": "PT2"}]})
+                if path == "/fb/v23.0/APP1/uploads":
+                    assert q["access_token"] == "LONG" and int(q["file_length"]) > 0
+                    st["fb_total"] = int(q["file_length"])
+                    return self._send(200, {"id": "upload:S1"})
+                if path == "/fb/v23.0/upload:S1":
+                    assert self.headers["Authorization"] == "OAuth LONG"
+                    if method == "GET":
+                        return self._send(200, {"id": "upload:S1", "file_offset": len(st["fb"])})
+                    off = int(self.headers["file_offset"])
+                    assert off == len(st["fb"])
+                    if not st["fb_failed"]:
+                        st["fb_failed"] = True
+                        st["fb"] += body[: len(body) // 2]                        # nhận được 1 nửa rồi rớt
+                        return self._send(503, {"error": {"message": "temporary"}})
+                    st["fb"] += body
+                    return self._send(200, {"h": "H1"})
+                if path == "/fb/v23.0/P1/videos":
+                    st["fb_post"] = body
+                    return self._send(200, {"id": "FV1"})
+                if path == "/fb/v23.0/P1/video_reels":
+                    if q.get("upload_phase") == "start":
+                        return self._send(200, {"video_id": "R1", "upload_url": b + "/rup/R1"})
+                    st["reel_finish"] = q
+                    return self._send(200, {"success": True})
+                if path == "/rup/R1":
+                    assert self.headers["Authorization"] == "OAuth PT1" and self.headers["offset"] == "0"
+                    st["reel"] += body
+                    return self._send(200, {"success": True})
+                # ---------------- Zernio
+                if path.startswith("/zn/"):
+                    assert self.headers["Authorization"] == "Bearer ZKEY"
+                if path == "/zn/profiles":
+                    return self._send(200, {"profiles": []} if method == "GET" else {"profile": {"_id": "PR1"}})
+                if path == "/zn/connect/youtube":
+                    assert q["profileId"] == "PR1"
+                    return self._send(200, {"authUrl": "https://zernio.example/connect/yt"})
+                if path == "/zn/accounts":
+                    return self._send(200, {"accounts": [
+                        {"_id": "A1", "platform": "youtube", "displayName": "Kênh Z"},
+                        {"_id": "A2", "platform": "facebook", "name": "Trang Z"},
+                        {"_id": "A3", "platform": "tiktok", "name": "TT"}]})
+                if path == "/zn/media/presign":
+                    return self._send(200, {"uploadUrl": b + "/up/1", "publicUrl": "https://media.zernio.com/v.mp4"})
+                if path == "/up/1":
+                    st["zn"] += body
+                    return self._send(200, {})
+                if path == "/zn/posts":
+                    st["zn_post"] = json.loads(body)
+                    return self._send(200, {"post": {"_id": "PO1", "status": "publishing",
+                                                     "platforms": [{"platform": "youtube", "status": "publishing"}]}})
+                if path == "/zn/posts/PO1":
+                    return self._send(200, {"post": {"_id": "PO1", "status": "published", "platforms": [
+                        {"platform": "youtube", "status": "published",
+                         "platformPostUrl": "https://www.youtube.com/watch?v=ZZ"}]}})
+                return self._send(404, {"error": {"message": "no route " + path}})
+
+            def do_GET(self):  # noqa: N802
+                self._route("GET")
+
+            def do_POST(self):  # noqa: N802
+                self._route("POST")
+
+            def do_PUT(self):  # noqa: N802
+                self._route("PUT")
+
+            def log_message(self, *a):
+                pass
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.base = f"http://127.0.0.1:{self.srv.server_address[1]}"
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def patch(self, monkeypatch):
+        from trami import publish
+
+        b = self.base
+        monkeypatch.setattr(publish, "GOOGLE_TOKEN", b + "/g/token")
+        monkeypatch.setattr(publish, "GOOGLE_AUTH", b + "/g/auth")
+        monkeypatch.setattr(publish, "YT_API", b + "/yt/api")
+        monkeypatch.setattr(publish, "YT_UPLOAD", b + "/yt/upload")
+        monkeypatch.setattr(publish, "FB_GRAPH", b + "/fb")
+        monkeypatch.setattr(publish, "ZERNIO_API", b + "/zn")
+        monkeypatch.setattr(publish, "CHUNK", 256 * 1024)
+        monkeypatch.setattr(publish.net, "sleep", lambda *a, **k: None)
+        monkeypatch.setattr(publish, "check_video", lambda *a: ("", ""))
+
+    def close(self):
+        self.srv.shutdown()
+
+
+def _browser(answer):
+    """Giả trình duyệt: đọc địa chỉ đăng nhập, gửi mã về cổng trên máy (redirect_uri) như Google / Facebook làm."""
+    import threading
+    import urllib.request
+    from urllib.parse import parse_qs, urlencode, urlparse
+
+    def opener(url):
+        q = {k: v[0] for k, v in parse_qs(urlparse(url).query).items()}
+        dest = q["redirect_uri"] + "?" + urlencode(dict(answer, state=q["state"]))
+        threading.Thread(target=lambda: urllib.request.urlopen(dest, timeout=10).read(), daemon=True).start()
+        opener.query = q
+    return opener
+
+
+def test_publish_youtube_api_login_and_resumable_upload(monkeypatch, tmp_path):
+    from trami import publish
+    from trami.project import Project
+
+    fake = _FakeSocial()
+    fake.patch(monkeypatch)
+    try:
+        s = {"yt_client_id": "CID", "yt_client_secret": "SEC"}
+        br = _browser({"code": "GCODE"})
+        acc = publish.yt_login(s, opener=br)
+        assert br.query["redirect_uri"].startswith("http://127.0.0.1:") and br.query["code_challenge_method"] == "S256"
+        assert acc["id"] == "UC1" and acc["name"] == "Kênh Thử" and acc["refresh_token"] == "RT1"
+        acc["expires"] = 0                                     # mã truy cập hết hạn -> phải làm mới trước khi tải
+        publish._upsert("youtube", acc)
+        [t] = [x for x in publish.targets("youtube") if x["via"] == "api"]
+        assert t["id"] == "yt:UC1" and publish.targets("youtube")[-1]["via"] == "manual"
+        vid = tmp_path / "phim.mp4"
+        data = os.urandom(700 * 1024)
+        vid.write_bytes(data)
+        thumb = tmp_path / "bia.jpg"
+        thumb.write_bytes(b"\xff\xd8jpeg")
+        p = Project.create("dang")
+        marks = []
+        rec = publish.publish(p, s, {"platform": "youtube", "kind": "short", "target": t, "file": str(vid),
+                                     "title": "Phim <hay> nhất", "description": "Mô tả", "hashtags": "#phim, hoathinh",
+                                     "privacy": "public", "thumbnail": str(thumb)},
+                              lambda f, m: marks.append(f))
+        assert fake.st["yt"] == data                           # đủ từng byte dù rớt 1 lần giữa chừng
+        assert fake.st["yt_failed"] and "refresh_token" in fake.st["tokens"]
+        meta = fake.st["yt_meta"]
+        assert meta["snippet"]["title"] == "Phim hay nhất"     # YouTube không nhận < >
+        assert meta["snippet"]["description"].endswith("#Shorts #phim #hoathinh")
+        assert meta["snippet"]["tags"] == ["phim", "hoathinh"] and meta["status"]["privacyStatus"] == "public"
+        assert rec["url"] == "https://www.youtube.com/shorts/VID1" and rec["status"] == "published"
+        assert "khoá Riêng tư" in rec["warn"] and "ảnh bìa" in rec["warn"]
+        assert publish.load_posts(p)[-1]["remote_id"] == "VID1" and max(marks) > 0.9
+        # hẹn giờ: Riêng tư + publishAt (UTC)
+        fake.st.update(yt=b"", yt_failed=True)
+        from datetime import datetime, timedelta
+
+        when = (datetime.now() + timedelta(days=1)).replace(microsecond=0)
+        rec = publish.publish(p, s, {"platform": "youtube", "kind": "video", "target": t, "file": str(vid),
+                                     "title": "A", "publish_at": when.isoformat()})
+        st_ = fake.st["yt_meta"]["status"]
+        assert st_["privacyStatus"] == "private" and st_["publishAt"].endswith("Z") and rec["status"] == "scheduled"
+    finally:
+        fake.close()
+
+
+def test_publish_facebook_pages_video_resume_and_reel(monkeypatch, tmp_path):
+    from trami import publish
+    from trami.project import Project
+
+    fake = _FakeSocial()
+    fake.patch(monkeypatch)
+    try:
+        s = {"fb_app_id": "APP1", "fb_app_secret": "S"}
+        pages = publish.fb_login(s, opener=_browser({"code": "FCODE"}))
+        assert [x["id"] for x in pages] == ["P1", "P2"] and pages[0]["user_token"] == "LONG"
+        t1 = next(x for x in publish.targets("facebook") if x["id"] == "fb:P1")
+        vid = tmp_path / "phim.mp4"
+        data = os.urandom(300 * 1024)
+        vid.write_bytes(data)
+        p = Project.create("fb")
+        rec = publish.publish(p, s, {"platform": "facebook", "kind": "video", "target": t1, "file": str(vid),
+                                     "title": "Tập 1", "description": "Hay lắm", "hashtags": ["phim"]})
+        assert fake.st["fb"] == data and fake.st["fb_failed"]  # gửi tiếp từ byte Facebook đã nhận
+        assert b"fbuploader_video_file_chunk=H1" in fake.st["fb_post"] and b"access_token=PT1" in fake.st["fb_post"]
+        assert rec["url"] == "https://www.facebook.com/P1/videos/FV1"
+        rec = publish.publish(p, s, {"platform": "facebook", "kind": "reel", "target": t1, "file": str(vid),
+                                     "title": "Reel", "description": "Ngắn", "hashtags": "#a #b"})
+        assert fake.st["reel"] == data and fake.st["reel_finish"]["video_state"] == "PUBLISHED"
+        assert fake.st["reel_finish"]["description"] == "Ngắn\n\n#a #b" and rec["url"].endswith("/reel/R1")
+        assert len(publish.load_posts(p)) == 2
+        publish.remove_account("fb:P2")
+        assert [x["id"] for x in publish.load_accounts("facebook")] == ["P1"]
+    finally:
+        fake.close()
+
+
+def test_publish_zernio_accounts_upload_post_and_status(monkeypatch, tmp_path):
+    from trami import config, publish
+    from trami.project import Project
+
+    fake = _FakeSocial()
+    fake.patch(monkeypatch)
+    saved = {}
+    monkeypatch.setattr(config, "save_settings", lambda d: saved.update(d))
+    try:
+        s = {"zernio_api_key": "ZKEY"}
+        zn = publish.Zernio("ZKEY")
+        assert zn.connect_url(s, "youtube") == "https://zernio.example/connect/yt" and saved["zernio_profile_id"] == "PR1"
+        accs = zn.accounts()
+        assert [(a["platform"], a["name"]) for a in accs] == [("youtube", "Kênh Z"), ("facebook", "Trang Z")]
+        t = next(x for x in publish.targets("youtube") if x["via"] == "zernio")
+        vid = tmp_path / "v.mp4"
+        data = os.urandom(200 * 1024)
+        vid.write_bytes(data)
+        p = Project.create("zn")
+        rec = publish.publish(p, s, {"platform": "youtube", "kind": "video", "target": t, "file": str(vid),
+                                     "title": "Tiêu đề", "description": "Mô tả", "hashtags": "#x", "privacy": "unlisted",
+                                     "synthetic": True})
+        assert fake.st["zn"] == data
+        body = fake.st["zn_post"]
+        assert body["publishNow"] is True and body["mediaItems"][0]["url"] == "https://media.zernio.com/v.mp4"
+        psd = body["platforms"][0]["platformSpecificData"]
+        assert body["platforms"][0]["accountId"] == "A1" and psd["visibility"] == "unlisted"
+        assert psd["containsSyntheticMedia"] is True and body["content"] == "Mô tả\n\n#x"
+        assert rec["status"] == "published" and rec["url"] == "https://www.youtube.com/watch?v=ZZ"
+        # Facebook Reels hẹn giờ qua Zernio: không chờ, gửi scheduledFor (UTC)
+        from datetime import datetime, timedelta
+
+        tf = next(x for x in publish.targets("facebook") if x["via"] == "zernio")
+        rec = publish.publish(p, s, {"platform": "facebook", "kind": "reel", "target": tf, "file": str(vid),
+                                     "title": "R", "description": "D",
+                                     "publish_at": (datetime.now() + timedelta(hours=3)).isoformat()})
+        body = fake.st["zn_post"]
+        assert "publishNow" not in body and body["scheduledFor"].endswith("Z") and rec["status"] == "scheduled"
+        assert body["platforms"][0]["platformSpecificData"] == {"contentType": "reel", "title": "R"}
+    finally:
+        fake.close()
+
+
+def test_publish_text_manual_and_job_rules(tmp_path):
+    from trami import jobs, publish
+
+    assert publish.norm_tags("#Phim hay, #phim  hoạt_hình #") == ["Phim", "hay", "hoạt_hình"]
+    m = {"title": "T", "description": "D", "hashtags": ["a"]}
+    assert publish.compose_text(m, "facebook", "video", with_title=True) == "T\n\nD\n\n#a"
+    assert publish.parse_when("2000-01-01T00:00:00") is None and publish.parse_when("") is None
+    vid = tmp_path / "x.mp4"
+    vid.write_bytes(b"0")
+    text, txt, url = publish.prepare_manual(vid, m, "youtube", "short")
+    assert url == "https://www.youtube.com/upload" and txt.name == "x.youtube_short.txt"
+    assert text == "T\n\nD\n\n#Shorts #a" and "TIÊU ĐỀ:\nT" in txt.read_text(encoding="utf-8")
+    # đang chạy lần lượt: đăng video (chỉ mạng) không chờ việc khác và không chặn việc khác
+    m_ = jobs.JobManager.__new__(jobs.JobManager)
+    m_.jobs, m_.running = {}, set()
+    mk = lambda i, kind, pid="p": jobs.Job(id=i, kind=kind, title=i, project_id=pid, _fn=None,  # noqa: E731
+                                           gpu=kind == "dub")
+    m_.jobs = {"d": mk("d", "dub"), "u": mk("u", "publish"), "r": mk("r", "render", "q")}
+    m_.running = {"d"}
+    assert m_._why_wait(m_.jobs["u"]) == ""
+    m_.running = {"u"}
+    assert m_._why_wait(m_.jobs["r"]) == "" and m_._why_wait(m_.jobs["d"]) == ""
+
+
+def test_publish_gui_manual_and_job(sample_video, monkeypatch):
+    """Tab Xuất → Đăng video: nạp bản xuất mới nhất, Tự tải lên (chép nội dung, mở trang đăng, ghi lịch sử), đăng qua
+    API = việc nền "publish" (không chờ việc khác), xong thì bảng Đã đăng cập nhật."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        pytest.skip(str(e))
+    import time as _t
+
+    from trami import pipeline, publish
+    from trami.gui import publish_ui, theme
+    from trami.gui.main import MainWindow
+    from trami.gui.widgets import set_combo
+    from trami.jobs import manager
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    theme.load_fonts()
+    app.setStyleSheet(theme.stylesheet())
+    p = Project.create("pubgui")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [Segment(0.5, 1.5, "你好", "Xin chào", "S1")]
+    p.save()
+    p.add_output(Path(sample_video), "video")
+    publish.save_accounts("youtube", [{"id": "UCX", "name": "Kênh X", "refresh_token": "r"}])
+    opened = []
+    monkeypatch.setattr(publish_ui.QDesktopServices, "openUrl", lambda u: opened.append(u.toString()))
+    monkeypatch.setattr(publish_ui, "_reveal", lambda path: None)
+    win = MainWindow()
+    win.show()
+    win.open_project(p.id)
+    pp = win.project_page
+    pp.tabs.set_current(pp.TAB_EXPORT)
+    app.processEvents()
+    pub = pp.pub
+    assert pub.file == Path(sample_video) and pub.plat["youtube"]["target"].currentData() == "yt:UCX"
+    pub.title.setText("Tiêu đề thử")
+    pub.desc.setPlainText("Mô tả")
+    pub.tags.setText("#a b")
+    set_combo(pub.plat["youtube"]["target"], "manual:youtube")
+    pub._go()
+    assert opened == ["https://www.youtube.com/upload"]
+    assert QApplication.clipboard().text() == "Tiêu đề thử\n\nMô tả\n\n#a #b"
+    assert publish.load_posts(p)[-1]["status"] == "prepared" and pub.hist.rowCount() == 1
+    assert publish.load_draft(p)["youtube_target"] == "manual:youtube"
+    # đăng qua API riêng -> việc nền
+    calls = []
+
+    def fake_publish(pr, s, item, progress=None):
+        calls.append(item)
+        rec = {"id": "r1", "time": _t.time(), "platform": item["platform"], "kind": item["kind"], "via": "api",
+               "account": item["target"]["name"], "title": item["title"], "url": "https://youtu.be/V", "status":
+               "published", "warn": ""}
+        publish.save_post(pr, rec)
+        return rec
+    monkeypatch.setattr(publish, "publish", fake_publish)
+    set_combo(pub.plat["youtube"]["target"], "yt:UCX")
+    pub._go()
+    for _ in range(100):
+        app.processEvents()
+        js = [j for j in manager.list(p.id) if j["kind"] == "publish"]
+        if js and js[0]["status"] in ("done", "error"):
+            break
+        _t.sleep(0.05)
+    assert js[0]["status"] == "done" and "https://youtu.be/V" in js[0]["message"]
+    assert calls[0]["target"]["id"] == "yt:UCX" and calls[0]["hashtags"] == "#a b" and calls[0]["lang"] == "vi"
+    pp.job_finished(js[0])
+    assert pub.hist.rowCount() == 2
+    win.close()
