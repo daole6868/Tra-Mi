@@ -859,7 +859,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     được giữ lại"; 429 mỗi phút -> key khác, không có thì chờ `retryDelay` / "retry in Ns" (≤ 20 lần, không tính hỏng).
     Nhớ trong phiên: `_KEY_POS` (lần sau bắt đầu bằng key còn tốt), `_KEY_DEAD`, `_KEY_CALLS`. `check_key` (nút Kiểm tra các
     key), `list_models` (Gemini `v1beta/models` lọc generateContent; Anthropic `/v1/models`; OpenAI-compatible `/models`).
-  * Cài đặt: khung "Dịch thuật" chung (công cụ mặc định, dịch sang, văn phong) + mục "Công cụ dịch AI – mỗi công cụ 1 khung"
+  * Cài đặt: khung "Dịch thuật" chung (công cụ mặc định, dịch sang, văn phong) + mục "Công cụ dịch"
     (`ENGINE_CARDS`: Gemini (hướng dẫn aistudio.google.com/apikey) / DeepSeek / Claude / OpenAI (Base URL) / Ollama): `KeyList`
     (mỗi dòng 1 key ẩn chữ, 👁, ×, "Thêm key", kết quả kiểm tra từng key), Model + nút danh sách model (QMenu), Số câu mỗi
     lần gửi, Số lần gửi tối đa / phút (mỗi key), Kiểm tra các key, Thử dịch 1 câu. `SettingsPage.eng_w`; `collect` ghi
@@ -869,6 +869,10 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     Hán Việt, địa danh tên Việt quen dùng, thương hiệu tên quốc tế, nhất quán. SỬA ĐƯỢC (không phải builtin): chưa sửa thì
     không ghi vào Cài đặt; sửa -> lưu vào `translate_skills` cùng id; "Về mặc định" (nút Xoá đổi tên) xoá bản đã sửa.
     `ai_clean_before_translate` mặc định False (bước AI nối câu trước khi dịch không còn tự chạy).
+
+- 2.0.63: người dùng không thích tiêu đề dài dòng -> tiêu đề ngắn: "Công cụ dịch", khung "Gemini" / "Claude" / "OpenAI" /
+  "Ollama" (giải thích để ở dòng mô tả dưới tiêu đề), "Khi câu đọc dài hơn chỗ trống", thẻ "Kỹ năng dịch AI" (tab Phụ đề).
+  Viết tiêu đề mới: chỉ tên, không thêm cụm giải thích.
 
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.

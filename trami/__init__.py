@@ -1,3 +1,3 @@
 """TraMi - Công cụ dịch video tự động Trung -> Việt."""
 
-__version__ = "2.0.62"
+__version__ = "2.0.63"

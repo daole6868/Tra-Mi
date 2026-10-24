@@ -787,7 +787,7 @@ class SettingsPage(QWidget):
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
         v.addLayout(grid)
-        v.addWidget(label("Công cụ dịch AI – mỗi công cụ 1 khung", "h2"))
+        v.addWidget(label("Công cụ dịch", "h2"))
         eg = QGridLayout()
         eg.setSpacing(16)
         for i, card in enumerate(eng_cards):
@@ -1037,15 +1037,15 @@ class KeyList(QWidget):
 
 
 ENGINE_CARDS = [
-    ("gemini", "Gemini (Google) – có gói miễn phí",
+    ("gemini", "Gemini",
      "Lấy key miễn phí: aistudio.google.com/apikey → Create API key. Gói miễn phí giới hạn số lần gửi mỗi phút và mỗi "
      "ngày: để 'Số lần gửi / phút' thấp hơn giới hạn một chút, gửi nhiều câu mỗi lần; thêm vài key (mỗi key 1 tài khoản "
      "Google / dự án) – key hết lượt hôm nay tool tự chuyển key sau."),
     ("deepseek", "DeepSeek", "Giỏi tiếng Trung, rẻ – dịch cả bộ phim chỉ vài nghìn đồng. Key ở platform.deepseek.com"),
-    ("anthropic", "Claude (Anthropic)", "Dịch hay, hiểu ngữ cảnh tốt. Key ở console.anthropic.com"),
-    ("openai", "OpenAI / API tương thích OpenAI",
+    ("anthropic", "Claude", "Dịch hay, hiểu ngữ cảnh tốt. Key ở console.anthropic.com"),
+    ("openai", "OpenAI",
      "GPT, hoặc dịch vụ tương thích OpenAI (OpenRouter, Groq…) – đổi Base URL theo nhà cung cấp"),
-    ("ollama", "Ollama (chạy trên máy)", "Không cần key, không tốn tiền – cần cài Ollama và tải model về máy"),
+    ("ollama", "Ollama", "Không cần key, không tốn tiền – cần cài Ollama và tải model về máy"),
 ]
 
 

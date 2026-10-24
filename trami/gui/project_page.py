@@ -392,7 +392,7 @@ class ProjectPage(QWidget):
         self.glossary.setMinimumHeight(64)
         self.glossary.textChanged.connect(lambda: self._save_edit_timer.start())
         # 1 thẻ chung: kỹ năng dịch AI + hồ sơ phim + bảng tên riêng (2 ô cạnh nhau) – kéo vách trên để đổi chiều cao
-        sk = SectionCard("Kỹ năng dịch AI · hồ sơ phim · tên riêng", "sparkle")
+        sk = SectionCard("Kỹ năng dịch AI", "sparkle")
         self.sk_toggle = button("Ẩn hồ sơ phim / tên riêng", "chev_down", "Hiện / ẩn 2 ô Hồ sơ phim và Bảng tên riêng "
                                 "(ẩn để bảng câu cao hơn)", flat=True, on_click=lambda: self._show_profile(None))
         sk.head.addWidget(self.sk_toggle)
@@ -1086,7 +1086,7 @@ class ProjectPage(QWidget):
                             on_click=self._goto_voices),
                      button("Khôi phục câu cảm thán đã xoá", "refresh", "Đưa lại các câu 'A!', 'Ừm.'… đã bị tự xoá "
                             "(lần lồng sau không xoá các câu này nữa)", flat=True, on_click=self._restore_interj)))
-        mix.add(label("Khi câu đọc dài hơn chỗ trống (tới lúc câu sau bắt đầu)", "h3"))
+        mix.add(label("Khi câu đọc dài hơn chỗ trống", "h3"))
         g = Form()
         st = self.settings
         self.d_overflow = g.row("Cách xếp", combo(OVERFLOW_MODES, st.get("dub_overflow", "smart")))
