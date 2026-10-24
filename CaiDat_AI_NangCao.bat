@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title TraMi - Cai dat AI nang cao
+title Subvideo - Cai dat AI nang cao
 cd /d "%~dp0"
 if not exist ".venv\Scripts\python.exe" (
   echo Hay chay CaiDat_Windows.bat truoc.

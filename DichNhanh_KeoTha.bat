@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title TraMi - Dich nhanh
+title Subvideo - Dich nhanh
 cd /d "%~dp0"
 REM Keo tha 1 hoac nhieu video vao file nay de dich tu dong
 REM (nhan dang giong noi + dich bang cong cu mac dinh trong Cai dat + ghep phu de tieng Viet)

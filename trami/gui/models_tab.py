@@ -57,7 +57,7 @@ class ModelRow(Card):
                 from ..asr_qwen import UPGRADE_CMD
 
                 self.status.setText("Cần cập nhật gói transformers (≥ 5.13)")
-                self.btn.setToolTip("Mở cửa sổ đen trong thư mục TraMi và chạy:\n" + UPGRADE_CMD)
+                self.btn.setToolTip("Mở cửa sổ đen trong thư mục Subvideo và chạy:\n" + UPGRADE_CMD)
                 self.status.setToolTip(self.btn.toolTip())
             else:
                 self.btn.setToolTip("Chạy CaiDat_AI_NangCao.bat để cài gói AI trước")
@@ -93,7 +93,7 @@ class ModelsTab(QWidget):
         super().__init__()
         self.win = win
         self.rows: dict[str, ModelRow] = {}
-        card = SectionCard("Mô hình AI của TraMi", "download",
+        card = SectionCard("Mô hình AI của Subvideo", "download",
                            "Tải mỗi mô hình một lần, lưu luôn trên máy. Khi dịch video, tool lấy mô hình đã tải ở đây "
                            "(không tải lại). Mô hình chưa tải sẽ được tự tải khi cần dùng lần đầu.")
         all_btn = GradientButton("Tải tất cả mô hình còn thiếu", "download")

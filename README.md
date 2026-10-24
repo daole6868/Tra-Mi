@@ -1,8 +1,9 @@
-# TraMi 2.0 – Phần mềm dịch video Trung → Việt
+# Subvideo – Dịch & lồng tiếng video
 
 Phần mềm chạy trên máy tính: có cửa sổ riêng, giao diện tiếng Việt, không cần trình duyệt.
-Dùng để dịch video tiếng Trung sang tiếng Việt, xoá phụ đề Trung cũ, đè phụ đề Việt, lồng tiếng Việt nhiều giọng
-và chỉnh sửa video trước khi đăng Facebook / YouTube / TikTok.
+Dùng để dịch video tiếng Trung sang tiếng Việt (hoặc Anh / Thái / Nhật / Hàn), xoá phụ đề cũ, đè phụ đề mới, lồng
+tiếng nhiều giọng và chỉnh sửa video trước khi đăng Facebook / YouTube / TikTok.
+(Tên cũ: TraMi – mã nguồn bên trong vẫn là gói `trami`, file chạy `TraMi.py`.)
 
 ---
 
@@ -10,15 +11,15 @@ và chỉnh sửa video trước khi đăng Facebook / YouTube / TikTok.
 
 | Bước | Làm gì |
 |---|---|
-| 1 | Giải nén zip vào thư mục ngắn, không dấu, ví dụ `D:\TraMi` |
-| 2 | Nháy đúp **`CaiDat_Windows.bat`**. File này tự cài Python 3.11 nếu máy chưa có, cài thư viện, tải FFmpeg và tạo icon **TraMi** trên Desktop |
+| 1 | Giải nén zip vào thư mục ngắn, không dấu, ví dụ `D:\Subvideo` |
+| 2 | Nháy đúp **`CaiDat_Windows.bat`**. File này tự cài Python 3.11 nếu máy chưa có, cài thư viện, tải FFmpeg và tạo biểu tượng **Subvideo** trên Desktop |
 | 3 | Khi được hỏi *"Cài AI nâng cao?"*, bấm **Y**. Bước này tự nhận card NVIDIA và cài PyTorch bản GPU, rồi cài các gói tách giọng, SenseVoice, phân người nói, VieNeu-TTS, LaMa. Cần thêm khoảng 5–8 GB |
-| 4 | Mở **icon TraMi** trên Desktop, hoặc chạy `ChayTool_Windows.bat` |
+| 4 | Mở **biểu tượng Subvideo** trên Desktop, hoặc chạy `ChayTool_Windows.bat` (tạo lại biểu tượng: `TaoBieuTuong.bat`) |
 
 Có thể cài AI nâng cao sau, hoặc cài lại, bằng `CaiDat_AI_NangCao.bat`.
 Các mô hình AI (khoảng 3–5 GB) tự tải về ở lần dùng đầu tiên.
 
-**Các lệnh cài tay** (PowerShell, trong thư mục TraMi). Phải cài đúng thứ tự:
+**Các lệnh cài tay** (PowerShell, trong thư mục phần mềm). Phải cài đúng thứ tự:
 
 ```powershell
 py -3.11 -m venv .venv
@@ -51,12 +52,17 @@ Máy không có card NVIDIA: ở bước 1, bỏ phần `--index-url ...` đi.
 
 **Linux / macOS:** chạy `./install.sh --ai`, sau đó `./run.sh`.
 
-### Đóng gói thành file .exe
-Chạy **`DongGoi_EXE.bat`**. Kết quả là thư mục `dist\TraMi\` chứa **TraMi.exe**.
-Nén thư mục này lại là gửi được sang máy khác, máy đó không cần cài Python.
-Dữ liệu dự án của bản exe được lưu ở `%LOCALAPPDATA%\TraMi`.
-
-Bản exe kèm AI nâng cao khá nặng (2–4 GB) vì có PyTorch.
+### Đóng gói thành Subvideo.exe
+Cài xong (kể cả AI nâng cao) thì chạy **`DongGoi_EXE.bat`** (15–40 phút, cần ~10–15 GB trống). Kết quả là thư mục
+`dist\Subvideo\` chứa **Subvideo.exe** + biểu tượng Subvideo trên Desktop / Start menu.
+- Gồm ĐỦ thư viện đã cài trong `.venv` (PyTorch GPU, nhận dạng, tách giọng, đọc giọng…), KHÔNG gồm mô hình AI – mô hình
+  vẫn tải ở tab Tài liệu.
+- Trên máy đóng gói, bản exe dùng chung thư mục `data` (dự án, cài đặt, mô hình đã tải) với bản chạy bằng Python
+  (file `dist\Subvideo\datadir.txt`).
+- Mang sang máy khác: nén cả thư mục `dist\Subvideo` (~5–8 GB vì có PyTorch). Máy đó chỉ cần driver NVIDIA, không cần
+  Python; dữ liệu lưu ở `%LOCALAPPDATA%\Subvideo` (hoặc thư mục `data` đặt cạnh Subvideo.exe), mô hình tải lại ở tab
+  Tài liệu.
+- Sửa mã thì phải chạy lại `DongGoi_EXE.bat`.
 
 ---
 
@@ -158,15 +164,15 @@ python TraMi.py dich phim.mp4 --dich-sang en --long-tieng      # dịch + lồng
 
 ## 6. Cấu trúc
 ```
-TraMi/
-├─ TraMi.py            mở phần mềm
+Subvideo/
+├─ TraMi.py            mở phần mềm (bản đóng gói: Subvideo.exe)
 ├─ trami/              phần xử lý: asr, asr_funasr, ocr, translate, separate, diarize,
 │  │                   skills, tts, lama, inpaint, video, pipeline, jobs, project
 │  └─ gui/             giao diện PySide6 vẽ bằng QPainter (theme, icons, widgets,
 │                      player, editors, project_page, main)
 ├─ fonts/  assets/     font Be Vietnam Pro + Bangers (giấy phép SIL OFL), icon
 ├─ tests/              kiểm thử tự động:  python -m pytest tests
-└─ TraMi.spec          cấu hình đóng gói .exe
+└─ Subvideo.spec       cấu hình đóng gói .exe (DongGoi_EXE.bat)
 ```
 
 ## 7. Bản quyền các mô hình

@@ -1,4 +1,4 @@
-"""Cửa sổ chính TraMi (PySide6)."""
+"""Cửa sổ chính Subvideo (PySide6)."""
 from __future__ import annotations
 
 import os
@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QFileDialog, QFrame, 
                                QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
                                QStackedWidget, QVBoxLayout, QWidget)
 
-from .. import __version__, pipeline, sitelogin
+from .. import APP_NAME, APP_TAGLINE, __version__, pipeline, sitelogin
 from ..config import load_settings, public_settings, save_settings
 from ..jobs import manager
 from ..project import Project
@@ -55,9 +55,9 @@ class Sidebar(QFrame):
         logo.setFixedSize(46, 46)
         tb = QVBoxLayout()
         tb.setSpacing(0)
-        t = QLabel("TraMi")
+        t = QLabel(APP_NAME)
         t.setFont(theme.font(15, QFont.Weight.ExtraBold))
-        st = label("Dịch video Trung → Việt", "muted")
+        st = label(APP_TAGLINE, "muted")
         st.setFont(theme.font(8.5))
         tb.addWidget(t)
         tb.addWidget(st)
@@ -1284,7 +1284,7 @@ class JobsPage(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"TraMi {__version__} – Dịch video Trung → Việt")
+        self.setWindowTitle(f"{APP_NAME} {__version__} – {APP_TAGLINE}")
         self.setWindowIcon(QIcon(icons.app_logo(256)))
         self.resize(1480, 920)
         self.setMinimumSize(1100, 700)
@@ -1485,7 +1485,7 @@ def _crash_log():
     try:
         (DATA_DIR / "logs").mkdir(parents=True, exist_ok=True)
         f = open(DATA_DIR / "logs" / "sap.txt", "a", encoding="utf-8")
-        f.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} mở TraMi\n")
+        f.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} mở {APP_NAME}\n")
         f.flush()
         faulthandler.enable(file=f, all_threads=True)
         return f
@@ -1503,11 +1503,11 @@ def run():
         try:
             import ctypes
 
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("TraMi.VideoTranslator")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Subvideo.VideoDubbing")
         except Exception:
             pass
     app = QApplication.instance() or QApplication(sys.argv)
-    app.setApplicationName("TraMi")
+    app.setApplicationName(APP_NAME)
     theme.load_fonts()
     app.setFont(theme.font(10))
     app.setStyleSheet(theme.stylesheet())

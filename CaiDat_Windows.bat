@@ -1,9 +1,9 @@
 @echo off
 chcp 65001 >nul
-title TraMi - Cai dat
+title Subvideo - Cai dat
 cd /d "%~dp0"
 echo ============================================================
-echo    TraMi - Cong cu dich video Trung -^> Viet  ^|  CAI DAT
+echo    Subvideo - Dich ^& long tieng video  ^|  CAI DAT
 echo ============================================================
 echo.
 
@@ -65,7 +65,7 @@ if not exist "bin\ffmpeg.exe" (
 )
 
 REM ---- 4. Tao loi tat tren Desktop (mo thang giao dien, khong hien cua so den)
-powershell -NoProfile -Command "$s=(New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Desktop')+'\TraMi.lnk'); $s.TargetPath='%~dp0.venv\Scripts\pythonw.exe'; $s.Arguments='\"%~dp0TraMi.py\"'; $s.WorkingDirectory='%~dp0'; $s.IconLocation='%~dp0assets\TraMi.ico'; $s.Save()" >nul 2>&1
+call "%~dp0TaoBieuTuong.bat" nopause
 
 echo.
 echo ============================================================
@@ -81,5 +81,5 @@ call CaiDat_AI_NangCao.bat nopause
 
 :done
 echo.
-echo Xong! Mo tool bang icon TraMi tren Desktop hoac file ChayTool_Windows.bat
+echo Xong! Mo tool bang icon Subvideo tren Desktop hoac file ChayTool_Windows.bat
 pause

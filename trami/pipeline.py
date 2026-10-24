@@ -43,7 +43,7 @@ def update_ytdlp(progress: Prog | None = None, cancel=None) -> dict:
     from .config import FROZEN
 
     if FROZEN:
-        raise RuntimeError("Bản đóng gói .exe không tự cập nhật trình tải được – hãy tải bản TraMi mới.")
+        raise RuntimeError("Bản đóng gói .exe không tự cập nhật trình tải được – hãy tải bản Subvideo mới.")
     old = ytdlp_version()
     if progress:
         progress(0.1, f"Đang cập nhật yt-dlp {old}…")

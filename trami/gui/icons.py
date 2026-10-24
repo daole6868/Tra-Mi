@@ -515,22 +515,28 @@ def icon(name: str, color: str = theme.TEXT, size: int = 20) -> QIcon:
 
 
 def app_logo(size: int = 256) -> QPixmap:
-    """Logo TraMi: ô vuông bo góc gradient đỏ-cam với chữ 译 (dịch)."""
+    """Logo Subvideo: ô vuông bo góc gradient đỏ-cam, chữ S trắng + 2 vạch phụ đề bên dưới."""
     from PySide6.QtGui import QFont
 
     pm = QPixmap(size, size)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
     r = QRectF(size * 0.04, size * 0.04, size * 0.92, size * 0.92)
     p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(theme.accent_gradient(r.left(), r.top(), r.right(), r.bottom()))
-    p.drawRoundedRect(r, size * 0.24, size * 0.24)
+    p.drawRoundedRect(r, size * 0.22, size * 0.22)
     p.setPen(QColor("#FFFFFF"))
-    f = QFont()
-    f.setPixelSize(int(size * 0.56))
-    f.setBold(True)
+    f = QFont(theme.FONT_FAMILY)
+    f.setWeight(QFont.Weight.ExtraBold)
+    f.setPixelSize(int(size * 0.58))
     p.setFont(f)
-    p.drawText(r, Qt.AlignmentFlag.AlignCenter, "译")
+    p.drawText(QRectF(0, -size * 0.10, size, size), Qt.AlignmentFlag.AlignCenter, "S")
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(255, 255, 255, 235))                       # 2 vạch phụ đề
+    p.drawRoundedRect(QRectF(size * 0.20, size * 0.70, size * 0.60, size * 0.075), size * 0.04, size * 0.04)
+    p.setBrush(QColor(255, 255, 255, 150))
+    p.drawRoundedRect(QRectF(size * 0.30, size * 0.81, size * 0.40, size * 0.065), size * 0.033, size * 0.033)
     p.end()
     return pm

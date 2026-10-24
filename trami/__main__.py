@@ -88,7 +88,7 @@ def main(argv=None):
     from .config import fix_std_streams
 
     fix_std_streams()
-    ap = argparse.ArgumentParser(prog="trami", description="TraMi - dịch video Trung -> Việt tự động")
+    ap = argparse.ArgumentParser(prog="trami", description="Subvideo - dịch & lồng tiếng video tự động")
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("ui", help="Mở giao diện (mặc định)")
 

@@ -11,10 +11,32 @@ import sys
 
 FROZEN = bool(getattr(sys, "frozen", False))          # đang chạy từ file .exe đóng gói
 PKG_DIR = Path(__file__).resolve().parent
+
+
+def _frozen_data_dir(app_dir: Path) -> Path:
+    """Thư mục dữ liệu của bản .exe (dự án, cài đặt, mô hình đã tải):
+    1. datadir.txt cạnh exe (DongGoi_EXE.bat ghi) -> DÙNG CHUNG thư mục data của bản chạy bằng Python trên máy này;
+    2. thư mục data cạnh exe (bản mang đi / USB);
+    3. %LOCALAPPDATA%\\Subvideo (máy khác) – còn dữ liệu bản exe cũ %LOCALAPPDATA%\\TraMi thì dùng tiếp chỗ đó."""
+    ptr = app_dir / "datadir.txt"
+    try:
+        want = Path(ptr.read_text("utf-8-sig").strip()) if ptr.is_file() else None
+    except OSError:
+        want = None
+    if want and want.is_dir():
+        return want
+    if (app_dir / "data").is_dir():
+        return app_dir / "data"
+    local = Path(os.environ.get("LOCALAPPDATA", Path.home()))
+    if (local / "TraMi").is_dir() and not (local / "Subvideo").exists():
+        return local / "TraMi"
+    return local / "Subvideo"
+
+
 if FROZEN:
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))   # tài nguyên đi kèm exe
-    APP_DIR = Path(sys.executable).resolve().parent                           # thư mục chứa TraMi.exe
-    _default_data = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "TraMi"
+    APP_DIR = Path(sys.executable).resolve().parent                           # thư mục chứa Subvideo.exe
+    _default_data = _frozen_data_dir(APP_DIR)
 else:
     BUNDLE_DIR = APP_DIR = PKG_DIR.parent
     _default_data = APP_DIR / "data"

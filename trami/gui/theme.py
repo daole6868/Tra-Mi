@@ -1,4 +1,4 @@
-"""Màu sắc, font chữ và stylesheet (QSS) cho giao diện TraMi."""
+"""Màu sắc, font chữ và stylesheet (QSS) cho giao diện Subvideo."""
 from __future__ import annotations
 
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QLinearGradient

@@ -1,4 +1,9 @@
-# TraMi – ghi nhớ cho Claude
+# Subvideo (tên cũ TraMi) – ghi nhớ cho Claude
+
+Tên hiển thị từ 2.0.71: **Subvideo** – "Dịch & lồng tiếng video" (`trami.APP_NAME` / `APP_TAGLINE`), logo chữ S trắng +
+2 vạch phụ đề trên nền gradient đỏ-cam (`icons.app_logo`, `assets/Subvideo.ico` / `.png`). Mã nguồn vẫn là gói `trami`,
+file chạy `TraMi.py`, biến môi trường `TRAMI_*`, tiền tố `@@TRAMI@@` (không đổi – tránh hỏng tiến trình phụ / dữ liệu cũ).
+Logo / tên mới không dùng chữ Trung.
 
 Công cụ desktop (PySide6) dịch video tiếng Trung → tiếng Việt (từ 2.0.47 cả Anh / Thái / Nhật / Hàn): nhận dạng giọng / OCR phụ đề cứng → dịch (LLM hoặc Google)
 → xoá phụ đề cũ (LaMa / OpenCV) → đè phụ đề Việt → lồng tiếng (Edge TTS / VieNeu-TTS, nhái giọng) → xuất MP4 bằng FFmpeg.
@@ -7,14 +12,17 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 ## Người dùng & cách làm việc
 - Người dùng nói tiếng Việt, chạy trên **Windows** (thư mục `C:\Users\daole\Downloads\TraMi`, venv `.venv`, Python 3.11),
   có card **NVIDIA**, PyTorch `2.11.0+cu128` (đã chạy GPU: True). Mục đích: dịch video đăng Facebook / YouTube.
-- Chạy dạng tool: `.venv\Scripts\python TraMi.py` (chưa đóng gói exe – người dùng chưa muốn).
+- Chạy dạng tool: `.venv\Scripts\python TraMi.py`. Từ 2.0.71 người dùng muốn bản **Subvideo.exe** đầy đủ thư viện, KHÔNG
+  kèm mô hình: `DongGoi_EXE.bat` -> `Subvideo.spec` (PyInstaller) -> `dist\Subvideo\` – phải đóng gói trên Windows của
+  người dùng (sandbox Linux không tạo được exe Windows).
 - **Chỉ gửi các file đã sửa** (kèm bảng "chép vào đâu"), không gửi zip đầy đủ. Mỗi lần sửa tăng `__version__`.
 - Không commit tên model AI vào code/commit message ngoài giá trị cấu hình cần thiết.
 - Trả lời ngắn gọn, bằng tiếng Việt, hướng dẫn từng bước bấm trên giao diện.
 
 ## Cấu trúc
 - `TraMi.py` – mở giao diện; có tham số → CLI (`python TraMi.py dich phim.mp4 ...`).
-- `trami/config.py` – `DATA_DIR` (`data/`, exe: `%LOCALAPPDATA%\TraMi`), `DEFAULT_SETTINGS`, settings chỉ lưu phần khác mặc định,
+- `trami/config.py` – `DATA_DIR` (`data/`; exe: `_frozen_data_dir` = `datadir.txt` cạnh exe -> `data` cạnh exe ->
+  `%LOCALAPPDATA%\Subvideo` (còn `%LOCALAPPDATA%\TraMi` cũ thì dùng tiếp)), `DEFAULT_SETTINGS`, settings chỉ lưu phần khác mặc định,
   `installed()` dùng `find_spec` (không import – import funasr mất ~2 phút), `log_error()` ghi `data/logs/loi.txt`,
   `fix_std_streams()` (gọi đầu tiên khi mở tool: pythonw để sys.stdout/stderr = None -> ghi `data/logs/console.txt`).
 - `trami/pipeline.py` – các bước: `attach_source`, `separate_audio`, `recognize` (tự chuyển Whisper nếu FunASR/torch lỗi),
@@ -72,6 +80,12 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `call` (gọi ở luồng phụ, Huỷ dừng ngay), `session` (requests có TCP keepalive). `jobs` chạy mọi tác vụ trong
   `net.task(cancel, report)` -> hàm gọi mạng tự lấy nút Huỷ + dòng trạng thái.
 - `trami/songs.py` – đoán cụm câu đang HÁT (nốt ngân trên giọng đã tách) -> 🎵; `pipeline.mark_song_lines` (♪ trong bản dịch).
+- Đóng gói: `Subvideo.spec` (gom `collect_submodules("trami")` + `collect_all` các gói AI nạp động, `module_collection_mode`
+  "pyz+py" cho transformers / torch / omnivoice / vieneu / funasr / speechbrain, loại gradio / tensorflow / matplotlib…),
+  `DongGoi_EXE.bat` (chép bin\ffmpeg, ghi `datadir.txt` = thư mục data của bản Python, gọi `TaoBieuTuong.bat`),
+  `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
+  TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
+  `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
 - `tests/test_core.py` – `python -m pytest -q tests` (122 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
@@ -1012,6 +1026,12 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   * Các bước khác của "Nghe & tách câu" đo trên 1,5 giờ (VAD theo độ to, nghe lại đoạn sót, nối câu, đoán đoạn hát):
     0,1–0,5 GB, không phải nguyên nhân.
 
+- 2.0.71: đổi tên hiển thị **Subvideo** ("Dịch & lồng tiếng video" – tiêu đề cửa sổ, thanh bên, AppUserModelID
+  "Subvideo.VideoDubbing", câu nghe thử giọng, các file .bat, README) + logo mẫu B (người dùng chọn trong 3 mẫu: chữ S
+  trắng + 2 vạch phụ đề; `assets/Subvideo.ico` 9 cỡ 16–256 PNG). Đóng gói exe đầy đủ thư viện không kèm mô hình (xem
+  Cấu trúc). Đã thử đóng gói lõi bằng PyInstaller 6.22 trên Linux (không có torch): giao diện mở được, dùng đúng thư
+  mục qua `datadir.txt`, `--hf-download` / dòng lệnh chạy qua exe; bản Windows + torch CUDA chưa đóng gói thử.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -1052,6 +1072,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.62: chờ người dùng thử Gemini gói miễn phí thật (sandbox không gọi được Google API): thông báo 429 của Gemini
   qua endpoint tương thích OpenAI có đúng chữ "PerDay" / "retry in" như đã đoán không; `response_format` json_object có bị
   từ chối không (đã có tự bỏ khi 400).
+- 2.0.71: chờ người dùng chạy `DongGoi_EXE.bat` trên Windows và mở Subvideo.exe (thiếu thư viện nào khi chạy -> thêm
+  vào `PKGS` trong Subvideo.spec); kiểm tra tiến trình VieNeu / Qwen3 / OmniVoice / Hy-MT2 chạy được trong bản exe.
 - 2.0.70: chờ người dùng chạy lại "1. Nghe & tách câu" trên phim 1354 câu và xem Task Manager (RAM, "Bộ nhớ GPU dùng
   chung" phải ~0 khi Qwen3 nghe); nghe thử chỗ nối các đoạn 10 phút của bản tách (tab Âm thanh → Nghe riêng nhạc nền
   quanh phút 10, 20…). Nếu còn tràn card: Cài đặt → Qwen3-ASR 0.6B.

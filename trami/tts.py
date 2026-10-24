@@ -753,7 +753,7 @@ def trend_synth(worker: VieneuWorker, spec: str, text: str, out: Path, params: d
     from .voicefx import resample_len
 
     if not trend_voices.get(spec):
-        raise ValueError("Giọng trend này không còn trong bản TraMi đang dùng")
+        raise ValueError("Giọng trend này không còn trong bản Subvideo đang dùng")
     synth_checked(worker, text, out, voice=trend_voices.base_voice(spec, presets) or None,
                   params=trend_voices.params(spec, params))
     try:
@@ -1398,11 +1398,11 @@ def wave_envelope(a: np.ndarray, sr: int, hop: float = 0.05) -> np.ndarray:
     return np.clip(env / max(top, 1e-4), 0, 1).astype(np.float16)
 
 
-PREVIEW_TEXT = {"vi": "Xin chào, đây là giọng đọc thử nghiệm của TraMi.",
-                "en": "Hello, this is a test voice from TraMi.",
-                "th": "สวัสดีค่ะ นี่คือเสียงทดสอบจาก TraMi",
-                "ja": "こんにちは、TraMiのテスト音声です。",
-                "ko": "안녕하세요, TraMi의 테스트 음성입니다."}
+PREVIEW_TEXT = {"vi": "Xin chào, đây là giọng đọc thử nghiệm của Subvideo.",
+                "en": "Hello, this is a test voice from Subvideo.",
+                "th": "สวัสดีค่ะ นี่คือเสียงทดสอบจาก Subvideo",
+                "ja": "こんにちは、Subvideoのテスト音声です。",
+                "ko": "안녕하세요, Subvideo의 테스트 음성입니다."}
 
 
 def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,

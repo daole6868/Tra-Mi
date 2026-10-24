@@ -109,7 +109,7 @@ def normalize_url(url: str, resolve=resolve_short) -> str:
 
 def write_cookies(path: Path, cookies: dict[str, str], domain: str, expires: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = ["# Netscape HTTP Cookie File", "# Tạo bởi TraMi (đăng nhập bằng mã QR) – đừng gửi file này cho người khác", ""]
+    lines = ["# Netscape HTTP Cookie File", "# Tạo bởi Subvideo (đăng nhập bằng mã QR) – đừng gửi file này cho người khác", ""]
     for name, value in cookies.items():
         lines.append("\t".join((domain, "TRUE", "/", "FALSE", str(int(expires)), name, value)))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

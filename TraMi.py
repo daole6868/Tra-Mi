@@ -1,10 +1,13 @@
-"""TraMi - Dịch video Trung -> Việt.   Chạy:  python TraMi.py"""
+"""Subvideo – dịch & lồng tiếng video.   Chạy:  python TraMi.py   (bản đóng gói: Subvideo.exe)"""
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __name__ == "__main__":
+    import multiprocessing
+
+    multiprocessing.freeze_support()   # bản .exe: thư viện nào mở tiến trình con bằng multiprocessing vẫn chạy đúng
     if len(sys.argv) > 1 and sys.argv[1] == "--vieneu-worker":   # tiến trình riêng đọc giọng VieNeu
         from trami.vieneu_worker import main as vn_main
 
