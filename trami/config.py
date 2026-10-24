@@ -127,6 +127,8 @@ DEFAULT_SETTINGS: dict = {
     "ai_clean_before_translate": False,       # AI sửa lỗi nghe & nối câu bị cắt trước khi dịch cả phim lần đầu
     "ai_review_after_translate": False,       # AI kiểm tra lại bản dịch sau khi dịch cả phim (tốn thêm ~1 lần gọi AI)
     "ai_song_filter": True,                   # trước khi dịch cả phim lần đầu: AI lọc lời bài hát (🎵) + chữ không phải thoại
+    "ai_join_engine": "auto",                 # AI nối câu theo nghĩa sau khi tách câu: auto (công cụ dịch nếu là AI) / off / tên AI
+    "asr_relisten": True,                     # nghe lại chỗ cắt khúc giữa lúc đang nói (bỏ dấu "。" giả bộ nghe tự đặt)
     # Tải video từ link: Bilibili đăng nhập bằng mã QR (sitelogin); trang khác lấy cookie từ trình duyệt / file
     "dl_browser": "",                         # "" / firefox / edge / chrome / brave / opera / vivaldi
     "dl_cookie_file": "",                     # file cookies.txt (Netscape) người dùng xuất từ trình duyệt

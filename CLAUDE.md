@@ -61,7 +61,12 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `units` (từ / chữ), `detect` (tiếng của 1 câu theo chữ viết), font phụ đề Thái/Nhật/Hàn (`subtitle_font`).
   `pipeline.target_lang(p)` (dự án `p.data["target_lang"]`, chưa có -> Cài đặt), `trans_lang(p)` (tiếng của bản dịch đang có).
 - Tách câu (`align.py`): `plan_cuts` (dấu câu + chỗ nghỉ + ranh giới từ jieba), `split_timed`, `join_broken` (nối câu
-  bị cắt ngang), kiểu tách câu `split_params` (Cài đặt `split_style`: dub / short).
+  bị cắt ngang), kiểu tách câu `split_params` (Cài đặt `split_style`: dub / short). Dấu "。" giả (2.0.76): `false_stop`
+  (từ treo cuối dòng / vế mở 既然 / 如果… chưa có vế sau / trợ từ đầu dòng sau), `soft_join` (chỗ nối "。" -> "，" hoặc bỏ),
+  `shift_tails` (nối quá dài -> chuyển mẩu sau dấu phẩy cuối sang dòng sau), `heard_junction` (so lời nghe lại quanh chỗ
+  cắt khúc); `asr_qwen.relisten_cuts` (nghe lại ±6 s quanh chỗ cắt khúc giữa lúc đang nói, Cài đặt `asr_relisten`);
+  AI nối câu theo nghĩa `pipeline.join_engine` / `ai_join_lines` / `ai_join` (`skills.clean_lines(mode="join")`, Cài đặt
+  `ai_join_engine`: auto / off / tên AI).
 - `trami/textfit.py` – đo bề rộng chữ phụ đề như libass (Qt khi có giao diện, không thì Pillow+fontTools, không thì ước
   lượng) + `fit_lines` (xếp câu vào dòng: % bề rộng, số dòng tối đa, thu nhỏ chữ). `subtitle.layout_event` dùng chung
   cho `to_ass` và khung xem trước (`player.SubtitleItem._layout`) -> xuống dòng / cỡ chữ / ô nền giống hệt.
@@ -93,7 +98,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (136 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (142 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1153,7 +1158,37 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     dài / thêm từ đệm khi ngắn (lệch 1–2 tiếng để nguyên), mục 6 lời hát thiếu "♪ " -> thêm; `ai_review` gọi
     `mark_song_lines` sau khi sửa. Luật 9 lời nhắc dịch thêm dấu hiệu điệp khúc / không nối tiếp lời thoại.
 
+- 2.0.76: tách câu "chuẩn thoại" (người dùng so cách tách của HaizFlow – Whisper + chỉ cắt ở 。！？ – với tool: đưa 4 mục, chọn
+  làm hết). Nguyên nhân câu bị cắt đôi có dấu "。": Qwen3-ASR đặt "。" cuối MỌI khúc nghe (≤ 28 s) – `chunk_spans` cắt khúc ở
+  chỗ lặng nhất kể cả giữa câu (khoảng hở ~0,02 s) – mà `join_broken` không bao giờ nối qua dấu kết câu.
+  * (1) Nghe lại chỗ cắt khúc (`asr_qwen.relisten_cuts`): khúc liền nhau hở < `FORCED_GAP` 0,3 s mà khúc trước kết thúc
+    bằng 。！？ -> nghe lại cửa sổ ±`RELISTEN_PAD` 6 s quanh chỗ cắt (1 lệnh worker cho mọi chỗ, `align=False`);
+    `align.heard_junction` khớp đuôi + đầu 2 khúc với lời nghe lại (SequenceMatcher, ≥ 60 % chữ giống, chỗ nối liền mạch):
+    không có dấu kết câu ở đó -> gộp 2 khúc (≤ `MERGE_MAX` 56 s), sửa ≤ 2 chữ nghe nhầm sát chỗ cắt (cùng số chữ).
+    `transcribe_qwen` giờ luôn: nghe (không căn) -> nghe lại chỗ cắt -> căn 1 lần. `p.data["asr_relisten"]` {cuts,
+    merged, fixed} -> thông báo bước 1.
+  * (2) Luật ngữ pháp cho "。" giả (`align.false_stop`, không cần AI): dòng kết thúc bằng từ treo (`TAIL_WORDS` 就 / 都 /
+    因为 / 如果…), vế cuối mở bằng `OPENERS` (既然 / 就连 / 如果 / 虽然…) mà chưa có vế sau (`CONSEQUENT`), hoặc dòng sau mở
+    bằng trợ từ (`HEAD_WORDS`) -> nối dù có "。" (cách ≤ `FALSE_STOP_GAP` 1,2 s, vế mở ≤ `OPENER_GAP` 2 s); chỗ nối
+    `soft_join`: nghỉ ≥ 0,3 s -> "，", không thì bỏ dấu. Trợ động từ cuối dòng không dấu câu (`MODAL_HANG` 会 / 能 / 要 /
+    可以…) = cắt ngang (nối được tới 3 s).
+  * (3) `shift_tails`: nối 2 dòng sẽ quá 36 chữ / 10 s -> chuyển mẩu sau dấu phẩy cuối (≤ `TAIL_SHIFT_MAX` 8 chữ) của dòng
+    trước sang dòng sau (câu mới, mốc theo `ct` nếu khớp, không thì chia tỉ lệ).
+  * (4) AI nối câu theo nghĩa: `skills.JOIN_PROMPT` (mỗi dòng kèm người nói + "nói liền" / "nghỉ X s" tới dòng sau), chỉ
+    gộp 2–3 dòng liền nhau, cùng người nói, không 🎵, ≤ 36 chữ / 10 s; chữ AI trả về chỉ nhận khi y nguyên chữ gốc, không
+    thì `soft_join`; không gắn kỹ năng dịch. Chọn AI: Cài đặt → Dịch thuật "AI nối câu theo nghĩa" + ô gương tab Tự động
+    (`ai_join_engine`: "Theo công cụ dịch đang chọn" / Tắt / Gemini / DeepSeek / Claude / OpenAI / Ollama – AI chưa có key
+    ghi "– chưa có API key"; `pipeline.join_engine_choices`). Tự chạy sau `join_broken` trong "1. Nghe & tách câu"
+    (`p.data["ai_joined"]`, lỗi -> `ai_join_note`, không chặn bước 1); tab Phụ đề nút "AI nối câu" (job "join",
+    `join_backup` -> "Hoàn tác nối", dự án đã dịch -> dịch câu gộp, tích sẵn câu gộp).
+  * Thử trên file SRT người dùng (chỉ chữ + giờ, không âm thanh): luật (2)(3) sửa 16–17 "勤俭持家，会过日子。", 206–207,
+    459–460, 751–752, 849–850 (chuyển đuôi); giữ nguyên 91–93, 131–133, 806. 549 / 739 cần nghe lại (âm thanh thật),
+    106 / 107 cần AI nối câu.
+
 ## Vấn đề đang mở
+- 2.0.76: chờ người dùng chạy lại "1. Nghe & tách câu" (Qwen3) trên phim thật: số chỗ cắt khúc được nghe lại / gộp, câu
+  có còn bị cắt đôi kiểu "就连夫人都。" | "…" không; AI nối câu (Gemini / DeepSeek…) có gộp nhầm 2 lượt nói không
+  (khôi phục bằng "Hoàn tác nối" / Ctrl+Z). Nghe lại chỉ có với Qwen3-ASR (SenseVoice / Whisper chưa).
 - 2.0.75: chờ người dùng thử 3 kỹ năng mới với ChatGPT / Gemini và nút "AI lọc lời bài hát" trong tool trên phim có
   nhạc phim – AI có bỏ nhầm câu thoại thật không (câu bỏ khôi phục bằng Hoàn tác sửa / Ctrl+Z).
 - 2.0.74: chờ người dùng thử Kéo dọc trên video thật, "Lọc câu nghe nhầm" (± nửa cung hợp lý bao nhiêu, có đánh dấu nhầm

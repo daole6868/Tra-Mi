@@ -3446,7 +3446,7 @@ def test_qwen_streams_chunk_groups(monkeypatch, tmp_path):
     assert all(s.extra.get("ct") for s in segs)                 # câu cuối cùng có mốc từng chữ
     calls.clear()
     asr_qwen.transcribe_qwen(tmp_path / "a.wav", {}, "zh", None, None)
-    assert calls == [(14, True)]                                # chạy thường: 1 lần như cũ
+    assert calls == [(14, False), ("align", 14)]                # chạy thường: nghe hết -> (nghe lại chỗ cắt) -> căn
 
 
 def test_auto_parallel_translates_and_reads_while_listening(monkeypatch):
@@ -4402,3 +4402,158 @@ def test_ai_song_filter_before_translate(monkeypatch):
     assert "filter" not in [k for k, _ in calls]
     assert pipeline.undo_cleanup(p, st_) == 5
     assert skills._is_trim("你去哪儿我爱你", "你去哪儿") and not skills._is_trim("走吧", "跑吧")
+
+
+def test_false_stop_rules():
+    """Dấu "。" giả chỉ nhận khi có bằng chứng ngữ pháp chắc chắn; câu đã trọn thì giữ (lấy từ phim người dùng gửi)."""
+    from trami import align
+
+    assert align.false_stop("爹，嗯，我刚回来就。", "收到延旭将军传讯，他说什么？") == "tail"
+    assert align.false_stop("就连今日的风。", "都比前些日子轻了几分，") == "opener"
+    assert align.false_stop("既然仙缘。", "咱们已经反抽过一次，") == "opener"
+    assert align.false_stop("你看他说。", "了吧，我就知道") == "head"
+    for a, b in [("本君得在。", "你不说，老夫也会安排。"), ("你还欠我一个玉钵，记得还。", "还有老夫的守孝玉恶阵。"),
+                 ("一百遍。", "娘，俺骂的可是天界。"), ("…前面所有人全白忙，这笔账。", "你自己算。"),
+                 ("如果你去我就去。", "好吗"), ("他还在找，我还在记。", "够了，能不能别排比了？")]:
+        assert align.false_stop(a, b) == "", a
+    assert align.broken_junction("勤俭持家，会", "过日子。")      # không dấu câu, dừng ở động từ năng nguyện
+
+
+def test_join_broken_fixes_false_stops_and_shifts_tail():
+    """Nối câu bị chặt bởi "。" giả / dòng dừng ở 会; nối thì quá dài -> chuyển mẩu đuôi sang câu sau; câu đúng giữ nguyên."""
+    from trami import align
+
+    rows = [(52.97, 54.19, "俺这是勤俭持家。"), (55.13, 55.81, "勤俭持家，会"), (58.09, 58.19, "过日子。"),
+            (437.03, 439.45, "他还在写，他还在考，"), (440.47, 443.05, "他还在找，我还在记。"),
+            (443.83, 446.01, "够了，能不能别排比了？"), (632.89, 633.48, "一百遍。"), (633.5, 636.69, "娘，俺骂的可是天界。"),
+            (1042.22, 1043.36, "就连今日的风。"), (1044.48, 1046.26, "都比前些日子轻了几分，"),
+            (1047.2, 1051.86, "这点重建损失跟整个凡界重新活过来相比，算什么？"),
+            (2071.86, 2074.878, "爹，嗯，我刚回来就。"), (2074.898, 2077.33, "收到延旭将军传讯，他说什么？"),
+            (3247.57, 3248.79, "既然仙缘。"), (3250.37, 3252.31, "咱们已经反抽过一次，"), (3254.37, 3256.47, "那就别只抽一次。"),
+            (3509.31, 3510.37, "本君得在。"), (3511.23, 3512.61, "你不说，老夫也会安排。"),
+            (3710.25, 3715.47, "为俺们天剑宗变穷的账，为大师兄挨的雷，为三师兄"),
+            (3717.45, 3719.96, "让雷劈焦的辫子，为四师兄劈没的围裙，")]
+    segs = [Segment(a, b, t) for a, b, t in rows]
+    out, made = align.join_broken(segs, align.split_params({}), 28, 4000)
+    texts = [s.text for s in out]
+    assert "勤俭持家，会过日子。" in texts
+    assert "就连今日的风，都比前些日子轻了几分，" in texts
+    assert "爹，嗯，我刚回来就收到延旭将军传讯，他说什么？" in texts         # nói liền 0,02 s -> bỏ hẳn "。"
+    assert "既然仙缘，咱们已经反抽过一次，" in texts and "那就别只抽一次。" in texts
+    assert "为俺们天剑宗变穷的账，为大师兄挨的雷，" in texts
+    assert "为三师兄让雷劈焦的辫子，为四师兄劈没的围裙，" in texts
+    for t in ("俺这是勤俭持家。", "他还在写，他还在考，", "他还在找，我还在记。", "够了，能不能别排比了？", "一百遍。",
+              "娘，俺骂的可是天界。", "本君得在。", "你不说，老夫也会安排。", "这点重建损失跟整个凡界重新活过来相比，算什么？"):
+        assert t in texts, t
+    assert len(out) == len(segs) - 4 and made == 5
+    shifted = [s for s in out if s.text.startswith("为三师兄")][0]
+    assert shifted.start == pytest.approx(3710.25 + 5.22 * 17 / 21, abs=0.01)
+
+
+def test_heard_junction_relisten():
+    """Nghe lại chỗ cắt khúc có ngữ cảnh: không có dấu kết câu ở chỗ nối -> nối; có -> giữ; sửa chữ nghe sai sát chỗ cắt."""
+    from trami import align
+
+    r = align.heard_junction("爹，嗯，我刚回来就。", "收到延旭将军传讯，他说什么？", "嗯，我刚回来就收到延旭将军传讯，他说")
+    assert r and not r["end"] and r["mark"] == "" and not r["fixed"]
+    r = align.heard_junction("这样的资质，三界难。", "找第二个，阿弥陀佛！", "根基稳，这样的资质，三界难找第二个，阿弥陀佛。")
+    assert r and not r["end"]
+    r = align.heard_junction("一百遍。", "娘，俺骂的可是天界。", "严行戒律，一百遍。娘，俺骂的可是天界。")
+    assert r and r["end"]
+    r = align.heard_junction("天界本源，确实得天独厚", "所以既然仙缘", "确实得天独厚，所以既然仙缘")
+    assert r and not r["end"] and r["mark"] == "，"
+    r = align.heard_junction("爹，我刚回来九。", "收到延旭将军传讯", "我刚回来就收到延旭将军传讯")
+    assert r["fixed"] == 1 and r["t1"] == "爹，我刚回来就。" and r["t2"] == "收到延旭将军传讯"
+    assert align.heard_junction("爹，我刚回来就。", "收到延旭将军传讯", "今天天气很好我们出去玩") is None
+
+
+def test_relisten_cuts_merges_false_stop(monkeypatch):
+    """Chỗ cắt khúc không có khoảng nghỉ + khúc trước kết thúc bằng "。" -> nghe lại 12 s quanh đó; câu bị chặt đôi được
+    nối (bước tách câu sau đó tách lại), lượt nói nối nhau thì giữ; khúc nghỉ thật không nghe lại."""
+    from trami import asr_qwen
+
+    calls = []
+
+    class FakeWorker:
+        def call(self, req, progress=None, cancel=None):
+            calls.append(req)
+            heard = {0: "嗯，我刚回来就收到延旭将军传讯，他说", 1: "严行戒律，一百遍。娘，俺骂的可是天界"}
+            return {"items": [{"text": heard[k]} for k in range(len(req["spans"]))]}
+
+    monkeypatch.setattr(asr_qwen, "worker", lambda settings=None: FakeWorker())
+    raw = [(0.0, 28.0, "魔界的事，爹，嗯，我刚回来就。"), (28.02, 40.0, "收到延旭将军传讯，他说什么？"),
+           (41.5, 52.0, "回去，万仙盟公共场合严行戒律，一百遍。"), (52.02, 56.0, "娘，俺骂的可是天界。"),
+           (57.0, 60.0, "好。")]
+    st = {}
+    out = asr_qwen.relisten_cuts(raw, "x.wav", {}, "zh", stats=st)
+    assert [t for _, _, t in out] == ["魔界的事，爹，嗯，我刚回来就收到延旭将军传讯，他说什么？",
+                                      "回去，万仙盟公共场合严行戒律，一百遍。", "娘，俺骂的可是天界。", "好。"]
+    assert out[0][:2] == (0.0, 40.0) and st == {"cuts": 2, "merged": 1, "fixed": 0}
+    assert calls[0]["spans"] == [[22.0, pytest.approx(34.02)], [46.0, 56.0]] and calls[0]["align"] is False
+
+
+def test_ai_join_mode_only_merges(monkeypatch):
+    """AI nối câu (mục 4): chỉ gộp 2–3 dòng liền nhau, chữ giữ nguyên (AI viết khác chữ -> tự bỏ "。" ở chỗ nối), quá
+    dài / quá 3 dòng / khác người nói -> bỏ qua; dòng không gộp giữ nguyên đối tượng; AI nhận khoảng nghỉ giữa các dòng."""
+    from trami import pipeline, skills
+
+    seen = []
+
+    class FakeLLM:
+        def chat(self, system, user, max_tokens=6000, temperature=0.1):
+            seen.append((system, user))
+            return json.dumps({"merge": [[1, 2], [3, 4], [5, 6, 7, 8], [9, 10]],
+                               "fix": {"1": "前面所有人全白忙，这笔账你自己算。", "3": "三界难找第二个人啊"}},
+                              ensure_ascii=False)
+
+    segs = [Segment(0, 7.7, "前面所有人全白忙，这笔账。"), Segment(8.07, 9.05, "你自己算。"),
+            Segment(20, 22.1, "这样的资质，三界难。"), Segment(22.12, 24.9, "找第二个，阿弥陀佛！"),
+            Segment(30, 31, "一。"), Segment(31.1, 32, "二。"), Segment(32.1, 33, "三。"), Segment(33.1, 34, "四。"),
+            Segment(40, 41, "好。", speaker="S1"), Segment(41.2, 42, "走吧。", speaker="S2"),
+            Segment(50, 52, "阿弥陀佛。")]
+    res = skills.clean_lines(FakeLLM(), segs, mode="join")
+    assert "nói liền" in seen[0][1] and "nghỉ 0.4s" in seen[0][1] and "(S2)" in seen[0][1]
+    assert "CHỈ làm" in seen[0][0]
+    out, st = skills.apply_cleanup(segs, res)
+    texts = [s.text for s in out]
+    assert texts[0] == "前面所有人全白忙，这笔账你自己算。" and (out[0].start, out[0].end) == (0, 9.05)
+    assert texts[1] == "这样的资质，三界难找第二个，阿弥陀佛！"     # AI viết khác chữ -> tự bỏ "。" giả (nói liền)
+    assert texts[2:] == ["一。", "二。", "三。", "四。", "好。", "走吧。", "阿弥陀佛。"]
+    assert out[-1] is segs[-1] and st["merged"] == 2 and st["changed"] == [0, 1]
+    # chọn AI cho mục 4 trong danh sách AI ở Cài đặt
+    assert pipeline.join_engine({"translate_engine": "google"})[0] is None
+    assert pipeline.join_engine({"translate_engine": "gemini", "gemini_api_keys": ["k"]}) == ("gemini", "Gemini")
+    assert pipeline.join_engine({"ai_join_engine": "deepseek"})[0] is None
+    assert pipeline.join_engine({"ai_join_engine": "ollama"}) == ("ollama", "Ollama")
+    assert pipeline.join_engine({"ai_join_engine": "off", "translate_engine": "gemini",
+                                 "gemini_api_keys": ["k"]})[0] is None
+    ch = dict(pipeline.join_engine_choices({"anthropic_api_keys": ["k"]}))
+    assert ch["anthropic"] == "Claude" and ch["deepseek"].endswith("chưa có API key") and "off" in ch
+
+
+def test_ai_join_project_and_undo(monkeypatch):
+    """Nút "AI nối câu": gộp theo AI đã chọn ở Cài đặt, câu gộp bỏ giọng cũ, "Hoàn tác nối" về bản cũ; chưa có key -> báo."""
+    from trami import pipeline
+    from trami import translate as tr
+    from trami.project import Project
+
+    used = []
+
+    def fake_chat(self, system, user, max_tokens=6000, temperature=0.1):
+        used.append(self.engine)
+        return json.dumps({"merge": [[1, 2]], "fix": {}})
+
+    monkeypatch.setattr(tr.LLMClient, "chat", fake_chat)
+    p = Project.create("ai_noi_cau")
+    p.segments = [Segment(0, 7.7, "前面所有人全白忙，这笔账。", "Cả đám uổng công, món nợ này."),
+                  Segment(8.07, 9.05, "你自己算。", "Cậu tự tính."), Segment(12, 13, "好。")]
+    p.segments[0].extra["tts_file"] = "a.wav"
+    p.save()
+    st = {"ai_join_engine": "deepseek", "deepseek_api_keys": ["k"]}
+    assert pipeline.ai_join(p, st) == [0] and used == ["deepseek"]
+    segs = p.segments
+    assert [s.text for s in segs] == ["前面所有人全白忙，这笔账，你自己算。", "好。"]
+    assert "tts_file" not in segs[0].extra
+    assert pipeline.undo_join(p, st) == 3 and p.segments[1].text == "你自己算。"
+    with pytest.raises(ValueError, match="chưa có API key"):
+        pipeline.ai_join(p, {"ai_join_engine": "gemini"})

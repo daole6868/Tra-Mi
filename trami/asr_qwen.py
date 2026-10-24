@@ -154,13 +154,71 @@ def _segment(s: float, e: float, item: dict, simplify: bool) -> Segment | None:
 
 
 STREAM_GROUP = 6   # chế độ vừa tách vừa dịch: nghe từng nhóm 6 khúc (≤ ~3 phút) rồi gửi câu sang bộ dịch ngay
+FORCED_GAP = 0.3   # 2 khúc nghe liền nhau (nghỉ < 0,3 s): khúc bị cắt giữa lúc đang nói vì dài quá 28 s
+RELISTEN_PAD = 6.0  # nghe lại 6 s mỗi bên chỗ cắt khúc để bộ nghe thấy trọn câu
+MERGE_MAX = 56.0    # khúc sau khi nối ≤ 56 s (bộ căn thời gian chạy 1 khúc / lô trên card 8 GB)
+
+
+def relisten_cuts(raw: list[tuple[float, float, str]], wav: str | Path, settings: dict, language: str,
+                  progress: Prog | None = None, cancel=None, stats: dict | None = None) -> list[tuple[float, float, str]]:
+    """raw: [(đầu, cuối, lời)] từng khúc theo thứ tự. Bộ nghe hay tự đặt "。" ở cuối mỗi khúc; ở chỗ cắt khúc KHÔNG có
+    khoảng nghỉ (cắt giữa lúc đang nói) dấu đó thường là giả ("我刚回来就。" | "收到…"). Nghe lại 12 s quanh mỗi chỗ cắt
+    như vậy (6 s mỗi bên): nghe có ngữ cảnh mà không có dấu kết câu ở chỗ nối -> bỏ dấu, nối 2 khúc (bước tách câu sau
+    đó tách lại đúng chỗ); sửa luôn chữ nghe sai sát chỗ cắt (`align.heard_junction`)."""
+    from .align import CLOSERS, STRONG, heard_junction
+
+    st = stats if stats is not None else {}
+    st.update(cuts=0, merged=0, fixed=0)
+    todo = []
+    for k in range(len(raw) - 1):
+        s1, e1, t1 = raw[k]
+        s2, e2, t2 = raw[k + 1]
+        if not t1 or not t2 or s2 - e1 >= FORCED_GAP or t1.rstrip(CLOSERS)[-1:] not in STRONG:
+            continue
+        a, b = max(s1, e1 - RELISTEN_PAD), min(e2, s2 + RELISTEN_PAD)
+        if b - a >= 2.0:
+            todo.append((k, a, b))
+    st["cuts"] = len(todo)
+    if not todo:
+        return raw
+    if progress:
+        progress(0.0, f"Nghe lại {len(todo)} chỗ cắt khúc giữa lúc đang nói…")
+    r = worker(settings).call({"cmd": "asr", "wav": _wav_path(wav), "language": language, "prompt": hotwords(settings),
+                               "align": False, "spans": [[a, b] for _, a, b in todo]}, progress, cancel)
+    raw = list(raw)
+    merge: dict[int, str] = {}
+    for (k, _a, _b), it in zip(todo, r.get("items") or []):
+        res = heard_junction(raw[k][2], raw[k + 1][2], (it.get("text") or "").strip())
+        if res is None:
+            continue
+        if res["fixed"]:
+            raw[k] = (raw[k][0], raw[k][1], res["t1"])
+            raw[k + 1] = (raw[k + 1][0], raw[k + 1][1], res["t2"])
+            st["fixed"] += res["fixed"]
+        if not res["end"]:
+            merge[k] = res["mark"]
+    out: list[tuple[float, float, str]] = []
+    for k, (s, e, t) in enumerate(raw):
+        if out and (k - 1) in merge and e - out[-1][0] <= MERGE_MAX:
+            ps, _pe, pt = out[-1]
+            core = pt.rstrip(CLOSERS)
+            tail = pt[len(core):]
+            core = core[:-1] if core[-1:] in STRONG else core
+            out[-1] = (ps, e, core + merge[k - 1] + tail + t)
+            st["merged"] += 1
+        else:
+            out.append((s, e, t))
+    return out
 
 
 def transcribe_qwen(wav: str | Path, settings: dict, language: str = "zh", progress: Prog | None = None,
-                    cancel=None, on_chunk: Callable[[list[Segment]], None] | None = None) -> list[Segment]:
-    """Nghe cả video: chia đoạn có tiếng -> gộp thành khúc ≤ 28 s (nghe trọn câu) -> Qwen3-ASR + mốc từng chữ.
-    Mỗi khúc trả về 1 Segment có extra["ct"]; bước căn thời gian (align.refine) tách câu theo dấu câu + chỗ nghỉ.
-    on_chunk: nghe theo từng nhóm khúc, nghe xong nhóm nào gọi on_chunk(các khúc đó) ngay (vừa tách vừa dịch)."""
+                    cancel=None, on_chunk: Callable[[list[Segment]], None] | None = None,
+                    stats: dict | None = None) -> list[Segment]:
+    """Nghe cả video: chia đoạn có tiếng -> gộp thành khúc ≤ 28 s (nghe trọn câu) -> Qwen3-ASR -> nghe lại chỗ cắt khúc
+    giữa lúc đang nói (`relisten_cuts`) -> mốc từng chữ. Mỗi khúc trả về 1 Segment có extra["ct"]; bước căn thời gian
+    (align.refine) tách câu theo dấu câu + chỗ nghỉ.
+    on_chunk: nghe theo từng nhóm khúc, nghe xong nhóm nào gọi on_chunk(các khúc đó) ngay (vừa tách vừa dịch).
+    stats: nhận {"cuts", "merged", "fixed"} của bước nghe lại chỗ cắt khúc."""
     from .align import chunk_spans, split_params
     from .asr_funasr import load_wav16k
 
@@ -174,17 +232,11 @@ def transcribe_qwen(wav: str | Path, settings: dict, language: str = "zh", progr
     want_align = bool(settings.get("align_words", True))
     req = {"cmd": "asr", "wav": _wav_path(wav), "language": language, "prompt": hotwords(settings),
            "align": want_align}
-    if not on_chunk:   # 1 lần gọi: nghe hết rồi căn hết (bộ căn chỉ nạp sau khi nghe xong)
-        r = worker(settings).call(dict(req, spans=[list(c) for c in chunks]), progress, cancel)
-        segs = [x for (s, e), it in zip(chunks, r.get("items") or []) if (x := _segment(s, e, it, simplify))]
-        if r.get("align_error") and progress:
-            progress(1.0, "Không căn được thời gian bằng Qwen3 (" + r["align_error"][:80] + ") – dùng cách dự phòng")
-        return segs
-    # vừa tách vừa dịch: NGHE theo từng nhóm khúc (chưa căn) -> gửi câu nháp ngay; nghe xong cả phim mới CĂN 1 lần.
-    # (2.0.64 nghe + căn xen kẽ từng nhóm -> từ nhóm 2 bộ căn 0.6B nằm sẵn trên card trong lúc bộ nghe 1.7B chạy -> đỉnh
-    # bộ nhớ cao hơn cách thường ~1,2 GB, card nhỏ tràn sang RAM -> chậm hẳn)
-    groups = [chunks[i:i + STREAM_GROUP] for i in range(0, len(chunks), STREAM_GROUP)]
-    a_end = 0.8 if want_align else 1.0
+    # NGHE hết (chưa căn) -> nghe lại chỗ cắt khúc -> CĂN 1 lần cho cả phim (bộ căn chỉ nạp sau khi nghe xong).
+    # Vừa tách vừa dịch: nghe theo từng nhóm khúc -> gửi câu nháp ngay. (2.0.64 nghe + căn xen kẽ từng nhóm -> từ nhóm 2
+    # bộ căn 0.6B nằm sẵn trên card trong lúc bộ nghe 1.7B chạy -> đỉnh bộ nhớ cao hơn ~1,2 GB, card nhỏ tràn sang RAM)
+    groups = [chunks[i:i + STREAM_GROUP] for i in range(0, len(chunks), STREAM_GROUP)] if on_chunk else [chunks]
+    a_end = 0.8 if want_align else 0.95
     raw: list[tuple[float, float, str]] = []
     for g, part in enumerate(groups):
         lo, hi = a_end * g / len(groups), a_end * (g + 1) / len(groups)
@@ -199,8 +251,12 @@ def transcribe_qwen(wav: str | Path, settings: dict, language: str = "zh", progr
             raw.append((s, e, text))
             if x := _segment(s, e, {"text": text}, simplify):
                 new.append(x)
-        if new:
+        if new and on_chunk:
             on_chunk(new)
+    if settings.get("asr_relisten", True) and len(raw) > 1:
+        rpr = (lambda x, m: progress(a_end + 0.03 * x, m)) if progress else None
+        raw = relisten_cuts(raw, wav, settings, language, rpr, cancel, stats)
+    a_end = min(0.97, a_end + 0.03)
     words: list = [[] for _ in raw]
     if want_align and raw:
         todo = [k for k, (_s, _e, t) in enumerate(raw) if t]

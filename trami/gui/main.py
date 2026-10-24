@@ -615,7 +615,7 @@ class SettingsPage(QWidget):
         ("split_style", "split_style", "c"),
         ("sep_model", "sep_model", "c"), ("sep_before", "sep_before_asr", "b"), ("diarize", "diarize", "b"),
         ("spk_n", "diarize_speakers", "i"), ("spk_thr", "diarize_threshold", "f"),
-        ("engine", "translate_engine", "c"), ("style", "translate_style", "c"),
+        ("engine", "translate_engine", "c"), ("style", "translate_style", "c"), ("ai_join", "ai_join_engine", "c"),
         ("target", "target_lang", "c"),
         ("ds_model", "deepseek_model", "t"), ("oa_base", "openai_base_url", "t"), ("oa_model", "openai_model", "t"),
         ("an_model", "anthropic_model", "t"), ("ge_model", "gemini_model", "t"),
@@ -713,6 +713,12 @@ class SettingsPage(QWidget):
         self.target = f.row("Dịch sang (dự án mới)", combo(C.TARGETS),
                             "Tiếng đích mặc định cho dự án mới. Mỗi dự án đổi riêng ở tab Tự động → 'Dịch sang'")
         self.style = f.row("Văn phong mặc định", combo(C.STYLES))
+        from ..pipeline import join_engine_choices
+
+        self.ai_join = f.row("AI nối câu theo nghĩa", combo(join_engine_choices(load_settings())),
+                             "Sau bước Nghe & tách câu: AI đọc cả kịch bản, gộp các dòng thực ra là 1 câu mà luật không "
+                             "đoán được (\"这笔账。\" | \"你自己算。\"). Chọn 1 AI đã nhập key ở các khung bên dưới (Ollama chạy "
+                             "trên máy, không cần key). Tắt = chỉ dùng luật nối câu")
         t.add(f)
         t.add(label("API key, số câu mỗi lần gửi, giới hạn gói miễn phí: chỉnh riêng ở khung từng công cụ bên dưới. "
                     "Kỹ năng dịch chung (giữ đúng số câu, tên riêng chuẩn) sửa ở tab Tự động → 'Kỹ năng dịch AI' → "

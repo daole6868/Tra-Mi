@@ -264,6 +264,12 @@ class ProjectPage(QWidget):
         self.a_sep.toggled.connect(self._audio_opts_changed)
         self.a_spk.toggled.connect(self._audio_opts_changed)
         self.a_split.currentIndexChanged.connect(self._audio_opts_changed)
+        self.a_joinai = f.row("AI nối câu theo nghĩa", combo(pipeline.join_engine_choices(s),
+                                                             s.get("ai_join_engine", "auto")),
+                              "Sau khi tách câu: AI đọc cả kịch bản, gộp các dòng thực ra là 1 câu mà luật không đoán "
+                              "được (\"这笔账。\" | \"你自己算。\"). Chọn AI trong danh sách đã nhập key ở Cài đặt → Công cụ "
+                              "dịch. Tắt = chỉ dùng luật nối câu (không tốn lượt AI)")
+        self.a_joinai.currentIndexChanged.connect(self._audio_opts_changed)
         self.a_engine = f.row("Công cụ dịch", combo(C.ENGINES + [(pipeline.NO_TRANSLATE, "Không dịch – chỉ nghe & tách câu, "
                                                                  "xuất SRT gốc (dịch ở phần mềm khác)")],
                                                     s.get("translate_engine")))
@@ -446,6 +452,9 @@ class ProjectPage(QWidget):
                     button("Nối câu bị cắt", "merge", "Tự nối các dòng bị cắt ngang câu (cắt giữa 1 từ như 真|的, mẩu "
                            "cụt như 子。, câu chưa hết) rồi tách lại đúng chỗ – không cần AI, không nghe lại. Theo Kiểu "
                            "tách câu ở tab Tự động. Câu đổi được tích sẵn để dịch lại", on_click=self.run_join),
+                    button("AI nối câu", "sparkle", "AI đọc cả kịch bản, gộp các dòng thực ra là 1 câu mà luật không "
+                           "đoán được (\"这笔账。\" | \"你自己算。\") – chỉ gộp, không đổi chữ. AI chọn ở tab Tự động / Cài đặt "
+                           "→ 'AI nối câu theo nghĩa'. Câu gộp được tích sẵn", on_click=self.run_ai_join),
                     button("Hoàn tác nối", "refresh", flat=True, on_click=self.run_undo_join),
                     button("Dời giờ", "clock", on_click=self._shift),
                     button("Căn khớp thoại", "wand", "Căn mốc từng câu sát lời thoại thật, tách câu ở chỗ nghỉ "
@@ -1974,8 +1983,17 @@ class ProjectPage(QWidget):
                                    o["denoise"])
             r = p.data.get("asr_rescued", 0)
             msg = f"Đã lấy {n} câu phụ đề" + (f" (nghe lại được thêm {r} câu bị sót)" if r else "")
+            rl = p.data.get("asr_relisten") or {}
+            if o["method"] != "ocr" and rl.get("cuts"):
+                msg += f" · nghe lại {rl['cuts']} chỗ cắt khúc giữa lúc nói" + \
+                    (f", nối {rl['merged']} câu bị chặt đôi" if rl.get("merged") else "") + \
+                    (f", sửa {rl['fixed']} chữ" if rl.get("fixed") else "")
             if o["method"] != "ocr" and p.data.get("asr_joined"):
                 msg += f" · nối lại {p.data['asr_joined']} câu bị cắt ngang"
+            if o["method"] != "ocr" and p.data.get("ai_joined"):
+                msg += f" · AI nối thêm {p.data['ai_joined']} câu theo nghĩa"
+            if o["method"] != "ocr" and p.data.get("ai_join_note"):
+                msg += " · ⚠ " + p.data["ai_join_note"]
             if o["method"] != "ocr" and p.data.get("songs_found"):
                 msg += f" · {p.data['songs_found']} câu là lời bài hát – đã đánh dấu 🎵 (không lồng tiếng)"
             if o["method"] != "ocr" and p.data.get("noise_found"):
@@ -2020,6 +2038,10 @@ class ProjectPage(QWidget):
             self.a_spk.setChecked(bool(st.get("diarize", True)))
             set_combo(self.d_sepmodel, st.get("sep_model"))
             set_combo(self.a_split, st.get("split_style", "dub"))
+            self.a_joinai.clear()     # danh sách AI theo key hiện có ở Cài đặt
+            for val, text in pipeline.join_engine_choices(st):
+                self.a_joinai.addItem(text, val)
+            set_combo(self.a_joinai, st.get("ai_join_engine", "auto"))
             self._fill_skills(st)
             self.a_clean.setChecked(bool(st.get("ai_clean_before_translate", True)))
             self.a_review.setChecked(bool(st.get("ai_review_after_translate", False)))
@@ -2125,6 +2147,32 @@ class ProjectPage(QWidget):
             return {"message": msg + " · bấm 'Hoàn tác sửa' nếu không ưng", "pick": st["songs"] or st["changed"]}
         self.submit("clean", "AI lọc lời bài hát", fn)
 
+    def run_ai_join(self):
+        """AI nối câu theo nghĩa (mục 4). Dự án đã dịch: câu gộp được dịch lại ngay bằng công cụ đang chọn."""
+        if not self.model.segs:
+            return self.win.toast("Chưa có phụ đề", "warn")
+        st = dict(load_settings())
+        st["ai_join_engine"] = self.a_joinai.currentData() or "auto"
+        eng, why = pipeline.join_engine(st)
+        if not eng:
+            return self.win.toast(f"Chưa chọn được AI để nối câu: {why}", "warn")
+        self.flush()
+        t_eng, sty = self.a_engine.currentData(), self.a_style.currentData()
+        translated = any(x.trans.strip() for x in self.model.segs)
+
+        def fn(j, p):
+            rows = pipeline.ai_join(p, st, eng, lambda x, m: j.update(0.8 * x, m), j.cancelled)
+            if not rows:
+                return {"message": f"{why}: không thấy dòng nào cần nối"}
+            msg = f"{why} nối {len(rows)} câu bị chặt đôi (được tích sẵn) · bấm 'Hoàn tác nối' nếu không ưng"
+            empty = [k for k in rows if p.segments[k].text.strip() and not p.segments[k].trans.strip()]
+            if translated and empty and t_eng != pipeline.NO_TRANSLATE:
+                pipeline.translate(p, t_eng, sty, settings=load_settings(), rows=empty,
+                                   progress=lambda x, m: j.update(0.8 + 0.2 * x, m), cancel=j.cancelled)
+                msg += f" · đã dịch lại {len(empty)} câu gộp"
+            return {"message": msg, "pick": rows}
+        self.submit("join", "AI nối câu", fn)
+
     def run_join(self):
         """Nối câu bị cắt ngang. Dự án đã dịch: câu mới chưa có bản dịch được DỊCH LUÔN (trước đây để trống, phải tự bấm
         dịch) và đã lồng tiếng thì đọc lại giọng đúng các câu đó."""
@@ -2215,7 +2263,8 @@ class ProjectPage(QWidget):
 
         self.settings = save_settings({"sep_before_asr": self.a_sep.isChecked(), "diarize": self.a_spk.isChecked(),
                                        "sep_model": self.d_sepmodel.currentData() or self.settings.get("sep_model"),
-                                       "split_style": self.a_split.currentData() or "dub"})
+                                       "split_style": self.a_split.currentData() or "dub",
+                                       "ai_join_engine": self.a_joinai.currentData() or "auto"})
 
     def _engine_changed(self, *_):
         self._update_engine_label()

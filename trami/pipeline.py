@@ -771,6 +771,7 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         segs = None
         streamed = False
         p.data.pop("asr_warning", None)
+        p.data.pop("asr_relisten", None)
         if engine == "qwen3":
             from . import asr_qwen
 
@@ -779,8 +780,10 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
                 engine = "sensevoice"
             else:
                 try:
+                    rl: dict = {}
                     segs = asr_qwen.transcribe_qwen(wav, settings, language, pr, cancel,
-                                                    on_chunk=draft if on_draft else None)
+                                                    on_chunk=draft if on_draft else None, stats=rl)
+                    p.data["asr_relisten"] = rl
                     streamed = True
                 except ff.Cancelled:
                     asr_qwen.release()
@@ -848,6 +851,24 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
 
             segs, p.data["asr_joined"] = join_broken(segs, split_params(settings),
                                                      int(settings.get("asr_max_chars", 28)), info_dur)
+        # 2c') AI nối các dòng thực ra là 1 câu mà luật không đoán được ("这笔账。" | "你自己算。") – AI chọn ở Cài đặt
+        p.data.pop("ai_joined", None)
+        p.data.pop("ai_join_note", None)
+        if segs and language in ("zh", "yue", "auto"):
+            eng, why = join_engine(settings)
+            if eng:
+                try:
+                    segs, jst = ai_join_lines(segs, settings, eng,
+                                              _sub(progress, min(0.95, asr_end + 0.07), min(0.97, asr_end + 0.1)),
+                                              cancel)
+                    p.data["ai_joined"] = jst["merged"]
+                except ff.Cancelled:
+                    raise
+                except Exception as e:  # noqa: BLE001 – mất mạng / hết lượt / sai key: giữ kết quả nghe, chỉ báo
+                    log_error("AI nối câu")
+                    p.data["ai_join_note"] = f"bỏ qua AI nối câu ({err_text(e)[:120]})"
+            elif settings.get("ai_join_engine", "auto") not in ("auto", "off"):
+                p.data["ai_join_note"] = f"chưa chạy AI nối câu – {why}"
         if engine in ("sensevoice", "qwen3"):
             from .asr_funasr import mark_songs
 
@@ -890,6 +911,8 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
     if method == "ocr":
         p.data.pop("asr_warning", None)
         p.data.pop("asr_joined", None)
+        p.data.pop("asr_relisten", None)
+        p.data.pop("ai_joined", None)
         p.data.pop("songs_found", None)
     p.save()
     # 3) phân biệt người nói
@@ -1062,6 +1085,74 @@ def cleanup_note(st: dict) -> str:
     if st["unsure"]:
         parts.append(f"{len(st['unsure'])} chỗ chưa chắc (rê chuột vào câu gốc để xem)")
     return " · ".join(parts)
+
+
+JOIN_ENGINE_CHOICES = [("auto", "Theo công cụ dịch đang chọn"), ("off", "Tắt")]
+
+
+def join_engine_choices(settings: dict) -> list[tuple[str, str]]:
+    """Lựa chọn cho ô "AI nối câu theo nghĩa": theo công cụ dịch / tắt / từng AI trong Cài đặt (ghi rõ AI chưa có key)."""
+    from .translate import AI_ENGINES, ENGINE_NAMES, api_keys
+
+    out = list(JOIN_ENGINE_CHOICES)
+    for eng in ("gemini", "deepseek", "anthropic", "openai", "ollama"):
+        if eng in AI_ENGINES:
+            ok = eng == "ollama" or bool(api_keys(settings, eng))
+            out.append((eng, ENGINE_NAMES[eng] + ("" if ok else " – chưa có API key")))
+    return out
+
+
+def join_engine(settings: dict) -> tuple[str | None, str]:
+    """AI dùng cho "AI nối câu theo nghĩa" (Cài đặt `ai_join_engine`): "auto" = công cụ dịch đang chọn nếu là AI có key,
+    "off" = tắt, hoặc 1 công cụ AI trong Cài đặt. Trả (công cụ | None, lý do / tên hiển thị)."""
+    from .translate import AI_ENGINES, ENGINE_NAMES, api_keys
+
+    v = settings.get("ai_join_engine", "auto") or "auto"
+    if v == "off":
+        return None, "đã tắt"
+    eng = settings.get("translate_engine", "google") if v == "auto" else v
+    if eng not in AI_ENGINES:
+        return None, "công cụ dịch đang chọn không phải AI – chọn 1 AI ở ô 'AI nối câu theo nghĩa'"
+    if eng != "ollama" and not api_keys(settings, eng):
+        return None, f"chưa có API key {ENGINE_NAMES[eng]} trong Cài đặt → Công cụ dịch"
+    return eng, ENGINE_NAMES[eng]
+
+
+def ai_join_lines(segs: list, settings: dict, engine: str, progress: Prog | None = None, cancel=None,
+                  profile: str = "") -> tuple[list, dict]:
+    """AI đọc cả kịch bản (kèm khoảng nghỉ giữa các dòng, chỗ "nói liền") -> gộp các dòng liền nhau thực ra là 1 câu
+    (`skills.clean_lines(mode="join")`); tool kiểm tra (liền nhau, cách ≤ 2,5 s, ≤ 36 chữ / 10 s, chữ giữ nguyên – chỉ
+    đổi dấu câu ở chỗ nối) rồi mới áp. Trả (danh sách mới, thống kê `apply_cleanup`)."""
+    from . import skills
+    from .translate import LLMClient
+
+    res = skills.clean_lines(LLMClient(settings, engine), segs, profile, "", progress, cancel, mode="join")
+    return skills.apply_cleanup(segs, res)
+
+
+def ai_join(p: Project, settings: dict | None = None, engine: str | None = None, progress: Prog | None = None,
+            cancel=None) -> list[int]:
+    """Nút "AI nối câu" (tab Phụ đề). Giữ bản cũ để "Hoàn tác nối"; câu gộp bỏ giọng cũ (bản lồng tự xếp lại). Trả số
+    thứ tự các câu mới gộp (để tích sẵn)."""
+    settings = settings or load_settings()
+    eng = engine
+    if not eng:
+        eng, why = join_engine(settings)
+        if not eng:
+            raise ValueError(f"Chưa chọn được AI để nối câu: {why}.")
+    segs = p.segments
+    if not segs:
+        raise ValueError("Chưa có phụ đề.")
+    new, st = ai_join_lines(segs, settings, eng, progress, cancel, p.data.get("film_profile", ""))
+    if not st["merged"]:
+        return []
+    p.data["join_backup"] = [s.to_dict() for s in segs]
+    lost = forget_stale_voice({s.text for s in segs}, new, moved=True)
+    p.segments = new
+    p.save()
+    if lost and has_dub(p):   # câu gộp: bỏ giọng cũ khỏi bản lồng (không đọc lại câu nào)
+        relayout(p, settings)
+    return list(st["changed"])
 
 
 def join_lines(p: Project, settings: dict | None = None) -> list[int]:

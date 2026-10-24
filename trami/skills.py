@@ -99,6 +99,21 @@ Chỉ trả về JSON: {"song": {"<số dòng>": "lý do"}, "noise": {"<số dò
 không phải lời thoại"}}. Lý do viết ngắn bằng tiếng Việt. Dòng là lời thoại bình thường thì KHÔNG ghi. Không có gì thì trả
 {"song": {}, "noise": {}, "fix": {}}."""
 
+JOIN_PROMPT = """Bạn là biên tập viên phụ đề tiếng Trung. Các dòng dưới đây do máy nghe (ASR) tách câu, mỗi dòng có giờ và
+khoảng nghỉ tới dòng sau ("nghỉ 0.4s"; "nói liền" = gần như không ngừng). Máy hay đặt dấu "。" SAI ở chỗ người nói ngừng
+lấy hơi hoặc chỗ máy cắt khúc, làm 1 câu bị chặt thành 2 dòng (VD "这笔账。" | "你自己算。"; "三界难。" | "找第二个";
+"就连今日的风。" | "都比前些日子轻了几分"; "沈小幽天资。" | "虽高，但若…"). Đọc HẾT các dòng để hiểu mạch chuyện, rồi CHỈ làm
+1 việc: tìm các dòng LIỀN NHAU thực ra là MỘT câu / một ý của CÙNG một người và gộp lại.
+- Gộp 2–3 dòng liền nhau khi dòng trước chưa nói hết ý: thiếu vế sau, thiếu tân ngữ / bổ ngữ, dòng sau là phần còn lại
+  của câu trước. "Nói liền" mà dòng trước dừng giữa ý thì gần như chắc chắn là 1 câu.
+- KHÔNG gộp 2 câu đã trọn vẹn; KHÔNG gộp lời của 2 người (hỏi – đáp, đổi người nói – xem nhãn người nói nếu có); không gộp
+  lời bài hát với lời thoại; nghỉ trên 2 giây thì chỉ gộp khi chắc chắn.
+- Mỗi nhóm gộp: ghi câu sau khi gộp vào "fix" ở dòng ĐẦU nhóm – chỉ được bỏ / đổi dấu câu ở chỗ nối (VD "这笔账你自己算。"),
+  KHÔNG đổi, thêm hay bớt chữ nào.
+- Chưa chắc thì KHÔNG gộp.
+Chỉ trả về JSON: {"merge": [[<số dòng>, <số dòng>]], "fix": {"<số dòng>": "câu sau khi gộp"}}. Không có gì thì trả
+{"merge": [], "fix": {}}."""
+
 PROFILE_PROMPT = """Bạn là biên tập viên phim Trung Quốc. Đọc kịch bản phụ đề dưới đây và lập "HỒ SƠ PHIM" ngắn gọn bằng tiếng
 Việt cho người dịch sang {lang}. Chỉ trả về JSON:
 {{"the_loai": "thể loại + giọng điệu (VD: hoạt hình hài chế meme về AI)",
@@ -162,14 +177,20 @@ def clean_lines(llm, segs: list[Segment], profile: str = "", skill: str = "", pr
     theo số dòng 1-based của CẢ danh sách. mode "filter": chỉ lọc lời bài hát / chữ không phải thoại."""
     from .ffmpeg import Cancelled
 
-    prompt = FILTER_PROMPT if mode == "filter" else CLEAN_PROMPT
+    prompt = {"filter": FILTER_PROMPT, "join": JOIN_PROMPT}.get(mode, CLEAN_PROMPT)
     out = {"fix": {}, "merge": [], "unsure": {}, "song": {}, "noise": {}, "mode": mode}
     n = len(segs)
     for a in range(0, n, CLEAN_CHUNK):
         if cancel and cancel():
             raise Cancelled()
         b = min(n, a + CLEAN_CHUNK)
-        lines = {str(i + 1): f"[{segs[i].start:.2f}–{segs[i].end:.2f}s] {segs[i].text}" for i in range(a, b)}
+        if mode == "join":   # kèm người nói + khoảng nghỉ tới dòng sau: AI biết dấu "。" nào đáng ngờ
+            lines = {str(i + 1): (f"[{segs[i].start:.2f}–{segs[i].end:.2f}s]"
+                                  + (f" ({segs[i].speaker})" if segs[i].speaker else "") + f" {segs[i].text}"
+                                  + (_gap_note(segs[i + 1].start - segs[i].end) if i + 1 < n else ""))
+                     for i in range(a, b)}
+        else:
+            lines = {str(i + 1): f"[{segs[i].start:.2f}–{segs[i].end:.2f}s] {segs[i].text}" for i in range(a, b)}
         after = [f"{i + 1}: {segs[i].text}" for i in range(b, min(n, b + 4))]
         parts = []
         if profile:
@@ -196,9 +217,18 @@ def clean_lines(llm, segs: list[Segment], profile: str = "", skill: str = "", pr
                 if str(k).isdigit() and a < int(k) <= b:
                     out[key][int(k)] = str(v)[:200]
         if progress:
-            progress(b / max(1, n), (f"AI đang lọc lời bài hát / chữ không phải thoại {b}/{n}" if mode == "filter"
-                                     else f"AI đang sửa lỗi nghe & nối câu {b}/{n}"))
+            progress(b / max(1, n), {"filter": f"AI đang lọc lời bài hát / chữ không phải thoại {b}/{n}",
+                                     "join": f"AI đang nối câu theo nghĩa {b}/{n}"}.get(
+                                         mode, f"AI đang sửa lỗi nghe & nối câu {b}/{n}"))
     return out
+
+
+def _gap_note(gap: float) -> str:
+    return "  → nói liền" if gap < 0.3 else f"  → nghỉ {gap:.1f}s"
+
+
+def _words_only(t: str) -> str:
+    return re.sub(r"[\W_]", "", t or "")
 
 
 def _close(old: str, new: str) -> bool:
@@ -230,8 +260,11 @@ def apply_cleanup(segs: list[Segment], res: dict) -> tuple[list[Segment], dict]:
     """Áp dụng kết quả AI (đã kiểm tra an toàn). Trả về (danh sách câu mới, thống kê {"fixed", "merged", "changed"
     (số thứ tự mới của câu đổi), "unsure" (số thứ tự mới), "songs" (số thứ tự mới của câu đánh 🎵), "removed"
     [(giờ, chữ, lý do)] câu không phải lời thoại đã bỏ})."""
+    from .align import JOIN_CHARS, JOIN_DUR, _cjk_count, soft_join
+
     n = len(segs)
     trim_only = res.get("mode") == "filter"
+    join_only = res.get("mode") == "join"   # AI nối câu: chỉ gộp (2–3 dòng, ≤ 36 chữ / 10 s), chữ giữ nguyên
     fix = {k: v for k, v in (res.get("fix") or {}).items() if 1 <= k <= n}
     noise = {k: v for k, v in (res.get("noise") or {}).items()
              if 1 <= k <= n and not segs[k - 1].extra.get("voice_ok") and segs[k - 1].text.strip()}
@@ -241,12 +274,16 @@ def apply_cleanup(segs: list[Segment], res: dict) -> tuple[list[Segment], dict]:
     used: set[int] = set()
     for g in sorted([] if trim_only else (res.get("merge") or []), key=lambda x: x[0]):
         g = [x for x in g if 1 <= x <= n]
-        if len(g) < 2 or len(g) > 4 or g != list(range(g[0], g[0] + len(g))) or used & set(g):
+        if len(g) < 2 or len(g) > (3 if join_only else 4) or g != list(range(g[0], g[0] + len(g))) or used & set(g):
             continue
         if any(x in noise or x in song for x in g):      # không gộp lời bài hát / chữ rác với lời thoại
             continue
         ss = [segs[x - 1] for x in g]
         if any(ss[k + 1].start - ss[k].end > MAX_GAP for k in range(len(ss) - 1)) or ss[-1].end - ss[0].start > MAX_MERGED:
+            continue
+        if join_only and (sum(_cjk_count(x.text) for x in ss) > JOIN_CHARS or ss[-1].end - ss[0].start > JOIN_DUR
+                          or any(x.extra.get("song") for x in ss)
+                          or len({x.speaker for x in ss if x.speaker}) > 1):
             continue
         groups.append(g)
         used |= set(g)
@@ -266,10 +303,17 @@ def apply_cleanup(segs: list[Segment], res: dict) -> tuple[list[Segment], dict]:
             parts = [segs[x - 1] for x in g]
             joined = "".join(p.text for p in parts)
             new_text = fix.get(k, joined)
-            if not _close(joined, new_text):
+            if join_only:   # chỉ được đổi dấu câu ở chỗ nối; AI không ghi / viết khác chữ -> tự bỏ "。" giả ở chỗ nối
+                if k not in fix or _words_only(new_text) != _words_only(joined):
+                    new_text = soft_join(parts)
+            elif not _close(joined, new_text):
                 new_text = joined
+            ex = {kk: v for kk, v in parts[0].extra.items() if kk != "ct"}
+            if all(len(p.extra.get("ct") or []) == _cjk_count(p.text) for p in parts) \
+                    and _cjk_count(new_text) == sum(_cjk_count(p.text) for p in parts):
+                ex["ct"] = [c for p in parts for c in p.extra["ct"]]   # mốc từng chữ nối liền (tách câu theo người nói)
             seg = Segment(parts[0].start, parts[-1].end, new_text, " ".join(p.trans.strip() for p in parts if p.trans.strip()),
-                          parts[0].speaker, dict(parts[0].extra))
+                          parts[0].speaker, ex)
             seg.extra["src_before"] = " | ".join(p.text for p in parts)
             stats["merged"] += 1
             stats["changed"].append(len(out))
@@ -280,6 +324,10 @@ def apply_cleanup(segs: list[Segment], res: dict) -> tuple[list[Segment], dict]:
             k = g[-1] + 1
             continue
         seg = Segment(s.start, s.end, s.text, s.trans, s.speaker, dict(s.extra))
+        if join_only:      # AI nối câu không sửa chữ của dòng không gộp
+            out.append(s)
+            k += 1
+            continue
         new = fix.get(k)
         if new and new != s.text and (_is_trim(s.text, new) if trim_only else _close(s.text, new)):
             seg.extra["src_before"] = s.text

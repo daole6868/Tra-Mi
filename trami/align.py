@@ -47,6 +47,16 @@ ENDABLE = {"一下", "一会", "一会儿", "一点儿", "一样", "一起", "�
 HANG_WORDS = {"很", "最", "太", "更", "都", "也", "就", "还", "才", "真", "不", "没", "别", "这个", "那个", "这些",
               "那些", "这种", "那种", "一个", "一只", "一些", "一点", "因为", "所以", "但是", "可是", "如果", "虽然"}
 HEAD_WORDS = set("的了着过得地吗呢吧嘛啦们么")
+# dấu "。" giả: bộ nghe đặt dấu kết câu lúc người nói ngừng lấy hơi / ở chỗ cắt khúc ("我刚回来就。" | "收到…")
+FALSE_STOP_GAP = 1.2    # câu kết thúc bằng phó từ / giới từ / liên từ, câu sau mở bằng trợ từ: nối nếu cách ≤ 1,2 s
+OPENER_GAP = 2.0        # vế mở bằng 既然 / 就连 / 如果… mà chưa có vế sau (người nói hay ngừng lâu hơn): ≤ 2 s
+SOFT_PAUSE = 0.3        # bỏ "。" giả: người nói ngừng ≥ 0,3 s -> thay bằng "，", nói liền -> bỏ hẳn
+TAIL_WORDS = {"就", "才", "都", "也", "又", "却", "再", "更", "很", "最", "太", "把", "被", "向", "往", "从", "与",
+              "因为", "所以", "但是", "可是", "而且", "如果", "虽然", "既然", "就是", "还是"}
+OPENERS = ("既然", "就连", "如果", "要是", "虽然", "尽管", "即使", "哪怕", "只要", "除非", "不管", "无论", "假如")
+CONSEQUENT = set("就都也那则还便才却但")      # vế sau của 既然…就 / 就连…都 / 虽然…但…: có rồi thì câu đã trọn
+MODAL_HANG = {"会", "能", "要", "想", "得", "可以", "应该", "敢", "肯", "必须", "需要", "打算", "准备"}
+TAIL_SHIFT_MAX = 8      # dòng chưa hết câu mà nối thì quá dài: chuyển mẩu sau dấu phẩy cuối (≤ 8 chữ) sang câu sau
 
 
 def split_params(settings: dict | None) -> dict:
@@ -650,6 +660,10 @@ def broken_junction(a: str, b: str, punctuated: bool = True) -> bool:
     ta, tb = a.rstrip(), b.lstrip()
     if not (CJK.match(ta[-1]) and CJK.match(tb[0])):
         return False
+    if punctuated:      # bộ nghe không đặt dấu câu + dòng dừng ở động từ năng nguyện ("勤俭持家，会" | "过日子。")
+        toks = _tokens(ta[-6:])
+        if (toks[-1] if toks else ta[-1]) in MODAL_HANG:
+            return True
     tail, head = ta[-8:], tb[:8]
     joined = tail + head
     pos = _char_positions(joined)
@@ -657,6 +671,147 @@ def broken_junction(a: str, b: str, punctuated: bool = True) -> bool:
     if k < 0 or k + 1 >= len(pos):
         return False
     return not _cut_ok(joined, pos, k, _word_info(joined))
+
+
+def _tokens(text: str) -> list[str] | None:
+    """Các từ (jieba), bỏ khoảng trắng; None nếu chưa cài jieba."""
+    try:
+        import jieba
+
+        jieba.setLogLevel(60)
+        return [w for w in jieba.cut(text) if w.strip()]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def false_stop(a: str, b: str) -> str:
+    """Dấu "。" cuối dòng a là giả (bộ nghe tưởng hết câu lúc người nói ngừng lấy hơi / ở chỗ cắt khúc) – chỉ nhận khi có
+    bằng chứng ngữ pháp chắc chắn: a dừng ở phó từ / giới từ / liên từ ("我刚回来就。"), vế cuối mở bằng 既然 / 就连 /
+    如果… mà chưa có vế sau ("就连今日的风。"), b mở bằng trợ từ (的 / 了 / 吗…). Trả lý do ("" = dấu chấm thật):
+    "opener" | "tail" | "head"."""
+    t = (a or "").rstrip(CLOSERS)
+    if not t.endswith("。") or not CJK.search(b or ""):
+        return ""
+    s = t[:-1].rstrip()
+    if _cjk_count(s) < 2 or not CJK.match(s[-1]):
+        return ""
+    clause = re.split(f"[{STRONG}{WEAK}]", s)[-1].strip()
+    for op in OPENERS:
+        if clause.startswith(op) and len(clause) > len(op) and not set(clause[len(op):]) & CONSEQUENT:
+            return "opener"
+    toks = _tokens(s)
+    if (toks[-1] if toks else s[-1]) in TAIL_WORDS:
+        return "tail"
+    tb = b.lstrip()
+    hb = _tokens(tb)
+    head = hb[0] if hb else (tb[:1] if tb[:1] in "的了吗呢吧嘛啦么" else "")
+    return "head" if head in HEAD_WORDS else ""
+
+
+def soft_join(grp: list[Segment]) -> str:
+    """Chữ của các dòng nối lại; dấu "。" giả ở chỗ nối (chỉ chỗ đó) -> "，" nếu người nói có ngừng, nói liền thì bỏ."""
+    parts = []
+    for k, s in enumerate(grp):
+        t = s.text or ""
+        if k + 1 < len(grp):
+            core = t.rstrip(CLOSERS)
+            if core.endswith("。"):
+                mark = "，" if grp[k + 1].start - s.end >= SOFT_PAUSE else ""
+                t = core[:-1] + mark + t[len(core):]
+        parts.append(t)
+    return _join_text(parts)
+
+
+def shift_tails(segs: list[Segment], q: dict, punctuated: bool) -> int:
+    """Dòng chưa hết câu (không dấu câu cuối) mà nối với dòng sau thì quá dài (> 36 chữ / 10 s): chuyển mẩu sau dấu phẩy
+    cuối sang đầu dòng sau ("…为大师兄挨的雷，为三师兄" | "让雷劈焦的辫子…" -> "…挨的雷，" | "为三师兄让雷劈焦的辫子…").
+    Sửa `segs` tại chỗ (đối tượng mới cho 2 dòng đổi chữ). Trả số chỗ đã chuyển."""
+    n = 0
+    for k in range(len(segs) - 1):
+        a, b = segs[k], segs[k + 1]
+        if not punctuated or not (CJK.search(a.text or "") and CJK.search(b.text or "")):
+            continue
+        if a.extra.get("song") or b.extra.get("song") or (a.speaker and b.speaker and a.speaker != b.speaker):
+            continue
+        if not a.text.strip() or _last_mark(a.text) in STRONG + WEAK or a.text.rstrip() != a.text.rstrip(CLOSERS):
+            continue
+        gap = b.start - a.end
+        if not ((gap <= JOIN_GAP_BROKEN and broken_junction(a.text, b.text, punctuated))
+                or (q.get("join") and gap <= JOIN_GAP)):
+            continue
+        if _cjk_count(a.text) + _cjk_count(b.text) <= JOIN_CHARS and b.end - a.start <= JOIN_DUR:
+            continue                       # nối được bình thường (join_broken lo)
+        cut = max(a.text.rfind(c) for c in STRONG + WEAK)
+        if cut < 0:
+            continue
+        head_t, tail_t = a.text[:cut + 1], a.text[cut + 1:].strip()
+        nh, nt = _cjk_count(head_t), _cjk_count(tail_t)
+        if not 1 <= nt <= TAIL_SHIFT_MAX or nh < 2 or nt + _cjk_count(b.text) > JOIN_CHARS:
+            continue
+        ct = a.extra.get("ct") or []
+        exact = len(ct) == nh + nt
+        if exact:
+            t_split, a_end = float(ct[nh][0]), float(ct[nh - 1][1]) + PAD
+        else:
+            t_split = a_end = a.start + (a.end - a.start) * nh / (nh + nt)
+        if b.end - t_split > JOIN_DUR:
+            continue
+        new_a = Segment(a.start, round(a_end, 3), head_t, "", a.speaker,
+                        {kk: v for kk, v in a.extra.items() if kk != "ct"})
+        new_b = Segment(round(max(a_end, t_split - PAD), 3), b.end, _join_text([tail_t, b.text]), "", b.speaker,
+                        {kk: v for kk, v in b.extra.items() if kk != "ct"})
+        bct = b.extra.get("ct") or []
+        if exact and len(bct) == _cjk_count(b.text):
+            new_a.extra["ct"], new_b.extra["ct"] = ct[:nh], ct[nh:] + bct
+        segs[k], segs[k + 1] = new_a, new_b
+        n += 1
+    return n
+
+
+def heard_junction(t1: str, t2: str, heard: str, near: int = 6) -> dict | None:
+    """Chỗ cắt khúc nghe lại có ngữ cảnh 2 bên: tìm chỗ nối (đuôi t1 | đầu t2) trong lời nghe lại `heard`. Trả {"end":
+    có dấu kết câu ở chỗ nối, "mark": "，" nếu có dấu phẩy, "t1"/"t2": lời đã sửa chữ nghe sai sát chỗ nối (cùng số chữ,
+    ≤ 2 chữ trong 2 chữ mỗi bên), "fixed": số chữ sửa}; None nếu không tìm thấy chỗ nối (giữ nguyên)."""
+    from difflib import SequenceMatcher
+
+    def chars(t):
+        return [(ch, i) for i, ch in enumerate(t or "") if CJK.match(ch) or ch.isalnum()]
+    c1, c2 = chars(t1)[-near:], chars(t2)[:near]
+    if not c1 or not c2:
+        return None
+    hw: list[str] = []
+    after: list[str] = []
+    for ch in heard or "":
+        if CJK.match(ch) or ch.isalnum():
+            hw.append(ch)
+            after.append("")
+        elif hw:
+            after[-1] += ch
+    pat = [c for c, _ in c1] + [c for c, _ in c2]
+    m: dict[int, int] = {}
+    same = 0
+    for tag, i1, i2, j1, j2 in SequenceMatcher(None, pat, hw, autojunk=False).get_opcodes():
+        if tag == "equal" or (tag == "replace" and i2 - i1 == j2 - j1):
+            for d in range(i2 - i1):
+                m[i1 + d] = j1 + d
+            same += (i2 - i1) if tag == "equal" else 0
+    k = len(c1) - 1
+    if same < 0.6 * len(pat) or k not in m or k + 1 not in m or m[k + 1] != m[k] + 1:
+        return None
+    p = after[m[k]]
+    out = {"end": any(ch in STRONG for ch in p), "mark": "，" if any(ch in WEAK for ch in p) else "",
+           "t1": t1, "t2": t2, "fixed": 0}
+    fixes = [(i, hw[m[i]]) for i in range(len(pat)) if i in m and pat[i] != hw[m[i]] and k - 1 <= i <= k + 2
+             and CJK.match(pat[i]) and CJK.match(hw[m[i]])]
+    if 0 < len(fixes) <= 2:
+        l1, l2 = list(t1), list(t2)
+        for i, ch in fixes:
+            if i < len(c1):
+                l1[c1[i][1]] = ch
+            else:
+                l2[c2[i - len(c1)][1]] = ch
+        out.update(t1="".join(l1), t2="".join(l2), fixed=len(fixes))
+    return out
 
 
 def _should_join(grp: list[Segment], nxt: Segment, q: dict, punctuated: bool) -> bool:
@@ -668,11 +823,12 @@ def _should_join(grp: list[Segment], nxt: Segment, q: dict, punctuated: bool) ->
     if last.speaker and nxt.speaker and last.speaker != nxt.speaker:
         return False
     text = _join_text([s.text for s in grp])
-    if _last_mark(text) in STRONG:
-        return False
     if sum(_cjk_count(s.text) for s in grp) + _cjk_count(nxt.text) > JOIN_CHARS or nxt.end - grp[0].start > JOIN_DUR:
         return False
     gap = nxt.start - last.end
+    if _last_mark(text) in STRONG:   # dấu kết câu: chỉ nối khi là dấu "。" giả (bằng chứng ngữ pháp chắc chắn)
+        why = false_stop(text, nxt.text) if punctuated else ""
+        return bool(why) and gap <= (OPENER_GAP if why == "opener" else FALSE_STOP_GAP)
     if gap <= JOIN_GAP_BROKEN and broken_junction(text, nxt.text, punctuated):
         return True
     if not (q.get("join") and punctuated):
@@ -708,6 +864,9 @@ def join_broken(segs: list[Segment], params: dict | None = None, max_chars: int 
       * luôn nối khi có bằng chứng chắc chắn (`broken_junction`), cách ≤ 3 s;
       * kiểu "câu trọn ý" (params["join"]): thêm dòng chưa có dấu câu cuối (cách ≤ 2 s) và dòng mở đầu ngắn kết thúc
         bằng dấu phẩy (≤ 4 chữ, cách ≤ 1 s);
+      * dấu "。" giả (`false_stop`): dòng dừng ở 就 / 都 / 因为…, vế 既然 / 就连… chưa có vế sau, dòng sau mở bằng trợ từ
+        -> nối, "。" ở chỗ nối thành "，" (có ngừng) hoặc bỏ (nói liền); dòng không dấu câu dừng ở 会 / 能 / 要… -> nối;
+      * nối thì quá dài: chuyển mẩu sau dấu phẩy cuối sang dòng sau (`shift_tails`);
       * cùng người nói, không phải đoạn hát, câu nối ≤ 36 chữ / 10 s. Phụ đề không có dấu câu (OCR) chỉ nối khi cắt giữa
         từ / từ treo / trợ từ đầu câu.
     Câu giữ nguyên chữ là đúng câu cũ (giữ bản dịch, giọng lồng). Trả về (danh sách mới, số câu mới tạo ra)."""
@@ -716,8 +875,9 @@ def join_broken(segs: list[Segment], params: dict | None = None, max_chars: int 
     cjk = [s for s in segs if CJK.search(s.text or "")]
     punctuated = sum(1 for s in cjk if _last_mark(s.text) in STRONG + WEAK) >= 0.3 * max(1, len(cjk))
     resplit = dict(q, pause_comma=99.0, pause_hard=99.0)   # tách lại chỉ ở dấu kết câu / câu quá dài
+    shifted = shift_tails(segs, q, punctuated)
     out: list[Segment] = []
-    made, i = 0, 0
+    made, i = shifted, 0
     while i < len(segs):
         grp = [segs[i]]
         while i + len(grp) < len(segs) and _should_join(grp, segs[i + len(grp)], q, punctuated):
@@ -731,7 +891,7 @@ def join_broken(segs: list[Segment], params: dict | None = None, max_chars: int 
         for s in grp:
             times += [(float(a), float(b)) for a, b in s.extra["ct"]] if exact else _even_times(s)
         trans = " ".join(s.trans.strip() for s in grp if s.trans.strip())
-        joined = Segment(grp[0].start, max(s.end for s in grp), _join_text([s.text for s in grp]), trans,
+        joined = Segment(grp[0].start, max(s.end for s in grp), soft_join(grp), trans,
                          grp[0].speaker, {k: v for k, v in grp[0].extra.items() if k != "ct"})
         old = {s.text.strip(): s for s in grp}
         for piece in split_timed(joined, times, exact, max_chars, total, resplit):
