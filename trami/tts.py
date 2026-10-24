@@ -5,6 +5,7 @@ Giọng cho từng người nói (S1, S2…) được ghi dạng chuỗi:
   - "vieneu:Ngọc Huyền"        : 25 giọng Việt dựng sẵn của VieNeu-TTS (chạy offline, GPU nhanh)
   - "vieneu:mau:<tên>"         : VieNeu nhái 6 giọng thu âm sạch có sẵn trong gói VieNeu (assets/samples)
   - "vieneu:lib:<id>"          : VieNeu nhái giọng từ thư viện giọng mẫu của bạn (trami/voices.py)
+  - "vieneu:trend:<mã>"        : 20 giọng VieNeu theo trend = giọng dựng sẵn + kiểu đọc + hiệu ứng (trami/trend_voices.py)
   - "clone"                    : NHÁI GIỌNG nhân vật gốc bằng VieNeu-TTS (lấy mẫu 5–12 giây từ chính video)
   - "omni:<id>"                : OmniVoice nhái giọng từ FILE GHI ÂM MẪU trong thư viện giọng mẫu (trami/voices.py)
   - "omniclone"                : OmniVoice nhái giọng nhân vật gốc (mẫu 3–10 giây cắt từ video + lời gốc)
@@ -44,6 +45,7 @@ CLONE = "clone"
 OMNI_CLONE = "omniclone"
 VN_SAMPLE = "vieneu:mau:"   # giọng thu âm sạch đi kèm gói VieNeu
 VN_LIB = "vieneu:lib:"      # giọng mẫu trong thư viện của người dùng
+VN_TREND = "vieneu:trend:"  # giọng theo trend: giọng dựng sẵn + hiệu ứng (trami/trend_voices.py)
 # kiểu đọc VieNeu: "clear" bớt ngẫu nhiên khi lấy mẫu -> phát âm rõ, ổn định hơn; "natural" = mặc định của VieNeu
 VIENEU_STYLES = {"clear": {"temperature": 0.6, "top_k": 20, "top_p": 0.9}, "natural": {}}
 SR = 24000
@@ -167,6 +169,9 @@ def list_voices(settings: dict | None = None, lang: str = "vi") -> list[dict]:
     if vieneu_available() and lang == "vi":
         voices.insert(0, {"id": CLONE, "name": "🎭 Nhái giọng nhân vật gốc (VieNeu)", "gender": ""})
         voices += vieneu_presets(mode)
+        from . import trend_voices
+
+        voices += [{k: v[k] for k in ("id", "name", "gender", "tip")} for v in trend_voices.voices()]
         if mode != "v3nano":
             voices += [{k: v[k] for k in ("id", "name", "gender")} for v in vieneu_sample_voices()]
         from . import voices as vlib
@@ -740,6 +745,34 @@ def synth_checked(worker: VieneuWorker, text: str, out: Path, **kw) -> Path:
     raise RuntimeError(f"giọng đọc hỏng ({why}) cả 2 lần đọc – sửa lời câu này rồi bấm Tạo lại giọng")
 
 
+def trend_synth(worker: VieneuWorker, spec: str, text: str, out: Path, params: dict,
+                presets: list[dict] | None = None) -> Path:
+    """Giọng VieNeu theo trend: đọc bằng giọng gốc + kiểu đọc của nó (đã qua kiểm tra giọng hỏng) rồi áp hiệu ứng.
+    Ghi 24 kHz (bản lồng tiếng trộn ở 24 kHz; hiệu ứng chạy nhanh gấp đôi so với 48 kHz của VieNeu)."""
+    from . import trend_voices
+    from .voicefx import resample_len
+
+    if not trend_voices.get(spec):
+        raise ValueError("Giọng trend này không còn trong bản TraMi đang dùng")
+    synth_checked(worker, text, out, voice=trend_voices.base_voice(spec, presets) or None,
+                  params=trend_voices.params(spec, params))
+    try:
+        a, sr = read_wav(out)
+    except (OSError, EOFError, wave.Error):
+        return Path(out)
+    if sr != SR:
+        a, sr = resample_len(a, int(round(len(a) * SR / sr))), SR
+    return write_wav(out, trend_voices.process(spec, a, sr), sr)
+
+
+def read_wav_rate(path: str | Path) -> int | None:
+    try:
+        with wave.open(str(path), "rb") as w:
+            return w.getframerate()
+    except (OSError, EOFError, wave.Error):
+        return None
+
+
 def _speed_tag(rate: str) -> float:
     try:
         return 1.0 + float(rate.strip().rstrip("%")) / 100.0
@@ -1016,7 +1049,10 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         from . import voices as vlib
 
         samples = {v["id"]: v for v in vlib.list_samples()}
-    vn_gender = {v["id"]: v.get("gender", "") for v in (vieneu_presets(mode) + vieneu_sample_voices())} \
+    from . import trend_voices
+
+    vn_presets = vieneu_presets(mode) if vieneu_available() else []
+    vn_gender = {v["id"]: v.get("gender", "") for v in (vn_presets + vieneu_sample_voices() + trend_voices.voices())} \
         if vieneu_available() else {}
     for i, s in enumerate(segs):
         lg = langs.detect(s.trans or "", lang)
@@ -1040,7 +1076,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         spec = s.extra.get("voice") or voices.get(s.speaker or "S1") or voice   # giọng riêng của câu (nếu có)
         want = spec
         if spec in (CLONE,) or spec.startswith("vieneu:"):
-            if not vieneu_available() or (spec.startswith((VN_SAMPLE, VN_LIB)) and not vieneu_ref(spec)):
+            if not vieneu_available() or (spec.startswith((VN_SAMPLE, VN_LIB)) and not vieneu_ref(spec)) or \
+                    (spec.startswith(VN_TREND) and not trend_voices.get(spec)):
                 spec = "edge:vi-VN-HoaiMyNeural"   # chưa cài VieNeu / giọng mẫu đã bị xoá
         if spec == OMNI_CLONE or spec.startswith(("omni:", "omnid:")):
             if not omnivoice_available() or (spec.startswith("omni:") and spec[5:] not in samples) or \
@@ -1078,6 +1115,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             if spec.startswith(VN_LIB):     # đổi file mẫu cùng mã -> đọc lại
                 ref = vieneu_ref(spec)
                 extra += f"|{Path(ref).stat().st_mtime if ref else ''}"
+            if spec.startswith(VN_TREND):   # đổi giọng gốc / hiệu ứng của giọng trend -> đọc lại
+                extra += "|" + trend_voices.key(spec) + "|" + trend_voices.base_voice(spec, vn_presets)
         groups[i] = spec
         take = int(s.extra.get("take", 0) or 0)   # "Tạo lại giọng": lần đọc mới của cùng câu
         h = hashlib.md5((f"{t}|{spec}|{rate}|{pitch}|{mode}|{extra}" + (f"|take{take}" if take else "")).encode()
@@ -1126,9 +1165,11 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                     synth_checked(tts, text, tmp, ref_audio=str(refs[spk]) if refs[spk] else None, params=vn_params)
                 elif spec.startswith((VN_SAMPLE, VN_LIB)):
                     synth_checked(tts, text, tmp, ref_audio=vieneu_ref(spec), params=vn_params)
+                elif spec.startswith(VN_TREND):
+                    trend_synth(tts, spec, text, tmp, vn_params, vn_presets)
                 else:
                     synth_checked(tts, text, tmp, voice=spec[7:] or None, params=vn_params)
-                sr = tts.sr
+                sr = read_wav_rate(tmp) or tts.sr
                 if abs(speed - 1) > 0.01:
                     a = _decode(tmp, speed, sr)
                     write_wav(p, a, sr)
@@ -1417,4 +1458,7 @@ def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,
         if not ref:
             raise ValueError("Giọng mẫu này không còn (đã xoá hoặc bản VieNeu không có)")
         return synth_checked(tts, text, out.with_suffix(".wav"), ref_audio=ref, params=prm)
+    if spec.startswith(VN_TREND):
+        return trend_synth(tts, spec, text, out.with_suffix(".wav"), prm,
+                           vieneu_presets(settings.get("vieneu_mode", "v3turbo")))
     return synth_checked(tts, text, out.with_suffix(".wav"), voice=spec[7:] or None, params=prm)

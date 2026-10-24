@@ -33,6 +33,14 @@ def safe_stem(p: Project) -> str:
     return (p.source.stem if p.data.get("source") else p.data.get("name", "video"))[:60]
 
 
+def _add_voices(cb: QComboBox, voices: list[dict]) -> None:
+    """Thêm giọng vào ô chọn; giọng có "tip" (giọng trend: hợp với loại video nào) hiện khi rê chuột."""
+    for v in voices:
+        cb.addItem(v["name"], v["id"])
+        if v.get("tip"):
+            cb.setItemData(cb.count() - 1, v["tip"], Qt.ItemDataRole.ToolTipRole)
+
+
 def scroll(w: QWidget) -> QScrollArea:
     sa = QScrollArea()
     sa.setWidgetResizable(True)
@@ -3061,8 +3069,7 @@ class ProjectPage(QWidget):
         cur = self.d_line_voice.currentData()
         self.d_line_voice.clear()
         self.d_line_voice.addItem("(Theo người nói)", "")
-        for v in voices:
-            self.d_line_voice.addItem(v["name"], v["id"])
+        _add_voices(self.d_line_voice, voices)
         set_combo(self.d_line_voice, cur or "")
         self._fill_auto_voices(voices)
         self.inspector.refresh_voices()
@@ -3090,8 +3097,7 @@ class ProjectPage(QWidget):
             self.spk_table.setItem(r, 1, n)
             cb = QComboBox()
             cb.addItem("(Mặc định của bộ đọc)", "")
-            for v in voices:
-                cb.addItem(v["name"], v["id"])
+            _add_voices(cb, voices)
             set_combo(cb, s["voice"])
             cb.currentIndexChanged.connect(lambda _i, spk=s["speaker"], c=cb: self._set_voice(spk, c.currentData()))
             self.spk_table.setCellWidget(r, 2, cb)
@@ -3107,8 +3113,7 @@ class ProjectPage(QWidget):
         self.a_voice.clear()
         self.a_voice.addItem("(Theo giọng từng người nói – mục 2)", "")
         self.a_voice.addItem("🎲 Tự gán giọng nam / nữ theo từng người nói", "@auto")
-        for v in voices:
-            self.a_voice.addItem(v["name"], v["id"])
+        _add_voices(self.a_voice, voices)
         set_combo(self.a_voice, cur)
         self.loading = was
 

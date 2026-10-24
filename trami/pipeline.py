@@ -1820,6 +1820,8 @@ def _voice_summary(voices: dict, default_voice: str) -> str:
     def name(spec: str) -> str:
         if spec == "clone":
             return "Nhái giọng"
+        if spec.startswith("vieneu:trend:") or spec.startswith("vieneu:mau:"):
+            return voice_label(spec)
         if spec.startswith("vieneu:"):
             return (spec[7:] or "VieNeu") + " (VieNeu)"
         if spec.startswith("edge:"):
@@ -2060,6 +2062,10 @@ def voice_label(spec: str) -> str:
         return "Nhái giọng gốc (OmniVoice)"
     if spec.startswith(tts.VN_SAMPLE):
         return spec[len(tts.VN_SAMPLE):].split(" (")[0] + " (VieNeu)"
+    if spec.startswith(tts.VN_TREND):
+        from . import trend_voices
+
+        return ((trend_voices.get(spec) or {}).get("name") or spec[len(tts.VN_TREND):]) + " (VieNeu)"
     if spec.startswith("vieneu:"):
         return (spec[7:] or "mặc định") + " (VieNeu)"
     if spec.startswith("edge:"):

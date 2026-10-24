@@ -3648,3 +3648,82 @@ def test_gpu_memory_released_between_jobs(monkeypatch):
     monkeypatch.setattr(pipeline, "inpainted_video", lambda p, hs=None, settings=None: "x.mp4")
     assert not jobs.needs_gpu("render", p.id)       # đã xoá sẵn -> chỉ ghép video, chạy song song được
     assert jobs.needs_gpu("recognize") and not jobs.needs_gpu("download")
+
+
+def test_trend_voices_vieneu(monkeypatch, tmp_path):
+    """20 giọng VieNeu theo trend: hiệu ứng giữ thời lượng / đổi đúng cao độ, đọc bằng giọng gốc + kiểu đọc riêng,
+    file 24 kHz, đổi mô tả giọng thì đọc lại, câu tiếng khác đọc bằng Edge cùng nam / nữ."""
+    from trami import gender, pipeline, trend_voices as tv, tts, voicefx as fx
+
+    sr = 24000
+    a = _speech_like(sr, 2.0)
+
+    def f0(x):
+        b = fx.resample_len(x, int(len(x) * 16000 / sr))
+        p = gender.pitch_track(b, 16000)
+        return float(np.median(p[p > 0]))
+    for p, fm in ((3, 1.5), (-2, -1.5), (5, None)):
+        y = fx.shift(a, sr, p, fm)
+        assert len(y) == len(a) and abs(f0(y) / f0(a) - 2 ** (p / 12)) < 0.04
+    assert abs(len(fx.stretch(a, 1.15, sr)) - len(a) / 1.15) < 2 and abs(f0(fx.stretch(a, 0.9, sr)) / f0(a) - 1) < 0.02
+    lv = tts.speech_level(a, sr)
+    for p in tv.PRESETS:   # mọi giọng: không vỡ tiếng, cùng độ to, đuôi vang ≤ 0,4 s
+        y = tv.process(tv.PREFIX + p["id"], a, sr)
+        assert np.isfinite(y).all() and np.abs(y).max() <= 0.891
+        body = len(a) / p["fx"].get("tempo", 1.0)
+        assert body - 2 <= len(y) <= body + fx.TAIL_MAX * sr + 2
+        assert abs(tts.speech_level(y, sr) / lv - 1) < 0.15 or np.abs(y).max() > 0.88
+    assert len(tv.PRESETS) == 20 and len({p["id"] for p in tv.PRESETS}) == 20
+    assert tv.base_voice("vieneu:trend:robot", [{"id": "vieneu:X", "gender": "female"},
+                                                {"id": "vieneu:Y", "gender": "male"}]) == "Y"   # bản Nano: cùng nam
+    assert pipeline.voice_label("vieneu:trend:robot") == "Robot AI (VieNeu)"
+
+    calls = []
+
+    class FakeVieneu:
+        sr = 48000
+
+        def ensure_started(self, progress=None, cancel=None):
+            pass
+
+        def synth(self, text, out, voice=None, ref_audio=None, params=None, **kw):
+            calls.append((text, voice, dict(params or {})))
+            return tts.write_wav(out, _speech_like(48000, 1.2), 48000)
+    got = {}
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, p, voice in items:
+            got[i] = voice
+            _fake_audio(p, 0.6)
+        return []
+    presets = [{"id": "vieneu:Quốc Tuấn", "name": "Quốc Tuấn", "gender": "male"},
+               {"id": "vieneu:Hải Đăng", "name": "Hải Đăng", "gender": "male"},
+               {"id": "vieneu:Trúc Ly", "name": "Trúc Ly", "gender": "female"}]
+    monkeypatch.setattr(tts, "vieneu_available", lambda: True)
+    monkeypatch.setattr(tts, "vieneu_presets", lambda mode="v3turbo": presets)
+    monkeypatch.setattr(tts, "vieneu_sample_voices", lambda: [])
+    monkeypatch.setattr(tts, "_vieneu", lambda mode: FakeVieneu())
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    assert any(v["id"] == "vieneu:trend:de_thuong" and v.get("tip") for v in tts.list_voices({}, "vi"))
+    segs = [Segment(0, 1.5, "a", "Xin chào cả nhà", "S1"), Segment(2, 3.5, "b", "Hôm nay vui quá", "S2"),
+            Segment(4, 5, "c", "สวัสดีครับ", "S1"), Segment(5.5, 7, "d", "Mua ngay nhé", "S3")]
+    voices = {"S1": "vieneu:trend:robot", "S2": "vieneu:trend:de_thuong", "S3": "vieneu:trend:mc_soi_dong"}
+    stats = {}
+    tts.synthesize_dub(segs, tmp_path / "dub.wav", 8.0, tmp_path / "t", voices=voices, stats=stats)
+    by_text = {c[0]: c for c in calls}
+    assert by_text["Xin chào cả nhà"][1] == "Quốc Tuấn" and by_text["Hôm nay vui quá"][1] == "Trúc Ly"
+    assert by_text["Mua ngay nhé"][2]["temperature"] == 0.85          # MC: kiểu đọc biểu cảm riêng
+    assert by_text["Xin chào cả nhà"][2] == tts.vieneu_params({})     # còn lại theo Cài đặt
+    assert got[2] == "th-TH-NiwatNeural" and "สวัสดีครับ" not in by_text   # robot (nam) -> Edge nam tiếng Thái
+    for s in (segs[0], segs[1], segs[3]):
+        assert tts.read_wav_rate(s.extra["tts_file"]) == 24000
+    assert stats["placed"] == 4 and stats["voices_used"]["S2"] == {"vieneu:trend:de_thuong": 1}
+    n = len(calls)
+    tts.synthesize_dub(segs, tmp_path / "dub2.wav", 8.0, tmp_path / "t", voices=voices)
+    assert len(calls) == n                                             # đã đọc rồi: dùng lại file
+    p = tv.get("de_thuong")
+    monkeypatch.setitem(p, "fx", dict(p["fx"], pitch=4.0))
+    tts.synthesize_dub(segs, tmp_path / "dub3.wav", 8.0, tmp_path / "t", voices=voices)
+    assert [c[0] for c in calls[n:]] == ["Hôm nay vui quá"]            # đổi hiệu ứng: chỉ đọc lại giọng đó
+    out = tts.preview_voice("vieneu:trend:soc_chuot", "Xin chào", tmp_path / "pv", {})
+    assert out.exists() and tts.read_wav_rate(out) == 24000

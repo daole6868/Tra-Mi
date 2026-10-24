@@ -31,7 +31,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `translate.py` (`LLMClient` gọi HTTP: anthropic / OpenAI-compatible / gemini / deepseek / ollama; Google gtx;
   Hy-MT2 trên máy qua `hymt_worker.py`), `voicefix.py` (đọc số, phát hiện giọng AI hỏng, cân âm lượng),
   `gender.py` (đoán giọng nam/nữ mỗi người nói), `karaoke.py` (thời điểm từng từ cho phụ đề karaoke),
-  `omni_design.py` (23 giọng OmniVoice chọn sẵn tạo theo mô tả).
+  `omni_design.py` (23 giọng OmniVoice chọn sẵn tạo theo mô tả), `trend_voices.py` (20 giọng VieNeu theo trend
+  `vieneu:trend:<mã>` = giọng dựng sẵn + kiểu đọc + hiệu ứng) + `voicefx.py` (hiệu ứng giọng chỉ bằng numpy).
 - `trami/audiomix.py` – quy tắc trộn âm thanh dùng chung cho xuất video (`video.build_and_render`) và bộ trộn trực tiếp
   `LiveMix` của trình phát (`player.LiveAudio` + `_Feeder` ở QThread riêng, QAudioSink); cài đặt ở `edit["audio"]`, tab `gui/audio_tab.py`.
 - `trami/jobs.py` – hàng đợi NHIỀU luồng (từ 2.0.64, tối đa `MAX_RUNNING` 4): cùng dự án lần lượt (trừ `READONLY_KINDS`),
@@ -70,7 +71,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `call` (gọi ở luồng phụ, Huỷ dừng ngay), `session` (requests có TCP keepalive). `jobs` chạy mọi tác vụ trong
   `net.task(cancel, report)` -> hàm gọi mạng tự lấy nút Huỷ + dòng trạng thái.
 - `trami/songs.py` – đoán cụm câu đang HÁT (nốt ngân trên giọng đã tách) -> 🎵; `pipeline.mark_song_lines` (♪ trong bản dịch).
-- `tests/test_core.py` – `python -m pytest -q tests` (118 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (119 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -962,6 +963,32 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     nhanh hơn 2.0.63 – không có chỗ chậm đi.
   * Chưa làm: tách giọng ở tiến trình riêng (bỏ hẳn ~0,3–0,5 GB CUDA context còn lại trong giao diện sau khi tách).
 
+- 2.0.69: "thêm 20 loại giọng khác cho VieNeu, nhiều mẫu theo trend" (kèm 1 file mẫu 3,7 s: thực chất MP3 24 kHz, nữ trẻ
+  cao ~271 Hz, "Bức này còn thua xa tôi vẽ nữa…" – giọng đọc kiểu app TTS; KHÔNG đóng gói vào tool, hướng dẫn người dùng
+  tự thêm ở "Giọng mẫu của bạn" -> `vieneu:lib:<id>` – đã thử `voices.add_sample` nhận được file này, còn 3,4 s).
+  * Đọc mã vieneu 3.8.3 (`_v3_turbo_engine`): giọng = speaker_emb 192 chiều + ref codes; token kiểu đọc (tin tức / kể
+    chuyện) ĐÃ BỎ (`_resolve_style_id` luôn "tự nhiên", kiểu đọc nằm trong giọng mẫu); `[cười]` / `[thở dài]` /
+    `[hắng giọng]` chỉ là tiếng phi ngôn ngữ -> không tạo được giọng mới bằng tham số của VieNeu.
+  * `trami/voicefx.py` (numpy, không scipy / rubberband – FFmpeg của imageio không có rubberband): `stretch` (WSOLA
+    30 ms), `resample_len` (FFT), `shift(pitch, formant)` = WSOLA + lấy mẫu lại (cao độ + âm sắc cùng đổi) rồi
+    `warp_formants` (dời đường bao cepstrum từng khung, giữ pha) -> cao độ và âm sắc tách riêng, giữ thời lượng;
+    `robot` (pha 0, khung 16 ms), `whisper` (đường bao + pha ngẫu nhiên), `vibrato`, `tremolo`, `chorus`, `eq` (nhân phổ
+    cả câu: low / high / presence / band), `compress`, `drive`, `echo`, `reverb` (tiếng vang tổng hợp, nhớ `_room`),
+    `noise`; `apply(x, sr, fx)` -> cùng độ to giọng nói với bản gốc, đỉnh ≤ −1 dBFS, đuôi vang ≤ `TAIL_MAX` 0,4 s.
+  * `trami/trend_voices.py`: 20 giọng (review phim nam / nữ, cô gái dễ thương, kể chuyện ma, ngôn tình, MC sôi động,
+    vlog nhanh, điểm tin, thì thầm ASMR, miền Trung, miền Tây, bé gái, ông lão, bà kể cổ tích, thần linh vọng, quái vật,
+    sóc chuột, robot, loa phường, gọi điện thoại): `base` (giọng dựng sẵn v3 Turbo; bản Nano -> giọng đầu tiên cùng nam /
+    nữ), `params` (MC / ngôn tình / miền Tây biểu cảm 0,85; điểm tin đều 0,5; còn lại theo Cài đặt), `fx`, `use` (tooltip
+    "Hợp với: …"). `tts.trend_synth`: đọc giọng gốc qua `synth_checked` (kiểm tra giọng hỏng TRƯỚC hiệu ứng – robot
+    sẽ bị coi là bíp) -> 24 kHz -> hiệu ứng. Hash file giọng có `trend_voices.key` + giọng gốc -> sửa mô tả 1 giọng chỉ
+    đọc lại câu của giọng đó. Câu tiếng khác -> Edge cùng nam / nữ (giới tính giọng trend trong `vn_gender`).
+    `list_voices` thêm sau 25 giọng dựng sẵn (🔥, không vào Tự gán giọng); `project_page._add_voices` gắn tooltip;
+    `pipeline.voice_label` / `_voice_summary` ghi tên giọng trend.
+  * Đo trên 6 file thu âm sạch của gói VieNeu bằng máy nghe tiếng Việt (sherpa-onnx zipformer-vi, tải từ GitHub):
+    giọng gốc sai 6,5 % số từ, 20 giọng trend 5–10 % (robot khung 43 ms 27 % -> 16 ms 10 %; loa phường / thần linh
+    giảm méo + vọng 22 % / 15 % -> 10 %); cao độ đúng ±2 %, độ dài đúng, không tiếng lách tách (trừ robot / loa vốn
+    có); 24 kHz ~0,02–0,15 s / câu 4 s. Chưa nghe bằng VieNeu thật (sandbox không tải được mô hình HF).
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -1002,6 +1029,9 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.62: chờ người dùng thử Gemini gói miễn phí thật (sandbox không gọi được Google API): thông báo 429 của Gemini
   qua endpoint tương thích OpenAI có đúng chữ "PerDay" / "retry in" như đã đoán không; `response_format` json_object có bị
   từ chối không (đã có tự bỏ khi 400).
+- 2.0.69: chờ người dùng nghe thử 20 giọng trend với VieNeu thật (tab Lồng tiếng mục 2 → nút ▶ cạnh ô giọng) – giọng
+  nào chưa hay thì chỉnh `fx` trong `trend_voices.PRESETS`. Có thể làm tiếp: cho áp hiệu ứng trend lên giọng bất kỳ
+  (giọng mẫu của bạn, Edge, OmniVoice).
 - 2.0.68: chờ người dùng đo lại GPU (Task Manager → GPU → Bộ nhớ GPU chuyên dụng) và thời gian "1. Nghe & tách câu" trên
   máy thật – nếu vẫn tràn bộ nhớ card: đổi Qwen3 1.7B -> 0.6B ở Cài đặt, hoặc tách giọng 1 mô hình thay vì "Kết hợp".
 - 2.0.65: chờ người dùng cho biết bộ đọc / giọng đang chọn khi bị "chỉ 1 giọng" (dòng "giọng – S1: …" sau khi lồng sẽ
