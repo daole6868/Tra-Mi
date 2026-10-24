@@ -844,6 +844,10 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   thán đã xoá") và "Xoá câu đã tích" (`_delete_picked`, hỏi lại, xoá phụ đề + giọng lồng). Lưu dự án ngay sau khi xoá.
   "Tạo lại giọng các câu đã tích" KHÔNG tự lọc câu cảm thán (chỉ "Tạo bản lồng tiếng" đầy đủ hoặc nút Lọc).
 
+- 2.0.61: "mọi nút phẳng (Nghe giọng, Tải MP3…, Tích câu…) ở tất cả các tab cho vào khung bo": `theme.stylesheet`
+  `QPushButton[flat="true"]` có viền `BORDER` 1 px + bo 9 px + padding 5/11 (nền trong suốt, rê chuột nền CARD2) – áp cho
+  mọi `widgets.button(flat=True)` và nút "Nghe riêng" tab Âm thanh. Đã chụp 9 tab + timeline.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.

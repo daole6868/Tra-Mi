@@ -89,8 +89,9 @@ QPushButton:hover {{ background: {CARD3}; border-color: #3A4458; }}
 QPushButton:pressed {{ background: #2C3547; }}
 QPushButton:disabled {{ color: {MUTED}; }}
 QPushButton[danger="true"] {{ color: {ERR}; }}
-QPushButton[flat="true"] {{ background: transparent; border: none; padding: 4px 8px; }}
-QPushButton[flat="true"]:hover {{ background: {CARD2}; }}
+QPushButton[flat="true"] {{ background: transparent; border: 1px solid {BORDER}; border-radius: 9px; padding: 5px 11px; }}
+QPushButton[flat="true"]:hover {{ background: {CARD2}; border-color: #3A4458; }}
+QPushButton[flat="true"]:pressed {{ background: #2C3547; }}
 
 QCheckBox {{ spacing: 8px; background: transparent; }}
 QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 5px; border: 1px solid {BORDER}; background: #0F141D; }}
