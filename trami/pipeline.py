@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from . import ffmpeg as ff
+from . import ffmpeg as ff, net
 from .config import err_text, load_settings, log_error
 from .project import Project, safe_name
 from .subtitle import normalize, save_subtitles
@@ -177,15 +177,25 @@ def download_video(url: str, dest_dir: Path, progress: Prog | None = None, cance
         "ffmpeg_location": ff.ffmpeg_bin(),
         "restrictfilenames": False,
         "windowsfilenames": True,
-        "retries": 5,
-        "fragment_retries": 5,
+        "retries": 10,
+        "fragment_retries": 10,
+        "socket_timeout": 20,   # mạng lag / rớt: 20 s không có dữ liệu thì thử lại (mặc định chờ rất lâu)
         "http_headers": {"User-Agent": sitelogin.UA},
     }
 
-    def run(extra: dict):
+    def run_once(extra: dict):
         with yt_dlp.YoutubeDL({**opts, **extra}) as ydl:
             info = ydl.extract_info(url, download=True)
             return info, Path(ydl.prepare_filename(info))
+
+    def run(extra: dict):
+        # chạy ở luồng phụ -> bấm Huỷ dừng ngay cả khi mạng đang đứng; mất mạng -> chờ có mạng rồi tải tiếp (nối file .part)
+        while True:
+            try:
+                return net.call(run_once, extra, cancel=cancel)
+            except yt_dlp.utils.DownloadError as e:
+                if not (net.is_net_error(e) and net.wait_online("tải video", cancel=cancel)):
+                    raise
 
     try:
         try:
@@ -801,6 +811,15 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
             from .asr_funasr import mark_songs
 
             mark_songs(segs)
+        # 2d) đoạn HÁT (nhạc phim, nhân vật hát): cao độ giữ nốt ngân trên giọng đã tách -> 🎵, không lồng tiếng
+        p.data["songs_found"] = 0
+        if segs and audio_in != Path(src) and settings.get("song_detect", True):
+            try:
+                from .songs import mark_sung
+
+                p.data["songs_found"] = mark_sung(segs, wav)
+            except Exception:  # noqa: BLE001 – bước phụ
+                log_error("Đoán đoạn hát")
     segs = normalize(segs)
     one_spk = want_spk and int(settings.get("diarize_speakers", 0) or 0) == 1
     if one_spk:   # đặt "1 người nói": gán hết S1, không đo giọng / không tách câu theo chỗ đổi giọng
@@ -817,6 +836,7 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
     if method == "ocr":
         p.data.pop("asr_warning", None)
         p.data.pop("asr_joined", None)
+        p.data.pop("songs_found", None)
     p.save()
     # 3) phân biệt người nói
     if want_dz:
@@ -1100,7 +1120,7 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
             if st["changed"]:
                 p.data["skill_note"] = (f"AI sửa lỗi nghe {st['fixed']} câu, nối {st['merged']} câu bị cắt"
                                         + (f" ({len(st['unsure'])} chỗ chưa chắc – xem cột gốc)" if st["unsure"] else ""))
-        except ff.Cancelled:
+        except (ff.Cancelled, net.NetworkDown):
             raise
         except Exception as e:  # noqa: BLE001 – không chặn việc dịch
             log_error("AI sửa lỗi nghe & nối câu")
@@ -1112,7 +1132,7 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
             progress(a0, "AI đang đọc kịch bản, lập hồ sơ phim (nhân vật, xưng hô, tên riêng)…")
         try:
             profile = film_profile(p, settings, eng)
-        except ff.Cancelled:
+        except (ff.Cancelled, net.NetworkDown):
             raise
         except Exception:  # noqa: BLE001 – không lập được thì dịch như cũ (AI tự đọc kịch bản)
             log_error("Lập hồ sơ phim")
@@ -1132,6 +1152,11 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
 
     tr.translate_segments(segs, prog, cancel, only_empty=only_empty, summary=profile, auto_terms=not profile,
                           rows=set(rows) if rows is not None else None)
+    # AI nhận ra lời bài hát (bản dịch có ♪) -> đánh dấu 🎵: không lồng tiếng, giữ giọng hát gốc
+    n_song = mark_song_lines(segs, rows)
+    if n_song:
+        p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + \
+            f"{n_song} câu là lời bài hát (♪) – đã đánh dấu 🎵, không lồng tiếng"
     # ghi lại thuật ngữ AI tìm được để người dùng xem/sửa
     user_g = parse_glossary(settings.get("glossary", "")) if target == "vi" else {}
     proj_g = parse_glossary(p.data.get(gkey, ""))
@@ -1159,7 +1184,7 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
                 p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + \
                     f"AI kiểm tra và sửa {len(fixed)} câu dịch"
                 p.save()
-        except ff.Cancelled:
+        except (ff.Cancelled, net.NetworkDown):
             raise
         except Exception as e:  # noqa: BLE001
             log_error("AI kiểm tra bản dịch")
@@ -1209,6 +1234,9 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     else:
         default_voice = f"edge:{settings.get('tts_voice')}" if engine == "edge" else "vieneu:"
     voices = dict(p.data.get("voices") or {})
+    dropped = 0
+    if not inplace and only is None and trans_lang(p) == "vi" and settings.get("dub_drop_interj", True):
+        dropped = drop_interjections(p, segs)   # câu chỉ có "A!", "Ừm.", "Ái!"… -> xoá khỏi phụ đề trước khi đọc
     st = stems(p)
     # mẫu giọng để nhái: lấy từ giọng đã tách (sạch) hoặc âm thanh gốc
     ref_audio = st.get("vocals") or str(p.source)
@@ -1256,12 +1284,15 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
                     segs[k].extra.setdefault("trans_long", segs[k].trans)   # giữ bản dài để người dùng xem lại
                     segs[k].trans = t
                     shortened += 1
-        except Exception as e:  # noqa: BLE001 – lỗi AI không làm hỏng bản lồng
+        except ff.Cancelled:
+            raise
+        except Exception as e:  # noqa: BLE001 – lỗi AI (cả mất mạng) không làm hỏng bản lồng
             if progress:
                 progress(0.86, f"Không rút gọn được ({str(e)[:80]})")
         if shortened:
             run(_sub(progress, 0.87, 1.0))
     stats["shortened"] = shortened
+    stats["interj"] = dropped
     try:
         tmp_out.replace(target)
         out = target
@@ -1302,6 +1333,83 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
             if settings.get("dub_skip_songs", True) else []
     p.data["edit"] = ed
     p.save()
+    return out
+
+
+def drop_interjections(p: Project, segs: list | None = None) -> int:
+    """Xoá khỏi phụ đề các câu CHỈ có 1–2 tiếng cảm thán (A!, Ừm., Ái!, Hả?…) trước khi lồng tiếng Việt – câu
+    "Ừm, đúng là như vậy." giữ nguyên. Câu bị xoá cất ở p.data["interj_removed"] (khôi phục được); câu đã khôi phục
+    (extra["keep_interj"]) không bị xoá lại. Sửa `segs` tại chỗ (hoặc p.segments) và trả về số câu đã xoá."""
+    from .voicefix import lone_interjection
+
+    own = segs is None
+    segs = p.segments if own else segs
+    keep, gone = [], []
+    for s in segs:
+        if s.trans.strip() and not s.extra.get("keep_interj") and lone_interjection(s.trans):
+            gone.append(s)
+        else:
+            keep.append(s)
+    if gone:
+        p.data.setdefault("interj_removed", []).extend(s.to_dict() for s in gone)
+        segs[:] = keep
+        if own:
+            p.segments = segs
+    return len(gone)
+
+
+def restore_interjections(p: Project) -> int:
+    """Đưa lại các câu cảm thán đã bị xoá vào đúng chỗ theo thời gian (đánh dấu để lần lồng sau không xoá nữa)."""
+    from .subtitle import Segment
+
+    back = [Segment.from_dict(d) for d in p.data.pop("interj_removed", []) or []]
+    if not back:
+        return 0
+    for s in back:
+        s.extra["keep_interj"] = True
+    segs = sorted(p.segments + back, key=lambda s: (s.start, s.end))
+    p.segments = segs
+    p.save()
+    return len(back)
+
+
+def detect_songs(p: Project, settings: dict | None = None, progress: Prog | None = None, cancel=None) -> int:
+    """Tìm các cụm câu đang HÁT trên giọng đã tách (dự án đã nghe từ trước) -> đánh dấu 🎵. Cần đã tách giọng."""
+    st = stems(p)
+    if not st:
+        raise ValueError("Chưa tách giọng / nhạc nền – bấm 'Tách ngay' ở mục 1 tab Lồng tiếng trước (đoán đoạn hát đo "
+                         "trên giọng đã tách khỏi nhạc)")
+    wav = p.work / "asr16k_vocals.wav"
+    if not wav.exists() or wav.stat().st_size < 1000 or wav.stat().st_mtime < Path(st["vocals"]).stat().st_mtime:
+        ff.run(["-i", st["vocals"], "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav)],
+               p.data.get("info", {}).get("duration", 0), progress, cancel, "Đang chuẩn bị giọng đã tách")
+    from .songs import mark_sung
+
+    segs = p.segments
+    if progress:
+        progress(0.6, "Đang nghe cao độ từng câu để tìm đoạn hát…")
+    n = mark_sung(segs, wav)
+    if n:
+        p.segments = segs
+        p.save()
+    return n
+
+
+def undubbed_rows(segs: list, skip_songs: bool = True) -> list[int]:
+    """Câu đã có lời dịch mà chưa có giọng trong bản lồng đang dùng (bị sót / đọc lỗi / câu mới thêm) – không tính câu
+    bài hát 🎵 (khi giữ nguyên bài hát) và câu 'Bỏ lồng'."""
+    from . import langs
+    from .tts import clean_tts_text
+
+    out = []
+    for i, s in enumerate(segs):
+        t = (s.trans or "").strip()
+        if not t or not clean_tts_text(t, langs.detect(t, "vi")):
+            continue
+        if s.extra.get("nodub") or (skip_songs and s.extra.get("song")):
+            continue
+        if not s.extra.get("dub_at"):
+            out.append(i)
     return out
 
 
@@ -1560,7 +1668,9 @@ def apply_translation(segs: list, cues: list, stats: dict | None = None) -> list
     if not segs or not cues:
         return []
     if len(cues) == len(segs) and all(abs(c.start - x.start) < 1.0 for c, x in zip(cues, segs)):
-        return [k for k, (x, c) in enumerate(zip(segs, cues)) if put(x, vi_text(c))]
+        rows = [k for k, (x, c) in enumerate(zip(segs, cues)) if put(x, vi_text(c))]
+        st["songs"] = mark_song_lines(segs, rows)
+        return rows
     # câu gốc -> câu dịch phủ nó nhiều nhất (phủ ≥ 30 % câu hoặc ≥ 0,5 s mới tính)
     owner: list[int | None] = []
     for x in segs:
@@ -1623,7 +1733,24 @@ def apply_translation(segs: list, cues: list, stats: dict | None = None) -> list
     st["added"] = len(added)
     new.sort(key=lambda x: x.start)
     segs[:] = new
-    return [k for k, x in enumerate(segs) if id(x) in changed_ids]
+    rows = [k for k, x in enumerate(segs) if id(x) in changed_ids]
+    st["songs"] = mark_song_lines(segs, rows)
+    return rows
+
+
+SONG_MARKS = ("♪", "♫", "♬", "🎵", "🎶")
+
+
+def mark_song_lines(segs: list, rows=None) -> int:
+    """Câu dịch có dấu ♪ (người dịch / AI đánh dấu lời bài hát) -> đánh dấu bài hát 🎵: không lồng tiếng, giữ giọng hát
+    gốc. rows: chỉ xét các câu này. Trả về số câu mới được đánh dấu."""
+    n = 0
+    for k in (range(len(segs)) if rows is None else rows):
+        x = segs[k]
+        if not x.extra.get("song") and not x.extra.get("not_song") and any(m in (x.trans or "") for m in SONG_MARKS):
+            x.extra["song"] = True
+            n += 1
+    return n
 
 
 def _voice_summary(voices: dict, default_voice: str) -> str:
@@ -1833,10 +1960,18 @@ def dub_summary(p: Project) -> str:
         extra.append(f"{st['songs']} câu bài hát giữ nguyên")
     if st.get("empty"):
         extra.append(f"{st['empty']} câu chưa dịch")
+    if st.get("nodub"):
+        extra.append(f"{st['nodub']} câu 'Bỏ lồng'")
+    if st.get("interj"):
+        extra.append(f"đã xoá {st['interj']} câu chỉ có tiếng cảm thán (A, Ừm…)")
     if st.get("errors"):
         extra.append(f"{st['errors']} câu lỗi")
     if st.get("lang_edge"):
         extra.append(f"{st['lang_edge']} câu không phải tiếng Việt đọc bằng Edge (VieNeu chỉ đọc tiếng Việt)")
+    miss = int(st.get("total", 0)) - int(st.get("placed", 0)) - sum(
+        int(st.get(k, 0) or 0) for k in ("songs", "empty", "nodub"))
+    if miss > 0:
+        extra.append(f"{miss} câu chưa có giọng – bấm 'Tích câu chưa lồng' rồi 'Tạo lại giọng các câu đã tích'")
     return msg + (f" ({', '.join(extra)})" if extra else "")
 
 

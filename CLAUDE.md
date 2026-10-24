@@ -61,7 +61,12 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (link điện thoại / rút gọn -> dạng yt-dlp có bộ tải riêng), đăng nhập Bilibili
   bằng mã QR (`bili_qr_start/poll/status`, cookie Netscape `data/cookies/bilibili.txt`), `BROWSERS` cho cookie
   trình duyệt; hộp mã QR `gui/link_login.py`; `pipeline.download_video` / `update_ytdlp` / `ytdlp_version`.
-- `tests/test_core.py` – `python -m pytest -q tests` (102 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `trami/net.py` – mạng chập chờn / mất mạng: `is_net_error`, `online` (thử nối tới proxy / 1.1.1.1 / 8.8.8.8 /
+  223.5.5.5 / bing cùng lúc), `wait_online` (báo "⚠ Mất mạng – … tạm dừng", chờ ≤ 10 phút -> `NetworkDown`),
+  `call` (gọi ở luồng phụ, Huỷ dừng ngay), `session` (requests có TCP keepalive). `jobs` chạy mọi tác vụ trong
+  `net.task(cancel, report)` -> hàm gọi mạng tự lấy nút Huỷ + dòng trạng thái.
+- `trami/songs.py` – đoán cụm câu đang HÁT (nốt ngân trên giọng đã tách) -> 🎵; `pipeline.mark_song_lines` (♪ trong bản dịch).
+- `tests/test_core.py` – `python -m pytest -q tests` (109 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -800,6 +805,40 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   nào -> thêm câu mới chỉ có lời dịch. `stats` {merged, joined, added} -> 1 thông báo khi nạp ("File dịch 9 câu, dự án 10
   câu: gộp 1 câu gốc…"). Sửa `segs` tại chỗ (`segs[:] = new`).
 
+- 2.0.59: "mạng lag / mất mạng giữa lúc lồng tiếng thì tool treo luôn" + lồng 1000 câu/đợt, lọc câu cảm thán lẻ, bỏ cột
+  🎵 / Bỏ lồng, tích câu chưa lồng, hàng SRT sang tab Phụ đề, lời bài hát bị dịch / lồng tiếng.
+  * Nguyên nhân treo: Edge TTS không giới hạn thời gian cả câu, nút Huỷ chỉ xét trước mỗi câu, file giọng dở (rớt mạng
+    giữa câu) vẫn bị coi là "đã đọc" (`have = exists and size > 0`) -> câu mất đuôi mãi; AI dịch `timeout=300` × 4 lần
+    × chia đôi lô; tiến trình VieNeu/Omni/Qwen/Hy-MT2 đọc stdout không giới hạn, Huỷ không được.
+  * `trami/net.py` (xem Cấu trúc). Dịch AI (`LLMClient.chat`): `net.call(_http)` + `session()` keepalive, timeout
+    (15, 300); lỗi mạng -> `wait_online` -> có mạng lại thì gửi lại lô (không tính lần hỏng); `_llm_batch` / `analyze` /
+    `shorten` / Google bù không nuốt `Cancelled` / `NetworkDown`. Google: `_gt_one` 3 cách × chờ mạng, timeout (8, 25).
+    Edge: `_edge_save` ghi `.part` rồi đổi tên, `asyncio.wait_for(60 + 0,2 s/chữ)`, `connect_timeout=10`,
+    `receive_timeout=20`; mất mạng -> 1 câu đi kiểm tra mạng, các câu khác chờ (`net_ok`), có mạng lại đọc lại câu dở;
+    quá 10 phút -> `NetworkDown` ("còn N/M câu chưa đọc… bấm tạo lại, chỉ đọc tiếp câu còn thiếu"); Huỷ: vòng
+    `asyncio.wait(timeout=0,2)` huỷ các câu đang đọc (KHÔNG dùng asyncio.sleep – test vá sleep thành no-op làm vòng
+    quay mãi). Worker: luồng `_pump` đọc stdout vào queue, `_read(stall=)` – Huỷ chờ 3 s rồi `kill()`, không có tin
+    `stall_start` 15 phút / `stall_call` (VieNeu 5, Omni 10, Hy-MT2 15, Qwen 30 phút) -> `WorkerStuck` -> mở lại 1 lần.
+    yt-dlp: `socket_timeout` 20, retries 10, `net.call` + chờ mạng rồi tải tiếp (.part). Thử: rớt mạng 3 lần giữa 5
+    câu Edge -> đủ 5 câu, không file cụt; AI lỗi mạng 3 lần -> chờ rồi dịch được; tiến trình treo -> Huỷ < 4 s.
+  * Lồng tiếng: `tts.DUB_BATCH` 1000 – Edge chạy từng đợt 1000 câu ("Đợt 2/3: đọc câu 1001–2000"), VieNeu/Omni mở lại
+    tiến trình mỗi 1000 câu. `voicefix.lone_interjection` (câu CHỈ có 1–2 tiếng trong `INTERJ_VI`: A!, Ừm., Ái!, Hả?,
+    Ha ha – không có "ai", "ơi", "vâng"…) -> `pipeline.drop_interjections` trong `dub` (đầy đủ, tiếng Việt, Cài đặt
+    `dub_drop_interj`) xoá khỏi phụ đề, cất `p.data["interj_removed"]`; `restore_interjections` (đặt `keep_interj`).
+    `undubbed_rows` (đã dịch mà không có `dub_at`). `dub_summary` thêm "Bỏ lồng", số câu đã xoá, "N câu chưa có giọng".
+  * Tab Lồng tiếng: ẩn cột 🎵 / Bỏ lồng (cột Độ vừa hiện "🎵 bài hát" / "bỏ lồng"), nút Tích câu chưa lồng, Tích câu 🎵,
+    Tự tìm câu hát, Đặt / bỏ 🎵 câu đã tích (`not_song` khi bỏ), Bỏ lồng / lồng lại câu đã tích; mục 3: công tắc "Tự xoá
+    câu chỉ có tiếng cảm thán", dòng "Giọng đọc – bộ đọc: … · S1: …" (`_update_voice_note`) + "Đổi giọng ở mục 2",
+    "Khôi phục câu cảm thán đã xoá". Hàng Xuất SRT / Nạp SRT đã dịch chuyển sang tab Phụ đề (`bar3`, `s_srt_trans`).
+  * Lời bài hát: file dịch người dùng đúng là có lời hát vì file Trung gốc (Qwen3-ASR) đã chép cả tiếng hát – Qwen3 không
+    gắn nhãn Sing như SenseVoice. (1) `mark_song_lines` – bản dịch có ♪ ♫ 🎵 -> `song` (nạp SRT: `stats["songs"]`, sau
+    dịch AI: `skill_note`); lời nhắc dịch luật 9: lời bài hát bắt đầu bằng "♪ ". (2) `songs.guess_song_lines`: tỉ lệ nốt
+    ngân (YIN 20 ms bằng FFT; ≥ 0,3 s, lệch chuẩn < 0,45 nửa cung) mỗi câu, câu > 5,5 chữ/s là nói; dãy câu ≥ 35 % nối
+    qua ≤ 2 câu (trừ câu lẻ ngắn), cụm ≥ 4 câu / ≥ 12 s / ≥ 70 % câu / trung bình ≥ 45 % -> 🎵, nối câu sát ≥ 20 %.
+    Chạy trong `recognize` khi đã tách giọng (`song_detect`, `songs_found`), nút `detect_songs`. Đo thật (tách giọng MDX):
+    bài hát librosa "Let's Go Fishin'" 28/34 câu, phim hoạt hình tiếng Trung của người dùng 0/47 câu nhầm, ghép
+    thoại + bài hát + thoại: chỉ đánh dấu phần bài hát.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -835,5 +874,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   câu có liền mạch, có nối nhầm 2 lượt nói khác người không (khi để 1 người nói thì không phân biệt được).
 - 2.0.55: chờ người dùng thử kỹ năng dịch AI với API thật (DeepSeek / GPT / Claude…): AI sửa lỗi nghe có sửa đúng
   không, số câu bị nối, hồ sơ phim, kiểm tra bản dịch (chỉ thử với AI giả lập ở sandbox).
+- 2.0.59: chờ người dùng thử rút dây mạng / tắt wifi giữa lúc lồng tiếng Edge / dịch AI (dòng trạng thái báo mất mạng,
+  có mạng lại tự làm tiếp), và "Tự tìm câu hát" trên phim thật (chỉ thử với 1 bài hát tiếng Anh + 1 phim hoạt hình).
 - 2.0.42: chờ người dùng nghe thử các cách xếp giọng trên video thật (nhất là Tự động với cụm câu dài, Đọc đè 2 giọng
   cùng lúc) và xem phụ đề chạy theo giọng lồng có dễ theo dõi không.

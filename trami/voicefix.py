@@ -4,6 +4,7 @@
   Bộ đọc AI gặp chữ số hay đọc sai hoặc phát ra tiếng "bíp".
 - `voice_problem`: phát hiện file giọng hỏng (im lặng, tiếng ù một chiều, tiếng bíp / còi một tần số) để đọc lại.
 - `speech_level` + `level_gains`: câu nào nhỏ hơn hẳn các câu khác cùng giọng thì tăng lên cho đều.
+- `lone_interjection`: câu CHỈ có 1–2 tiếng cảm thán ("A!", "Ừm.", "Ái!", "Hả?") -> xoá trước khi lồng tiếng Việt.
 """
 from __future__ import annotations
 
@@ -197,3 +198,29 @@ def level_gains(levels: dict, groups: dict, max_boost_db: float = 9.0, tol_db: f
         if 0.003 <= v < t * 10 ** (-tol_db / 20):
             out[k] = min(t / v, lim)
     return out
+
+
+# tiếng cảm thán / tiếng đệm (không mang nghĩa) – câu chỉ gồm 1–2 tiếng này thì bỏ khi lồng tiếng Việt.
+# KHÔNG có từ có nghĩa dễ trùng ("ai" = ai đó, "ơi" = dạ, "vâng", "dạ", "ừ thì"…) để không xoá nhầm câu trả lời.
+INTERJ_VI = set("""
+a á à ả ã ạ â ầ ấ ẩ ái ài ải ây ầy
+ơ ờ ớ ở ỡ ợ ô ồ ố ổ ỗ ộ o ò ó ỏ oa oà oá oái oải ồi
+ư ừ ứ ử ừm ứm ửm ưm ừa ừh
+hừ hứ hử hừm hửm hứm hm hmm hự hơ hờ hở hả há hà ha haha hahaha hê hế hề hì hí hi hihi hehe hô hố hồ
+ê ế ề ể ối ôi ui úi ùi uầy uây ới ứa
+chà chậc chặc tặc xì xí ặc ọe ọc phù phì
+ah oh uh um umm hmmm eh huh ha ho oops wow
+""".split())
+_WORD = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+
+def lone_interjection(text: str) -> bool:
+    """Câu chỉ có 1–2 tiếng cảm thán, không có chữ nào khác: "A!", "Ừm…", "Ái!", "Hả?", "Ha ha". "Ừm, đúng là như vậy."
+    hay "A Lan" -> False (có lời thật)."""
+    import unicodedata
+
+    t = unicodedata.normalize("NFC", text or "").lower()
+    if any(c.isdigit() for c in t):
+        return False
+    words = _WORD.findall(t)
+    return 1 <= len(words) <= 2 and all(w in INTERJ_VI for w in words)

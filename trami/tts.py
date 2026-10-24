@@ -17,12 +17,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import queue
 import os
 import re
 import subprocess
 import sys
 import unicodedata
 import threading
+import time
 import wave
 from pathlib import Path
 from typing import Callable
@@ -366,44 +368,139 @@ EDGE_403 = ("Microsoft Edge từ chối đọc (lỗi 403): bản edge-tts trên
             "10/2026). Tắt tool rồi chạy lệnh: " + EDGE_UPGRADE)
 
 
+DUB_BATCH = 1000      # lồng tiếng video dài: đọc mỗi đợt 1000 câu
+EDGE_CONNECT = 10     # giây chờ nối tới máy chủ Edge
+EDGE_RECEIVE = 20     # giây chờ giữa 2 gói dữ liệu giọng (mạng lag / rớt -> báo lỗi thay vì chờ mãi)
+
+
+def _edge_comm(text: str, voice: str, rate: str = "+0%", pitch: str = "+0Hz"):
+    import edge_tts
+
+    try:
+        return edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, connect_timeout=EDGE_CONNECT,
+                                    receive_timeout=EDGE_RECEIVE)
+    except TypeError:   # edge-tts rất cũ chưa có tham số chờ
+        return edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+
+
+async def _edge_save(text: str, voice: str, out: Path, rate: str = "+0%", pitch: str = "+0Hz") -> None:
+    """Đọc 1 câu ra file. Ghi vào file tạm rồi mới đổi tên: rớt mạng giữa chừng không để lại file giọng cụt
+    (file cụt từng bị coi là câu đã đọc xong -> câu mất đuôi mãi). Cả câu quá 60 s + 0,2 s/chữ -> coi như treo."""
+    tmp = out.with_name(out.stem + ".part" + out.suffix)
+    tmp.unlink(missing_ok=True)
+    try:
+        await asyncio.wait_for(_edge_comm(text, voice, rate, pitch).save(str(tmp)), timeout=60 + 0.2 * len(text))
+        if not tmp.exists() or tmp.stat().st_size == 0:
+            raise RuntimeError("Edge không trả về tiếng nào")
+        tmp.replace(out)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 async def _edge_all(items: list[tuple[int, str, Path, str]], rate: str, pitch: str, progress, cancel,
                     total: int, done0: int, concurrency: int = 6):
-    import edge_tts
+    """Đọc các câu bằng Edge (6 câu cùng lúc). Mất mạng giữa chừng: mọi câu tạm dừng, chờ có mạng lại rồi đọc tiếp
+    (câu đang đọc dở đọc lại từ đầu, không tính là lỗi); mất quá 10 phút -> NetworkDown (câu đã đọc được giữ lại).
+    Bấm Huỷ: dừng ngay cả câu đang đọc."""
+    from . import net
 
     sem = asyncio.Semaphore(concurrency)
     done = done0
     errors: list[str] = []
     blocked = False   # Edge trả 403 -> các câu sau cũng sẽ bị từ chối, không thử nữa
+    net_ok = asyncio.Event()
+    net_ok.set()
+    state: dict = {"down": None, "waiter": None}
+    loop = asyncio.get_running_loop()
+    _, report = net.current()
+    if progress and not report:
+        report = lambda m: progress(done / max(1, total) * 0.8, m)   # noqa: E731
+
+    async def wait_net() -> bool:
+        """Chỉ 1 câu đi kiểm tra mạng, các câu khác chờ theo. True = đã mất mạng và có lại (đọc lại không tính lỗi)."""
+        if state["waiter"] is None:
+            net_ok.clear()
+
+            def check():
+                try:
+                    return net.wait_online("tạo giọng đọc Edge", cancel=cancel, report=report)
+                except (net.NetworkDown, Cancelled) as e:
+                    state["down"] = e
+                    return False
+
+            state["waiter"] = loop.run_in_executor(None, check)
+            try:
+                back = await state["waiter"]
+            finally:
+                state["waiter"] = None
+                net_ok.set()
+            state["back"] = back
+            return back
+        await net_ok.wait()
+        return bool(state.get("back"))
 
     async def one(i: int, text: str, out: Path, voice: str):
         nonlocal done, blocked
         async with sem:
-            if cancel and cancel():
-                return
-            for attempt in range(4):
+            fails = 0
+            while True:
+                await net_ok.wait()
+                if state["down"] or (cancel and cancel()):
+                    return
                 if blocked:
                     errors.append(f"Câu {i + 1}: bỏ qua (Edge từ chối 403)")
                     break
                 try:
-                    comm = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
-                    await comm.save(str(out))
-                    if out.exists() and out.stat().st_size > 0:
-                        break
+                    await _edge_save(text, voice, out, rate, pitch)
+                    break
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:  # mạng chập chờn -> thử lại
-                    if "403" in str(e) and attempt >= 1:
+                    if "403" in str(e) and fails >= 1:
                         blocked = True
                         continue
-                    if attempt == 3:
-                        errors.append(f"Câu {i + 1}: {e}")
-                    await asyncio.sleep(1.5 * (attempt + 1))
+                    if net.is_net_error(e) and await wait_net():
+                        continue          # mất mạng rồi có lại: đọc lại câu này, không tính là lỗi
+                    if state["down"]:
+                        return
+                    fails += 1
+                    if fails >= 4:
+                        errors.append(f"Câu {i + 1}: {type(e).__name__}: {e}" if not str(e) else f"Câu {i + 1}: {e}")
+                        break
+                    await asyncio.sleep(1.5 * fails)
             done += 1
             if progress:
                 progress(done / max(1, total) * 0.8, f"Đang tạo giọng đọc {done}/{total}")
 
-    await asyncio.gather(*(one(*it) for it in items))
+    tasks = [asyncio.ensure_future(one(*it)) for it in items]
+
+    # bấm Huỷ -> dừng cả các câu đang đọc dở (không phải đợi mạng trả lời)
+    pending = set(tasks)
+    while pending:
+        _, pending = await asyncio.wait(pending, timeout=0.2)
+        if pending and cancel and cancel():
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            break
+    for t in tasks:   # lấy lỗi (nếu có) để asyncio không cảnh báo "exception was never retrieved"
+        if t.done() and not t.cancelled():
+            t.exception()
+    if cancel and cancel():
+        raise Cancelled()
+    if isinstance(state["down"], Cancelled):
+        raise Cancelled()
+    if state["down"]:
+        left = sum(1 for it in items if not (it[2].exists() and it[2].stat().st_size > 0))
+        raise net.NetworkDown(f"Mất mạng quá lâu khi tạo giọng đọc Edge: còn {left}/{len(items)} câu chưa đọc. "
+                              "Các câu đã đọc được giữ lại – có mạng thì bấm tạo lại, tool chỉ đọc tiếp các câu còn thiếu.")
     if blocked:
         errors.insert(0, EDGE_403)
     return errors
+
+
+class WorkerStuck(RuntimeError):
+    """Tiến trình VieNeu / OmniVoice / Qwen3 / Hy-MT2 không trả lời quá lâu."""
 
 
 class VieneuWorker:
@@ -417,9 +514,12 @@ class VieneuWorker:
         self.proc: subprocess.Popen | None = None
         self.lock = threading.Lock()
         self.fused = "1"      # CUDA graph của VieNeu (nhanh); tắt nếu GPU báo lỗi chụp graph
+        self._q: queue.Queue = queue.Queue()   # dòng stdout của tiến trình (luồng _pump đọc)
 
     flag = "--vieneu-worker"
     log_name = "vieneu.txt"
+    stall_start = 900.0   # nạp / tải mô hình mà 15 phút không có tin gì -> coi là treo
+    stall_call = 300.0    # 1 câu đọc quá 5 phút -> treo (GPU kẹt…) -> tắt, mở lại tiến trình
 
     def _extra_env(self) -> dict:
         return {}
@@ -445,26 +545,65 @@ class VieneuWorker:
         self.proc = subprocess.Popen(self._cmd(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err,
                                      text=True, encoding="utf-8", errors="replace", bufsize=1, cwd=str(APP_DIR),
                                      env=env, creationflags=_NO_WINDOW)
-        r = self._read(progress, cancel)
+        # đọc stdout ở luồng riêng -> luồng tác vụ chờ có giới hạn, bấm Huỷ được, tiến trình treo thì biết
+        self._q = queue.Queue()
+        threading.Thread(target=self._pump, args=(self.proc, self._q), daemon=True, name=f"trami-{self.title}").start()
+        r = self._read(progress, cancel, self.stall_start)
         if "error" in r:
             self.stop()
             raise RuntimeError(r["error"])
         self.sr = int(r.get("sr", 48000))
 
-    def _read(self, progress=None, cancel=None) -> dict:
-        assert self.proc and self.proc.stdout
-        for line in self.proc.stdout:
+    @staticmethod
+    def _pump(proc: subprocess.Popen, q: queue.Queue) -> None:
+        try:
+            for line in proc.stdout:   # type: ignore[union-attr]
+                q.put(line)
+        except (OSError, ValueError):
+            pass
+        q.put(None)
+
+    def _read(self, progress=None, cancel=None, stall: float | None = None) -> dict:
+        """Chờ 1 câu trả lời của tiến trình. Bấm Huỷ: chờ thêm 3 s cho xong câu đang làm (tiến trình còn dùng tiếp),
+        quá thì tắt hẳn. Không nhận được gì quá `stall` giây -> tiến trình bị treo -> tắt + WorkerStuck."""
+        from . import net
+
+        assert self.proc
+        cancel = cancel or net.current()[0]
+        q = self._q
+        last = time.time()
+        grace = None
+        while True:
+            try:
+                line = q.get(timeout=0.2)
+            except queue.Empty:
+                now = time.time()
+                if grace is None and cancel and cancel():
+                    grace = now + 3.0
+                if grace is not None and now > grace:
+                    self.kill()
+                    raise Cancelled() from None
+                if stall and now - last > stall:
+                    self.kill()
+                    raise WorkerStuck(f"Tiến trình {self.title} không phản hồi quá {round(stall / 60)} phút "
+                                      "(bị treo) – đã tắt để mở lại") from None
+                continue
+            if line is None:
+                break
+            last = time.time()
             if not line.startswith("@@TRAMI@@"):
                 continue
             obj = json.loads(line[len("@@TRAMI@@"):])
             if "progress" in obj:   # tiến độ tải / nạp mô hình từ tiến trình VieNeu
-                if cancel and cancel():
-                    self.stop()
-                    raise Cancelled()
                 if progress:
                     progress(float(obj["progress"]), obj.get("msg", ""))
                 continue
+            if grace is not None:   # câu trả lời tới sau khi bấm Huỷ: tiến trình vẫn dùng tiếp được
+                raise Cancelled()
             return obj
+        if grace is not None:
+            self.proc = None
+            raise Cancelled()
         code = self.proc.poll() if self.proc else None
         self.proc = None
         from .config import no_console
@@ -494,7 +633,7 @@ class VieneuWorker:
                     assert self.proc and self.proc.stdin
                     self.proc.stdin.write(req + "\n")
                     self.proc.stdin.flush()
-                    r = self._read()
+                    r = self._read(stall=self.stall_call)
                 except (OSError, RuntimeError) as e:
                     self.stop()
                     if attempt == 0:
@@ -518,6 +657,16 @@ class VieneuWorker:
             except Exception:
                 p.kill()
 
+    def kill(self):
+        """Tắt ngay (tiến trình bị treo / người dùng bấm Huỷ giữa câu dài)."""
+        p, self.proc = self.proc, None
+        if p and p.poll() is None:
+            try:
+                p.kill()
+                p.wait(5)
+            except Exception:  # noqa: BLE001
+                pass
+
 
 def _vieneu(mode: str) -> VieneuWorker:
     global _vn_model
@@ -535,6 +684,7 @@ def _vieneu(mode: str) -> VieneuWorker:
 class OmniWorker(VieneuWorker):
     """Tiến trình riêng chạy OmniVoice (trami/omni_worker.py); mode = tên mô hình trên HuggingFace."""
     title = "OmniVoice"
+    stall_call = 600.0    # chạy CPU chậm hơn VieNeu
     flag = "--omni-worker"
     log_name = "omnivoice.txt"
 
@@ -953,6 +1103,9 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         for n, (i, text, p, spec) in enumerate(vn_items):
             if cancel and cancel():
                 raise Cancelled()
+            if n and n % DUB_BATCH == 0:   # mỗi 1000 câu mở lại tiến trình đọc (trả bộ nhớ GPU, tránh chậm dần / treo)
+                tts.stop()
+                tts.ensure_started(None, cancel)
             try:
                 tmp = p.with_suffix(".raw.wav")
                 if spec.startswith("clone:"):
@@ -972,6 +1125,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                     tmp.unlink(missing_ok=True)
                 else:
                     tmp.replace(p)
+            except Cancelled:
+                raise
             except Exception as e:
                 errors.append(f"Câu {i + 1}: {e}")
             if progress:
@@ -1012,6 +1167,9 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         for n, (i, text, p, spec, lg) in enumerate(omni_items):
             if cancel and cancel():
                 raise Cancelled()
+            if n and n % DUB_BATCH == 0:
+                om.stop()
+                om.ensure_started(None, cancel)
             try:
                 ref, rtext = omni_ref(spec, lg)
                 tmp = p.with_suffix(".raw.wav")
@@ -1022,6 +1180,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                     tmp.unlink(missing_ok=True)
                 else:
                     tmp.replace(p)
+            except Cancelled:
+                raise
             except Exception as e:
                 errors.append(f"Câu {i + 1}: {e}")
             if progress:
@@ -1029,8 +1189,16 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
 
     # --- Edge (online)
     if edge_items:
-        errors += asyncio.run(_edge_all(edge_items, rate, pitch, progress, cancel, total_items,
-                                        len(vn_items) + len(omni_items)))
+        base = len(vn_items) + len(omni_items)
+        nb = (len(edge_items) + DUB_BATCH - 1) // DUB_BATCH
+        for b in range(0, len(edge_items), DUB_BATCH):   # video dài: đọc từng đợt 1000 câu (file đã đọc được giữ)
+            if cancel and cancel():
+                raise Cancelled()
+            if nb > 1 and progress:
+                progress((base + b) / max(1, total_items) * 0.8,
+                         f"Đợt {b // DUB_BATCH + 1}/{nb}: đọc câu {b + 1}–{min(b + DUB_BATCH, len(edge_items))}")
+            errors += asyncio.run(_edge_all(edge_items[b:b + DUB_BATCH], rate, pitch, progress, cancel, total_items,
+                                            base + b))
     if cancel and cancel():
         raise Cancelled()
     redone = kept_old = 0
@@ -1190,11 +1358,15 @@ def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,
     elif lg == "vi":
         text = spoken_vi(text)
     if spec.startswith("edge:"):
-        import edge_tts
+        from . import net
 
-        async def run():
-            await edge_tts.Communicate(text, spec[5:]).save(str(out.with_suffix(".mp3")))
-        asyncio.run(run())
+        try:
+            asyncio.run(_edge_save(text, spec[5:], out.with_suffix(".mp3")))
+        except Exception as e:  # noqa: BLE001
+            if net.is_net_error(e):
+                raise RuntimeError("Không nối được tới Microsoft Edge để nghe thử (mất mạng / mạng chập chờn) – "
+                                   "kiểm tra mạng rồi bấm nghe lại") from None
+            raise
         return out.with_suffix(".mp3")
     if spec.startswith(("omni:", "omnid:")) or spec == OMNI_CLONE:
         om = _omni(settings)

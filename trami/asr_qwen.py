@@ -59,6 +59,7 @@ def why_unavailable() -> str:
 class QwenAsrWorker(VieneuWorker):
     """Tiến trình riêng chạy Qwen3-ASR; mode = tên mô hình trên HuggingFace."""
     title = "Qwen3-ASR"
+    stall_call = 1800.0  # 1 khúc nghe không xong trong 30 phút -> treo
     flag = "--qwen-asr-worker"
     log_name = "qwen_asr.txt"
 
@@ -76,7 +77,7 @@ class QwenAsrWorker(VieneuWorker):
             assert self.proc and self.proc.stdin
             self.proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
             self.proc.stdin.flush()
-            r = self._read(progress, cancel)
+            r = self._read(progress, cancel, self.stall_call)
         if "error" in r:
             raise RuntimeError(r["error"])
         return r

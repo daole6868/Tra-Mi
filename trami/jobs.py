@@ -8,6 +8,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable
 
+from . import net
 from .ffmpeg import Cancelled
 
 
@@ -95,7 +96,9 @@ class JobManager:
                 continue
             job.status, job.started, job.message = "running", time.time(), "Đang bắt đầu…"
             try:
-                res = job._fn(job) if job._fn else None
+                # mọi lần gọi mạng trong tác vụ biết nút Huỷ + báo "mất mạng – đang chờ" vào dòng trạng thái
+                with net.task(job.cancelled, lambda m, j=job: j.update(j.progress, m)):
+                    res = job._fn(job) if job._fn else None
                 job.result = res or {}
                 job.status, job.progress, job.message = "done", 1.0, job.result.get("message", "Hoàn tất")
             except Cancelled:

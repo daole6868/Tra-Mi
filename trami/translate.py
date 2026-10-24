@@ -21,7 +21,7 @@ from typing import Callable
 
 import requests
 
-from . import langs
+from . import langs, net
 from .ffmpeg import Cancelled
 from .subtitle import Segment
 from .tts import VieneuWorker
@@ -51,7 +51,9 @@ Yêu cầu bắt buộc:
 6. Dòng gốc có thể bị nhận dạng sai vài chữ đồng âm: dựa vào ngữ cảnh để hiểu và dịch đúng ý.
 7. Chỉ trả về JSON hợp lệ dạng {"1": "bản dịch", "2": "bản dịch", ...} không kèm giải thích.
 8. Dòng có ký hiệu ⟪≤N tiếng⟫ ở cuối là giới hạn độ dài để LỒNG TIẾNG khớp thời gian nhân vật nói: bản dịch KHÔNG được
-   vượt N tiếng (âm tiết). Ưu tiên cách nói gọn, tự nhiên; lược từ đệm, giữ đủ ý chính. KHÔNG chép ký hiệu ⟪⟫ vào bản dịch."""
+   vượt N tiếng (âm tiết). Ưu tiên cách nói gọn, tự nhiên; lược từ đệm, giữ đủ ý chính. KHÔNG chép ký hiệu ⟪⟫ vào bản dịch.
+9. Dòng chắc chắn là LỜI BÀI HÁT (nhạc phim, nhân vật đang hát – câu văn vần, không phải lời thoại) thì bắt đầu bản dịch
+   bằng "♪ ". Lời thoại bình thường KHÔNG thêm ♪."""
 
 # Dịch sang Anh / Thái / Nhật / Hàn: lời nhắc tiếng Anh (luật giống bản tiếng Việt, đổi phần xưng hô / tên riêng)
 STYLES_EN = {
@@ -91,7 +93,9 @@ Mandatory rules:
 7. Return ONLY valid JSON like {{"1": "translation", "2": "translation", ...}} with no explanation.
 8. A line ending with ⟪≤N {L['unit_ai']}⟫ is a length limit so the DUBBED voice fits the character's speaking time: the
    translation must NOT exceed N {L['unit_ai']}. Prefer short natural phrasing, drop filler words, keep the core meaning.
-   NEVER copy the ⟪⟫ marker into the translation."""
+   NEVER copy the ⟪⟫ marker into the translation.
+9. A line that is clearly SONG LYRICS (theme song, a character singing – verse, not dialogue) must start with "♪ ".
+   Never add ♪ to normal dialogue."""
 
 
 SYL_PER_SEC = 4.6      # tiếng Việt lồng tiếng tự nhiên ~4–5 tiếng/giây (tiếng khác: langs.INFO[...]["rate"])
@@ -227,20 +231,23 @@ class LLMClient:
         # Các model Claude đời mới (và một số model OpenAI) không nhận tham số temperature -> không gửi
         self._send_temp = engine != "anthropic"
 
+    def _http(self, url: str, headers: dict, body: dict):
+        # chờ AI viết xong có thể lâu (không có dữ liệu) -> chờ đọc tới 5 phút; rớt mạng thì keepalive báo trong ~40 s
+        return net.session().post(url, headers=headers, json=body, timeout=(15, 300))
+
     def chat(self, system: str, user: str, max_tokens: int = 8000, temperature: float = 0.3) -> str:
         last_err = None
-        for attempt in range(4):
+        fails = 0
+        while fails < 4:
             try:
                 if self.engine == "anthropic":
                     body = {"model": self.model, "max_tokens": max(max_tokens, 16000),  # chừa chỗ cho phần suy nghĩ
                             "system": system, "messages": [{"role": "user", "content": user}]}
                     if self._send_temp:
                         body["temperature"] = temperature
-                    r = requests.post(
-                        "https://api.anthropic.com/v1/messages",
-                        headers={"x-api-key": self.api_key, "anthropic-version": "2023-06-01",
-                                 "content-type": "application/json"},
-                        json=body, timeout=300)
+                    r = net.call(self._http, "https://api.anthropic.com/v1/messages",
+                                 {"x-api-key": self.api_key, "anthropic-version": "2023-06-01",
+                                  "content-type": "application/json"}, body)
                     if r.status_code == 200:
                         return "".join(b.get("text", "") for b in r.json().get("content", []) if b.get("type") == "text")
                 else:
@@ -250,8 +257,8 @@ class LLMClient:
                         body["temperature"] = temperature
                     if self._json_mode:
                         body["response_format"] = {"type": "json_object"}
-                    r = requests.post(f"{self.base}/chat/completions",
-                                      headers={"Authorization": f"Bearer {self.api_key}"}, json=body, timeout=300)
+                    r = net.call(self._http, f"{self.base}/chat/completions",
+                                 {"Authorization": f"Bearer {self.api_key}"}, body)
                     if r.status_code == 400 and self._json_mode and "response_format" in r.text:
                         self._json_mode = False
                         continue
@@ -269,10 +276,15 @@ class LLMClient:
                 raise
             except requests.RequestException as e:
                 last_err = e
-            if attempt < 3:
-                time.sleep(2 * 2 ** attempt)
-        raise ApiError(f"Không gọi được API dịch {self.engine} ({self.model}): {str(last_err)[:250]}. "
-                       f"Kiểm tra Internet / API key / số dư tài khoản ở trang Cài đặt.")
+                # mất mạng giữa chừng: chờ có mạng lại rồi gửi lại lô này (không tính là 1 lần hỏng, không bỏ lô)
+                if net.is_net_error(e) and net.wait_online(f"dịch bằng AI ({self.engine})"):
+                    continue
+            fails += 1
+            if fails < 4:
+                net.sleep(2 * 2 ** (fails - 1))
+        hint = ("Mạng chập chờn / máy chủ không trả lời – thử lại sau ít phút" if last_err is not None
+                and net.is_net_error(last_err) else "Kiểm tra Internet / API key / số dư tài khoản ở trang Cài đặt")
+        raise ApiError(f"Không gọi được API dịch {self.engine} ({self.model}): {str(last_err)[:250]}. {hint}.")
 
 
 # ======================================================================= Hy-MT2
@@ -291,6 +303,7 @@ def hymt_available() -> bool:
 class HymtWorker(VieneuWorker):
     """Tiến trình riêng chạy Hy-MT2 (trami/hymt_worker.py), cùng cách điều khiển với VieNeu / Qwen3."""
     title = "Hy-MT2"
+    stall_call = 900.0   # 1 lô dịch không có tin gì quá 15 phút -> treo
     flag = "--hymt-worker"
     log_name = "hymt.txt"
 
@@ -308,7 +321,7 @@ class HymtWorker(VieneuWorker):
             assert self.proc and self.proc.stdin
             self.proc.stdin.write(json.dumps(req, ensure_ascii=False) + "\n")
             self.proc.stdin.flush()
-            r = self._read(progress, cancel)
+            r = self._read(progress, cancel, self.stall_call)
         if "error" in r:
             raise RuntimeError(r["error"])
         return r
@@ -362,6 +375,8 @@ class Translator:
                 progress(0.01, "AI đang đọc toàn bộ kịch bản để thống nhất tên riêng, xưng hô…")
             try:
                 summary = summary or self.analyze([segs[i].text for i in idx])
+            except (Cancelled, net.NetworkDown):
+                raise
             except Exception:
                 summary = summary or ""
         texts = [segs[i].text for i in idx]
@@ -392,6 +407,8 @@ class Translator:
             user = "SHORTEN THESE TRANSLATIONS:\n" + json.dumps(payload, ensure_ascii=False, indent=0)
         try:
             d = _extract_json(self.llm.chat(with_skill(sysp, self.skill), user))
+        except (Cancelled, net.NetworkDown):
+            raise
         except Exception:  # noqa: BLE001
             return [vi for _, vi, _ in items]
         out = []
@@ -488,6 +505,8 @@ class Translator:
                     f"address in {L['english']}.\n\nSCRIPT:\n" + ch)
             try:
                 d = _extract_json(self.llm.chat(sysp, prompt, max_tokens=4000, temperature=0.1))
+            except (Cancelled, net.NetworkDown):
+                raise
             except Exception:
                 continue
             for k, v in (d.get("terms") or {}).items():
@@ -522,6 +541,8 @@ class Translator:
         user = "\n\n".join(parts)
         try:
             d = _extract_json(self.llm.chat(with_skill(system_prompt(self.target, self.source), self.skill), user))
+        except (Cancelled, net.NetworkDown):
+            raise
         except (PermissionError, ApiError, ValueError) as e:
             if isinstance(e, ValueError) and "JSON" in str(e):
                 d = None  # AI trả về sai định dạng -> chia nhỏ lô rồi thử lại
@@ -549,6 +570,8 @@ class Translator:
         try:
             self.fallback_lines += len(lines)
             return self._google(lines)
+        except (Cancelled, net.NetworkDown):
+            raise
         except Exception:
             return [""] * len(lines)
 
@@ -610,19 +633,19 @@ class Translator:
     def _gtx(self, text: str) -> str:
         """Google Translate (endpoint miễn phí trả JSON)."""
         sl, tl = self._gl()
-        r = requests.post("https://translate.googleapis.com/translate_a/single",
-                          params={"client": "gtx", "sl": sl, "tl": tl, "dt": "t", "ie": "UTF-8", "oe": "UTF-8"},
-                          data={"q": text}, timeout=30,
-                          headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        r = net.session().post("https://translate.googleapis.com/translate_a/single",
+                               params={"client": "gtx", "sl": sl, "tl": tl, "dt": "t", "ie": "UTF-8", "oe": "UTF-8"},
+                               data={"q": text}, timeout=(8, 25),
+                               headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
         r.raise_for_status()
         data = r.json()
         return "".join(part[0] for part in (data[0] or []) if part and part[0])
 
     def _clients5(self, text: str) -> str:
         sl, tl = self._gl()
-        r = requests.get("https://clients5.google.com/translate_a/t",
-                         params={"client": "dict-chrome-ex", "sl": sl, "tl": tl, "q": text}, timeout=30,
-                         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        r = net.session().get("https://clients5.google.com/translate_a/t",
+                              params={"client": "dict-chrome-ex", "sl": sl, "tl": tl, "q": text}, timeout=(8, 25),
+                              headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
         r.raise_for_status()
         d = r.json()
         if isinstance(d, list) and d:
@@ -632,24 +655,33 @@ class Translator:
             return "".join(s.get("trans", "") for s in d["sentences"])
         raise ValueError("Phản hồi Google không hợp lệ")
 
-    def _gt_one(self, text: str) -> str:
-        errs = []
-        for attempt in range(3):
-            for fn in (self._gtx, self._clients5):
-                try:
-                    return fn(text)
-                except Exception as e:
-                    errs.append(f"{fn.__name__}: {e}")
-            try:
-                from deep_translator import GoogleTranslator
+    def _deep(self, text: str) -> str:
+        from deep_translator import GoogleTranslator
 
-                sl, tl = self._gl()
-                return GoogleTranslator(source=sl, target=tl).translate(text) or ""
-            except Exception as e:
-                errs.append(f"deep_translator: {str(e)[:150]}")
-            time.sleep(2 * 2 ** attempt)
-        raise RuntimeError("Không kết nối được Google Dịch (kiểm tra mạng hoặc bị giới hạn tạm thời, "
-                           "hãy thử lại sau hoặc dùng engine AI): " + errs[0][:200])
+        sl, tl = self._gl()
+        return GoogleTranslator(source=sl, target=tl).translate(text) or ""
+
+    def _gt_one(self, text: str) -> str:
+        errs: list[str] = []
+        fails = 0
+        while True:
+            net_err = False
+            for fn in (self._gtx, self._clients5, self._deep):
+                try:
+                    return net.call(fn, text)
+                except Cancelled:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    errs.append(f"{fn.__name__.strip('_')}: {str(e)[:150]}")
+                    net_err = net_err or net.is_net_error(e)
+            # mất mạng: chờ có mạng lại rồi dịch tiếp câu này (không tính là 1 lần hỏng)
+            if net_err and net.wait_online("dịch bằng Google"):
+                continue
+            fails += 1
+            if fails >= 3:
+                raise RuntimeError("Không kết nối được Google Dịch (kiểm tra mạng hoặc bị giới hạn tạm thời, "
+                                   "hãy thử lại sau hoặc dùng engine AI): " + errs[0][:200])
+            net.sleep(2 * 2 ** (fails - 1))
 
     def _google(self, lines: list[str]) -> list[str]:
         src = [self._apply_glossary_src(l).replace("\n", " ").strip() for l in lines]

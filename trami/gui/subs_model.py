@@ -23,6 +23,10 @@ OVERFLOW_SHORT = {"smart": "Tự động", "push": "Nối tiếp", "overlap": "�
 def fit_text(s: Segment) -> str:
     """Chữ ngắn ở cột Độ vừa: ✓/⚡/⚠ ×tốc độ, ◀ đọc sớm, ▶ bị lùi, ⧉ đọc đè, ✂ cắt, ✎ đặt tay."""
     ex = s.extra
+    if ex.get("nodub"):
+        return "bỏ lồng"
+    if ex.get("song") and not ex.get("dub_at"):
+        return "🎵 bài hát"
     fit = ex.get("fit")
     if not fit:
         return "✎ ×" + f"{float(ex['speed']):.2f}" if ex.get("speed") else ""
@@ -43,6 +47,10 @@ def fit_text(s: Segment) -> str:
 def fit_tip(s: Segment) -> str:
     """Giải thích đầy đủ độ vừa của câu (chú thích cột Độ vừa, khung Câu đang chọn, timeline)."""
     ex = s.extra
+    if ex.get("nodub"):
+        return "Câu đánh dấu 'Bỏ lồng' – không đọc câu này (tích câu rồi bấm 'Lồng lại' để bỏ dấu)"
+    if ex.get("song") and not ex.get("dub_at"):
+        return "Câu bài hát 🎵 – giữ nguyên giọng hát gốc (tích câu rồi bấm 'Bỏ 🎵' nếu là lời thoại)"
     fit = ex.get("fit")
     sp = float(ex.get("fit_speed", 1) or 1)
     lines = [{"ok": "Giọng lồng vừa thời gian nhân vật nói",

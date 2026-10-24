@@ -1923,7 +1923,9 @@ def test_target_language_detect_and_translate(monkeypatch):
     def fake_post(url, params=None, **kw):
         sent.update(params or {})
         return R()
-    monkeypatch.setattr(translate.requests, "post", fake_post)
+    from trami import net
+
+    monkeypatch.setattr(net, "session", lambda: type("S", (), {"post": staticmethod(fake_post)})())
     tr = translate.Translator({"translate_engine": "google"}, target="ja")
     assert tr._gl() == ("zh-CN", "ja") and tr._gtx("你好") == "Hello" and sent["tl"] == "ja" and sent["sl"] == "zh-CN"
     # dự án: đổi tiếng đích -> dịch lại mọi câu (kể cả câu đã có bản tiếng Việt), thuật ngữ theo tiếng
@@ -2688,7 +2690,7 @@ def test_subs_tab_ticks_and_translate_options(monkeypatch):
     t = pp.table
     assert not t.isColumnHidden(C_SEL) and t.horizontalHeader().visualIndex(C_SEL) == 0
     assert all(t.isColumnHidden(c) for c in (C_SONG, C_NODUB, C_FIT))
-    assert not pp.dub_table.isColumnHidden(C_SONG)                       # 🎵 chuyển sang bảng câu tab Lồng tiếng
+    assert pp.dub_table.isColumnHidden(C_SONG) and pp.dub_table.isColumnHidden(C_NODUB)   # 2.0.59: đổi bằng nút
     # ô cách dịch ở tab Phụ đề <-> tab Tự động <-> Cài đặt
     set_combo(pp.s_engine, "deepseek")
     assert pp.a_engine.currentData() == "deepseek" and config.load_settings()["translate_engine"] == "deepseek"
@@ -2876,7 +2878,7 @@ def test_apply_translation_different_line_count():
     cues += [Segment(4.0, 4.7, "Câu 2a"), Segment(4.8, 5.5, "câu 2b"), Segment(25, 26, "Thêm mới")]
     st = {}
     pipeline.apply_translation(segs, cues, st)
-    assert len(segs) == 11 and st == {"merged": 0, "joined": 1, "added": 1}
+    assert len(segs) == 11 and st == {"merged": 0, "joined": 1, "added": 1, "songs": 0}
     assert segs[2].trans == "Câu 2a câu 2b" and (segs[-1].text, segs[-1].trans) == ("", "Thêm mới")
     # câu dịch chỉ chạm nhẹ câu bên cạnh (< 30 %) -> không gộp nhầm
     segs = [Segment(0, 2, "你好", ""), Segment(2.1, 4, "再见", "")]
@@ -2919,4 +2921,304 @@ def test_join_keeps_or_translates_new_lines(monkeypatch):
     segs = p.segments
     assert [s.text for s in segs] == ["那是当然，我可是最强AI。", "你先别最强了，已经有十份鹈鹕自行车等着你生成。"]
     assert all(s.trans.startswith("VI ") for s in segs) and "đã dịch 2 câu mới" in jobs[0]["message"]
+    win.close()
+
+
+
+# ------------------------------------------------------------------ 2.0.59: mất mạng / lag, câu cảm thán, bài hát
+
+def test_net_error_kinds_wait_and_cancel(monkeypatch):
+    """Nhận ra lỗi mạng; mất mạng -> chờ có mạng rồi trả True; mạng vẫn có -> False; quá lâu -> NetworkDown; Huỷ ->
+    dừng ngay (cả khi đang chờ mạng trả lời)."""
+    import socket
+    import time as _t
+
+    import requests
+
+    from trami import net
+
+    assert net.is_net_error(requests.ConnectionError("Max retries exceeded … getaddrinfo failed"))
+    assert net.is_net_error(requests.ReadTimeout("Read timed out"))
+    assert net.is_net_error(socket.gaierror(11001, "getaddrinfo failed"))
+    assert net.is_net_error(ConnectionResetError(10054, "forcibly closed"))
+    assert not net.is_net_error(ConnectionRefusedError(10061, "refused"))           # Ollama chưa bật: không phải mạng
+    assert not net.is_net_error(requests.ConnectionError("HTTPConnectionPool(host='localhost', port=11434)"))
+    assert not net.is_net_error(ValueError("API key sai"))
+    assert not net.is_net_error(ff.Cancelled())
+    monkeypatch.setattr(net, "CHECK_EVERY", 0.05)
+    seq = iter([False, False, False, True])
+    monkeypatch.setattr(net, "online", lambda hosts=(), timeout=3.0: next(seq))
+    msgs = []
+    assert net.wait_online("dịch", report=msgs.append) is True
+    assert any("Mất mạng" in m for m in msgs) and "có mạng lại" in msgs[-1]
+    monkeypatch.setattr(net, "online", lambda hosts=(), timeout=3.0: True)
+    assert net.wait_online("dịch") is False                                         # mạng vẫn có: máy chủ lỗi
+    monkeypatch.setattr(net, "online", lambda hosts=(), timeout=3.0: False)
+    with pytest.raises(net.NetworkDown):
+        net.wait_online("dịch", max_wait=0.2, report=lambda m: None)
+    flag = {"c": False}
+    with pytest.raises(ff.Cancelled):
+        with net.task(lambda: flag["c"], None):
+            import threading
+
+            threading.Timer(0.2, lambda: flag.update(c=True)).start()
+            net.wait_online("dịch", max_wait=30)
+    t0 = _t.time()
+    with pytest.raises(ff.Cancelled):
+        net.call(lambda: _t.sleep(5), cancel=lambda: _t.time() - t0 > 0.3)        # mạng đứng: Huỷ không phải đợi
+    assert _t.time() - t0 < 2
+
+
+def test_llm_waits_for_network_instead_of_failing(monkeypatch):
+    """Rớt mạng giữa lúc dịch AI: chờ có mạng rồi gửi lại lô đó (không tính là lần hỏng, không báo lỗi)."""
+    import requests
+
+    from trami import net, translate
+
+    monkeypatch.setattr(net, "CHECK_EVERY", 0.01)
+    state = {"n": 0, "online": iter([False, True, False, True, False, True])}
+    monkeypatch.setattr(net, "online", lambda hosts=(), timeout=3.0: next(state["online"]))
+
+    class R:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": '{"1": "Xin chào"}'}}]}
+
+    class Sess:
+        def post(self, *a, **k):
+            state["n"] += 1
+            if state["n"] <= 3:
+                raise requests.ConnectionError("Max retries exceeded: getaddrinfo failed")
+            return R()
+
+    monkeypatch.setattr(net, "session", lambda: Sess())
+    monkeypatch.setattr(net, "sleep", lambda s, c=None: None)
+    c = translate.LLMClient({"deepseek_api_key": "x"}, "deepseek")
+    assert c.chat("sys", "user") == '{"1": "Xin chào"}' and state["n"] == 4
+    # mạng vẫn có mà máy chủ không trả lời -> 4 lần rồi báo lỗi rõ
+    state["n"] = -100
+    monkeypatch.setattr(net, "online", lambda hosts=(), timeout=3.0: True)
+    with pytest.raises(translate.ApiError, match="chập chờn"):
+        c.chat("sys", "user")
+
+
+def test_edge_tts_network_drop_no_truncated_files(monkeypatch, tmp_path):
+    """Edge: rớt mạng giữa câu -> chờ có mạng rồi đọc lại; file dở không bị coi là đã đọc xong; Huỷ dừng ngay."""
+    import asyncio
+    import time as _t
+    import types
+
+    from trami import net, tts
+
+    monkeypatch.setattr(net, "CHECK_EVERY", 0.01)
+    on = {"v": False, "fails": 0, "checks": 0}
+
+    def online(hosts=(), timeout=3.0):
+        on["checks"] += 1
+        if on["checks"] >= 3 and on["fails"] < 9:
+            on["v"] = True                                       # kiểm tra lần 3: có mạng lại
+        return on["v"]
+    monkeypatch.setattr(net, "online", online)
+
+    class Comm:
+        def __init__(self, text, voice, **k):
+            self.text = text
+
+        async def save(self, path):
+            Path(path).write_bytes(b"ID3partial")          # ghi được 1 phần rồi rớt mạng
+            if not on["v"]:
+                on["fails"] += 1
+                raise ConnectionResetError(10054, "Cannot connect to host speech.platform.bing.com")
+            if self.text == "treo":
+                await asyncio.sleep(30)
+            Path(path).write_bytes(b"ID3" + self.text.encode() * 50)
+
+    monkeypatch.setitem(sys.modules, "edge_tts", types.SimpleNamespace(Communicate=Comm))
+    items = [(i, f"câu {i}", tmp_path / f"t{i}.mp3", "vi-VN-HoaiMyNeural") for i in range(5)]
+    msgs = []
+    errs = asyncio.run(tts._edge_all(items, "+0%", "+0Hz", lambda x, m: msgs.append(m), None, 5, 0))
+    assert errs == [] and all((tmp_path / f"t{i}.mp3").read_bytes().startswith(b"ID3c") for i in range(5))
+    assert not list(tmp_path.glob("*.part.mp3")) and any("Mất mạng" in m for m in msgs)
+    # mất mạng quá lâu: câu chưa đọc không để lại file cụt, báo NetworkDown
+    on.update(v=False, fails=99)                                 # không bao giờ có mạng lại
+    monkeypatch.setattr(net, "NET_WAIT", 0.1)
+    monkeypatch.setattr(net, "NET_WAIT_QUICK", 0.1)
+    items2 = [(0, "mới", tmp_path / "n0.mp3", "v")]
+    with pytest.raises(net.NetworkDown):
+        asyncio.run(tts._edge_all(items2, "+0%", "+0Hz", None, None, 1, 0))
+    assert not (tmp_path / "n0.mp3").exists()
+    # bấm Huỷ giữa câu đang chờ mạng trả lời
+    on.update(v=True)
+    t0 = _t.time()
+    with pytest.raises(ff.Cancelled):
+        asyncio.run(tts._edge_all([(0, "treo", tmp_path / "h.mp3", "v")], "+0%", "+0Hz", None,
+                                  lambda: _t.time() - t0 > 0.3, 1, 0))
+    assert _t.time() - t0 < 3
+
+
+def test_worker_read_cancel_and_stall(tmp_path):
+    """Tiến trình đọc giọng bị treo: Huỷ dừng được (tắt tiến trình sau 3 s), quá giờ -> WorkerStuck rồi mở lại."""
+    import time as _t
+
+    from trami import tts
+
+    script = tmp_path / "w.py"
+    script.write_text("import sys, time, json\n"
+                      "print('@@TRAMI@@' + json.dumps({'ready': True, 'sr': 24000}), flush=True)\n"
+                      "for line in sys.stdin:\n"
+                      "    req = json.loads(line)\n"
+                      "    if req['text'] == 'treo':\n"
+                      "        time.sleep(60)\n"
+                      "    print('@@TRAMI@@' + json.dumps({'ok': True}), flush=True)\n", encoding="utf-8")
+
+    class W(tts.VieneuWorker):
+        title = "Thử"
+        stall_call = 1.0
+
+        def _cmd(self):
+            return [sys.executable, str(script)]
+
+    w = W("x")
+    w.ensure_started()
+    assert w.sr == 24000
+    assert w.synth("được", tmp_path / "a.wav") == tmp_path / "a.wav"
+    with pytest.raises(RuntimeError, match="không phản hồi"):     # treo -> mở lại 1 lần -> vẫn treo -> báo lỗi
+        w.synth("treo", tmp_path / "b.wav")
+    assert w.synth("được", tmp_path / "c.wav")                   # tiến trình mới chạy tiếp được
+    w.stall_call = 60
+    t0 = _t.time()
+    from trami import net
+
+    with net.task(lambda: _t.time() - t0 > 0.3, None):
+        with pytest.raises(ff.Cancelled):
+            w.synth("treo", tmp_path / "d.wav")
+    assert _t.time() - t0 < 6 and w.proc is None
+    w.stop()
+
+
+def test_lone_interjections_dropped_before_dub():
+    """Câu CHỈ có 1–2 tiếng cảm thán bị xoá trước khi lồng tiếng Việt; câu có lời thật giữ nguyên; khôi phục được."""
+    from trami import pipeline
+    from trami.project import Project
+    from trami.voicefix import lone_interjection
+
+    for t in ("A!", "Ừm.", "Ái!", "Hả?", "Ha ha!", "Ồ…", "Ối!", "Hừ!", '"Ừm"'):
+        assert lone_interjection(t), t
+    for t in ("Ừm, đúng là như vậy.", "A Lan", "Ai?", "Vâng.", "Đi!", "Ừm ừm ừm", "Ơi!", "Ồ, 3 cái"):
+        assert not lone_interjection(t), t
+    p = Project.create("cam_than")
+    p.segments = [Segment(0, 1, "啊", "A!"), Segment(1, 3, "嗯，是这样", "Ừm, đúng là như vậy."),
+                  Segment(3, 4, "嗯", "Ừm."), Segment(5, 7, "走吧", "Đi thôi.")]
+    p.save()
+    assert pipeline.drop_interjections(p) == 2
+    assert [s.trans for s in p.segments] == ["Ừm, đúng là như vậy.", "Đi thôi."]
+    assert pipeline.restore_interjections(p) == 2
+    segs = p.segments
+    assert [s.trans for s in segs] == ["A!", "Ừm, đúng là như vậy.", "Ừm.", "Đi thôi."]
+    assert pipeline.drop_interjections(p) == 0                   # đã khôi phục: không xoá lại
+    # câu chưa có giọng trong bản lồng
+    segs[1].extra["dub_at"] = [1, 2]
+    segs[3].extra["song"] = True
+    assert pipeline.undubbed_rows(segs) == [0, 2]
+    assert pipeline.undubbed_rows(segs, skip_songs=False) == [0, 2, 3]
+
+
+def test_song_marks_from_translation_and_pitch():
+    """♪ trong bản dịch (file SRT dịch ngoài / AI) -> 🎵; giọng HÁT (nốt ngân) thành cụm -> 🎵, lời nói không."""
+    from trami import pipeline, songs
+
+    segs = [Segment(0, 2, "我要看你", ""), Segment(2, 4, "你好", "")]
+    cues = [Segment(0, 2, "♪ Anh muốn nhìn em ♪"), Segment(2, 4, "Xin chào")]   # SRT dịch: lời ở .text
+    stats: dict = {}
+    pipeline.apply_translation(segs, cues, stats)
+    assert segs[0].extra.get("song") and not segs[1].extra.get("song") and stats["songs"] == 1
+    segs[0].extra.pop("song")
+    segs[0].extra["not_song"] = True                             # người dùng đã bỏ 🎵: không tự đánh dấu lại
+    assert pipeline.mark_song_lines(segs) == 0
+    sr = 16000
+    rng = np.random.default_rng(0)
+
+    def tone(f0s, durs, vib=0.0):
+        out = []
+        for f, d in zip(f0s, durs):
+            t = np.arange(int(d * sr)) / sr
+            ph = 2 * np.pi * np.cumsum(f * (1 + vib * np.sin(2 * np.pi * 5.5 * t)) if np.ndim(f) == 0 else f) / sr
+            out.append(sum(np.sin(k * ph) / k for k in range(1, 6)) * 0.3)
+        return np.concatenate(out)
+
+    def sung(n=8):        # nốt ngân 0,5 s có rung giọng, cách nhau 0,1 s
+        notes = rng.choice([220, 247, 262, 294, 330], n)
+        return np.concatenate([np.concatenate([tone([f], [0.5], 0.02), np.zeros(int(0.1 * sr))]) for f in notes])
+
+    def spoken(n=14):     # tiếng ngắn 0,15 s, cao độ trượt, nghỉ phụ âm
+        parts = []
+        for _ in range(n):
+            t = np.arange(int(0.15 * sr)) / sr
+            f = np.linspace(rng.uniform(150, 260), rng.uniform(120, 220), len(t))
+            parts += [tone([0], [0])[:0], np.sin(2 * np.pi * np.cumsum(f) / sr) * 0.3,
+                      rng.normal(0, 0.02, int(0.08 * sr))]
+        return np.concatenate(parts)
+
+    a = sung()
+    assert songs.note_share(a) > 0.6 and songs.note_share(spoken()) < 0.2
+    # phim: 3 câu nói, 6 câu hát liền nhau (≈ 21 s), 1 câu nói kéo dài lẻ, 3 câu nói
+    lines, audio, t = [], [], 0.0
+    for kind in ["s", "s", "s"] + ["h"] * 6 + ["s", "x", "s", "s"]:
+        clip = sung() if kind == "h" else spoken() if kind == "s" else tone([200], [1.2], 0.01)
+        lines.append(Segment(t, t + len(clip) / sr, "你好"))
+        audio += [clip, np.zeros(int(0.5 * sr))]
+        t += len(clip) / sr + 0.5
+    pcm = (np.concatenate(audio) * 32767).astype(np.int16)
+    got = songs.guess_song_lines(lines, pcm)
+    assert got == list(range(3, 9))                               # đúng 6 câu hát, câu kêu kéo dài lẻ (9…) không
+
+
+def test_dub_tab_flags_undubbed_and_srt_row(monkeypatch):
+    """Tab Lồng tiếng: bỏ cột 🎵 / Bỏ lồng (đổi bằng nút cho câu đã tích), Tích câu chưa lồng, ghi rõ giọng lấy từ
+    đâu, khôi phục câu cảm thán; hàng xuất / nạp SRT chuyển sang tab Phụ đề."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        pytest.skip(str(e))
+    from trami import pipeline
+    from trami.gui.main import MainWindow
+    from trami.gui.subs_model import C_NODUB, C_SONG, fit_text
+    from trami.project import Project
+
+    QApplication.instance() or QApplication([])
+    p = Project.create("tab_long_tieng")
+    segs = [Segment(2 * i, 2 * i + 1.5, f"句{i}", f"Câu {i}") for i in range(4)]
+    segs[0].extra["dub_at"] = [0, 1.4]
+    segs[2].extra["dub_at"] = [4, 5.4]
+    p.segments = segs
+    p.data["interj_removed"] = [Segment(7.6, 7.9, "啊", "A!").to_dict()]
+    p.save()
+    win = MainWindow()
+    win.open_project(p.id)
+    pp, m = win.project_page, win.project_page.model
+    assert pp.dub_table.isColumnHidden(C_SONG) and pp.dub_table.isColumnHidden(C_NODUB)
+    assert pp.s_srt_trans.text() == "Xuất SRT đã dịch"                      # hàng SRT ở tab Phụ đề
+    assert pp.d_voice_note.text().startswith("Giọng đọc – bộ đọc:")
+    toasts, jobs = [], []
+    monkeypatch.setattr(win, "toast", lambda msg, kind="info", *a, **k: toasts.append(msg))
+    monkeypatch.setattr(pipeline, "has_dub", lambda p: True)
+    pp.submit = lambda kind, title, fn: jobs.append((kind, title))
+    pp._pick_undubbed()
+    assert m.selected == {1, 3} and "2 câu chưa có giọng" in toasts[-1]
+    m.set_picked(range(4), False)
+    m.set_picked([1])
+    pp._toggle_flag("song")
+    assert m.segs[1].extra.get("song") and jobs[-1][0] == "redub" and fit_text(m.segs[1]) == "🎵 bài hát"
+    pp._toggle_flag("song")
+    assert not m.segs[1].extra.get("song") and m.segs[1].extra.get("not_song")
+    pp._toggle_flag("nodub")
+    assert m.segs[1].extra.get("nodub") and fit_text(m.segs[1]) == "bỏ lồng"
+    pp._restore_interj()
+    assert [s.trans for s in pp.model.segs] == ["Câu 0", "Câu 1", "Câu 2", "Câu 3", "A!"]
+    assert pp.model.segs[-1].extra.get("keep_interj")
     win.close()
