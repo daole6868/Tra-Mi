@@ -521,11 +521,17 @@ class VieneuWorker:
         self.fused = "1"      # CUDA graph của VieNeu (nhanh); tắt nếu GPU báo lỗi chụp graph
         self._q: queue.Queue = queue.Queue()   # dòng stdout của tiến trình (luồng _pump đọc)
         self.last_used = time.time()           # gpu.reap_idle: để không lâu thì tắt, trả bộ nhớ card
+        self._times: list[float] = []          # giây / chữ của các câu gần đây -> biết câu nào chậm bất thường
+        self.note = ""                         # vừa phải mở lại bộ đọc vì chậm bất thường (báo lên dòng tiến độ)
+        self.vram_free = None                  # phần card đồ hoạ còn trống (tiến trình báo sau mỗi câu)
 
     flag = "--vieneu-worker"
     log_name = "vieneu.txt"
     stall_start = 900.0   # nạp / tải mô hình mà 15 phút không có tin gì -> coi là treo
     stall_call = 300.0    # 1 câu đọc quá 5 phút -> treo (GPU kẹt…) -> tắt, mở lại tiến trình
+    stall_min = 60.0      # đã biết tốc độ thường (vài câu đầu): chờ 25 × thời gian 1 câu, ít nhất 60 s
+    SLOW, SLOW_MIN = 8.0, 20.0   # câu đọc lâu gấp 8 lần bình thường (và > 20 s): card đầy -> Windows lấy RAM thay ->
+    # mọi câu sau cũng chậm như treo (GPU vẫn 98 %) -> mở lại tiến trình (trả sạch bộ nhớ card) trước câu sau
 
     def _extra_env(self) -> dict:
         return {}
@@ -569,21 +575,25 @@ class VieneuWorker:
             pass
         q.put(None)
 
-    def _read(self, progress=None, cancel=None, stall: float | None = None) -> dict:
+    def _read(self, progress=None, cancel=None, stall: float | None = None, on_wait=None) -> dict:
         """Chờ 1 câu trả lời của tiến trình. Bấm Huỷ: chờ thêm 3 s cho xong câu đang làm (tiến trình còn dùng tiếp),
-        quá thì tắt hẳn. Không nhận được gì quá `stall` giây -> tiến trình bị treo -> tắt + WorkerStuck."""
+        quá thì tắt hẳn. Không nhận được gì quá `stall` giây -> tiến trình bị treo -> tắt + WorkerStuck.
+        on_wait(giây đã chờ): gọi mỗi 5 s khi câu đọc lâu hơn 10 s (dòng tiến độ không đứng im như treo)."""
         from . import net
 
         assert self.proc
         cancel = cancel or net.current()[0]
         q = self._q
-        last = time.time()
+        last = t0 = beat = time.time()
         grace = None
         while True:
             try:
                 line = q.get(timeout=0.2)
             except queue.Empty:
                 now = time.time()
+                if on_wait and now - t0 > 10 and now - beat >= 5:
+                    beat = now
+                    on_wait(now - t0)
                 if grace is None and cancel and cancel():
                     grace = now + 3.0
                 if grace is not None and now > grace:
@@ -591,7 +601,8 @@ class VieneuWorker:
                     raise Cancelled() from None
                 if stall and now - last > stall:
                     self.kill()
-                    raise WorkerStuck(f"Tiến trình {self.title} không phản hồi quá {round(stall / 60)} phút "
+                    took = f"{stall:.0f} giây" if stall < 120 else f"{round(stall / 60)} phút"
+                    raise WorkerStuck(f"Tiến trình {self.title} không phản hồi quá {took} "
                                       "(bị treo) – đã tắt để mở lại") from None
                 continue
             if line is None:
@@ -626,7 +637,8 @@ class VieneuWorker:
 
     def synth(self, text: str, out: str | Path, voice: str | None = None, ref_audio: str | None = None,
               ref_text: str | None = None, duration: float | None = None, params: dict | None = None,
-              seed: int | None = None, instruct: str | None = None, language: str | None = None) -> Path:
+              seed: int | None = None, instruct: str | None = None, language: str | None = None,
+              on_wait=None) -> Path:
         req = {"text": text, "out": str(out), "voice": voice, "ref_audio": ref_audio, "ref_text": ref_text or "",
                "duration": duration, "params": params or {}, "seed": seed, "instruct": instruct}
         if language and language != "vi":   # OmniVoice đọc tiếng khác (VieNeu chỉ đọc tiếng Việt)
@@ -638,9 +650,10 @@ class VieneuWorker:
                     if not self.proc or self.proc.poll() is not None:
                         self._start()
                     assert self.proc and self.proc.stdin
+                    t0 = time.time()
                     self.proc.stdin.write(req + "\n")
                     self.proc.stdin.flush()
-                    r = self._read(stall=self.stall_call)
+                    r = self._read(stall=self._stall_for(text), on_wait=on_wait)
                 except (OSError, RuntimeError) as e:
                     self.stop()
                     if attempt == 0:
@@ -653,8 +666,31 @@ class VieneuWorker:
                         continue
                     raise RuntimeError(r["error"])
                 self.last_used = time.time()
+                self._timed(time.time() - t0, r, len(text))
                 return Path(out)
         raise RuntimeError(f"{self.title} không đọc được câu này")
+
+    def _typical(self, chars: int) -> float:
+        """Thời gian đọc bình thường của 1 câu `chars` chữ (theo trung vị giây / chữ của 20 câu gần nhất);
+        chưa đủ 5 câu -> 0 (chưa biết)."""
+        t = sorted(self._times[-20:])
+        return t[len(t) // 2] * max(chars, 10) if len(t) >= 5 else 0.0
+
+    def _stall_for(self, text: str) -> float:
+        typ = self._typical(len(text))
+        return min(self.stall_call, max(self.stall_min, 25 * typ)) if typ else self.stall_call
+
+    def _timed(self, dt: float, reply: dict, chars: int) -> None:
+        """Ghi tốc độ câu vừa đọc. Chậm bất thường -> tắt tiến trình, câu sau mở lại với card sạch."""
+        self.vram_free = reply.get("vram_free", self.vram_free)
+        typ = self._typical(chars)
+        if typ and dt > max(self.SLOW_MIN, self.SLOW * typ):
+            free = f", card còn trống {self.vram_free:.0%}" if isinstance(self.vram_free, (int, float)) else ""
+            self.note = (f"{self.title} đọc 1 câu mất {dt:.0f} s (thường {typ:.1f} s{free}) – card đồ hoạ có thể đã "
+                         "đầy, đã mở lại bộ đọc")
+            self.stop()
+            return    # không tính câu chậm vào tốc độ thường
+        self._times = (self._times + [dt / max(chars, 10)])[-40:]
 
     def stop(self):
         p, self.proc = self.proc, None
@@ -693,6 +729,7 @@ class OmniWorker(VieneuWorker):
     """Tiến trình riêng chạy OmniVoice (trami/omni_worker.py); mode = tên mô hình trên HuggingFace."""
     title = "OmniVoice"
     stall_call = 600.0    # chạy CPU chậm hơn VieNeu
+    stall_min = 120.0
     flag = "--omni-worker"
     log_name = "omnivoice.txt"
 
@@ -728,7 +765,7 @@ def _omni(settings: dict | None = None) -> OmniWorker:
         return _omni_model
 
 
-def synth_checked(worker: VieneuWorker, text: str, out: Path, **kw) -> Path:
+def synth_checked(worker: VieneuWorker, text: str, out: Path, **kw) -> Path:  # kw: voice, ref_audio, params, on_wait…
     """Đọc 1 câu rồi kiểm tra file giọng: im lặng / tiếng bíp / tiếng ù -> đọc lại 1 lần (hạt ngẫu nhiên khác).
     Vẫn hỏng thì báo lỗi (câu đó không được ghép vào bản lồng tiếng)."""
     why = None
@@ -746,7 +783,7 @@ def synth_checked(worker: VieneuWorker, text: str, out: Path, **kw) -> Path:
 
 
 def trend_synth(worker: VieneuWorker, spec: str, text: str, out: Path, params: dict,
-                presets: list[dict] | None = None) -> Path:
+                presets: list[dict] | None = None, on_wait=None) -> Path:
     """Giọng VieNeu theo trend: đọc bằng giọng gốc + kiểu đọc của nó (đã qua kiểm tra giọng hỏng) rồi áp hiệu ứng.
     Ghi 24 kHz (bản lồng tiếng trộn ở 24 kHz; hiệu ứng chạy nhanh gấp đôi so với 48 kHz của VieNeu)."""
     from . import trend_voices
@@ -755,7 +792,7 @@ def trend_synth(worker: VieneuWorker, spec: str, text: str, out: Path, params: d
     if not trend_voices.get(spec):
         raise ValueError("Giọng trend này không còn trong bản Subvideo đang dùng")
     synth_checked(worker, text, out, voice=trend_voices.base_voice(spec, presets) or None,
-                  params=trend_voices.params(spec, params))
+                  params=trend_voices.params(spec, params), on_wait=on_wait)
     try:
         a, sr = read_wav(out)
     except (OSError, EOFError, wave.Error):
@@ -1155,6 +1192,12 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             if n and n % DUB_BATCH == 0:   # mỗi 1000 câu mở lại tiến trình đọc (trả bộ nhớ GPU, tránh chậm dần / treo)
                 tts.stop()
                 tts.ensure_started(None, cancel)
+            base_p = n / max(1, total_items) * 0.8
+
+            def waiting(sec, n=n, base_p=base_p):   # câu đọc lâu: dòng tiến độ đếm giây, không đứng im như treo
+                if progress:
+                    progress(base_p, f"VieNeu đang đọc {n + 1}/{total_items} – câu này đã {sec:.0f} s "
+                                     "(thường chỉ vài giây)")
             try:
                 tmp = p.with_suffix(".raw.wav")
                 if spec.startswith("clone:"):
@@ -1162,13 +1205,14 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                     if spk not in refs:
                         refs[spk] = build_reference(ref_audio, segs, spk, work / f"ref_{spk}.wav") if ref_audio else None
                     # không đủ mẫu giọng -> dùng giọng mặc định
-                    synth_checked(tts, text, tmp, ref_audio=str(refs[spk]) if refs[spk] else None, params=vn_params)
+                    synth_checked(tts, text, tmp, ref_audio=str(refs[spk]) if refs[spk] else None, params=vn_params,
+                                  on_wait=waiting)
                 elif spec.startswith((VN_SAMPLE, VN_LIB)):
-                    synth_checked(tts, text, tmp, ref_audio=vieneu_ref(spec), params=vn_params)
+                    synth_checked(tts, text, tmp, ref_audio=vieneu_ref(spec), params=vn_params, on_wait=waiting)
                 elif spec.startswith(VN_TREND):
-                    trend_synth(tts, spec, text, tmp, vn_params, vn_presets)
+                    trend_synth(tts, spec, text, tmp, vn_params, vn_presets, on_wait=waiting)
                 else:
-                    synth_checked(tts, text, tmp, voice=spec[7:] or None, params=vn_params)
+                    synth_checked(tts, text, tmp, voice=spec[7:] or None, params=vn_params, on_wait=waiting)
                 sr = read_wav_rate(tmp) or tts.sr
                 if abs(speed - 1) > 0.01:
                     a = _decode(tmp, speed, sr)
@@ -1181,7 +1225,12 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             except Exception as e:
                 errors.append(f"Câu {i + 1}: {e}")
             if progress:
-                progress((n + 1) / max(1, total_items) * 0.8, f"VieNeu đang đọc {n + 1}/{total_items}")
+                msg = f"VieNeu đang đọc {n + 1}/{total_items}"
+                if tts.note:    # vừa mở lại bộ đọc vì 1 câu chậm bất thường
+                    stats["slow_restarts"] = stats.get("slow_restarts", 0) + 1
+                    msg += " · " + tts.note
+                    tts.note = ""
+                progress((n + 1) / max(1, total_items) * 0.8, msg)
 
     orefs: dict[tuple, tuple] = {}
 
@@ -1224,7 +1273,10 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             try:
                 ref, rtext = omni_ref(spec, lg)
                 tmp = p.with_suffix(".raw.wav")
-                synth_checked(om, text, tmp, ref_audio=ref, ref_text=rtext, language=lg)
+                synth_checked(om, text, tmp, ref_audio=ref, ref_text=rtext, language=lg,
+                              on_wait=lambda sec, n=n: progress and progress(
+                                  (base + n) / max(1, total_items) * 0.8,
+                                  f"OmniVoice đang đọc {n + 1}/{len(omni_items)} – câu này đã {sec:.0f} s"))
                 sr = om.sr
                 if abs(speed - 1) > 0.01:
                     write_wav(p, _decode(tmp, speed, sr), sr)
@@ -1236,7 +1288,12 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             except Exception as e:
                 errors.append(f"Câu {i + 1}: {e}")
             if progress:
-                progress((base + n + 1) / max(1, total_items) * 0.8, f"OmniVoice đang đọc {n + 1}/{len(omni_items)}")
+                msg = f"OmniVoice đang đọc {n + 1}/{len(omni_items)}"
+                if om.note:
+                    stats["slow_restarts"] = stats.get("slow_restarts", 0) + 1
+                    msg += " · " + om.note
+                    om.note = ""
+                progress((base + n + 1) / max(1, total_items) * 0.8, msg)
 
     # --- Edge (online)
     if edge_items:

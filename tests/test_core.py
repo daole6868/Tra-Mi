@@ -3841,3 +3841,118 @@ def test_jobs_sequential_by_default_and_qwen_batches(monkeypatch):
     assert sorted(k for x in bs for k in x) == list(range(len(lens)))
     assert all(max(lens[k] for k in x) * len(x) <= budget or len(x) == 1 for x in bs)
     assert vram_plan(24 * 1024 ** 3) == (224.0, False)
+
+
+def test_vieneu_slow_card_restarts_and_heartbeat(tmp_path, monkeypatch):
+    """VieNeu chậm dần như card đầy (Windows lấy RAM thay, GPU vẫn 98 %): câu chậm bất thường -> mở lại bộ đọc trước câu
+    sau; câu đang đọc lâu -> dòng tiến độ đếm giây; bộ đọc treo hẳn -> thời gian chờ theo tốc độ thật, không đợi 5 phút."""
+    import queue
+    import textwrap
+    import time
+
+    from trami import tts
+
+    script = tmp_path / "fakevn.py"
+    script.write_text(textwrap.dedent("""
+        import json, sys, time
+        M = "@@TRAMI@@"
+        print(M + json.dumps({"ready": True, "sr": 24000}), flush=True)
+        for line in sys.stdin:
+            req = json.loads(line)
+            t = req["text"]
+            time.sleep(1.6 if "slow" in t else 30 if "hang" in t else 0.02)
+            print(M + json.dumps({"ok": True, "sr": 24000, "vram_free": 0.03}), flush=True)
+    """), "utf-8")
+    starts = []
+
+    class W(tts.VieneuWorker):
+        stall_min, SLOW_MIN = 3.0, 1.0       # ngưỡng thật 60 s / 20 s – hạ cho test chạy nhanh
+
+        def _cmd(self):
+            starts.append(1)
+            return [sys.executable, str(script)]
+    w = W("v3turbo")
+    for k in range(6):                       # tốc độ thường ~0,02 s / câu
+        w.synth(f"normal line {k}", tmp_path / "a.wav")
+    assert len(starts) == 1 and 0 < w._typical(20) < 0.5 and w._stall_for("x" * 20) == 3.0
+    w.synth("slow line", tmp_path / "a.wav")
+    assert "mở lại bộ đọc" in w.note and "3%" in w.note and w.proc is None   # câu chậm -> đã tắt tiến trình
+    w.synth("normal again", tmp_path / "a.wav")
+    assert len(starts) == 2                  # câu sau mở lại tiến trình (card sạch)
+    t0 = time.time()
+    with pytest.raises(RuntimeError, match="3 giây"):   # treo hẳn: chờ 3 s (không phải 5 phút), mở lại, đọc lại 1 lần
+        w.synth("hang line", tmp_path / "a.wav")
+    assert time.time() - t0 < 15 and len(starts) == 3
+    w.stop()
+    # câu đọc lâu: on_wait được gọi khi đã chờ > 10 s (đồng hồ giả)
+    w4 = W("v3turbo")
+    w4.proc = type("P", (), {"poll": lambda self: None})()
+    w4._q = queue.Queue()
+    now = [1000.0]
+    monkeypatch.setattr(tts.time, "time", lambda: now[0])
+
+    def get(timeout=0.2):
+        if now[0] < 1030:
+            now[0] += 6
+            raise queue.Empty
+        return '@@TRAMI@@{"ok": true}\n'
+    w4._q.get = get
+    beats: list = []
+    assert w4._read(stall=100, on_wait=beats.append) == {"ok": True}
+    assert beats and beats[0] >= 10
+
+
+def test_vieneu_worker_vram_guard(monkeypatch):
+    """Tiến trình VieNeu: card còn trống < 15 % -> bỏ các đồ thị CUDA đã chụp + trả bộ nhớ đệm; card 8 GB -> đọc từng
+    đoạn một (batch 1)."""
+    import types
+
+    from trami import vieneu_worker as vw
+
+    state = {"free": 0.5 * 2 ** 30, "emptied": 0}
+    cuda = types.SimpleNamespace(
+        is_available=lambda: True, mem_get_info=lambda: (state["free"], 8 * 2 ** 30),
+        synchronize=lambda: None,
+        empty_cache=lambda: (state.__setitem__("emptied", state["emptied"] + 1),
+                             state.__setitem__("free", 3 * 2 ** 30)),
+        get_device_properties=lambda i: types.SimpleNamespace(total_memory=8 * 2 ** 30))
+    monkeypatch.setitem(sys.modules, "torch", types.SimpleNamespace(cuda=cuda))
+    eng = types.SimpleNamespace(_fused={(1, 512): 1, (4, 1024): 2, (8, 1024): 3}, _graphs={(1,): 1})
+    tts_obj = types.SimpleNamespace(_batch_engine=eng)
+    assert vw._small_card()
+    out = vw._vram_guard(tts_obj)
+    assert out["freed_graphs"] == 4 and not eng._fused and not eng._graphs and state["emptied"] == 1
+    assert out["vram_free"] == 0.375
+    eng._fused[(1, 512)] = 1
+    assert vw._vram_guard(tts_obj) == {"vram_free": 0.375} and eng._fused   # còn nhiều chỗ: giữ đồ thị (nhanh)
+
+
+def test_redub_resumes_after_cancel(monkeypatch):
+    """Huỷ "Tạo lại giọng" giữa chừng rồi bấm lại: không đánh lần đọc mới lần nữa -> câu đã đọc xong được dùng lại;
+    chạy xong rồi bấm lại mới là lần đọc mới."""
+    from trami import pipeline
+    from trami.ffmpeg import Cancelled
+    from trami.project import Project
+
+    p = Project.create("redub-resume")
+    p.segments = [Segment(i, i + 0.8, f"句{i}", f"Câu {i}") for i in range(4)]
+    p.save()
+    calls = {"n": 0}
+
+    def fake_dub(p, *a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise Cancelled()
+        return Path("dub.wav")
+    monkeypatch.setattr(pipeline, "dub", fake_dub)
+    with pytest.raises(Cancelled):
+        pipeline.redub(p, [0, 1, 2])
+    q = Project(p.id)
+    assert [s.extra.get("take") for s in q.segments] == [1, 1, 1, None]
+    pipeline.redub(q, [0, 1, 2])                 # bấm lại sau khi huỷ: vẫn lần đọc 1 (dùng lại file đã đọc)
+    q = Project(q.id)
+    assert [s.extra.get("take") for s in q.segments] == [1, 1, 1, None]
+    assert not any(s.extra.get("take_pending") for s in q.segments)
+    pipeline.redub(q, [1])                       # đã xong -> bấm lại = lần đọc mới
+    assert [s.extra.get("take") for s in Project(q.id).segments] == [1, 2, 1, None]
+    p.delete()

@@ -86,7 +86,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (122 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (125 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1032,6 +1032,27 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Cấu trúc). Đã thử đóng gói lõi bằng PyInstaller 6.22 trên Linux (không có torch): giao diện mở được, dùng đúng thư
   mục qua `datadir.txt`, `--hf-download` / dòng lệnh chạy qua exe; bản Windows + torch CUDA chưa đóng gói thử.
 
+- 2.0.72: "Tạo lại giọng 2610 câu tới 290 thì dừng, GPU vẫn 98 %" (phim 2 giờ 47, VieNeu, RTX 4060 8 GB).
+  * Nguyên nhân (đọc mã vieneu 3.8.3 `v3_turbo_serve/engine.py`): `_infer_chunks` gộp các đoạn của 1 câu thành lô
+    (`batch_bucket` 1/2/4/8/16) và `_generate_codes_fused` giữ MÃI 1 `FusedFrame` (đồ thị CUDA + bộ nhớ KV tĩnh riêng) cho
+    mỗi (cỡ lô, độ dài `cache_len_bucket` bước 512, temperature/top_k/top_p…) đã gặp (`engine._fused`) -> đọc vài trăm câu
+    đủ kiểu là card đầy -> Windows lấy RAM thay -> mỗi câu chậm hàng chục lần, GPU vẫn 98 %. Canh treo cũ chờ 5 phút
+    KHÔNG có câu trả lời – câu chậm vẫn trả lời trước 5 phút -> không bao giờ mở lại.
+  * `vieneu_worker`: card < 11 GB -> `infer(batch_size=1)` (`_small_card`; bản cũ không nhận -> bỏ); sau mỗi câu
+    `_vram_guard`: card còn trống < `LOW_FREE` 15 % -> xoá `_batch_engine._fused` / `_graphs` + `empty_cache`, trả
+    `vram_free` trong câu trả lời.
+  * `tts.VieneuWorker`: ghi giây / chữ của 20–40 câu gần nhất (`_typical`), thời gian chờ treo `_stall_for` = 25 × thời
+    gian thường (≥ `stall_min` 60 s VieNeu / 120 s Omni, ≤ `stall_call`); câu chậm > `SLOW` 8 × thường và > `SLOW_MIN`
+    20 s -> `note` + tắt tiến trình, câu sau mở lại với card sạch (`stats["slow_restarts"]` -> `dub_summary`);
+    `_read(on_wait=)` câu đọc > 10 s -> dòng tiến độ "VieNeu đang đọc 291/2610 – câu này đã 45 s (thường chỉ vài giây)".
+    Thông báo treo ghi giây khi < 2 phút.
+  * `pipeline.redub`: Huỷ giữa chừng rồi bấm lại trước đây đánh `take` mới -> đọc lại TẤT CẢ từ đầu; giờ `take_pending`
+    (đặt khi đánh lần đọc mới, xoá khi xong) -> bấm lại dùng tiếp lần đọc dở, chỉ đọc câu còn thiếu.
+  * Thử: tiến trình đọc giả chậm dần / treo (tự mở lại, chờ theo tốc độ thật), `_vram_guard` với torch giả, redub huỷ rồi
+    chạy lại. Chưa chạy với VieNeu thật trên card 8 GB.
+  * Đề xuất đang chờ người dùng chọn: ghi "Đợt k/n" cho VieNeu / OmniVoice; ghép vào bản lồng sau mỗi đợt 1000 câu; hỏi
+    lại khi tích > 300 câu.
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -1072,6 +1093,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.62: chờ người dùng thử Gemini gói miễn phí thật (sandbox không gọi được Google API): thông báo 429 của Gemini
   qua endpoint tương thích OpenAI có đúng chữ "PerDay" / "retry in" như đã đoán không; `response_format` json_object có bị
   từ chối không (đã có tự bỏ khi 400).
+- 2.0.72: chờ người dùng chạy lại "Tạo lại giọng" 2610 câu: còn dừng không, dòng tiến độ có báo "câu này đã N s" / "đã
+  mở lại bộ đọc" không; nếu vẫn chậm -> cần file data\logs\vieneu.txt (dòng "[Subvideo] card gần đầy…").
 - 2.0.71: chờ người dùng chạy `DongGoi_EXE.bat` trên Windows và mở Subvideo.exe (thiếu thư viện nào khi chạy -> thêm
   vào `PKGS` trong Subvideo.spec); kiểm tra tiến trình VieNeu / Qwen3 / OmniVoice / Hy-MT2 chạy được trong bản exe.
 - 2.0.70: chờ người dùng chạy lại "1. Nghe & tách câu" trên phim 1354 câu và xem Task Manager (RAM, "Bộ nhớ GPU dùng

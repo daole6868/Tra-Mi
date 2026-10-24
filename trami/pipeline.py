@@ -1588,10 +1588,23 @@ def redub(p: Project, rows: list[int], rate: str | None = None, settings: dict |
         raise ValueError("Chưa tích chọn câu nào để tạo lại giọng.")
     if new_take:
         for k in rows:
-            segs[k].extra["take"] = int(segs[k].extra.get("take", 0) or 0) + 1
+            ex = segs[k].extra
+            if ex.get("take_pending"):
+                # lần "Tạo lại giọng" trước bị Huỷ / dừng giữa chừng: giữ đúng lần đọc đó -> các câu đã đọc xong được
+                # dùng lại, chỉ đọc tiếp câu còn thiếu (trước đây đánh lần đọc mới -> đọc lại TẤT CẢ từ đầu)
+                continue
+            ex["take"] = int(ex.get("take", 0) or 0) + 1
+            ex["take_pending"] = True
     p.segments = segs
     p.save()
-    return dub(p, None, rate, settings, progress, cancel, engine, inplace=True, only=rows)
+    out = dub(p, None, rate, settings, progress, cancel, engine, inplace=True, only=rows)
+    segs = p.segments
+    for k in rows:
+        if k < len(segs):
+            segs[k].extra.pop("take_pending", None)
+    p.segments = segs
+    p.save()
+    return out
 
 
 SHORTEN_FROM = 1.15    # câu ⚡ phải đọc nhanh hơn ×1,15 mới cần rút gọn (nhanh hơn nữa nghe vội)
@@ -2031,6 +2044,8 @@ def dub_summary(p: Project) -> str:
         extra.append(f"đã xoá {st['interj']} câu chỉ có tiếng cảm thán (A, Ừm…)")
     if st.get("errors"):
         extra.append(f"{st['errors']} câu lỗi")
+    if st.get("slow_restarts"):
+        extra.append(f"bộ đọc chậm bất thường {st['slow_restarts']} lần (card đồ hoạ đầy) – đã tự mở lại")
     if st.get("lang_edge"):
         extra.append(f"{st['lang_edge']} câu không phải tiếng Việt đọc bằng Edge (VieNeu chỉ đọc tiếng Việt)")
     if st.get("auto_voiced"):

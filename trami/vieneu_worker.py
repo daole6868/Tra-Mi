@@ -17,6 +17,54 @@ import sys
 
 MARK = "@@TRAMI@@"
 _INFER_KEYS = {"temperature", "top_k", "top_p", "repetition_penalty"}
+LOW_FREE = 0.15        # card còn trống < 15 % -> bỏ các đồ thị CUDA VieNeu đã chụp
+
+
+def _small_card() -> bool:
+    """Card < 11 GB (RTX 4060 laptop 8 GB…): mỗi câu đọc từng đoạn một (batch 1) -> VieNeu chỉ chụp đồ thị CUDA cỡ nhỏ.
+    VieNeu gộp các đoạn của 1 câu vào cùng lô (1, 2, 4, 8, 16) và giữ MÃI 1 đồ thị + bộ nhớ KV riêng cho mỗi (cỡ lô,
+    độ dài, kiểu đọc) đã gặp -> đọc vài trăm câu là card đầy, Windows lấy RAM thay -> chậm như treo, GPU vẫn 98 %."""
+    torch = sys.modules.get("torch")
+    try:
+        return bool(torch and torch.cuda.is_available()
+                    and torch.cuda.get_device_properties(0).total_memory < 11 * 1024 ** 3)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _vram_guard(tts) -> dict:
+    """Sau mỗi câu: card gần đầy -> bỏ các đồ thị CUDA đã chụp (VieNeu chụp lại khi cần, ~0,5 s) + trả bộ nhớ đệm."""
+    torch = sys.modules.get("torch")
+    try:
+        if torch is None or not torch.cuda.is_available():
+            return {}
+        free, total = torch.cuda.mem_get_info()
+    except Exception:  # noqa: BLE001
+        return {}
+    out = {"vram_free": round(free / max(total, 1), 3)}
+    if free / max(total, 1) >= LOW_FREE:
+        return out
+    eng = getattr(tts, "_batch_engine", None)
+    n = 0
+    for name in ("_fused", "_graphs"):
+        d = getattr(eng, name, None)
+        if isinstance(d, dict):
+            n += len(d)
+            d.clear()
+    import gc
+
+    gc.collect()
+    try:
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        free, total = torch.cuda.mem_get_info()
+        out["vram_free"] = round(free / max(total, 1), 3)
+    except Exception:  # noqa: BLE001
+        pass
+    out["freed_graphs"] = n
+    print(f"[Subvideo] card gần đầy – bỏ {n} đồ thị CUDA đã chụp, giờ còn trống {out['vram_free']:.0%}",
+          file=sys.stderr, flush=True)
+    return out
 
 
 def _seed(n: int) -> None:
@@ -72,6 +120,7 @@ def main(mode: str = "v3turbo") -> None:
         _reply(proto, {"error": f"Không nạp được VieNeu: {type(e).__name__}: {e}"})
         return
     _reply(proto, {"ready": True, "sr": sr})
+    one_chunk = {"batch_size": 1} if _small_card() else {}
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -86,12 +135,17 @@ def main(mode: str = "v3turbo") -> None:
             if req.get("seed") is not None:
                 _seed(int(req["seed"]))
             prm = {k: v for k, v in (req.get("params") or {}).items() if k in _INFER_KEYS}
-            try:
-                wav = tts.infer(req["text"], **kw, **prm)
-            except TypeError:       # bản VieNeu cũ không nhận thông số lấy mẫu
-                wav = tts.infer(req["text"], **kw)
+            tries = [dict(prm, **one_chunk), prm, {}] if one_chunk else [prm, {}]
+            for k, extra in enumerate(tries):
+                try:
+                    wav = tts.infer(req["text"], **kw, **extra)
+                    break
+                except TypeError:   # bản VieNeu cũ không nhận batch_size / thông số lấy mẫu
+                    if k == len(tries) - 1:
+                        raise
+                    one_chunk = {}
             write_wav(req["out"], wav, sr)
-            _reply(proto, {"ok": True, "sr": sr})
+            _reply(proto, dict({"ok": True, "sr": sr}, **_vram_guard(tts)))
         except Exception as e:  # noqa: BLE001
             _reply(proto, {"error": f"{type(e).__name__}: {e}"})
 
