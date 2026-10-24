@@ -112,8 +112,10 @@ QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 
 QTableView {{ background: #10151E; border: 1px solid {BORDER}; border-radius: 10px; gridline-color: transparent;
-    selection-background-color: #2A2230; selection-color: {TEXT}; alternate-background-color: #131924; }}
+    selection-background-color: #4A2A24; selection-color: {TEXT}; alternate-background-color: #131924; }}
 QTableView::item {{ padding: 4px 6px; border-bottom: 1px solid #1B2230; }}
+QTableView::item:selected {{ background: #4A2A24; color: #FFFFFF; border-top: 1px solid {ACCENT2};
+    border-bottom: 1px solid {ACCENT2}; }}
 QTableView::indicator {{ width: 17px; height: 17px; border-radius: 5px; border: 1px solid #3A4458; background: #0F141D; }}
 QTableView::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; image: url("{{CHECK}}"); }}
 QHeaderView::section {{ background: {CARD2}; color: {MUTED}; border: none; padding: 7px 6px; font-weight: 600; }}

@@ -5,7 +5,8 @@ vừa; câu chưa có giọng: khung nét đứt) · Video (dải ảnh thu nh�
 Bấm khối = chọn (Ctrl: chọn thêm / bỏ, Shift: chọn 1 dải), kéo trên chỗ trống = quét chọn nhiều khối, bấm tên dòng =
 chọn hết dòng đó, bấm chỗ trống dòng Phụ đề = chọn khoảng trống (rồi "Thêm phụ đề" đúng chỗ đó), bấm đúp = nghe câu;
 dòng Video / Tiếng gốc chia thành đoạn theo điểm tách (Tách tại đầu phát) – chọn đoạn để xoá / khôi phục / tắt tiếng gốc;
-kéo đoạn giọng lồng sang trái / phải = dời đúng chỗ (xếp lại ngay); bấm / kéo trên thước = tua;
+kéo đoạn giọng lồng sang trái / phải = dời đúng chỗ (xếp lại ngay); kéo khối phụ đề = dời câu (giọng lồng đi theo),
+kéo mép trái / phải của khối = đổi lúc bắt đầu / kết thúc (không lấn câu bên cạnh); bấm / kéo trên thước = tua;
 Delete = xoá thứ đang chọn, Ctrl+A = chọn hết dòng, Esc = bỏ chọn; Ctrl + lăn chuột = phóng to/thu nhỏ.
 Công cụ trên thanh phía trên đổi theo dòng đang chọn.
 """
@@ -49,6 +50,8 @@ class _Canvas(QWidget):
         self._dpress = None    # (câu, x lúc bấm, đầu, cuối) – đang bấm giữ 1 đoạn giọng lồng
         self._ghost = None     # (câu, đầu mới, cuối mới) – đang kéo đoạn giọng lồng
         self._band = None      # (dòng, giây lúc bấm, x lúc bấm, giây hiện tại) – đang kéo quét chọn trên chỗ trống
+        self._spress = None    # bấm giữ khối phụ đề: {"row", "x", "mode": move/l/r, "rows", "orig", "defer"}
+        self._sghost = None    # đang kéo khối phụ đề: {câu: (đầu mới, cuối mới)}
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
 
     # ------------------------------------------------------------------ toạ độ
@@ -96,6 +99,43 @@ class _Canvas(QWidget):
         tol = 3 / max(self.tl.pps, 1e-6)
         return next(((int(k), a, b, f) for a, b, k, f in self.tl.dub if a - tol <= t <= b + tol), None)
 
+    EDGE = 6        # px: bấm sát mép khối phụ đề = kéo đổi đầu / cuối câu
+
+    def _sub_edge(self, pos: QPointF, row: int) -> str:
+        """Vị trí bấm trên khối phụ đề: "l" / "r" (mép trái / phải – đổi đầu / cuối câu) hoặc "move" (dời cả câu)."""
+        s = self.tl.segs[row]
+        xa, xb = self.x(s.start), self.x(s.end)
+        if xb - xa >= 3 * self.EDGE:
+            if pos.x() - xa <= self.EDGE:
+                return "l"
+            if xb - pos.x() <= self.EDGE:
+                return "r"
+        return "move"
+
+    def _sub_drag(self, d: float) -> dict[int, tuple[float, float]]:
+        """Vị trí mới của các khối phụ đề khi kéo thêm d giây – không lấn câu bên cạnh (không đổi thứ tự câu), câu
+        ngắn nhất 0,2 s, trong độ dài video."""
+        sp = self._spress
+        segs, dur = self.tl.segs, self.tl.duration
+        orig = sp["orig"]
+        if sp["mode"] == "move":
+            rows = set(orig)
+            lo, hi = -1e9, 1e9
+            for r, (a, b) in orig.items():
+                if r - 1 not in rows:
+                    lo = max(lo, (segs[r - 1].end if r > 0 else 0.0) - a)
+                if r + 1 not in rows:
+                    hi = min(hi, (segs[r + 1].start if r + 1 < len(segs) else dur) - b)
+            d = max(min(lo, 0.0), min(max(hi, 0.0), d))
+            return {r: (a + d, b + d) for r, (a, b) in orig.items()}
+        r = sp["row"]
+        a, b = orig[r]
+        if sp["mode"] == "l":
+            lo = min(a, segs[r - 1].end if r > 0 else 0.0)
+            return {r: (max(lo, min(b - 0.2, a + d)), b)}
+        hi = max(b, segs[r + 1].start if r + 1 < len(segs) else dur)
+        return {r: (a, min(hi, max(a + 0.2, b + d)))}
+
     def _hit(self, pos: QPointF) -> int | None:
         """Câu nằm dưới con trỏ (track Phụ đề hoặc Lồng tiếng – cả khung nét đứt của câu chưa có giọng)."""
         if pos.x() < self.HEAD:
@@ -137,6 +177,16 @@ class _Canvas(QWidget):
                 self._dpress = (d[0], pos.x(), d[1], d[2])
             row = self._hit(pos)
             if row is not None:
+                if key == "subs" and not ctrl and not shift:
+                    mode = self._sub_edge(pos, row)
+                    group = mode == "move" and self.tl.sel_track == "subs" and row in self.tl.sel_rows and \
+                        len(self.tl.sel_rows) > 1
+                    rows = sorted(self.tl.sel_rows) if group else [row]
+                    segs = self.tl.segs
+                    self._spress = {"row": row, "x": pos.x(), "mode": mode, "defer": group,
+                                    "orig": {r: (segs[r].start, segs[r].end) for r in rows if 0 <= r < len(segs)}}
+                    if group:   # bấm vào 1 khối trong nhóm đang chọn: giữ cả nhóm để kéo (thả mà không kéo = chọn khối đó)
+                        return
                 self.tl.click_row(key, row, ctrl, shift)
                 return
             self._band = (key, t, pos.x(), t)
@@ -154,7 +204,7 @@ class _Canvas(QWidget):
         self.tl.seekRequested.emit(t)
 
     def mouseDoubleClickEvent(self, e):
-        self._dpress = self._ghost = self._band = None
+        self._dpress = self._ghost = self._band = self._spress = self._sghost = None
         row = self._hit(e.position())
         if row is not None:
             self.tl.lineActivated.emit(row)
@@ -163,6 +213,19 @@ class _Canvas(QWidget):
         pos = e.position()
         if self._drag and self.tl.duration:
             self.tl.seekRequested.emit(self.t(pos.x()))
+            return
+        if self._spress and e.buttons() & Qt.MouseButton.LeftButton:
+            dx = pos.x() - self._spress["x"]
+            if self._sghost or abs(dx) > 4:   # kéo khối phụ đề: dời câu / đổi đầu, cuối câu
+                self._sghost = self._sub_drag(dx / self.tl.pps)
+                self.setCursor(Qt.CursorShape.SizeHorCursor if self._spress["mode"] != "move"
+                               else Qt.CursorShape.ClosedHandCursor)
+                r = self._spress["row"]
+                a, b = self._sghost.get(r, self._spress["orig"].get(r, (0, 0)))
+                a0, b0 = self._spress["orig"].get(r, (a, b))
+                self.setToolTip("")
+                self.tl.sel_label.setText(f"#{r + 1}  {_tc(a, 0.5)} → {_tc(b, 0.5)}  ({a - a0:+.2f} s / {b - b0:+.2f} s)")
+                self.update()
             return
         if self._dpress and e.buttons() & Qt.MouseButton.LeftButton:
             row, x0, a, b = self._dpress
@@ -199,7 +262,8 @@ class _Canvas(QWidget):
                        else "chưa có giọng lồng – bấm Tạo lại giọng câu này")
                 tip = f"#{row + 1} {why}\n{s.trans or s.text}"
             elif s:
-                tip = f"#{row + 1} {s.speaker or ''}\n{s.trans or s.text}"
+                tip = (f"#{row + 1} {s.speaker or ''}\n{s.trans or s.text}\nKéo khối để dời câu (giọng lồng đi theo) · "
+                       "kéo mép trái / phải để đổi lúc bắt đầu / kết thúc")
             elif key in ("video", "audio"):
                 ins = self._insert_at(pos)
                 if ins is not None:
@@ -220,12 +284,27 @@ class _Canvas(QWidget):
             else:
                 tip = ""
             self.setToolTip(tip)
-            self.setCursor(Qt.CursorShape.PointingHandCursor if row is not None else Qt.CursorShape.ArrowCursor)
             self.update()
+        if row is not None and key == "subs" and self._sub_edge(pos, row) != "move":
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        else:
+            self.setCursor(Qt.CursorShape.PointingHandCursor if row is not None else Qt.CursorShape.ArrowCursor)
 
     def mouseReleaseEvent(self, e):
         self._drag = False
         self._band = None
+        sg, sp = self._sghost, self._spress
+        self._spress = self._sghost = None
+        if sp:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            if sg:
+                moved = [(r, round(a, 3), round(b, 3)) for r, (a, b) in sg.items()
+                         if abs(a - sp["orig"][r][0]) >= 0.01 or abs(b - sp["orig"][r][1]) >= 0.01]
+                self.tl._refresh_tools()
+                if moved:
+                    self.tl.subsMoved.emit(moved)
+            elif sp["defer"]:
+                self.tl.click_row("subs", sp["row"], False, False)
         g, pr = self._ghost, self._dpress
         self._dpress = self._ghost = None
         if g and pr:
@@ -369,11 +448,19 @@ class _Canvas(QWidget):
                 lanes[int(k)] = 2 if lanes.get(prev[0], 1) == 1 else 1
                 lanes.setdefault(prev[0], 1)
             prev = (int(k), float(b))
+        sub_shift = {}   # đang kéo khối phụ đề: giọng lồng của câu đó đi theo lúc bắt đầu mới
+        if self._sghost:
+            sub_shift = {r: ab[0] - self._spress["orig"][r][0] for r, ab in self._sghost.items()
+                         if abs(ab[0] - self._spress["orig"][r][0]) > 1e-3}
         for a, b, k, fit in tl.dub:
             if b < t_lo or a > t_hi:
                 continue
-            self._paint_clip(p, rd, a, b, int(k), fit, faded=int(k) == ghost_row, lane=lanes.get(int(k), 0))
+            self._paint_clip(p, rd, a, b, int(k), fit, faded=int(k) == ghost_row or int(k) in sub_shift,
+                             lane=lanes.get(int(k), 0))
             self._paint_shift(p, rd, a, int(k))
+            if int(k) in sub_shift:
+                d = sub_shift[int(k)]
+                self._paint_clip(p, rd, a + d, b + d, int(k), fit, ghost=True)
         if self._ghost:
             row, a, b = self._ghost
             fit = next((f for *_x, k, f in tl.dub if int(k) == row), "ok")
@@ -381,10 +468,17 @@ class _Canvas(QWidget):
         # phụ đề: khối từng câu
         rs = self.track_rect("subs")
         p.setFont(theme.font(8.4, QFont.Weight.Medium))
+        sghost = self._sghost or {}
         for i, s in enumerate(tl.segs):
-            if s.end < t_lo or s.start > t_hi:
+            a, b = sghost.get(i, (s.start, s.end))
+            if i in sghost:   # chỗ cũ của khối đang kéo: khung mờ nét đứt
+                p.setPen(QPen(theme.c("#FFFFFF", 90), 1, Qt.PenStyle.DashLine))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(QRectF(self.x(s.start), rs.top() + 2, max(2.0, (s.end - s.start) * tl.pps - 1),
+                                         rs.height() - 4), 5, 5)
+            if b < t_lo or a > t_hi:
                 continue
-            r = QRectF(self.x(s.start), rs.top() + 2, max(2.0, (s.end - s.start) * tl.pps - 1), rs.height() - 4)
+            r = QRectF(self.x(a), rs.top() + 2, max(2.0, (b - a) * tl.pps - 1), rs.height() - 4)
             base = QColor(spk_color(s.speaker or "S1"))
             fill = QColor(base)
             sel = tl.is_row_selected(i)
@@ -392,6 +486,11 @@ class _Canvas(QWidget):
             p.setPen(QPen(QColor("#FFFFFF"), 2) if sel else Qt.PenStyle.NoPen)
             p.setBrush(fill)
             p.drawRoundedRect(r, 5, 5)
+            if sel and r.width() >= 3 * self.EDGE:   # tay nắm 2 mép: kéo để đổi đầu / cuối câu
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor("#FFFFFF"))
+                for xh in (r.left() + 2.5, r.right() - 4.5):
+                    p.drawRoundedRect(QRectF(xh, r.center().y() - 7, 2, 14), 1, 1)
             if r.width() > 26:
                 p.setPen(QColor("#FFFFFF"))
                 txt = (s.trans or s.text or "").strip()
@@ -558,6 +657,7 @@ class TrackTimeline(QWidget):
     actionRequested = Signal(str)   # công cụ trên thanh (xem TOOLS) – trang dự án làm với lựa chọn hiện tại
     dubMoved = Signal(int, float)   # kéo đoạn giọng lồng của câu: (câu, số giây dời thêm)
     dubReset = Signal(int)          # đặt đoạn giọng lồng về đúng lúc nhân vật nói
+    subsMoved = Signal(list)        # kéo khối phụ đề: [(câu, đầu mới, cuối mới)]
     selectionChanged = Signal()
 
     # công cụ hiện trên thanh theo dòng đang chọn: (tên lệnh, icon, chữ, gợi ý)

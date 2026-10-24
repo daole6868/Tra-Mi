@@ -30,7 +30,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - `trami/video.py` – `build_and_render`: 1 lần encode, `filter_complex`; cắt giữa dùng `select/aselect`;
   âm thanh ngoài qua `ext_audio` (`apad=whole_dur` để không treo); trộn: nhạc nền đã tách + giọng gốc (đoạn hát) + bản lồng.
   Lệnh FFmpeg cuối: `data/projects/<id>/work/render/last_ffmpeg_cmd.txt`.
-- `trami/tts.py` – `synthesize_dub` (giọng mỗi người nói: `edge:<id>` / `vieneu:<preset>` / `clone`), `clean_tts_text`,
+- `trami/tts.py` – `synthesize_dub` (giọng mỗi người nói: `edge:<id>` / `vieneu:<preset>` / `clone`; `patch=` vá đúng
+  đoạn thay đổi vào bản lồng đang dùng theo bảng `placed` của bản đó – 2.0.73), `clean_tts_text`,
   `preview_voice`, `plan_layout` (xếp giọng theo thời gian, thuần – không đụng âm thanh; `OVERFLOW_MODES`). VieNeu API: `Vieneu(mode="v3turbo").infer(text, voice="<tên preset>" | ref_audio=...)` → numpy 48 kHz.
 - `trami/asr_qwen.py` + `qwen_asr_worker.py` (Qwen3-ASR + Qwen3-ForcedAligner, tiến trình riêng `--qwen-asr-worker`,
   transformers ≥ 5.13, mặc định từ 2.0.29), `trami/asr.py` (faster-whisper), `asr_funasr.py` (SenseVoice/Paraformer, `mark_songs`), `diarize.py` (ECAPA),
@@ -43,8 +44,10 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `vieneu:trend:<mã>` = giọng dựng sẵn + kiểu đọc + hiệu ứng) + `voicefx.py` (hiệu ứng giọng chỉ bằng numpy).
 - `trami/audiomix.py` – quy tắc trộn âm thanh dùng chung cho xuất video (`video.build_and_render`) và bộ trộn trực tiếp
   `LiveMix` của trình phát (`player.LiveAudio` + `_Feeder` ở QThread riêng, QAudioSink); cài đặt ở `edit["audio"]`, tab `gui/audio_tab.py`.
+  `decode_track` giải mã mỗi lớp 1 lần (`work/live/<lớp>_<mã>.raw`); `patch_track` vá từng đoạn + `<lớp>_<mã mới>.ref`.
 - `trami/jobs.py` – hàng đợi: MẶC ĐỊNH LẦN LƯỢT từng việc (2.0.70, `max_running()` = 1); Cài đặt "Chạy nhiều việc cùng
-  lúc" (`jobs_parallel`) -> tối đa `MAX_RUNNING` 4: cùng dự án lần lượt (trừ `READONLY_KINDS`), mỗi lúc 1 việc GPU
+  lúc" (`jobs_parallel`) -> tối đa `MAX_RUNNING` 4: cùng dự án lần lượt (trừ `READONLY_KINDS`; `LIGHT_KINDS` "relayout"
+  không chờ việc của dự án khác), mỗi lúc 1 việc GPU
   (`GPU_KINDS`, dịch Hy-MT2); `progress_hook` theo từng luồng; trang `main.JobsPage` "Việc đang làm".
   `trami/stream.py` – `LivePipeline` (tab Tự động "Vừa tách vừa dịch"); `trami/gpu.py` – trả bộ nhớ card giữa các
   việc (`before_job` / `after_job` trong `jobs._run`, `reap_idle` tắt VieNeu/Omni để không 10 phút); `trami/gui/*` –
@@ -86,7 +89,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (125 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (129 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1053,6 +1056,41 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   * Đề xuất đang chờ người dùng chọn: ghi "Đợt k/n" cho VieNeu / OmniVoice; ghép vào bản lồng sau mỗi đợt 1000 câu; hỏi
     lại khi tích > 300 câu.
 
+- 2.0.73: "mỗi lần xoá câu lại xếp lại rất lâu" (phim 2 giờ 47, 2610 câu) + kéo phụ đề trên timeline + bảng câu khó thấy
+  câu đang chọn. Đo cách cũ: mỗi lần xếp lại đọc lại 2610 file giọng 2 lượt, 1 lần FFmpeg atempo / câu đọc nhanh (~0,1 s,
+  Windows chậm hơn), dựng cả bản ~1 GB RAM + ghi wav 481 MB, trình phát giải mã lại 1,8 GB (13 s); mỗi lần xoá 1 việc
+  "redub" (việc GPU, chờ hàng đợi lần lượt). Câu sát bên được "về đúng chỗ" = lúc nhân vật nói (giọng đặt theo giờ của
+  CHÍNH câu, xoá câu không làm các câu khác dồn lên).
+  * Vá bản lồng (`tts.synthesize_dub(patch=)`): bản lồng lưu bảng đoạn giọng đã đặt `dub_versions[i]["placed"]`
+    = [file, mẫu bắt đầu, tốc độ (làm tròn 0,001, `_clip_speed`), hệ số âm lượng, mẫu giữ khi cắt, độ dài]; xếp lại / đọc
+    lại vài câu (`dub(inplace)`): tính lại `plan_layout` (nhanh), so bảng cũ / mới -> chỉ các đoạn khác (`merge_regions`)
+    được trộn lại + `soft_limit` rồi ghi thẳng vào file wav (`_patch_wav`, `wav_info`); câu cũ giữ đúng hệ số âm lượng
+    đang có; khác định dạng / độ dài / bị khoá / đổi > 50 % (`PATCH_MAX`) -> `_NoPatch` -> dựng cả bản như cũ. Kết quả vá
+    = dựng lại cả bản (so từng mẫu, test). `_ClipMeta` (`work/tts/_clipmeta.json`: độ dài sau bỏ lặng, độ to, tốc độ đã
+    đệm) + `_clip_at` (bản tua nhanh `<file>.x<tốc độ>.npy`, mỗi câu giữ 1 bản) -> không giải mã lại mọi câu, không gọi
+    FFmpeg cho câu đã có bản đệm. Sóng âm timeline vá đúng đoạn (`pipeline._patch_dub_env`, mức chuẩn `env_top` lưu
+    theo bản lồng). File nghe của trình phát: `audiomix.patch_track` giải mã lại từng đoạn (đệm 0,1 s, ghi rộng hơn đoạn
+    đổi 0,05 s vì bộ lấy mẫu lại trộn vài chục mẫu 2 bên – khớp từng mẫu với giải mã cả file) vào `.raw` cũ + `.ref` cho
+    mã mới (memmap đang phát nghe thay đổi ngay). Đo 2610 câu / 2 giờ 47: xoá 1 câu 0,44 s, xoá 5 câu 1,75 s, trình phát
+    0 s (cách cũ ~5 phút + 14 s; dựng cả bản khi đã có đệm tua 17 s). Lần xếp lại đầu tiên sau khi cập nhật (bản lồng
+    cũ chưa có bảng) vẫn dựng cả bản 1 lần – tua / đo song song (`_prefetch_clips`, `_ClipMeta.warm`, ≤ 8 luồng): 2610
+    câu 320 -> 100 s trên máy 4 nhân. Bản đang dùng nhận theo `use_cur` (trước so tên file -> trùng giây thì dựng cả bản).
+  * Việc "relayout" (`jobs.LIGHT_KINDS`, không GPU) không chờ việc dài của dự án khác; `project_page._relayout` gộp các
+    thao tác trong 1,2 s (`_relayout_go`, `_relayout_now`, đếm số câu xoá `_relayout_deleted`), đã có lần xếp lại đang chờ
+    thì không thêm. Mọi chỗ xếp lại (xoá ở timeline / bảng Phụ đề / Xoá câu đã tích / Lọc câu cảm thán, kéo đoạn giọng,
+    bỏ lồng, về đúng chỗ, 🎵, tốc độ, cách xếp) đi qua đây. Nút Xoá / Gộp 1 câu ở bảng Phụ đề (`_seg_op`) giờ cũng qua
+    `_sub_op` (trước đây không xếp lại -> giọng câu đã xoá còn trong bản lồng). Gộp câu đã có giọng -> tự đọc lại giọng
+    câu gộp (`_redub_rows`, vá đúng đoạn) – không thì sau lần xếp lại kế tiếp câu gộp chỉ còn giọng câu đầu.
+  * `pipeline._keep_user_edits`: việc lồng tiếng inplace xong không ghi đè dự án nữa – lấy bản mới nhất trên đĩa, ghép
+    phần lồng tiếng (`_DUB_EXTRA` từng câu theo giờ + chữ gốc, dub_layout/stats/versions/voices, edit.dub) -> câu xoá
+    trong lúc đang xếp lại không hiện lại.
+  * Timeline: kéo khối phụ đề = dời câu (cả nhóm đang chọn), kéo mép trái / phải = đổi đầu / cuối (`_Canvas._sub_edge`,
+    `_sub_drag`: không lấn câu bên cạnh, không đổi thứ tự, ≥ 0,2 s); khung mờ chỗ cũ + đoạn giọng đi theo khi kéo; khối
+    đang chọn có 2 tay nắm; thả -> `subsMoved` -> `project_page._subs_moved` (giọng đi theo vì đặt theo `start` +
+    `dub_shift`) -> xếp lại.
+  * Bảng câu (tab Phụ đề + Lồng tiếng): dòng đang chọn tô `#4A2A24` + viền cam (`QTableView::item:selected`), tắt lưới
+    (khe 1 px chia vạch dòng tô), chọn từ timeline / khung câu -> cuộn câu ra GIỮA bảng (`PositionAtCenter`).
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
@@ -1093,6 +1131,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.0.62: chờ người dùng thử Gemini gói miễn phí thật (sandbox không gọi được Google API): thông báo 429 của Gemini
   qua endpoint tương thích OpenAI có đúng chữ "PerDay" / "retry in" như đã đoán không; `response_format` json_object có bị
   từ chối không (đã có tự bỏ khi 400).
+- 2.0.73: chờ người dùng thử xoá / gộp / kéo câu trên phim dài (lần đầu sau cập nhật dựng cả bản 1 lần, sau đó ~1 s),
+  nghe chỗ vá có tiếng lách tách không, kéo khối phụ đề trên timeline có dễ dùng không.
 - 2.0.72: chờ người dùng chạy lại "Tạo lại giọng" 2610 câu: còn dừng không, dòng tiến độ có báo "câu này đã N s" / "đã
   mở lại bộ đọc" không; nếu vẫn chậm -> cần file data\logs\vieneu.txt (dòng "[Subvideo] card gần đầy…").
 - 2.0.71: chờ người dùng chạy `DongGoi_EXE.bat` trên Windows và mở Subvideo.exe (thiếu thư viện nào khi chạy -> thêm

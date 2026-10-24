@@ -79,6 +79,33 @@ def pitch_filter(pitch: float, rate: int = SR) -> str:
 
 # ------------------------------------------------------------------ bộ trộn trực tiếp (trình phát trong tool)
 
+def _track_key(src: Path, size: int, mtime: float, pre: str) -> str:
+    return hashlib.md5(f"{src.resolve()}|{size}|{int(mtime)}|{pre}".encode()).hexdigest()[:12]
+
+
+def _cached_track(d: Path, name: str, key: str) -> Path | None:
+    """Bản giải mã có sẵn cho đúng file + bộ lọc: <lớp>_<mã>.raw, hoặc bản cũ đã được vá cho khớp (<lớp>_<mã>.ref chỉ
+    tới file .raw đó – xem patch_track)."""
+    out = d / f"{name}_{key}.raw"
+    if out.exists() and out.stat().st_size > 0:
+        return out
+    ref = d / f"{name}_{key}.ref"
+    try:
+        t = d / ref.read_text(encoding="utf-8").strip()
+        if t.suffix == ".raw" and t.exists() and t.stat().st_size > 0:
+            return t
+    except OSError:
+        pass
+    return None
+
+
+def _decode_cmd(src: str | Path, pre: str, dst: str) -> list[str]:
+    from . import ffmpeg as ff
+
+    return [ff.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-vn", "-ac", "2",
+            "-ar", str(SR)] + (["-af", pre] if pre else []) + ["-f", "s16le", dst]
+
+
 def decode_track(src: str | Path, cache_dir: str | Path, name: str, pre: str = "") -> Path | None:
     """Giải mã 1 file âm thanh / video thành PCM 16-bit stereo 44,1 kHz (đọc lại bằng memmap, không chiếm RAM).
     Có sẵn bản giải mã đúng file + đúng bộ lọc thì dùng lại."""
@@ -88,27 +115,79 @@ def decode_track(src: str | Path, cache_dir: str | Path, name: str, pre: str = "
     if not src.exists():
         return None
     st = src.stat()
-    key = hashlib.md5(f"{src.resolve()}|{st.st_size}|{int(st.st_mtime)}|{pre}".encode()).hexdigest()[:12]
+    key = _track_key(src, st.st_size, st.st_mtime, pre)
     d = Path(cache_dir)
     d.mkdir(parents=True, exist_ok=True)
+    hit = _cached_track(d, name, key)
+    if hit:
+        return hit
     out = d / f"{name}_{key}.raw"
-    if out.exists() and out.stat().st_size > 0:
-        return out
     tmp = out.with_suffix(".tmp")
-    cmd = [ff.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-vn", "-ac", "2",
-           "-ar", str(SR)] + (["-af", pre] if pre else []) + ["-f", "s16le", str(tmp)]
-    r = subprocess.run(cmd, capture_output=True, creationflags=ff._NO_WINDOW)
+    r = subprocess.run(_decode_cmd(src, pre, str(tmp)), capture_output=True, creationflags=ff._NO_WINDOW)
     if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
         tmp.unlink(missing_ok=True)
         return None
     tmp.replace(out)
-    for old in d.glob(f"{name}_*.raw"):          # bản giải mã cũ của lớp này (file / bộ lọc đã đổi)
+    for old in list(d.glob(f"{name}_*.raw")) + list(d.glob(f"{name}_*.ref")):   # bản cũ của lớp này (file / bộ lọc đã đổi)
         if old != out:
             try:
                 old.unlink()
             except OSError:
                 pass
     return out
+
+
+def patch_track(src: str | Path, cache_dir: str | Path, name: str, pre: str, old_stat, regions) -> bool:
+    """File nguồn (wav PCM 16-bit) vừa được ghi lại vài đoạn (regions: [(mẫu đầu, mẫu cuối)] theo tần số của file) ->
+    vá đúng các đoạn đó trong bản giải mã đã có (giải mã lại từng đoạn có đệm 0,1 s 2 bên – khớp từng mẫu với giải mã cả
+    file) rồi ghi <lớp>_<mã mới>.ref chỉ tới nó. Trình phát đang phát bản này (memmap) nghe thay đổi ngay; lần nạp sau
+    không phải giải mã lại cả phim. False = chưa có bản giải mã cũ (nạp lần sau giải mã cả file như thường)."""
+    import wave
+    from math import gcd
+
+    from . import ffmpeg as ff
+    from .tts import wav_info
+
+    src, d = Path(src), Path(cache_dir)
+    raw = _cached_track(d, name, _track_key(src, old_stat.st_size, old_stat.st_mtime, pre))
+    if raw is None:
+        return False
+    off, frames, sr, ch, sw = wav_info(src)
+    if sw != 2:
+        return False
+    k = gcd(sr, SR)
+    u, v = sr // k, SR // k          # u mẫu nguồn <-> v khung 44,1 kHz (24 kHz: 80 <-> 147)
+    m = u * max(1, int(0.1 * sr) // u)
+    nraw = raw.stat().st_size // 4
+    tmp = d / f"{name}_patch.wav"
+    with open(src, "rb") as fs, open(raw, "r+b") as fr:
+        for r0, r1 in regions:
+            # bộ lấy mẫu lại trộn vài chục mẫu 2 bên -> ghi rộng hơn đoạn đổi 0,05 s, giải mã rộng thêm 0,1 s nữa
+            a0, a1 = max(0, (r0 - m // 2) // u * u), min(frames, -(-(r1 + m // 2) // u) * u)
+            i0, i1 = max(0, a0 - m), min(frames, a1 + m)
+            if a1 <= a0:
+                continue
+            fs.seek(off + i0 * ch * 2)
+            with wave.open(str(tmp), "wb") as w:
+                w.setnchannels(ch)
+                w.setsampwidth(2)
+                w.setframerate(sr)
+                w.writeframes(fs.read((i1 - i0) * ch * 2))
+            r = subprocess.run(_decode_cmd(tmp, pre, "pipe:1"), capture_output=True, creationflags=ff._NO_WINDOW)
+            if r.returncode != 0:
+                raise RuntimeError(r.stderr.decode("utf-8", "replace")[-300:])
+            pcm = np.frombuffer(r.stdout, dtype=np.int16).reshape(-1, 2)
+            o0, dst = (a0 - i0) * v // u, a0 * v // u
+            n = min((a1 - a0) * v // u, len(pcm) - o0, nraw - dst)
+            if n > 0:
+                fr.seek(dst * 4)
+                fr.write(pcm[o0:o0 + n].tobytes())
+    tmp.unlink(missing_ok=True)
+    st = src.stat()
+    key = _track_key(src, st.st_size, st.st_mtime, pre)
+    if not raw.name.endswith(f"_{key}.raw"):
+        (d / f"{name}_{key}.ref").write_text(raw.name, encoding="utf-8")
+    return True
 
 
 def load_raw(path: str | Path) -> np.ndarray:

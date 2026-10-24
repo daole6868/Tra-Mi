@@ -1265,6 +1265,7 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     segs = p.segments
     if not any(s.trans for s in segs):
         raise ValueError("Chưa có bản dịch để lồng tiếng.")
+    sig0 = [_seg_sig(s) for s in segs]   # câu lúc bắt đầu: người dùng sửa tiếp trong lúc chạy thì không bị đè (xem cuối)
     engine = engine or settings.get("tts_engine", "edge")
     default_voice = dub_default_voice(voice, engine, settings)
     voices = dict(p.data.get("voices") or {})
@@ -1305,11 +1306,20 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     (p.work / "dubs").mkdir(parents=True, exist_ok=True)
     out = p.work / "dubs" / f"dub_{time.strftime('%Y%m%d_%H%M%S')}.wav"
     cur = (p.edit.get("dub") or {}).get("wav")
-    target = Path(cur) if inplace and cur and Path(cur).exists() else out
+    use_cur = bool(inplace and cur and Path(cur).exists())
+    target = Path(cur) if use_cur else out
     tmp_out = target.with_name(target.stem + "_new.wav")
     stats: dict = {}
+    # sửa bản đang dùng (xếp lại, xoá / kéo / gộp câu, đọc lại vài câu): chỉ ghi lại đúng đoạn thời gian thay đổi vào
+    # file đó (~1 giây) thay vì dựng lại cả phim (phim 2 giờ: ghi lại ~500 MB + giải mã lại cho trình phát)
+    ver = next((v for v in dub_versions(p) if v.get("wav") == str(target)), None) if use_cur else None
+    patch = {"wav": str(target), "placed": ver["placed"]} if ver and ver.get("placed") else None
+    old_stat = target.stat() if patch else None
+    patched: list = []        # các đoạn đã vá (mẫu 24 kHz), qua mọi lần chạy
+    full = [False]            # có lần dựng lại cả bản (ghi vào tmp_out)
 
     def run(pr):
+        nonlocal patch
         stats.clear()
         synthesize_dub(segs, tmp_out, p.data.get("info", {}).get("duration", 0), p.work / "tts",
                        default_voice, rate or settings.get("tts_rate", "+0%"),
@@ -1317,7 +1327,13 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
                        voices=voices, ref_audio=ref_audio, settings=settings,
                        skip_songs=bool(settings.get("dub_skip_songs", True)), stats=stats,
                        only=set(only) if only is not None else None, lang=trans_lang(p),
-                       genders=p.data.get("speaker_gender") or {})
+                       genders=p.data.get("speaker_gender") or {}, patch=patch)
+        if stats.get("patched") is not None:
+            patched.extend(stats["patched"])
+            patch = {"wav": str(target), "placed": stats["placed_tab"]}
+        else:
+            full[0] = True
+            patch = None      # bản mới nằm ở tmp_out -> lần chạy sau (rút gọn) cũng dựng cả bản
 
     run(_sub(progress, 0.0, 0.85))
     # tầng 3b: câu vẫn quá dài -> AI rút gọn bản dịch rồi đọc lại (chỉ những câu đó, câu khác dùng lại bản đã đọc)
@@ -1356,16 +1372,31 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     stats["shortened"] = shortened
     stats["interj"] = dropped
     stats["auto_voiced"] = auto_voiced
-    try:
-        tmp_out.replace(target)
+    if full[0]:
+        try:
+            tmp_out.replace(target)
+            out = target
+        except OSError:   # Windows: file đang được chương trình khác mở -> lưu thành bản mới
+            tmp_out.replace(out)
+    else:
         out = target
-    except OSError:   # Windows: file đang được chương trình khác mở -> lưu thành bản mới
-        tmp_out.replace(out)
     env = stats.pop("wave", None)
+    top = stats.pop("env_top", None)
+    placed_tab = stats.pop("placed_tab", None)
+    stats.pop("patched", None)
+    stats.pop("patch_skipped", None)
     if env is not None:
         import numpy as np
 
         np.save(dub_env_path(out), env)   # sóng âm từng đoạn giọng lồng cho timeline
+    elif patched:
+        top = _patch_dub_env(out, patched, (ver or {}).get("env_top"))
+        from .audiomix import patch_track
+
+        try:   # file nghe thử của trình phát: vá đúng các đoạn đó (không giải mã lại cả phim)
+            patch_track(out, p.work / "live", "dub", "", old_stat, patched)
+        except Exception:  # noqa: BLE001 – không vá được thì trình phát tự giải mã lại như cũ
+            log_error("Vá file nghe thử bản lồng")
     p.segments = segs            # lưu độ vừa (fit) + bản dịch đã rút gọn
     layout = stats.pop("layout", [])
     p.data["dub_layout"] = layout
@@ -1373,6 +1404,10 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     vers = dub_versions(p)
     entry = {"wav": str(out), "time": time.strftime("%H:%M %d/%m"), "voices": _voice_summary(voices, default_voice),
              "stats": stats, "layout": layout}
+    if placed_tab is not None:
+        entry["placed"] = placed_tab   # đoạn giọng đã đặt trong bản này -> lần sửa sau chỉ vá phần thay đổi
+    if top is not None:
+        entry["env_top"] = top
     old_i = next((i for i, v in enumerate(vers) if v["wav"] == str(out)), None)
     if old_i is None:
         entry["created"] = entry["time"]
@@ -1395,8 +1430,54 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
         ed["dub"]["song_spans"] = [[s.start, s.end] for s in segs if s.extra.get("song")] \
             if settings.get("dub_skip_songs", True) else []
     p.data["edit"] = ed
+    if inplace:
+        _keep_user_edits(p, sig0)
     p.save()
     return out
+
+
+# kết quả lồng tiếng ghi vào từng câu (xếp lại / đọc lại) – được ghép vào câu tương ứng khi người dùng sửa song song
+_DUB_EXTRA = ("tts_file", "dub_at", "fit", "fit_speed", "fit_need", "fit_have", "fit_shift", "fit_over", "voice_used",
+              "take", "take_pending")
+
+
+def _seg_sig(s) -> tuple:
+    return round(s.start, 3), round(s.end, 3), s.text, s.trans
+
+
+def _keep_user_edits(p: Project, sig0: list) -> None:
+    """Xếp lại / đọc lại vài câu chạy ở nền trong lúc người dùng vẫn sửa (xoá tiếp câu khác, kéo câu, đổi kiểu chữ…)
+    và giao diện đã lưu dự án: giữ mọi sửa đổi đó (lấy dự án mới nhất trên đĩa), chỉ ghép phần của việc lồng tiếng vào
+    (giọng / vị trí từng câu còn lại, bản lồng, các bản đã lưu). Trước đây việc chạy xong ghi đè cả dự án -> câu vừa xoá
+    hiện lại. Câu còn thay đổi sẽ được lần xếp lại kế tiếp (giao diện tự xếp hàng) cập nhật."""
+    fresh = Project(p.id)
+    if not fresh.exists:
+        return
+    data = fresh.data
+    fsegs = fresh.segments
+    if [_seg_sig(s) for s in fsegs] != sig0:
+        mine = {}
+        for s in p.segments:
+            mine.setdefault((round(s.start, 3), round(s.end, 3), s.text), s)
+        for s in fsegs:
+            j = mine.get((round(s.start, 3), round(s.end, 3), s.text))
+            if j is None:
+                continue
+            for k in _DUB_EXTRA:
+                if k in j.extra:
+                    s.extra[k] = j.extra[k]
+                else:
+                    s.extra.pop(k, None)
+        data["segments"] = [s.to_dict() for s in fsegs]
+    else:
+        data["segments"] = p.data.get("segments", [])
+    for k in ("dub_layout", "dub_stats", "dub_versions", "voices", "voice_all"):
+        if k in p.data:
+            data[k] = p.data[k]
+    ed = dict(data.get("edit") or {})
+    ed["dub"] = dict((p.data.get("edit") or {}).get("dub") or {})
+    data["edit"] = ed
+    p.data = data
 
 
 def drop_interjections(p: Project, segs: list | None = None) -> int:
@@ -1486,6 +1567,43 @@ def relayout(p: Project, settings: dict | None = None, progress: Prog | None = N
 
 def dub_env_path(wav: str | Path) -> Path:
     return Path(wav).with_suffix(".env.npy")
+
+
+def _patch_dub_env(wav: str | Path, regions: list, top: float | None) -> float:
+    """Sóng âm timeline của bản lồng vừa vá: chỉ tính lại các đoạn đã vá (thiếu file / mức chuẩn -> tính cả bản).
+    Trả mức chuẩn hoá (đỉnh 99,5 %) đang dùng."""
+    import numpy as np
+
+    from .tts import SR, env_top, norm_peaks, wav_info, wave_peaks
+
+    off, frames, sr, _ch, _sw = wav_info(wav)
+    hop = int(SR * 0.05)
+    envp = dub_env_path(wav)
+    env = None
+    if top is not None and envp.exists():
+        try:
+            env = np.load(envp).astype(np.float32)
+        except (OSError, ValueError):
+            env = None
+    if env is None or len(env) != frames // hop:
+        a = np.memmap(str(wav), dtype=np.int16, mode="r", offset=off, shape=(frames,))
+        step = hop * 20000
+        peaks = np.concatenate([wave_peaks(a[i:i + step].astype(np.float32) / 32767.0, SR)
+                                for i in range(0, frames, step)] or [np.zeros(0, np.float32)])
+        del a
+        top = env_top(peaks)
+        np.save(envp, norm_peaks(peaks, top))
+        return top
+    with open(wav, "rb") as f:
+        for r0, r1 in regions:
+            h0, h1 = r0 // hop, min(len(env), -(-r1 // hop))
+            if h1 <= h0:
+                continue
+            f.seek(off + h0 * hop * 2)
+            a = np.frombuffer(f.read((h1 - h0) * hop * 2), dtype=np.int16).astype(np.float32) / 32767.0
+            env[h0:h0 + len(a) // hop] = wave_peaks(a, SR) / max(top, 1e-4)
+    np.save(envp, np.clip(env, 0, 1).astype(np.float16))
+    return top
 
 
 def dub_wave(p: Project) -> tuple[str, float] | None:

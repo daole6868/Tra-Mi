@@ -1046,14 +1046,251 @@ def soft_limit(a: np.ndarray, thr: float = 0.9) -> np.ndarray:
     return a
 
 
+# ------------------------------------------------------------------ ghép bản lồng nhanh (xếp lại / vá từng đoạn)
+
+PATCH_MAX = 0.5   # thay đổi > 50 % thời lượng bản lồng -> dựng lại cả bản (nhanh ngang vá)
+
+
+class _NoPatch(Exception):
+    """Không vá được bản lồng đang có (khác định dạng / đang bị khoá / đổi gần hết) -> dựng lại cả bản."""
+
+
+def _clip_speed(v: float) -> float:
+    """Tốc độ dùng để giải mã đoạn giọng: làm tròn 0,001 (đệm theo tốc độ dùng lại được); gần ×1 thì đúng ×1."""
+    v = round(float(v), 3)
+    return 1.0 if abs(v - 1.0) <= 0.01 else v
+
+
+class _ClipMeta:
+    """Đệm thông số từng file giọng (work/tts/_clipmeta.json): độ dài sau khi bỏ khoảng lặng, độ to, tốc độ đã lưu
+    bản tua nhanh -> xếp lại 2.000 câu không phải giải mã lại 2.000 file chỉ để biết độ dài."""
+
+    def __init__(self, work: str | Path):
+        self.path = Path(work) / "_clipmeta.json"
+        try:
+            self.d = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            self.d = {}
+        self.dirty = False
+
+    def _get(self, path: str | Path) -> list:
+        p = Path(path)
+        st = p.stat()
+        e = self.d.get(p.name)
+        if not e or e[0] != int(st.st_mtime) or e[1] != st.st_size:
+            e = [int(st.st_mtime), st.st_size, len(_trim_silence(_decode_cached(p))), None, None]
+            self.d[p.name] = e
+            self.dirty = True
+        return e
+
+    def warm(self, paths) -> None:
+        """Tính trước (song song) các file chưa có trong đệm – lần đầu, phim dài hàng nghìn câu."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        todo = []
+        for path in set(paths):
+            try:
+                st = Path(path).stat()
+            except OSError:
+                continue
+            e = self.d.get(Path(path).name)
+            if not e or e[0] != int(st.st_mtime) or e[1] != st.st_size:
+                todo.append(path)
+        if len(todo) < 8:
+            return
+        with ThreadPoolExecutor(max_workers=max(2, min(8, (os.cpu_count() or 4)))) as ex:
+            for path, n in zip(todo, ex.map(lambda q: len(_trim_silence(_decode_cached(q))), todo)):
+                st = Path(path).stat()
+                self.d[Path(path).name] = [int(st.st_mtime), st.st_size, n, None, None]
+                self.dirty = True
+
+    def n(self, path) -> int:
+        """Số mẫu (24 kHz) của đoạn giọng ở ×1 sau khi bỏ khoảng lặng 2 đầu."""
+        return int(self._get(path)[2])
+
+    def level(self, path) -> float:
+        e = self._get(path)
+        if e[3] is None:
+            e[3] = float(speech_level(_decode_cached(path), SR))
+            self.dirty = True
+        return float(e[3])
+
+    def speed_file(self, path, speed: float) -> None:
+        """Ghi nhớ bản tua nhanh vừa lưu; bản tốc độ cũ của cùng câu bị xoá (mỗi câu giữ 1 bản)."""
+        e = self._get(path)
+        old = e[4]
+        if old is not None and abs(float(old) - speed) > 1e-6:
+            Path(path).with_name(f"{Path(path).name}.x{float(old):.3f}.npy").unlink(missing_ok=True)
+        e[4] = speed
+        self.dirty = True
+
+    def save(self) -> None:
+        if not self.dirty:
+            return
+        tmp = self.path.with_suffix(".tmp")
+        try:
+            tmp.write_text(json.dumps(self.d, separators=(",", ":")), encoding="utf-8")
+            tmp.replace(self.path)
+            self.dirty = False
+        except OSError:
+            pass
+
+
+def _clip_at(path: str | Path, speed: float, meta: _ClipMeta | None = None) -> np.ndarray:
+    """Đoạn giọng đã bỏ khoảng lặng 2 đầu ở tốc độ `speed`. Bản tua nhanh lưu đệm <file>.x<tốc độ>.npy cạnh file giọng
+    -> xếp lại lần sau không phải gọi FFmpeg cho từng câu (trước đây mỗi lần xếp lại: 1 lần FFmpeg / câu đọc nhanh)."""
+    if speed == 1.0:
+        return _trim_silence(_decode_cached(path))
+    p = Path(path)
+    c = p.with_name(f"{p.name}.x{speed:.3f}.npy")
+    try:
+        if c.exists() and c.stat().st_mtime >= p.stat().st_mtime:
+            return np.load(c).astype(np.float32) / 32768.0
+    except Exception:  # noqa: BLE001 – file đệm hỏng -> giải mã lại
+        pass
+    a = _trim_silence(_decode(p, speed))
+    try:
+        np.save(c, np.clip(np.round(a * 32768.0), -32768, 32767).astype(np.int16))
+        if meta is not None:
+            meta.speed_file(p, speed)
+    except OSError:
+        pass
+    return a
+
+
+def _prefetch_clips(pairs, meta: _ClipMeta, progress=None, cancel=None) -> None:
+    """Tua sẵn (song song, mỗi luồng 1 tiến trình FFmpeg) các đoạn giọng cần tốc độ khác ×1 mà chưa có bản đệm – lần
+    đầu dựng bản lồng phim dài có hàng nghìn câu đọc nhanh (trước đây tua lần lượt từng câu)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    todo = []
+    for path, speed in pairs:
+        p = Path(path)
+        c = p.with_name(f"{p.name}.x{speed:.3f}.npy")
+        try:
+            if not (c.exists() and c.stat().st_mtime >= p.stat().st_mtime):
+                todo.append((p, speed))
+        except OSError:
+            continue
+    if not todo:
+        return
+
+    def one(job):
+        p, speed = job
+        a = _trim_silence(_decode(p, speed))
+        np.save(p.with_name(f"{p.name}.x{speed:.3f}.npy"), np.clip(np.round(a * 32768.0), -32768, 32767).astype(np.int16))
+        return p, speed
+
+    with ThreadPoolExecutor(max_workers=max(2, min(8, (os.cpu_count() or 4)))) as ex:
+        for n, res in enumerate(ex.map(one, todo)):
+            meta.speed_file(*res)
+            if cancel and cancel():
+                raise Cancelled()
+            if progress and n % 50 == 0:
+                progress(0.8, f"Đang tua giọng các câu đọc nhanh {n}/{len(todo)} (chỉ lần đầu, lần sau dùng lại)")
+
+
+def _shaped_clip(path, speed: float, gain: float | None, keep_n: int, g: float | None = None,
+                 meta: _ClipMeta | None = None) -> tuple[np.ndarray, float]:
+    """Đoạn giọng đúng như đặt vào bản lồng: tốc độ, âm lượng (g: hệ số đã dùng; None = tính từ `gain` cân âm lượng,
+    không vượt -1 dBFS), cắt + nhỏ dần cuối khi bị "Giữ đúng giờ" (keep_n mẫu). Trả (đoạn giọng, hệ số âm lượng)."""
+    clip = _clip_at(path, speed, meta)
+    if g is None:
+        g = 1.0
+        if gain and gain > 1.0 and len(clip):
+            pk = float(np.abs(clip).max())
+            if pk > 0 and min(gain, 0.89 / pk) > 1.0:
+                g = round(min(gain, 0.89 / pk), 4)
+    if g != 1.0:
+        clip = clip * g
+    if keep_n:
+        clip = clip[:keep_n].copy()
+        f = min(int(FADE * SR), len(clip) // 3)
+        if f > 0:
+            clip[-f:] *= np.linspace(1.0, 0.0, f, dtype=np.float32)
+    return clip, g
+
+
+def merge_regions(spans, limit: int, join: int = SR // 2) -> list[tuple[int, int]]:
+    """Gộp các đoạn (mẫu) chồng / sát nhau (< 0,5 s) và cắt trong [0, limit)."""
+    out: list[list[int]] = []
+    for a, b in sorted((max(0, int(a)), min(int(limit), int(b))) for a, b in spans):
+        if b <= a:
+            continue
+        if out and a <= out[-1][1] + join:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [(a, b) for a, b in out]
+
+
+def wav_info(path: str | Path) -> tuple[int, int, int, int, int]:
+    """(vị trí bắt đầu dữ liệu, số khung, tần số mẫu, số kênh, số byte / mẫu) của file wav PCM."""
+    with open(path, "rb") as f:
+        head = f.read(12)
+        if head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+            raise ValueError("không phải file wav")
+        sr = ch = sw = 0
+        while True:
+            h = f.read(8)
+            if len(h) < 8:
+                raise ValueError("file wav thiếu dữ liệu")
+            cid, size = h[:4], int.from_bytes(h[4:], "little")
+            if cid == b"fmt ":
+                fmt = f.read(size)
+                ch, sr = int.from_bytes(fmt[2:4], "little"), int.from_bytes(fmt[4:8], "little")
+                sw = int.from_bytes(fmt[14:16], "little") // 8
+                continue
+            if cid == b"data":
+                if not (sr and ch and sw):
+                    raise ValueError("file wav thiếu thông tin định dạng")
+                return f.tell(), size // (ch * sw), sr, ch, sw
+            f.seek(size + (size & 1), 1)
+
+
+def _patch_wav(path: str | Path, regions: list[tuple[int, int]], tab: list[list], by_name: dict[str, str],
+               meta: _ClipMeta, n_out: int) -> None:
+    """Ghi lại đúng các đoạn thời gian `regions` (mẫu) của file bản lồng: trộn lại mọi đoạn giọng (theo tab) chạm vào
+    đoạn đó + nén mềm như khi dựng cả bản. Kiểm tra định dạng trước khi ghi (không hợp -> _NoPatch, chưa đụng file)."""
+    try:
+        off, frames, sr, ch, sw = wav_info(path)
+    except (OSError, ValueError) as e:
+        raise _NoPatch(str(e)) from None
+    if (sr, ch, sw) != (SR, 1, 2) or frames != n_out:
+        raise _NoPatch("bản lồng đang dùng khác định dạng / độ dài")
+    if not regions:
+        return
+    try:
+        f = open(path, "r+b")
+    except OSError as e:
+        raise _NoPatch(str(e)) from None
+    with f:
+        for r0, r1 in regions:
+            buf = np.zeros(r1 - r0, dtype=np.float32)
+            for name, st, speed, g, keep_n, full in tab:
+                if st >= r1 or st + full <= r0 or name not in by_name:
+                    continue
+                clip, _g = _shaped_clip(by_name[name], speed, None, keep_n, g, meta)
+                a, b = max(r0, st), min(r1, st + len(clip))
+                if b > a:
+                    buf[a - r0:b - r0] += clip[a - st:b - st]
+            soft_limit(buf)
+            f.seek(off + r0 * 2)
+            f.write((np.clip(buf, -1.0, 1.0) * 32767).astype(np.int16).tobytes())
+
+
 def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: float, work_dir: str | Path,
                    voice: str = "edge:vi-VN-HoaiMyNeural", rate: str = "+0%", pitch: str = "+0Hz",
                    max_speedup: float = 1.6, progress: Callable[[float, str], None] | None = None,
                    cancel: Callable[[], bool] | None = None, voices: dict | None = None,
                    ref_audio: str | Path | None = None, settings: dict | None = None,
                    skip_songs: bool = True, stats: dict | None = None, only: set[int] | None = None,
-                   lang: str = "vi", genders: dict | None = None, prepare_only: bool = False) -> Path:
-    """prepare_only: chỉ đọc giọng từng câu vào kho đệm (work/tts), không xếp / không ghi bản lồng – chế độ vừa tách
+                   lang: str = "vi", genders: dict | None = None, prepare_only: bool = False,
+                   patch: dict | None = None) -> Path:
+    """patch: {"wav": bản lồng đang dùng, "placed": bảng đoạn giọng đã đặt trong bản đó} -> chỉ ghi lại những đoạn thời
+    gian có thay đổi vào chính file đó (xoá / kéo / gộp / đọc lại vài câu: ~1 giây thay vì dựng lại cả phim);
+    stats["patched"] = các đoạn đã ghi (mẫu 24 kHz). Không vá được -> dựng cả bản vào out_wav như thường.
+    prepare_only: chỉ đọc giọng từng câu vào kho đệm (work/tts), không xếp / không ghi bản lồng – chế độ vừa tách
     vừa dịch đọc trước các câu đã dịch, bước lồng tiếng sau đó dùng lại file (cùng lời + giọng = cùng file).
     only: chỉ đọc (lại) các câu này; câu khác dùng giọng đã đọc ở bản trước (extra["tts_file"]) dù lời đã đổi.
     Câu đọc lại bị lỗi mà có giọng cũ -> giữ giọng cũ (báo lỗi), không làm hỏng cả bản lồng tiếng.
@@ -1343,17 +1580,9 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         return max(0.0, segs[k].start + float(segs[k].extra.get("dub_shift", 0) or 0))
 
     order = sorted(range(len(segs)), key=want)
-    # cân âm lượng: câu nhỏ hơn hẳn các câu cùng giọng (hoặc giọng nhỏ hơn hẳn giọng khác) được tăng lên cho đều
-    gains: dict[int, float] = {}
-    if settings.get("dub_level_match", True):
-        levels = {}
-        for k in order:
-            p = segs[k].extra.get("_tts")
-            if p and Path(p).exists():
-                levels[k] = speech_level(_decode_cached(p), SR)
-        gains = level_gains(levels, {k: groups.get(k) or "spk:" + (segs[k].speaker or "S1") for k in levels})
-    stats["level_fixed"] = len(gains)
-    items, files = [], {}
+    meta = _ClipMeta(work)   # độ dài / độ to từng file giọng lưu đệm: xếp lại không phải giải mã lại mọi câu
+    meta.warm(s.extra["_tts"] for s in segs if s.extra.get("_tts") and Path(s.extra["_tts"]).exists())
+    files: dict[int, str] = {}
     for k in order:
         s = segs[k]
         p = s.extra.pop("_tts", None)
@@ -1361,65 +1590,120 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             s.extra.pop(key, None)
         if not p or not Path(p).exists():
             continue
-        clip = _trim_silence(_decode_cached(p))
-        if len(clip) == 0:
+        if meta.n(p) == 0:
             errors.append(f"Câu {k + 1}: giọng đọc tạo ra toàn khoảng lặng")
             continue
         files[k] = p
+    old_g = {e[0]: e[3] for e in (patch or {}).get("placed") or []}
+
+    # cân âm lượng: câu nhỏ hơn hẳn các câu cùng giọng (hoặc giọng nhỏ hơn hẳn giọng khác) được tăng lên cho đều.
+    # Vá bản lồng đang có: câu cũ giữ đúng âm lượng đang nghe, chỉ câu mới đọc mới tính
+    gains: dict[int, float] = {}
+    if settings.get("dub_level_match", True) and (patch is None or any(Path(f).name not in old_g
+                                                                       for f in files.values())):
+        levels = {k: meta.level(p) for k, p in files.items()}
+        gains = level_gains(levels, {k: groups.get(k) or "spk:" + (segs[k].speaker or "S1") for k in levels})
+    items = []
+    for k in order:
+        if k not in files:
+            continue
+        s = segs[k]
         # tốc độ người dùng đặt cho câu (tab Lồng tiếng / timeline) = mức TỐI THIỂU: câu vốn phải đọc nhanh hơn để vừa
         # thì giữ tốc độ đó; < 1 = đọc chậm lại (nếu còn chỗ)
-        items.append({"k": k, "want": want(k), "dur": len(clip) / SR, "user": float(s.extra.get("speed") or 0),
+        items.append({"k": k, "want": want(k), "dur": meta.n(files[k]) / SR, "user": float(s.extra.get("speed") or 0),
                       "fixed": bool(s.extra.get("dub_shift")), "mode": s.extra.get("overflow") or ""})
     durs = {it["k"]: it["dur"] for it in items}
     user_min = {it["k"]: it["user"] for it in items if it["user"]}
     plan = plan_layout(items, total, settings.get("dub_overflow", "smart"), max_speedup,
                        float(settings.get("dub_lead_max", 1.0)), float(settings.get("dub_max_lag", 2.0)))
     end_t = max([total] + [x["end"] + 0.5 for x in plan.values()])
-    track = np.zeros(int(end_t * SR) + SR, dtype=np.float32)
-    placed = 0
-    layout: list[list] = []
-    too_long: list[tuple[int, float, float]] = []   # (câu, thời lượng cần, thời lượng có) -> để AI rút gọn
-    for n, k in enumerate(sorted(plan, key=lambda q: plan[q]["start"])):
-        s, x, p = segs[k], plan[k], files[k]
-        speed = x["speed"]
-        clip = _trim_silence(_decode(p, speed)) if abs(speed - 1.0) > 0.005 else _trim_silence(_decode_cached(p))
-        if k in gains:
-            g = gains[k]
-            pk = float(np.abs(clip).max()) if len(clip) else 0.0
-            if pk > 0:
-                g = min(g, 0.89 / pk)            # không vượt -1 dBFS
-            if g > 1.0:
-                clip = clip * g
-        if x["keep"] is not None:
+    track_len = int(end_t * SR) + SR
+    n_out = int(total * SR)
+
+    def assemble(patch_on: bool):
+        """Đặt từng đoạn giọng vào bản lồng. patch_on: chỉ ghi lại những đoạn thời gian có thay đổi vào file bản lồng
+        đang có (xoá / kéo / gộp câu… vài giây) thay vì dựng lại cả phim; không vá được thì báo _NoPatch."""
+        old_keys = {tuple(e[:5]): int(e[5]) for e in patch["placed"]} if patch_on else {}
+        if not patch_on:
+            _prefetch_clips({(files[k], _clip_speed(x["speed"])) for k, x in plan.items()
+                             if _clip_speed(x["speed"]) != 1.0}, meta, progress, cancel)
+        track = None if patch_on else np.zeros(track_len, dtype=np.float32)
+        tab: list[list] = []
+        layout: list[list] = []
+        too_long: list[tuple[int, float, float]] = []   # (câu, thời lượng cần, thời lượng có) -> để AI rút gọn
+        placed = 0
+        for n, k in enumerate(sorted(plan, key=lambda q: plan[q]["start"])):
+            s, x, p = segs[k], plan[k], files[k]
+            speed = _clip_speed(x["speed"])
+            name = Path(p).name
+            st = int(x["start"] * SR)
             # "Giữ đúng giờ": vẫn quá dài -> nhỏ dần phần cuối (≤0,3 s) rồi dừng đúng lúc câu sau vào
-            clip = clip[:max(int(0.3 * SR), int(x["keep"] * SR))].copy()
-            f = min(int(FADE * SR), len(clip) // 3)
-            if f > 0:
-                clip[-f:] *= np.linspace(1.0, 0.0, f, dtype=np.float32)
-        if x["fit"] == "long" and durs[k] / max(user_min.get(k, 1.0), 1.0) > x["slot"] * 1.15:
-            # chỉ câu có LỜI dài hơn chỗ của chính nó (câu chỉ bị câu trước đẩy trễ thì không cần rút gọn)
-            too_long.append((k, durs[k], x["slot"]))
-        st = int(x["start"] * SR)
-        seg_len = min(len(clip), len(track) - st)
-        if seg_len > 0:
-            track[st:st + seg_len] += clip[:seg_len]
-            placed += 1
-            a0, a1 = round(x["start"], 3), round(x["start"] + seg_len / SR, 3)
-            layout.append([a0, a1, k, x["fit"]])
-            s.extra["tts_file"] = str(p)   # giọng đang dùng của câu này (để lần sau chỉ đọc lại câu được chọn)
-            s.extra["dub_at"] = [a0, a1]   # đoạn giọng đang phát của câu (phụ đề chạy theo giọng lồng)
-            if abs(x["shift"]) >= 0.05:
-                s.extra["fit_shift"] = round(x["shift"], 2)
-            if x["over"] >= 0.05:
-                s.extra["fit_over"] = round(x["over"], 2)
-        s.extra["fit"] = x["fit"]
-        s.extra["fit_speed"] = round(speed, 2)
-        s.extra["fit_need"] = round(durs[k], 2)     # giọng ở ×1 cần bao lâu / chỗ trống của chính câu -> AI rút gọn
-        s.extra["fit_have"] = round(x["slot"], 2)
-        if progress and n % 20 == 0:
-            progress(0.8 + 0.2 * n / max(1, len(plan)), "Đang xếp giọng đọc khớp thời gian nhân vật nói")
+            keep_n = max(int(0.3 * SR), int(x["keep"] * SR)) if x["keep"] is not None else 0
+            g = old_g.get(name) if patch_on else None
+            key = (name, st, speed, g, keep_n)
+            if g is not None and key in old_keys:     # đoạn này y như bản đang có -> không cần giải mã
+                full_len = old_keys[key]
+            else:
+                clip, g = _shaped_clip(p, speed, gains.get(k), keep_n, g, meta)
+                full_len = len(clip)
+                if track is not None:
+                    seg = min(len(clip), len(track) - st)
+                    if seg > 0:
+                        track[st:st + seg] += clip[:seg]
+            tab.append([name, st, speed, g, keep_n, full_len])
+            if x["fit"] == "long" and durs[k] / max(user_min.get(k, 1.0), 1.0) > x["slot"] * 1.15:
+                # chỉ câu có LỜI dài hơn chỗ của chính nó (câu chỉ bị câu trước đẩy trễ thì không cần rút gọn)
+                too_long.append((k, durs[k], x["slot"]))
+            seg_len = min(full_len, track_len - st)
+            if seg_len > 0:
+                placed += 1
+                a0, a1 = round(x["start"], 3), round(x["start"] + seg_len / SR, 3)
+                layout.append([a0, a1, k, x["fit"]])
+                s.extra["tts_file"] = str(p)   # giọng đang dùng của câu này (để lần sau chỉ đọc lại câu được chọn)
+                s.extra["dub_at"] = [a0, a1]   # đoạn giọng đang phát của câu (phụ đề chạy theo giọng lồng)
+                if abs(x["shift"]) >= 0.05:
+                    s.extra["fit_shift"] = round(x["shift"], 2)
+                if x["over"] >= 0.05:
+                    s.extra["fit_over"] = round(x["over"], 2)
+            s.extra["fit"] = x["fit"]
+            s.extra["fit_speed"] = round(x["speed"], 2)
+            s.extra["fit_need"] = round(durs[k], 2)     # giọng ở ×1 cần bao lâu / chỗ trống của chính câu -> AI rút gọn
+            s.extra["fit_have"] = round(x["slot"], 2)
+            if progress and n % 20 == 0:
+                progress(0.8 + 0.2 * n / max(1, len(plan)), "Đang xếp giọng đọc khớp thời gian nhân vật nói")
+        if placed == 0:
+            raise RuntimeError("Bản lồng tiếng tạo ra không có tiếng nào. " + "; ".join(errors[:3]))
+        if patch_on:
+            changed = {tuple(e[:5]) for e in tab}
+            spans = [(e[1], e[1] + int(e[5])) for e in patch["placed"] if tuple(e[:5]) not in changed] + \
+                    [(e[1], e[1] + int(e[5])) for e in tab if tuple(e[:5]) not in old_keys]
+            regions = merge_regions(spans, n_out)
+            if sum(b - a for a, b in regions) > n_out * PATCH_MAX:
+                raise _NoPatch("thay đổi gần cả bản lồng")
+            _patch_wav(patch["wav"], regions, tab, files_by_name(), meta, n_out)
+            stats["patched"] = regions
+        else:
+            soft_limit(track)      # chỗ 2 giọng đọc đè lên nhau: nén mềm đỉnh, không vỡ tiếng
+            write_wav(out_wav, track[:n_out])
+            peaks = wave_peaks(track[:n_out], SR)
+            stats["env_top"] = env_top(peaks)
+            stats["wave"] = norm_peaks(peaks, stats["env_top"])
+            stats.pop("patched", None)
+        return tab, layout, too_long, placed
+
+    def files_by_name() -> dict[str, str]:
+        return {Path(p).name: p for p in files.values()}
+
+    try:
+        tab, layout, too_long, placed = assemble(bool(patch and patch.get("placed")))
+    except _NoPatch as e:   # không vá được (file bản lồng khác, đổi gần hết…) -> dựng lại cả bản lồng như thường
+        stats["patch_skipped"] = str(e)
+        tab, layout, too_long, placed = assemble(False)
+    meta.save()
+    stats["placed_tab"] = tab
     stats["layout"] = layout
     stats["too_long"] = too_long
+    stats["level_fixed"] = sum(1 for e in tab if e[3] > 1.0)
     stats["fit"] = {"ok": sum(1 for x in layout if x[3] == "ok"), "fast": sum(1 for x in layout if x[3] == "fast"),
                     "long": sum(1 for x in layout if x[3] == "long")}
     lay_segs = [segs[int(r[2])].extra for r in layout]
@@ -1432,27 +1716,36 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     stats.update({"placed": placed, "total": len(segs), "songs": n_song, "empty": n_empty,
                   "nodub": n_nodub, "errors": len(errors), "error_samples": errors[:3],
                   "redone": redone, "kept_old": kept_old, "lang_edge": n_lang, "langs": by_lang})
-    if placed == 0:
-        raise RuntimeError("Bản lồng tiếng tạo ra không có tiếng nào. " + "; ".join(errors[:3]))
-    soft_limit(track)      # chỗ 2 giọng đọc đè lên nhau: nén mềm đỉnh, không vỡ tiếng
-    write_wav(out_wav, track[: int(total * SR)])
-    stats["wave"] = wave_envelope(track[: int(total * SR)], SR)
     if progress:
         msg = "Đã tạo xong bản lồng tiếng"
         if errors:
             msg += f" ({len(errors)} câu lỗi, đã bỏ qua)"
         progress(1.0, msg)
-    return Path(out_wav)
+    return Path(patch["wav"]) if stats.get("patched") is not None else Path(out_wav)
+
+
+def wave_peaks(a: np.ndarray, sr: int, hop: float = 0.05) -> np.ndarray:
+    """Đỉnh mỗi 0,05 s (chưa chuẩn hoá)."""
+    n = max(1, int(sr * hop))
+    if len(a) < n:
+        return np.zeros(0, np.float32)
+    return np.abs(a[: len(a) // n * n].reshape(-1, n)).max(axis=1).astype(np.float32)
+
+
+def env_top(peaks: np.ndarray) -> float:
+    return float(np.percentile(peaks, 99.5)) if len(peaks) else 0.0
+
+
+def norm_peaks(peaks: np.ndarray, top: float) -> np.ndarray:
+    return np.clip(peaks / max(top, 1e-4), 0, 1).astype(np.float16)
 
 
 def wave_envelope(a: np.ndarray, sr: int, hop: float = 0.05) -> np.ndarray:
     """Sóng âm rút gọn (đỉnh mỗi 0,05 s, 0..1) để vẽ trên timeline."""
-    n = max(1, int(sr * hop))
-    if len(a) < n:
+    peaks = wave_peaks(a, sr, hop)
+    if not len(peaks):
         return np.zeros(0, np.float16)
-    env = np.abs(a[: len(a) // n * n].reshape(-1, n)).max(axis=1)
-    top = float(np.percentile(env, 99.5)) if len(env) else 0.0
-    return np.clip(env / max(top, 1e-4), 0, 1).astype(np.float16)
+    return norm_peaks(peaks, env_top(peaks))
 
 
 PREVIEW_TEXT = {"vi": "Xin chào, đây là giọng đọc thử nghiệm của Subvideo.",

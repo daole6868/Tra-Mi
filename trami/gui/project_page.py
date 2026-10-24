@@ -66,6 +66,9 @@ class ProjectPage(QWidget):
         # đổi cách xếp giọng ở tab Lồng tiếng -> xếp lại bản lồng (đợi người dùng chỉnh xong)
         self._relayout_timer = QTimer(self, singleShot=True, interval=900,
                                       timeout=lambda: self._relayout("Đã xếp lại giọng lồng theo cách mới"))
+        # xoá / kéo / gộp nhiều câu liền nhau -> gộp thành 1 lần xếp lại (đợi 1,2 s sau thao tác cuối)
+        self._relayout_whats: list[str] = []
+        self._relayout_go = QTimer(self, singleShot=True, interval=1200, timeout=self._relayout_now)
 
         # ---------------- thanh trên cùng: tên dự án · trạng thái lưu · Xuất (như trình dựng phim)
         self.name = QLineEdit()
@@ -170,6 +173,7 @@ class ProjectPage(QWidget):
         self.tracks.lineActivated.connect(lambda r: (self._select_line(r), self._play_line(r)))
         self.tracks.actionRequested.connect(self._timeline_action)
         self.tracks.dubMoved.connect(self._dub_moved)
+        self.tracks.subsMoved.connect(self._subs_moved)
         self.tracks.dubReset.connect(lambda r: self._dub_moved(r, None))
         bottom = Card(padding=theme.PANEL_PAD)
         bottom.add(self.tracks)
@@ -354,6 +358,7 @@ class ProjectPage(QWidget):
         tv.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)   # Ctrl / Shift chọn nhiều dòng
         tv.setWordWrap(True)
         tv.setTextElideMode(Qt.TextElideMode.ElideNone)
+        tv.setShowGrid(False)   # lưới trong suốt vẫn chừa khe 1 px -> dòng đang chọn (tô cam) bị chia vạch
         tv.verticalHeader().hide()
         tv.verticalHeader().setDefaultSectionSize(40)
         hh = tv.horizontalHeader()
@@ -1013,6 +1018,7 @@ class ProjectPage(QWidget):
         dt.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         dt.setWordWrap(True)
         dt.setTextElideMode(Qt.TextElideMode.ElideNone)
+        dt.setShowGrid(False)
         dt.verticalHeader().hide()
         dt.verticalHeader().setDefaultSectionSize(38)
         dh = dt.horizontalHeader()
@@ -1677,13 +1683,14 @@ class ProjectPage(QWidget):
             self._save_edit_now()
 
     # ================================================================== tác vụ nền
-    def submit(self, kind: str, title: str, fn):
+    def submit(self, kind: str, title: str, fn, quiet: bool = False):
         if not self.p:
             return
         self.flush()
         pid = self.p.id
         job = manager.submit(kind, f"{title}: {self.p.data.get('name')}", lambda j: fn(j, Project(pid)), pid)
-        self.win.toast(f"Đã thêm vào hàng đợi: {title}", "ok")
+        if not quiet:
+            self.win.toast(f"Đã thêm vào hàng đợi: {title}", "ok")
         self.win.jobs_changed()
         return job
 
@@ -1744,9 +1751,9 @@ class ProjectPage(QWidget):
             if self._live_draft:
                 self._live_draft = None
                 self.table.setEditTriggers(self._edit_triggers)
-            self._play_after_mix = getattr(self, "_replay_row", None) if j["kind"] == "redub" and \
-                j.get("status") == "done" else None
-            self._replay_row = None if j["kind"] == "redub" else getattr(self, "_replay_row", None)
+            redub = j["kind"] in ("redub", "relayout")
+            self._play_after_mix = getattr(self, "_replay_row", None) if redub and j.get("status") == "done" else None
+            self._replay_row = None if redub else getattr(self, "_replay_row", None)
             self.reload()
             self._update_player_audio()
             pick = (j.get("result") or {}).get("pick") if isinstance(j.get("result"), dict) else None
@@ -2382,7 +2389,8 @@ class ProjectPage(QWidget):
                 pi = proxy.mapFromSource(self.model.index(row, 0))
                 if pi.isValid():
                     table.selectRow(pi.row())
-                    table.scrollTo(pi, QAbstractItemView.ScrollHint.EnsureVisible)
+                    # chọn từ timeline / khung câu / bảng kia: đưa câu ra GIỮA bảng (tô cam) cho dễ thấy
+                    table.scrollTo(pi, QAbstractItemView.ScrollHint.PositionAtCenter)
         if seek:
             self.player.seek(segs[row].start + 0.01)
 
@@ -2416,13 +2424,44 @@ class ProjectPage(QWidget):
                            for a, b, k, f in self.tracks.dub]
         self.tracks.canvas.update()
         self._save_segs_now()
-        self._replay_row = row
+        where = "đúng lúc nhân vật nói" if not shift else f"dời {shift:+.2f} giây so với lúc nhân vật nói"
+        self._relayout(f"Đã đặt giọng câu {row + 1} {where}", row)
 
-        def fn(j, p):
-            pipeline.relayout(p, None, j.update, j.cancelled)
-            where = "đúng lúc nhân vật nói" if not shift else f"dời {shift:+.2f} giây so với lúc nhân vật nói"
-            return {"message": f"Đã đặt giọng câu {row + 1} {where} – trình phát đang dùng bản mới"}
-        self.submit("redub", f"Xếp lại giọng câu {row + 1}", fn)
+    def _subs_moved(self, changes: list):
+        """Kéo khối phụ đề trên timeline: đổi đầu / cuối câu; giọng lồng của câu đi theo lúc bắt đầu mới (vẫn giữ phần
+        đã kéo dời riêng đoạn giọng) -> xếp lại bản lồng, chỉ vá quanh các câu đó."""
+        segs = self.model.segs
+        moved, shifted = [], {}
+        for r, a, b in changes:
+            if not 0 <= r < len(segs) or b - a < 0.05:
+                continue
+            s = segs[r]
+            if abs(s.start - a) < 0.005 and abs(s.end - b) < 0.005:
+                continue
+            if abs(a - s.start) >= 0.005:
+                shifted[r] = a - s.start
+            s.start, s.end = round(a, 3), round(b, 3)
+            moved.append(r)
+        if not moved:
+            return
+        self.model.dataChanged.emit(self.model.index(min(moved), 0),
+                                    self.model.index(max(moved), self.model.columnCount() - 1))
+        self._segs_edited()
+        # hiện ngay giọng lồng ở chỗ mới trên timeline trong lúc xếp lại ở nền
+        self.tracks.dub = [[a + shifted[int(k)], b + shifted[int(k)], k, f] if int(k) in shifted else [a, b, k, f]
+                           for a, b, k, f in self.tracks.dub]
+        self.tracks.canvas.update()
+        if self._sel_row in moved:
+            self.inspector.set_row(self._sel_row)
+        self._save_segs_now()
+        r0 = moved[0]
+        what = (f"Đã dời câu {r0 + 1} tới {fmt(segs[r0].start)} → {fmt(segs[r0].end)}" if len(moved) == 1
+                else f"Đã dời {len(moved)} câu phụ đề")
+        if shifted and any(segs[r].extra.get("tts_file") for r in shifted) and \
+                (self.p.edit.get("dub") or {}).get("wav"):
+            self._relayout(what + " – giọng lồng đi theo", r0)
+        else:
+            self.win.toast(what, "ok")
 
     def _load_dub_wave(self):
         if not self.p:
@@ -2517,7 +2556,10 @@ class ProjectPage(QWidget):
             return self.win.toast("Chọn câu trên dòng Phụ đề trước", "warn")
         elif op == "merge":
             lo, hi = rows[0], rows[-1]
+            if lo == hi and lo >= len(segs) - 1:
+                return self.win.toast("Câu cuối cùng – không còn câu sau để gộp", "warn")
             picked = any(self.model.is_picked(r) for r in range(lo, max(hi, lo + 1) + 1))
+            voiced = any(segs[r].extra.get("tts_file") for r in range(lo, max(hi, lo + 1) + 1))
             if lo == hi:
                 st.merge(segs, lo)
             else:
@@ -2539,11 +2581,18 @@ class ProjectPage(QWidget):
         self.tracks.select("subs", rows={focus} if 0 <= focus < len(segs) else set())
         if 0 <= focus < len(segs):
             self._select_line(focus)
+        dubbed = any(x.extra.get("tts_file") for x in segs) and (self.p.edit.get("dub") or {}).get("wav")
         if op == "delete":
             self.win.toast(f"Đã xoá {len(rows)} câu", "ok")
-            if any(x.extra.get("tts_file") for x in segs) and (self.p.edit.get("dub") or {}).get("wav"):
+            if dubbed:
                 self._save_segs_now()   # giọng lồng của câu đã xoá bỏ khỏi bản lồng ngay (không đọc lại câu nào)
-                self._relayout(f"Đã xoá {len(rows)} câu và giọng lồng của chúng")
+                self._relayout("", deleted=len(rows))
+        elif op == "merge" and dubbed and voiced and (segs[focus].trans or "").strip():
+            # câu gộp = lời của các câu cũ nối lại -> đọc lại giọng đúng câu này (chỉ vá đoạn đó trong bản lồng); không
+            # đọc lại thì bản lồng chỉ còn giọng của câu đầu
+            self._save_segs_now()
+            self.win.toast(f"Đã gộp – đang đọc lại giọng câu {focus + 1} (câu gộp)", "ok")
+            self._redub_rows([focus])
 
     # ------------------------------------------------------------------ timeline: lồng tiếng
     def _dub_rows_flag(self, name: str, rows: list[int]):
@@ -2568,12 +2617,7 @@ class ProjectPage(QWidget):
         self._save_segs_now()
         if not any(x.extra.get("tts_file") for x in segs):
             return self.win.toast(what + " – áp dụng khi tạo bản lồng tiếng", "ok")
-        self._replay_row = rows[0] if name != "dub_toggle" else None
-
-        def fn(j, p):
-            pipeline.relayout(p, None, j.update, j.cancelled)
-            return {"message": what + " – trình phát đang dùng bản mới"}
-        self.submit("redub", what, fn)
+        self._relayout(what, rows[0] if name != "dub_toggle" else None)
 
     # ------------------------------------------------------------------ timeline: video / tiếng gốc
     def _video_op(self, name: str):
@@ -2703,6 +2747,9 @@ class ProjectPage(QWidget):
             return self._sub_op("delete", rows)
         i = self._selected_row()
         segs = self.model.segs
+        if op in ("merge", "delete") and i >= 0:
+            # 1 câu: cùng đường với timeline -> bản lồng được xếp lại / câu gộp được đọc lại giọng
+            return self._sub_op(op, [i])
         if op == "insert":
             t = self.player.position()
             pos = next((k for k, s in enumerate(segs) if s.start > t), len(segs))
@@ -3306,17 +3353,33 @@ class ProjectPage(QWidget):
 
             save_settings({"dub_auto_shorten": on})
 
-    def _relayout(self, what: str, replay_row: int | None = None):
-        """Xếp lại bản lồng tiếng đang dùng theo cài đặt / cách xếp mới (vài giây, không đọc lại câu nào)."""
+    def _relayout(self, what: str, replay_row: int | None = None, deleted: int = 0):
+        """Xếp lại bản lồng tiếng đang dùng theo cài đặt / cách xếp / câu mới (không đọc lại câu nào; chỉ ghi lại đoạn
+        thời gian có thay đổi – ~1 giây). Nhiều thao tác liền nhau (xoá từng câu, kéo…) gộp thành 1 lần."""
         if not self.p:
             return
         self._replay_row = replay_row
+        self._relayout_deleted = getattr(self, "_relayout_deleted", 0) + deleted
+        if what and what not in self._relayout_whats:
+            self._relayout_whats.append(what)
+        self._relayout_go.start()
+
+    def _relayout_now(self):
+        n_del, self._relayout_deleted = getattr(self, "_relayout_deleted", 0), 0
+        whats, self._relayout_whats = self._relayout_whats, []
+        if n_del:
+            whats.insert(0, f"Đã xoá {n_del} câu và giọng lồng của chúng")
+        if not self.p or not whats:
+            return
+        what = "; ".join(whats[-3:]) + (f" (+{len(whats) - 3} thao tác)" if len(whats) > 3 else "")
+        if any(j["kind"] == "relayout" and j["status"] == "queued" for j in manager.list(self.p.id)):
+            return self._save_segs_now()   # lần xếp lại đang chờ sẽ đọc dự án mới nhất khi chạy
 
         def fn(j, p):
             pipeline.relayout(p, None, j.update, j.cancelled)
             sts = p.data.get("dub_stats") or {}
             return {"message": what + " – " + pipeline.dub_summary(p) if sts else what}
-        self.submit("redub", what, fn)
+        self.submit("relayout", "Xếp lại giọng lồng", fn, quiet=True)
 
     def _apply_overflow(self, rows: list[int], mode: str | None):
         """Cách xếp riêng cho các câu (None = theo cài đặt chung) -> xếp lại bản lồng ngay."""
@@ -3495,12 +3558,7 @@ class ProjectPage(QWidget):
         if not pipeline.has_dub(self.p):
             return self.win.toast(what + " – áp dụng khi tạo bản lồng tiếng", "ok")
         need = 0 if on else sum(1 for r in rows if not segs[r].extra.get("tts_file"))
-
-        def fn(j, p):
-            pipeline.relayout(p, None, j.update, j.cancelled)
-            return {"message": what + (f" – {need} câu chưa có giọng: bấm 'Tạo lại giọng các câu đã tích'" if need
-                                       else " – trình phát đang dùng bản mới")}
-        self.submit("redub", what, fn)
+        self._relayout(what + (f" – {need} câu chưa có giọng: bấm 'Tạo lại giọng các câu đã tích'" if need else ""))
 
     def _dub_row_clicked(self, pidx):
         row = self.dub_proxy.mapToSource(pidx).row()

@@ -2848,7 +2848,7 @@ def test_join_button_and_split_style_gui(monkeypatch):
     win.settings_page.load()
     assert win.settings_page.split_style.currentData() == "short"     # trang Cài đặt cũng thấy
     jobs = []
-    pp.submit = lambda kind, title, fn: jobs.append((kind, fn(type("J", (), {"update": lambda *a: None})(), p)))
+    pp.submit = lambda kind, title, fn, **k: jobs.append((kind, fn(type("J", (), {"update": lambda *a: None})(), p)))
     pp.run_join()
     assert jobs[0][0] == "join" and jobs[0][1]["pick"] == [0]
     assert [s.text for s in p.segments] == ["放开我，不好吃。", "嘎！"]
@@ -2915,7 +2915,7 @@ def test_join_keeps_or_translates_new_lines(monkeypatch):
     win.open_project(p.id)
     pp = win.project_page
     jobs = []
-    pp.submit = lambda kind, title, fn: jobs.append(fn(type("J", (), {"update": lambda *a: None,
+    pp.submit = lambda kind, title, fn, **k: jobs.append(fn(type("J", (), {"update": lambda *a: None,
                                                                     "cancelled": lambda *a: False})(), p))
     pp.run_join()
     segs = p.segments
@@ -3207,13 +3207,16 @@ def test_dub_tab_flags_undubbed_and_srt_row(monkeypatch):
     toasts, jobs = [], []
     monkeypatch.setattr(win, "toast", lambda msg, kind="info", *a, **k: toasts.append(msg))
     monkeypatch.setattr(pipeline, "has_dub", lambda p: True)
-    pp.submit = lambda kind, title, fn: jobs.append((kind, title))
+    pp.submit = lambda kind, title, fn, **k: jobs.append((kind, title))
     pp._pick_undubbed()
     assert m.selected == {1, 3} and "2 câu chưa có giọng" in toasts[-1]
     m.set_picked(range(4), False)
     m.set_picked([1])
     pp._toggle_flag("song")
-    assert m.segs[1].extra.get("song") and jobs[-1][0] == "redub" and fit_text(m.segs[1]) == "🎵 bài hát"
+    assert not jobs and pp._relayout_go.isActive()          # xếp lại sau 1,2 s (gộp các thao tác liền nhau)
+    pp._relayout_go.stop()
+    pp._relayout_now()
+    assert m.segs[1].extra.get("song") and jobs[-1][0] == "relayout" and fit_text(m.segs[1]) == "🎵 bài hát"
     pp._toggle_flag("song")
     assert not m.segs[1].extra.get("song") and m.segs[1].extra.get("not_song")
     pp._toggle_flag("nodub")
@@ -3956,3 +3959,211 @@ def test_redub_resumes_after_cancel(monkeypatch):
     pipeline.redub(q, [1])                       # đã xong -> bấm lại = lần đọc mới
     assert [s.extra.get("take") for s in Project(q.id).segments] == [1, 2, 1, None]
     p.delete()
+
+
+def test_relayout_patches_only_changed_part(monkeypatch, tmp_path):
+    """Xoá câu / đọc lại 1 câu trên bản lồng đã có: chỉ ghi lại đúng đoạn thời gian thay đổi vào file bản lồng (kết quả
+    y hệt dựng lại cả bản), file nghe thử của trình phát được vá theo (khớp từng mẫu, không giải mã lại cả phim), giọng
+    đã tua nhanh lưu đệm (xếp lại không gọi FFmpeg cho từng câu); file khác định dạng -> dựng lại cả bản như cũ."""
+    import numpy as np
+
+    from trami import audiomix, pipeline, tts
+    from trami.project import Project
+
+    reads = []
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, p, voice in items:
+            reads.append(i)
+            n = int(tts.SR * (0.3 + 0.06 * len(text)))
+            x = np.sin(np.arange(n) * 2 * np.pi * (200 + 9 * len(text) + 40 * len(reads)) / tts.SR) * 0.3
+            tts.write_wav(p, x.astype(np.float32))
+        return []
+
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    p = Project.create("vá bản lồng")
+    p.data["info"] = {"duration": 40}
+    segs, t = [], 0.5
+    for i in range(16):
+        text = "Câu thoại số " + "dài " * (2 * (i % 5)) + str(i)
+        segs.append(Segment(round(t, 2), round(t + 1.2, 2), f"句{i}", text, "S1"))
+        t += 2.2
+    p.segments = segs
+    p.save()
+    st = {"translate_engine": "google", "tts_voice": "vi-VN-HoaiMyNeural", "dub_level_match": False}
+    wav = pipeline.dub(p, None, settings=st, engine="edge")
+    ver = pipeline.dub_versions(p)[0]
+    assert len(ver["placed"]) == 16 and ver.get("env_top")
+    assert any(e[2] != 1.0 for e in ver["placed"])               # có câu phải đọc nhanh
+    raw0 = audiomix.decode_track(wav, p.work / "live", "dub")
+    calls = []
+    real = tts._decode
+    monkeypatch.setattr(tts, "_decode", lambda *a, **k: calls.append(a) or real(*a, **k))
+    before = tts.read_wav(wav)[0].copy()
+    segs = p.segments
+    del segs[7]                                                   # câu 7: 15,9 s
+    p.segments = segs
+    p.save()
+    assert pipeline.relayout(p, st) == wav
+    after = tts.read_wav(wav)[0]
+    diff = np.where(np.abs(after - before) > 1e-4)[0] / tts.SR
+    assert len(diff) and diff[0] > 13 and diff[-1] < 26           # chỉ quanh câu đã xoá (+ cụm câu dài sát sau)
+    assert len(calls) <= 3                  # chỉ câu sát bên đổi tốc độ mới phải tua lại, câu khác dùng bản đệm
+    calls.clear()
+    mt = wav.stat().st_mtime_ns
+    pipeline.relayout(p, st)                                      # không đổi gì: không tua, không ghi file
+    assert not calls and wav.stat().st_mtime_ns == mt
+    ref = tmp_path / "ref.wav"
+    tts.synthesize_dub(p.segments, ref, 40, p.work / "tts", "edge:vi-VN-HoaiMyNeural", settings=st, max_speedup=1.3,
+                       stats={}, only=set())
+    assert np.abs(tts.read_wav(ref)[0] - after).max() == 0       # y hệt dựng lại cả bản
+    raw1 = audiomix.decode_track(wav, p.work / "live", "dub")
+    fresh = audiomix.decode_track(wav, tmp_path / "fresh", "dub")
+    assert raw1 == raw0 and np.array_equal(np.fromfile(raw1, np.int16), np.fromfile(fresh, np.int16))
+    env = np.load(pipeline.dub_env_path(wav)).astype(np.float32)
+    want_env = tts.wave_envelope(after, tts.SR).astype(np.float32)
+    assert len(env) == len(want_env) and np.abs(env - want_env).max() < 0.01
+    # đọc lại 1 câu: chỉ câu đó được đọc + vá đúng chỗ của nó, trình phát vẫn dùng bản đã vá
+    before = after.copy()
+    reads.clear()
+    pipeline.redub(p, [2], settings=st, engine="edge")
+    assert reads == [2]
+    after = tts.read_wav(wav)[0]
+    diff = np.where(np.abs(after - before) > 1e-4)[0] / tts.SR
+    assert len(diff) and diff[0] > 3.5 and diff[-1] < 9
+    raw2 = audiomix.decode_track(wav, p.work / "live", "dub")
+    fresh = audiomix.decode_track(wav, tmp_path / "fresh2", "dub")
+    assert raw2 == raw0 and np.array_equal(np.fromfile(raw2, np.int16), np.fromfile(fresh, np.int16))
+    # bản lồng khác độ dài (video dài hơn) -> không vá được -> dựng lại cả bản
+    p.data["info"]["duration"] = 45
+    p.save()
+    pipeline.relayout(p, st)
+    assert len(tts.read_wav(wav)[0]) == 45 * tts.SR
+
+
+def test_keep_user_edits_while_relayout_runs():
+    """Xếp lại chạy nền trong lúc người dùng xoá tiếp 1 câu / đổi thứ khác và đã lưu: kết quả xếp lại không đè mất sửa
+    đổi đó (trước đây câu vừa xoá hiện lại), chỉ ghép giọng / vị trí của các câu còn lại."""
+    from trami import pipeline
+    from trami.project import Project
+
+    p = Project.create("sửa song song")
+    p.segments = [Segment(i, i + 0.8, f"句{i}", f"Câu {i}") for i in range(5)]
+    p.save()
+    job = Project(p.id)
+    sig0 = [pipeline._seg_sig(s) for s in job.segments]
+    gui = Project(p.id)
+    segs = gui.segments
+    del segs[2]
+    gui.segments = segs
+    gui.data["ghi_chu"] = "người dùng vừa sửa"
+    gui.save()
+    segs = job.segments
+    for k, s in enumerate(segs):
+        s.extra.update({"dub_at": [k, k + 0.5], "tts_file": f"f{k}.wav", "fit": "ok"})
+    job.segments = segs
+    job.data["dub_layout"] = [[0, 0.5, 0, "ok"]]
+    pipeline._keep_user_edits(job, sig0)
+    job.save()
+    got = Project(p.id)
+    assert [s.trans for s in got.segments] == ["Câu 0", "Câu 1", "Câu 3", "Câu 4"]
+    assert got.segments[2].extra["dub_at"] == [3, 3.5] and got.segments[2].extra["tts_file"] == "f3.wav"
+    assert got.data["ghi_chu"] == "người dùng vừa sửa" and got.data["dub_layout"]
+
+
+def test_relayout_job_not_blocked_by_long_job(monkeypatch):
+    """Xếp lại bản lồng (vài giây, không dùng card) không phải chờ việc dài của dự án khác dù đang chạy lần lượt; vẫn
+    chờ việc khác của CÙNG dự án."""
+    import threading
+    import time as _t
+
+    from trami import gpu, jobs as jobs_mod
+    from trami.jobs import JobManager
+
+    monkeypatch.setattr(jobs_mod, "_limit_cache", [_t.time() + 60, 1])
+    monkeypatch.setattr(gpu, "before_job", lambda kind: None)
+    monkeypatch.setattr(gpu, "after_job", lambda kind: None)
+    m = JobManager(workers=4)
+    gate = threading.Event()
+    a = m.submit("recognize", "Nghe & tách câu", lambda j: gate.wait(3), "p1")
+    _t.sleep(0.2)
+    b = m.submit("relayout", "Xếp lại", lambda j: None, "p2")
+    c = m.submit("relayout", "Xếp lại", lambda j: None, "p1")
+    _t.sleep(0.5)
+    assert m.jobs[b.id].status == "done" and not m.jobs[b.id].gpu
+    assert m.jobs[c.id].status == "queued" and "dự án này" in m.jobs[c.id].message
+    gate.set()
+    t0 = _t.time()
+    while m.jobs[c.id].status != "done" and _t.time() - t0 < 5:
+        _t.sleep(0.05)
+    assert m.jobs[c.id].status == "done"
+
+
+def test_timeline_drag_subtitle_merge_and_selection(monkeypatch):
+    """Kéo khối phụ đề trên timeline: dời câu (không lấn câu bên cạnh), kéo mép đổi đầu / cuối; thả chuột -> câu đổi giờ,
+    giọng lồng đi theo (xếp lại sau 1,2 s, gộp các thao tác liền nhau thành 1 việc nhẹ); xoá / gộp ở bảng Phụ đề đi chung
+    đường với timeline (câu gộp được đọc lại giọng); câu chọn trên timeline tô màu nổi trong bảng."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    try:
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        pytest.skip(str(e))
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+
+    QApplication.instance() or QApplication([])
+    p = Project.create("kéo phụ đề")
+    segs = [Segment(2 * i, 2 * i + 1.5, f"句{i}", f"Câu {i}") for i in range(5)]
+    for i, s in enumerate(segs):
+        s.extra.update({"tts_file": f"tts_{i}.wav", "dub_at": [2 * i, 2 * i + 1.2]})
+    p.segments = segs
+    p.data["info"] = {"duration": 12}
+    p.data["edit"] = {"dub": {"enabled": True, "wav": "dub.wav"}}
+    p.save()
+    win = MainWindow()
+    win.resize(1600, 1000)
+    win.show()
+    win.open_project(p.id)
+    QTest.qWait(50)
+    pp = win.project_page
+    cv = pp.tracks.canvas
+    jobs, redub = [], []
+    pp.submit = lambda kind, title, fn, **k: jobs.append(kind)
+    monkeypatch.setattr(pp, "_redub_rows", lambda rows: redub.append(rows))
+    cv._spress = {"row": 1, "x": 0, "mode": "move", "defer": False, "orig": {1: (2.0, 3.5)}}
+    assert cv._sub_drag(5.0) == {1: (2.5, 4.0)} and cv._sub_drag(-5.0) == {1: (1.5, 3.0)}   # không lấn câu bên cạnh
+    cv._spress["mode"] = "l"
+    assert cv._sub_drag(-3.0) == {1: (1.5, 3.5)} and cv._sub_drag(3.0)[1][0] == pytest.approx(3.3)
+    cv._spress = None
+    # kéo thật bằng chuột: khối câu 2 (4,0–5,5 s) sang phải 0,3 s
+    pp.tracks.fit()
+    y = int(cv.track_rect("subs").center().y())
+    x0 = int(cv.x(4.75))
+    dx = int(round(0.3 * pp.tracks.pps))
+    QTest.mousePress(cv, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(x0, y))
+    QTest.mouseMove(cv, QPoint(x0 + dx // 2, y))
+    QTest.mouseMove(cv, QPoint(x0 + dx, y))
+    QTest.mouseRelease(cv, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(x0 + dx, y))
+    s2 = pp.model.segs[2]
+    assert s2.start == pytest.approx(4.3, abs=0.05) and s2.end - s2.start == pytest.approx(1.5, abs=0.01)
+    assert Project(p.id).segments[2].start == pytest.approx(s2.start)
+    assert pp._relayout_go.isActive() and not jobs
+    # xoá 1 câu ở bảng Phụ đề trong lúc chờ -> gộp vào cùng 1 lần xếp lại
+    pp._select_line(4)
+    pp._seg_op("delete")
+    assert len(pp.model.segs) == 4 and pp._relayout_deleted == 1
+    pp._relayout_go.stop()
+    pp._relayout_now()
+    assert jobs == ["relayout"]
+    # gộp câu đã có giọng -> đọc lại giọng câu gộp
+    pp._sub_op("merge", [0])
+    assert len(pp.model.segs) == 3 and pp.model.segs[0].trans == "Câu 0 Câu 1" and redub == [[0]]
+    # câu chọn trên timeline: bảng tô màu nổi
+    pp._select_line(2)
+    assert pp.dub_table.selectionModel().isRowSelected(pp.dub_proxy.mapFromSource(pp.model.index(2, 0)).row())
+    assert "QTableView::item:selected" in theme.stylesheet()
+    win.close()

@@ -78,6 +78,9 @@ def max_running() -> int:
 GPU_KINDS = {"auto", "recognize", "separate", "diarize", "inpaint", "dub", "redub", "realign"}
 # việc chỉ ĐỌC dự án (không ghi project.json) -> chạy được song song với việc khác của cùng dự án
 READONLY_KINDS = {"preview", "tool"}
+# việc rất nhẹ (vài giây, không dùng card): xếp lại bản lồng sau khi xoá / kéo / gộp câu -> không phải chờ việc dài của
+# dự án khác dù đang chạy lần lượt (vẫn chờ việc khác của CÙNG dự án vì cùng ghi project.json)
+LIGHT_KINDS = {"relayout"}
 
 
 def needs_gpu(kind: str, project_id: str = "") -> bool:
@@ -173,9 +176,10 @@ class JobManager:
         """Vì sao việc này chưa chạy được ('' = chạy được ngay)."""
         run = [self.jobs[r] for r in self.running]
         limit = max_running()
-        if limit == 1 and run:
+        light = job.kind in LIGHT_KINDS
+        if limit == 1 and run and not light:
             return "chờ việc trước xong (chạy lần lượt từng việc)"
-        if len(run) >= limit:
+        if len(run) >= limit and not light:
             return f"chờ – đang chạy {len(run)} việc"
         if job.project_id and job.kind not in READONLY_KINDS and any(
                 r.project_id == job.project_id and r.kind not in READONLY_KINDS for r in run):
