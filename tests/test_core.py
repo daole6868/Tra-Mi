@@ -3221,4 +3221,20 @@ def test_dub_tab_flags_undubbed_and_srt_row(monkeypatch):
     pp._restore_interj()
     assert [s.trans for s in pp.model.segs] == ["Câu 0", "Câu 1", "Câu 2", "Câu 3", "A!"]
     assert pp.model.segs[-1].extra.get("keep_interj")
+    # nút Lọc câu cảm thán: xoá ngay câu cảm thán lẻ (câu đã khôi phục thì giữ), cất để khôi phục
+    from PySide6.QtWidgets import QMessageBox
+
+    pp.model.segs.insert(1, Segment(1.6, 1.9, "嗯", "Ừm."))
+    pp.model.segs[3].trans = "Ừm, đúng là như vậy."
+    pp.model.set_segments(pp.model.segs)
+    pp._drop_interj_now()
+    assert [s.trans for s in pp.model.segs] == ["Câu 0", "Câu 1", "Ừm, đúng là như vậy.", "Câu 3", "A!"]
+    assert [d["trans"] for d in Project(p.id).data["interj_removed"]] == ["Ừm."]
+    # Xoá câu đã tích: hỏi lại rồi xoá cả phụ đề
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    pp.model.set_picked(range(len(pp.model.segs)), False)
+    pp.model.set_picked([0, 3])
+    pp._delete_picked()
+    assert [s.trans for s in pp.model.segs] == ["Câu 1", "Ừm, đúng là như vậy.", "A!"]
+    assert len(Project(p.id).segments) == 3
     win.close()

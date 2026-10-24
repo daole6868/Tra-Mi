@@ -1010,7 +1010,13 @@ class ProjectPage(QWidget):
                      button("Đặt / bỏ 🎵 câu đã tích", "music", "Câu đã tích là bài hát -> giữ nguyên giọng hát gốc, "
                             "không lồng; bấm lần nữa để bỏ dấu", flat=True, on_click=lambda: self._toggle_flag("song")),
                      button("Bỏ lồng / lồng lại câu đã tích", "x", "Không đọc các câu đã tích (vd. tiếng hét, tiếng động); "
-                            "bấm lần nữa để lồng lại", flat=True, on_click=lambda: self._toggle_flag("nodub"))))
+                            "bấm lần nữa để lồng lại", flat=True, on_click=lambda: self._toggle_flag("nodub")),
+                     button("Lọc câu cảm thán", "wand", "Xoá ngay các câu CHỈ có 1–2 tiếng cảm thán đứng lẻ (\"A!\", "
+                            "\"Ừm.\", \"Ái!\", \"Hả?\") – cả phụ đề lẫn giọng lồng. Câu \"Ừm, đúng là như vậy.\" giữ "
+                            "nguyên. Khôi phục được ở mục 3", flat=True, on_click=self._drop_interj_now),
+                     button("Xoá câu đã tích", "trash", "Xoá các câu đã tích: cả phụ đề lẫn giọng lồng của chúng "
+                            "(bản lồng tiếng được xếp lại ngay, không đọc lại câu nào)", danger=True,
+                            on_click=self._delete_picked)))
         spk.add(dt)
         self.d_line_voice = QComboBox()
         self.d_line_voice.setMinimumContentsLength(16)
@@ -3233,6 +3239,34 @@ class ProjectPage(QWidget):
             return {"message": (f"Tìm được {n} câu đang hát – đã đánh dấu 🎵 và tích sẵn (bấm 'Đặt / bỏ 🎵' nếu câu nào "
                                 "là lời thoại)") if n else "Không thấy thêm đoạn hát nào", "pick": rows if n else []}
         self.submit("redub" if pipeline.has_dub(self.p) else "join", "Tìm câu hát", fn)
+
+    def _delete_picked(self):
+        rows = [r for r in sorted(self.model.selected) if 0 <= r < len(self.model.segs)]
+        if not rows:
+            return self.win.toast("Tích câu cần xoá ở cột Chọn trước", "warn")
+        if QMessageBox.question(self, "Xoá câu", f"Xoá {len(rows)} câu đã tích – cả phụ đề lẫn giọng lồng của các câu "
+                                "này?") != QMessageBox.StandardButton.Yes:
+            return
+        self._sub_op("delete", rows)
+        self._save_segs_now()
+
+    def _drop_interj_now(self):
+        """Nút "Lọc câu cảm thán": xoá ngay câu chỉ có 1–2 tiếng cảm thán đứng lẻ (phụ đề + giọng lồng), cất để khôi phục."""
+        from ..voicefix import lone_interjection
+
+        segs = self.model.segs
+        rows = [i for i, x in enumerate(segs) if x.trans.strip() and not x.extra.get("keep_interj")
+                and lone_interjection(x.trans)]
+        if not rows:
+            return self.win.toast("Không có câu nào chỉ có tiếng cảm thán đứng lẻ (A!, Ừm., Ái!…)", "ok")
+        self.flush()
+        self.p.reload()
+        self.p.data.setdefault("interj_removed", []).extend(segs[r].to_dict() for r in rows)
+        self.p.save()
+        self._sub_op("delete", rows)
+        self._save_segs_now()
+        self.win.toast(f"Đã lọc và xoá {len(rows)} câu chỉ có tiếng cảm thán – bấm 'Khôi phục câu cảm thán đã xoá' "
+                       "(mục 3) nếu cần lấy lại", "ok")
 
     def _pick_flag(self, key: str):
         rows = [i for i, s in enumerate(self.model.segs) if s.extra.get(key)]

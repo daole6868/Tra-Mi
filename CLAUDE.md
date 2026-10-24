@@ -839,6 +839,11 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     bài hát librosa "Let's Go Fishin'" 28/34 câu, phim hoạt hình tiếng Trung của người dùng 0/47 câu nhầm, ghép
     thoại + bài hát + thoại: chỉ đánh dấu phần bài hát.
 
+- 2.0.60: hàng nút trên bảng câu tab Lồng tiếng thêm "Lọc câu cảm thán" (`_drop_interj_now`: xoá ngay câu chỉ có 1–2 tiếng
+  cảm thán – cả phụ đề lẫn giọng lồng qua `_sub_op("delete")` + xếp lại bản lồng; cất `interj_removed` để "Khôi phục câu cảm
+  thán đã xoá") và "Xoá câu đã tích" (`_delete_picked`, hỏi lại, xoá phụ đề + giọng lồng). Lưu dự án ngay sau khi xoá.
+  "Tạo lại giọng các câu đã tích" KHÔNG tự lọc câu cảm thán (chỉ "Tạo bản lồng tiếng" đầy đủ hoặc nút Lọc).
+
 ## Vấn đề đang mở
 - Chờ người dùng xác nhận 2.0.9 nghe được giọng lồng trong trình phát và trong video xuất.
 - OmniVoice chưa chạy thật trên máy người dùng (chỉ kiểm thử với bản giả lập) – chờ phản hồi.
