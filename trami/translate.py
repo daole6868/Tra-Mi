@@ -56,8 +56,8 @@ Yêu cầu bắt buộc:
    phụ từ hợp ngữ cảnh (à, ạ, nhé, nhỉ, đấy, cơ, mà, thế, vậy, chứ, đi, này, ơi, nào), chủ ngữ / xưng hô, "thì", "là",
    cách nói đầy đủ thay cách nói tắt – KHÔNG thêm ý mới, không đổi nghĩa, không lặp từ vô nghĩa, không vượt N.
    KHÔNG chép ký hiệu ⟪⟫ vào bản dịch.
-9. Dòng chắc chắn là LỜI BÀI HÁT (nhạc phim, nhân vật đang hát – câu văn vần, không phải lời thoại) thì bắt đầu bản dịch
-   bằng "♪ ". Lời thoại bình thường KHÔNG thêm ♪."""
+9. Dòng chắc chắn là LỜI BÀI HÁT (nhạc phim, nhân vật đang hát – câu văn vần, điệp khúc lặp lại, không trả lời / không
+   nối tiếp lời thoại trước – sau) thì bắt đầu bản dịch bằng "♪ ". Lời thoại bình thường KHÔNG thêm ♪."""
 
 # Dịch sang Anh / Thái / Nhật / Hàn: lời nhắc tiếng Anh (luật giống bản tiếng Việt, đổi phần xưng hô / tên riêng)
 STYLES_EN = {

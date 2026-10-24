@@ -4,6 +4,9 @@ API tương thích OpenAI), không dùng với Google / Hy-MT2 (không phải AI
   1. Sửa lỗi nghe & nối câu (`clean_lines` -> `apply_cleanup`): máy nghe (ASR) hay nghe nhầm chữ đồng âm (升/生, 咬/摇,
      D神/地神…) và cắt câu sai chỗ (真 | 的假的, 最强 | AI。). AI đọc cả kịch bản, trả về chữ sửa + nhóm dòng cần gộp;
      tool kiểm tra (chữ mới phải gần chữ cũ, chỉ gộp dòng liền nhau, nghỉ ≤ 2,5 s, câu gộp ≤ 15 s) rồi mới áp dụng.
+     Cùng lúc AI lọc chữ KHÔNG PHẢI lời thoại theo nội dung (không theo âm lượng): lời bài hát -> 🎵 (không lồng tiếng),
+     câu máy tự bịa / chữ vô nghĩa -> bỏ, đoạn rác dính vào câu thoại -> xoá phần đó. mode "filter" = chỉ lọc (tự chạy
+     trước khi dịch cả phim lần đầu, Cài đặt `ai_song_filter`).
   2. Hồ sơ phim (`make_profile`): thể loại, nhân vật, bảng xưng hô, tên riêng / meme – lưu trong dự án, sửa được, AI dùng
      cho mọi lần dịch sau (không đọc lại kịch bản mỗi lần).
   3. Kiểm tra bản dịch (`review_lines`): sai nghĩa, sót ý, xưng hô / tên không thống nhất, quá dài so với thời gian,
@@ -56,19 +59,45 @@ STD_SKILL = {"id": STD_ID, "name": "Dịch chuẩn – giữ đúng số câu, t
     "- Xưng hô theo quan hệ, tuổi tác, địa vị và giữ nhất quán.\n"
     "- Không thêm chú thích, ngoặc, giải thích; không bỏ ý; không thêm ý.")}
 
+FILTER_RULES = """LỌC CHỮ KHÔNG PHẢI LỜI THOẠI – máy nghe chép cả nhạc nền, tiếng hát, tiếng động thành chữ. Chỉ dựa vào NỘI DUNG
+chữ và GIỜ của dòng (không đoán theo âm lượng):
+a) LỜI BÀI HÁT (nhạc nền, nhạc mở đầu / kết thúc phim, nhân vật hát) -> ghi vào "song". Dấu hiệu: câu văn vần / như thơ,
+   nhiều dòng liền nhau dài đều nhau, vần ở cuối; lặp lại nguyên câu (điệp khúc); từ ngữ bài hát (爱, 心, 梦, 风, 雨, 月光,
+   眼泪, 永远, 远方, 思念, 回忆, 等你, 天涯, 一生…) mà không ai trong cảnh đang nói về chuyện đó; KHÔNG trả lời, KHÔNG nối
+   tiếp câu thoại trước / sau, không nhắc nhân vật / sự việc trong phim; cả cụm liền nhau ở đầu / cuối video; chữ ít mà
+   kéo dài (dưới ~2 chữ mỗi giây – hát ngân); dòng tên bài hát / 作词 / 作曲 / 演唱.
+b) KHÔNG PHẢI LỜI THOẠI -> ghi vào "noise": câu máy tự bịa khi chỉ có nhạc / tiếng ồn (请不吝点赞 订阅 转发 打赏…,
+   字幕由…提供, 中文字幕, 优优独播剧场, 点赞关注, 谢谢观看 / 感谢收看 ở cuối video mà không nhân vật nào nói); chữ vô nghĩa
+   không thành câu, không hợp ngữ cảnh; 1 chữ / 1 cụm lặp lại nhiều lần (啊啊啊啊啊, 嗯嗯嗯嗯) khi không ai đang la / cười.
+c) Câu thoại có DÍNH một đoạn lời bài hát / chữ vô nghĩa ở đầu, cuối hoặc giữa -> ghi vào "fix" câu chỉ còn phần lời thoại
+   (chỉ XOÁ bớt, không thêm chữ, không sửa chữ khác).
+KHÔNG lọc: tiếng cảm thán thật trong lúc nói chuyện (嗯？, 啊！, 哈哈, 哇), câu trả lời ngắn (对, 好, 走), câu thoại ngắn mà có
+ý; nhân vật đọc thơ / nói câu có vần trong lúc nói chuyện vẫn là lời thoại. Chưa chắc thì KHÔNG ghi."""
+
 CLEAN_PROMPT = """Bạn là biên tập viên phụ đề tiếng Trung. Các dòng dưới đây do máy nghe (ASR) tạo ra: có thể nghe nhầm chữ
-đồng âm / gần âm và cắt câu sai chỗ. Đọc HẾT các dòng để nắm nội dung, nhân vật, mạch chuyện, rồi:
+đồng âm / gần âm, cắt câu sai chỗ, và chép cả lời bài hát / tiếng động thành chữ. Đọc HẾT các dòng để nắm nội dung, nhân vật,
+mạch chuyện, rồi:
 1. Sửa chữ nghe nhầm theo ngữ cảnh (VD 升↔生, 咬↔摇, 胃袋↔尾带, D神↔地神, 北极熊↔北京雄, 得↔的). CHỈ sửa khi ngữ cảnh rõ
    ràng; không viết lại câu, không thêm ý, không dịch.
 2. Nối câu bị cắt ngang: một từ / cụm bị tách sang dòng sau (VD dòng 3 "真", dòng 4 "的假的…"), hoặc đầu dòng sau thực ra là
    đuôi dòng trước ("我可是最强" | "AI。你先别…"). Cách sửa:
    - gộp 2–4 dòng LIỀN NHAU thành 1 (khoá "merge"), chữ của dòng gộp ghi ở "fix" của dòng ĐẦU nhóm; hoặc
    - chuyển phần chữ sang dòng bên cạnh (ghi "fix" cho CẢ 2 dòng).
-   Chỉ gộp khi đúng là 1 câu bị cắt; không gộp 2 câu trọn vẹn của 2 người nói.
+   Chỉ gộp khi đúng là 1 câu bị cắt; không gộp 2 câu trọn vẹn của 2 người nói; không gộp dòng lời bài hát với lời thoại.
 3. Bỏ chữ lặp do máy (的的). Giữ tiếng cảm thán (嗯, 啊, 嘎).
 4. Chỗ sửa mà chưa chắc: ghi vào "unsure" kèm lý do ngắn bằng tiếng Việt.
-Chỉ trả về JSON: {"fix": {"<số dòng>": "chữ mới"}, "merge": [[<số dòng>, <số dòng>]], "unsure": {"<số dòng>": "lý do"}}.
-Dòng không sửa thì KHÔNG ghi. Không có gì sửa thì trả {"fix": {}, "merge": [], "unsure": {}}."""
+5. """ + FILTER_RULES + """
+Chỉ trả về JSON: {"fix": {"<số dòng>": "chữ mới"}, "merge": [[<số dòng>, <số dòng>]], "unsure": {"<số dòng>": "lý do"},
+"song": {"<số dòng>": "lý do"}, "noise": {"<số dòng>": "lý do"}}. Lý do viết ngắn bằng tiếng Việt.
+Dòng không sửa thì KHÔNG ghi. Không có gì thì trả {"fix": {}, "merge": [], "unsure": {}, "song": {}, "noise": {}}."""
+
+FILTER_PROMPT = """Bạn là biên tập viên phụ đề tiếng Trung. Các dòng dưới đây do máy nghe (ASR) tạo ra. Đọc HẾT các dòng để
+nắm nội dung, nhân vật, mạch chuyện, rồi CHỈ làm 1 việc:
+""" + FILTER_RULES + """
+Không sửa chữ nghe nhầm, không nối câu, không dịch.
+Chỉ trả về JSON: {"song": {"<số dòng>": "lý do"}, "noise": {"<số dòng>": "lý do"}, "fix": {"<số dòng>": "câu đã xoá phần
+không phải lời thoại"}}. Lý do viết ngắn bằng tiếng Việt. Dòng là lời thoại bình thường thì KHÔNG ghi. Không có gì thì trả
+{"song": {}, "noise": {}, "fix": {}}."""
 
 PROFILE_PROMPT = """Bạn là biên tập viên phim Trung Quốc. Đọc kịch bản phụ đề dưới đây và lập "HỒ SƠ PHIM" ngắn gọn bằng tiếng
 Việt cho người dịch sang {lang}. Chỉ trả về JSON:
@@ -79,13 +108,16 @@ Việt cho người dịch sang {lang}. Chỉ trả về JSON:
  "nghe_nham": ["chữ máy nghe có thể sai -> chữ đúng (nếu thấy)", ...],
  "ghi_chu": "những điều người dịch cần biết để dịch đúng ngữ cảnh (câu đùa, bối cảnh, ẩn ý)"}}"""
 
-REVIEW_PROMPT = """Bạn là biên tập viên kiểm tra bản dịch phụ đề {src} -> {lang}. Mỗi mục có câu gốc, bản dịch và độ dài tối đa
-(để lồng tiếng / đọc kịp). Kiểm tra và CHỈ sửa câu có lỗi thật:
+REVIEW_PROMPT = """Bạn là biên tập viên kiểm tra bản dịch phụ đề {src} -> {lang} để LỒNG TIẾNG. Mỗi mục có câu gốc, bản dịch
+và độ dài nói vừa thời gian câu thoại ("≤N" = tối đa N; "M–N" = từ M tới N). Kiểm tra và CHỈ sửa câu có lỗi thật:
 1. Dịch sai nghĩa, sót ý, tự thêm ý; câu vắt qua 2 dòng đọc không liền mạch.
 2. Xưng hô, tên riêng, thuật ngữ không thống nhất với HỒ SƠ PHIM / các câu khác.
-3. Quá độ dài tối đa -> rút gọn, giữ ý.
+3. Độ dài: đếm số tiếng (âm tiết; số đếm theo cách đọc). Dài hơn N -> rút gọn, giữ ý (bỏ từ thừa, dùng từ ngắn hơn).
+   Ngắn hơn M -> nói đầy đủ, tự nhiên hơn bằng phụ từ / từ đệm / xưng hô (à, ấy, nhé, đấy, thì, mà, cơ, nhỉ, chứ, vậy,
+   thật là, đúng là…) – KHÔNG thêm ý mới, không thêm tên / thông tin. Dư / thiếu 1–2 tiếng thì để nguyên.
 4. Còn chữ Hán, sai chính tả, sai dấu câu.
 5. Sai giọng điệu (phim hài mà câu đùa không còn buồn cười…).
+6. Câu gốc là lời bài hát (văn vần, điệp khúc, không ăn nhập với lời thoại) mà bản dịch chưa có "♪ " ở đầu -> thêm "♪ ".
 Chỉ trả về JSON: {{"<số>": {{"sua": "bản dịch mới", "ly_do": "lý do ngắn bằng tiếng Việt"}}}}. Câu đã ổn thì KHÔNG ghi."""
 
 
@@ -124,12 +156,14 @@ def _json(txt: str) -> dict:
 CLEAN_CHUNK = 80
 
 
-def clean_lines(llm, segs: list[Segment], profile: str = "", skill: str = "", progress=None, cancel=None) -> dict:
-    """Hỏi AI theo từng phần (80 dòng, kèm 4 dòng sau làm ngữ cảnh). Trả về {"fix", "merge", "unsure"} theo số dòng
-    1-based của CẢ danh sách."""
+def clean_lines(llm, segs: list[Segment], profile: str = "", skill: str = "", progress=None, cancel=None,
+                mode: str = "full") -> dict:
+    """Hỏi AI theo từng phần (80 dòng, kèm 4 dòng sau làm ngữ cảnh). Trả về {"fix", "merge", "unsure", "song", "noise"}
+    theo số dòng 1-based của CẢ danh sách. mode "filter": chỉ lọc lời bài hát / chữ không phải thoại."""
     from .ffmpeg import Cancelled
 
-    out = {"fix": {}, "merge": [], "unsure": {}}
+    prompt = FILTER_PROMPT if mode == "filter" else CLEAN_PROMPT
+    out = {"fix": {}, "merge": [], "unsure": {}, "song": {}, "noise": {}, "mode": mode}
     n = len(segs)
     for a in range(0, n, CLEAN_CHUNK):
         if cancel and cancel():
@@ -144,7 +178,7 @@ def clean_lines(llm, segs: list[Segment], profile: str = "", skill: str = "", pr
         if after:
             parts.append("NGỮ CẢNH SAU (chỉ tham khảo, không sửa):\n" + "\n".join(after))
         try:
-            d = _json(llm.chat(with_skill(CLEAN_PROMPT, skill), "\n\n".join(parts), max_tokens=6000, temperature=0.1))
+            d = _json(llm.chat(with_skill(prompt, skill), "\n\n".join(parts), max_tokens=6000, temperature=0.1))
         except ValueError:
             d = {}
         for k, v in (d.get("fix") or {}).items():
@@ -157,11 +191,13 @@ def clean_lines(llm, segs: list[Segment], profile: str = "", skill: str = "", pr
                 continue
             if len(g) >= 2 and all(a < x <= b for x in g):
                 out["merge"].append(g)
-        for k, v in (d.get("unsure") or {}).items():
-            if str(k).isdigit() and a < int(k) <= b:
-                out["unsure"][int(k)] = str(v)[:200]
+        for key in ("unsure", "song", "noise"):
+            for k, v in (d.get(key) or {}).items():
+                if str(k).isdigit() and a < int(k) <= b:
+                    out[key][int(k)] = str(v)[:200]
         if progress:
-            progress(b / max(1, n), f"AI đang sửa lỗi nghe & nối câu {b}/{n}")
+            progress(b / max(1, n), (f"AI đang lọc lời bài hát / chữ không phải thoại {b}/{n}" if mode == "filter"
+                                     else f"AI đang sửa lỗi nghe & nối câu {b}/{n}"))
     return out
 
 
@@ -176,20 +212,38 @@ def _close(old: str, new: str) -> bool:
     return difflib.SequenceMatcher(None, old, new).ratio() >= 0.45
 
 
+def _is_trim(old: str, new: str) -> bool:
+    """Chỉ XOÁ bớt chữ (đoạn lời bài hát / chữ vô nghĩa dính vào câu thoại): chữ mới là dãy con của chữ cũ, còn ≥ 1 chữ
+    có nghĩa, không xoá quá 70 %."""
+    new = (new or "").strip()
+    if not new or len(new) >= len(old) or len(new) < 0.3 * len(old.strip()):
+        return False
+    it = iter(old)
+    return all(ch in it for ch in new)
+
+
 MAX_GAP = 2.5      # chỉ gộp 2 dòng cách nhau ≤ 2,5 s (câu bị cắt hay có chỗ nghỉ 1,5–2 s: "一只真" | "的鹈鹕")
 MAX_MERGED = 15.0  # câu sau khi gộp ≤ 15 s
 
 
 def apply_cleanup(segs: list[Segment], res: dict) -> tuple[list[Segment], dict]:
     """Áp dụng kết quả AI (đã kiểm tra an toàn). Trả về (danh sách câu mới, thống kê {"fixed", "merged", "changed"
-    (số thứ tự mới của câu đổi), "unsure" (số thứ tự mới)})."""
+    (số thứ tự mới của câu đổi), "unsure" (số thứ tự mới), "songs" (số thứ tự mới của câu đánh 🎵), "removed"
+    [(giờ, chữ, lý do)] câu không phải lời thoại đã bỏ})."""
     n = len(segs)
+    trim_only = res.get("mode") == "filter"
     fix = {k: v for k, v in (res.get("fix") or {}).items() if 1 <= k <= n}
+    noise = {k: v for k, v in (res.get("noise") or {}).items()
+             if 1 <= k <= n and not segs[k - 1].extra.get("voice_ok") and segs[k - 1].text.strip()}
+    song = {k: v for k, v in (res.get("song") or {}).items()
+            if 1 <= k <= n and k not in noise and not segs[k - 1].extra.get("not_song")}
     groups: list[list[int]] = []
     used: set[int] = set()
-    for g in sorted(res.get("merge") or [], key=lambda x: x[0]):
+    for g in sorted([] if trim_only else (res.get("merge") or []), key=lambda x: x[0]):
         g = [x for x in g if 1 <= x <= n]
         if len(g) < 2 or len(g) > 4 or g != list(range(g[0], g[0] + len(g))) or used & set(g):
+            continue
+        if any(x in noise or x in song for x in g):      # không gộp lời bài hát / chữ rác với lời thoại
             continue
         ss = [segs[x - 1] for x in g]
         if any(ss[k + 1].start - ss[k].end > MAX_GAP for k in range(len(ss) - 1)) or ss[-1].end - ss[0].start > MAX_MERGED:
@@ -198,11 +252,15 @@ def apply_cleanup(segs: list[Segment], res: dict) -> tuple[list[Segment], dict]:
         used |= set(g)
     first = {g[0]: g for g in groups}
     out: list[Segment] = []
-    stats = {"fixed": 0, "merged": 0, "changed": [], "unsure": []}
+    stats = {"fixed": 0, "merged": 0, "changed": [], "unsure": [], "songs": [], "removed": []}
     unsure = res.get("unsure") or {}
     k = 1
     while k <= n:
         s = segs[k - 1]
+        if k in noise:
+            stats["removed"].append((s.start, s.text, noise[k]))
+            k += 1
+            continue
         if k in first:
             g = first[k]
             parts = [segs[x - 1] for x in g]
@@ -223,14 +281,19 @@ def apply_cleanup(segs: list[Segment], res: dict) -> tuple[list[Segment], dict]:
             continue
         seg = Segment(s.start, s.end, s.text, s.trans, s.speaker, dict(s.extra))
         new = fix.get(k)
-        if new and new != s.text and _close(s.text, new):
+        if new and new != s.text and (_is_trim(s.text, new) if trim_only else _close(s.text, new)):
             seg.extra["src_before"] = s.text
             seg.text = new
             stats["fixed"] += 1
             stats["changed"].append(len(out))
-        if k in unsure:
+        if k in unsure and not trim_only:
             seg.extra["src_unsure"] = unsure[k]
             stats["unsure"].append(len(out))
+        if k in song:
+            if not seg.extra.get("song"):
+                stats["songs"].append(len(out))
+            seg.extra["song"] = True                     # 🎵: không lồng tiếng, giữ giọng hát gốc
+            seg.extra["ai_song"] = song[k]
         out.append(seg)
         k += 1
     return out, stats
@@ -270,9 +333,10 @@ REVIEW_CHUNK = 60
 _HAN = re.compile(r"[㐀-鿿]")
 
 
-def review_lines(llm, items: list[tuple[int, str, str, int]], profile: str, skill: str, src_name: str,
+def review_lines(llm, items: list[tuple[int, str, str, int | str]], profile: str, skill: str, src_name: str,
                  target_name: str, unit: str, lang: str = "vi", progress=None, cancel=None) -> dict[int, tuple[str, str]]:
-    """items: (chỉ số câu, câu gốc, bản dịch, độ dài tối đa). Trả về {chỉ số: (bản dịch mới, lý do)}."""
+    """items: (chỉ số câu, câu gốc, bản dịch, độ dài: số tối đa hoặc chữ "M–N tiếng"). Trả về {chỉ số: (bản dịch mới,
+    lý do)}."""
     from .ffmpeg import Cancelled
 
     out: dict[int, tuple[str, str]] = {}
@@ -280,7 +344,8 @@ def review_lines(llm, items: list[tuple[int, str, str, int]], profile: str, skil
         if cancel and cancel():
             raise Cancelled()
         chunk = items[a:a + REVIEW_CHUNK]
-        payload = {str(k + 1): {"goc": zh, "dich": tr, "toi_da": f"{mx} {unit}"} for k, (_, zh, tr, mx) in enumerate(chunk)}
+        payload = {str(k + 1): {"goc": zh, "dich": tr, "do_dai": mx if isinstance(mx, str) else f"≤{mx} {unit}"}
+                   for k, (_, zh, tr, mx) in enumerate(chunk)}
         user = (("HỒ SƠ PHIM:\n" + profile + "\n\n") if profile else "") + \
             "KIỂM TRA CÁC CÂU SAU:\n" + json.dumps(payload, ensure_ascii=False, indent=0)
         try:

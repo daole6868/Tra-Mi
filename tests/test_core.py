@@ -4358,3 +4358,47 @@ def test_undo_redo_subtitle_ops(monkeypatch):
     pp.undo()
     assert pp.model.segs[1].trans == "Câu 1" and pp.redo_btn.isEnabled()
     win.close()
+
+
+def test_ai_song_filter_before_translate(monkeypatch):
+    """AI lọc lời bài hát / chữ không phải thoại theo NỘI DUNG trước khi dịch cả phim lần đầu: lời hát -> 🎵 (không lồng
+    tiếng), câu máy tự bịa -> bỏ, đoạn lời hát dính vào câu thoại -> chỉ xoá phần đó (không cho sửa chữ khác); kiểm tra
+    bản dịch nhận khoảng độ dài M–N."""
+    from trami import pipeline, skills
+    from trami import translate as tr
+    from trami.project import Project
+
+    calls = []
+
+    def fake_chat(self, system, user, max_tokens=8000, temperature=0.3):
+        kind = ("filter" if "CHỈ làm 1 việc" in system else "review" if "kiểm tra bản dịch" in system
+                else "profile" if 'lập "HỒ SƠ PHIM"' in system else "translate")
+        calls.append((kind, user))
+        if kind == "filter":
+            return json.dumps({"song": {"3": "văn vần, điệp khúc"}, "noise": {"5": "máy tự bịa"},
+                               "fix": {"2": "你去哪儿", "4": "完全不同的一句话"}}, ensure_ascii=False)
+        if kind == "profile":
+            return "{}"
+        payload = json.loads(user[user.index("{"):])
+        return json.dumps({k: f"Câu {k}" for k in payload} if kind == "translate" else {}, ensure_ascii=False)
+
+    monkeypatch.setattr(tr.LLMClient, "chat", fake_chat)
+    st_ = {"translate_engine": "openai", "openai_api_key": "x", "openai_base_url": "https://api.example.com/v1",
+           "ai_clean_before_translate": False, "ai_review_after_translate": True}
+    p = Project.create("loc_loi_hat")
+    p.segments = [Segment(0, 1, "你好"), Segment(1.2, 3.5, "你去哪儿我爱你到永远"), Segment(4, 8, "我爱你到永远"),
+                  Segment(9, 10, "走吧"), Segment(11, 13, "请不吝点赞订阅转发")]
+    p.save()
+    pipeline.translate(p, "openai", "auto", False, st_)
+    segs = p.segments
+    assert [s.text for s in segs] == ["你好", "你去哪儿", "我爱你到永远", "走吧"]
+    assert segs[2].extra["song"] and segs[2].extra["ai_song"] == "văn vần, điệp khúc"
+    assert segs[1].extra["src_before"] == "你去哪儿我爱你到永远" and "src_before" not in segs[3].extra
+    assert "lời bài hát" in p.data["skill_note"] and "bỏ 1 câu" in p.data["skill_note"]
+    review = [u for k, u in calls if k == "review"][0]
+    assert "≤5 tiếng" in review and "13–20 tiếng" in review               # 1 s -> tối đa; 4 s -> khoảng M–N
+    calls.clear()
+    pipeline.translate(p, "openai", "auto", False, st_)                     # đã lọc rồi -> không lọc lại
+    assert "filter" not in [k for k, _ in calls]
+    assert pipeline.undo_cleanup(p, st_) == 5
+    assert skills._is_trim("你去哪儿我爱你", "你去哪儿") and not skills._is_trim("走吧", "跑吧")

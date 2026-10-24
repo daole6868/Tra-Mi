@@ -1020,9 +1020,10 @@ def film_profile(p: Project, settings: dict | None = None, engine: str | None = 
 
 
 def ai_cleanup(p: Project, settings: dict | None = None, engine: str | None = None, progress: Prog | None = None,
-               cancel=None) -> dict:
-    """Kỹ năng 1: AI sửa chữ nghe nhầm + nối câu bị cắt sai chỗ (giữ bản cũ để Hoàn tác). Trả về thống kê của
-    `skills.apply_cleanup` (changed / unsure = số thứ tự câu sau khi sửa)."""
+               cancel=None, mode: str = "full") -> dict:
+    """Kỹ năng 1: AI sửa chữ nghe nhầm + nối câu bị cắt sai chỗ + lọc chữ không phải lời thoại (giữ bản cũ để Hoàn
+    tác). mode "filter": chỉ lọc – lời bài hát -> 🎵 (không lồng tiếng), câu máy tự bịa / chữ vô nghĩa -> bỏ, đoạn rác dính
+    vào câu thoại -> xoá phần đó. Trả về thống kê của `skills.apply_cleanup` (số thứ tự câu sau khi sửa)."""
     from . import skills
     from .translate import LLMClient
 
@@ -1032,18 +1033,35 @@ def ai_cleanup(p: Project, settings: dict | None = None, engine: str | None = No
     if not segs:
         raise ValueError("Chưa có phụ đề gốc để sửa.")
     res = skills.clean_lines(LLMClient(settings, eng), segs, p.data.get("film_profile", ""),
-                             skills.skill_text(settings), progress, cancel)
+                             skills.skill_text(settings), progress, cancel, mode=mode)
     new, stats = skills.apply_cleanup(segs, res)
-    if stats["changed"]:
+    if stats["changed"] or stats["songs"] or stats["removed"]:
         p.data["cleanup_backup"] = [x.to_dict() for x in segs]
         lost = forget_stale_voice({x.text for x in segs}, new, moved=len(new) != len(segs))
         p.segments = new
         p.save()
-        if lost and has_dub(p):   # câu đổi lời / gộp: bỏ giọng cũ khỏi bản lồng (không đọc lại câu nào)
+        if (lost or stats["songs"]) and has_dub(p):   # câu đổi lời / gộp / bỏ / thành 🎵: xếp lại bản lồng, không đọc lại
             relayout(p, settings)
-    p.data["asr_cleaned"] = True
+    p.data["ai_filtered"] = True
+    if mode != "filter":
+        p.data["asr_cleaned"] = True
     p.save()
     return stats
+
+
+def cleanup_note(st: dict) -> str:
+    """Thông báo kết quả AI sửa lỗi nghe / lọc lời bài hát."""
+    parts = []
+    if st["fixed"] or st["merged"]:
+        parts.append(f"AI sửa {st['fixed']} câu, nối {st['merged']} câu bị cắt")
+    if st["songs"]:
+        parts.append(f"{len(st['songs'])} câu là lời bài hát – đánh 🎵 (không lồng tiếng)")
+    if st["removed"]:
+        ex = "; ".join(f"\"{t[:14]}\"" for _, t, _ in st["removed"][:3])
+        parts.append(f"bỏ {len(st['removed'])} câu không phải lời thoại ({ex}{'…' if len(st['removed']) > 3 else ''})")
+    if st["unsure"]:
+        parts.append(f"{len(st['unsure'])} chỗ chưa chắc (rê chuột vào câu gốc để xem)")
+    return " · ".join(parts)
 
 
 def join_lines(p: Project, settings: dict | None = None) -> list[int]:
@@ -1102,14 +1120,17 @@ def ai_review(p: Project, settings: dict | None = None, engine: str | None = Non
     """Kỹ năng 3: AI kiểm tra bản dịch (sai nghĩa, xưng hô / tên không thống nhất, quá dài, còn chữ Hán…) và sửa. Câu bạn
     sửa tay không đụng tới. Bản cũ giữ ở extra["trans_before_review"], lý do ở extra["review_note"]. Trả về câu đã sửa."""
     from . import langs, skills
-    from .translate import LLMClient, budget_for
+    from .translate import LLMClient, length_marker
 
     settings = settings or load_settings()
     eng = ai_engine(settings, engine)
     segs = p.segments
     target = target_lang(p, settings)
     L = langs.INFO[target]
-    items = [(i, x.text, x.trans, budget_for(x.duration, 1.1, target)) for i, x in enumerate(segs)
+    fill = bool(settings.get("translate_fill", True))
+    # độ dài theo thời gian câu thoại: "≤N tiếng" hoặc "M–N tiếng" (câu ngắn hơn M thì thêm từ đệm cho vừa giọng lồng)
+    items = [(i, x.text, x.trans, length_marker(x.duration, target, L["unit_vi"], fill).strip("⟪⟫"))
+             for i, x in enumerate(segs)
              if x.trans.strip() and x.text.strip() and not x.extra.get("trans_user") and (rows is None or i in rows)]
     if not items:
         return []
@@ -1122,6 +1143,7 @@ def ai_review(p: Project, settings: dict | None = None, engine: str | None = Non
         segs[i].extra["review_note"] = why
         segs[i].trans = new
     if fixes:
+        mark_song_lines(segs, sorted(fixes))      # AI thêm "♪ " cho lời bài hát -> 🎵 (không lồng tiếng)
         p.segments = segs
         p.save()
     return sorted(fixes)
@@ -1160,25 +1182,30 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
     whole = rows is None
     # Kỹ năng dịch AI: 1) sửa lỗi nghe & nối câu (chỉ khi dịch cả phim lần đầu – chưa câu nào có bản dịch), 2) hồ sơ
     # phim (lập 1 lần, dùng lại), 3) kiểm tra bản dịch sau khi dịch cả phim. Kỹ năng riêng gắn vào mọi lời nhắc.
+    first = not any(x.trans.strip() for x in segs)
     do_clean = (is_ai and whole and settings.get("ai_clean_before_translate", True) and not p.data.get("asr_cleaned")
-                and not any(x.trans.strip() for x in segs))
+                and first)
+    # không bật sửa lỗi nghe thì vẫn nhờ AI lọc lời bài hát / chữ không phải lời thoại trước khi dịch cả phim lần đầu
+    do_filter = (is_ai and whole and not do_clean and settings.get("ai_song_filter", True) and first
+                 and not p.data.get("ai_filtered"))
     do_review = is_ai and whole and bool(settings.get("ai_review_after_translate", False))
     a0 = 0.0
     p.data.pop("skill_warning", None)
     if whole:
         p.data.pop("skill_note", None)
-    if do_clean:
+    if do_clean or do_filter:
         try:
-            st = ai_cleanup(p, settings, eng, _sub(progress, 0.0, 0.18), cancel)
+            st = ai_cleanup(p, settings, eng, _sub(progress, 0.0, 0.18), cancel, mode="full" if do_clean else "filter")
             segs = p.segments
-            if st["changed"]:
-                p.data["skill_note"] = (f"AI sửa lỗi nghe {st['fixed']} câu, nối {st['merged']} câu bị cắt"
-                                        + (f" ({len(st['unsure'])} chỗ chưa chắc – xem cột gốc)" if st["unsure"] else ""))
+            note = cleanup_note(st)
+            if note:
+                p.data["skill_note"] = note
         except (ff.Cancelled, net.NetworkDown):
             raise
         except Exception as e:  # noqa: BLE001 – không chặn việc dịch
-            log_error("AI sửa lỗi nghe & nối câu")
-            p.data["skill_warning"] = f"Bỏ qua bước AI sửa lỗi nghe ({err_text(e)[:120]})"
+            log_error("AI sửa lỗi nghe & nối câu" if do_clean else "AI lọc lời bài hát")
+            p.data["skill_warning"] = (f"Bỏ qua bước AI {'sửa lỗi nghe' if do_clean else 'lọc lời bài hát'} "
+                                       f"({err_text(e)[:120]})")
         a0 = 0.18
     profile = p.data.get("film_profile", "") or p.data.get("summary", "")
     if is_ai and not profile.strip():

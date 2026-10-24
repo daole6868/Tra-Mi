@@ -93,7 +93,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (135 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (136 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1133,7 +1133,29 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   * Đề xuất chưa làm (chờ người dùng chọn): "cắt video khớp lời thoại" (cách 1 cắt đoạn lặng / cách 2 kéo giãn hình theo
     giọng lồng), "Tạo Shorts tự động" (kiểu AutoShorts).
 
+- 2.0.75: người dùng xin viết lại 3 kỹ năng dịch (dán vào ChatGPT / Gemini…) "dịch ra đúng thời gian câu thoại khi lồng,
+  loại bỏ lời bài hát – đừng dùng âm lượng, nhờ AI quét chữ không liên quan tới hội thoại". Gửi file
+  `KyNang_DichLongTieng.md` (ngoài repo): K1 sửa phụ đề + bỏ lời bài hát / chữ máy bịa theo nội dung + giờ (văn vần, điệp
+  khúc, từ ngữ bài hát, không ăn nhập lời thoại trước – sau, cụm đầu / cuối video, < 2 chữ/giây; 请不吝点赞订阅 / 字幕由…提供),
+  K2 dịch theo khoảng tiếng mỗi khối (tối đa T × 5, tối thiểu T × 3,4, bảng tra = `length_marker`, thiếu thì thêm phụ từ /
+  từ đệm không thêm ý, lời hát còn sót -> "♪ "), K3 kiểm tra (cùng khoảng độ dài + lời hát / chữ bịa còn sót).
+  Trong tool:
+  * `skills.FILTER_RULES` (dùng chung) gắn vào `CLEAN_PROMPT` (AI sửa lỗi nghe & nối câu giờ lọc luôn) + `FILTER_PROMPT`
+    (chỉ lọc); `clean_lines(mode=)` trả thêm "song" / "noise". `apply_cleanup`: lời bài hát -> `extra["song"]` + `ai_song`
+    (🎵, không lồng tiếng, phụ đề vẫn hiện), câu máy bịa / vô nghĩa -> BỎ (`stats["removed"]`, Hoàn tác sửa khôi phục),
+    mode filter chỉ nhận "fix" XOÁ bớt chữ (`_is_trim`: dãy con, còn ≥ 30 %); không gộp dòng lời hát / rác với lời thoại.
+    `pipeline.ai_cleanup(mode=)` + `cleanup_note`; đổi 🎵 khi đã lồng -> xếp lại bản lồng.
+  * `translate`: dịch cả phim lần đầu bằng AI mà không bật sửa lỗi nghe -> tự chạy lọc (`ai_song_filter`, mặc định bật,
+    `p.data["ai_filtered"]` – chạy 1 lần). Tab Tự động công tắc "AI lọc lời bài hát trước khi dịch"; tab Phụ đề nút "AI lọc
+    lời bài hát" (job "clean", tích sẵn câu 🎵). "Không phải nhạc" bỏ cả `ai_song` (-> `not_song`). Tooltip chữ gốc "🎵 AI:
+    lời bài hát – lý do".
+  * Kiểm tra bản dịch: mỗi câu gửi "do_dai" = `length_marker` ("≤N tiếng" / "M–N tiếng"), `REVIEW_PROMPT` mục 3 rút gọn khi
+    dài / thêm từ đệm khi ngắn (lệch 1–2 tiếng để nguyên), mục 6 lời hát thiếu "♪ " -> thêm; `ai_review` gọi
+    `mark_song_lines` sau khi sửa. Luật 9 lời nhắc dịch thêm dấu hiệu điệp khúc / không nối tiếp lời thoại.
+
 ## Vấn đề đang mở
+- 2.0.75: chờ người dùng thử 3 kỹ năng mới với ChatGPT / Gemini và nút "AI lọc lời bài hát" trong tool trên phim có
+  nhạc phim – AI có bỏ nhầm câu thoại thật không (câu bỏ khôi phục bằng Hoàn tác sửa / Ctrl+Z).
 - 2.0.74: chờ người dùng thử Kéo dọc trên video thật, "Lọc câu nghe nhầm" (± nửa cung hợp lý bao nhiêu, có đánh dấu nhầm
   câu thoại thật không), dịch có từ đệm (AI có thêm từ quá đà không), Ctrl+Z, bản xem trước nhẹ với video 4K / 60 khung,
   xuất lại nhanh phim dài (nghe / xem chỗ nối đoạn 60 s), báo card bị chiếm (cần nvidia-smi trong PATH – có sẵn khi cài

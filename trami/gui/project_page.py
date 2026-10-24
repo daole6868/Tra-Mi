@@ -283,6 +283,11 @@ class ProjectPage(QWidget):
         self.a_clean = f.row("AI sửa lỗi nghe & nối câu trước khi dịch", Switch(bool(s.get("ai_clean_before_translate", True))),
                              "Trước khi dịch cả phim lần đầu: AI sửa chữ máy nghe nhầm (đồng âm) và nối câu bị cắt sai "
                              "chỗ. Có nút Hoàn tác ở tab Phụ đề")
+        self.a_songai = f.row("AI lọc lời bài hát trước khi dịch", Switch(bool(s.get("ai_song_filter", True))),
+                              "Trước khi dịch cả phim lần đầu (khi không bật sửa lỗi nghe ở trên – bước đó đã gồm việc "
+                              "này): AI đọc cả kịch bản, câu là lời bài hát (văn vần, điệp khúc, không ăn nhập lời thoại) "
+                              "-> đánh 🎵 không lồng tiếng; câu máy tự bịa / chữ vô nghĩa lúc chỉ có nhạc -> bỏ. Dựa vào "
+                              "nội dung chữ, không dựa vào âm lượng. Có nút Hoàn tác sửa ở tab Phụ đề")
         self.a_review = f.row("AI kiểm tra lại bản dịch", Switch(bool(s.get("ai_review_after_translate", False))),
                               "Sau khi dịch cả phim: AI soát sai nghĩa, xưng hô / tên không thống nhất, câu quá dài, còn "
                               "chữ Hán rồi sửa (tốn thêm ~1 lần gọi AI)")
@@ -292,6 +297,7 @@ class ProjectPage(QWidget):
                             "lồng không hụt so với miệng nhân vật. Tắt = chỉ giới hạn độ dài tối đa")
         self.a_clean.toggled.connect(self._ai_switch_changed)
         self.a_review.toggled.connect(self._ai_switch_changed)
+        self.a_songai.toggled.connect(self._ai_switch_changed)
         self.a_fill.toggled.connect(self._ai_switch_changed)
         self.a_hardsub = f.row("Phụ đề Trung cũ", combo(C.HARDSUB, "none"))
         self.a_which = f.row("Ghép phụ đề vào video", combo(C.WHICH, "trans"))
@@ -457,6 +463,10 @@ class ProjectPage(QWidget):
                                "dấu nhầm câu kêu / hét), lớn = lọc lỏng (chỉ bắt nhạc cụ / giọng hát cao hẳn)")
         self.s_ptol.valueChanged.connect(self._ptol_changed)
         self.bar_pitch = flow(
+            button("AI lọc lời bài hát", "wand", "Nhờ công cụ dịch AI đọc cả kịch bản: câu là lời bài hát (văn vần, điệp "
+                   "khúc, không ăn nhập lời thoại) -> đánh 🎵 (không lồng tiếng); câu máy tự bịa / chữ vô nghĩa lúc chỉ "
+                   "có nhạc -> bỏ; đoạn lời hát dính vào câu thoại -> xoá phần đó. Dựa vào nội dung, không dựa vào âm "
+                   "lượng. Không ưng: Hoàn tác sửa", on_click=self.run_ai_filter),
             button("Lọc câu nghe nhầm", "wand", "Đo cao độ giọng thật của từng người nói (trên giọng đã tách) – câu nằm "
                    "ngoài khoảng cao độ đó, gần như không có giọng nói, hoặc nhỏ hẳn so với lời thoại = nhạc / tiếng "
                    "động bị nghe thành lời → đánh dấu + tích sẵn để nghe lại rồi xoá. Đồng thời thu đầu / cuối câu "
@@ -2013,6 +2023,7 @@ class ProjectPage(QWidget):
             self._fill_skills(st)
             self.a_clean.setChecked(bool(st.get("ai_clean_before_translate", True)))
             self.a_review.setChecked(bool(st.get("ai_review_after_translate", False)))
+            self.a_songai.setChecked(bool(st.get("ai_song_filter", True)))
             self.a_fill.setChecked(bool(st.get("translate_fill", True)))
             self.d_interj.setChecked(bool(st.get("dub_drop_interj", True)))
             self.a_parallel.setChecked(bool(st.get("auto_parallel", False)))
@@ -2053,6 +2064,7 @@ class ProjectPage(QWidget):
 
         self.settings = save_settings({"ai_clean_before_translate": self.a_clean.isChecked(),
                                        "ai_review_after_translate": self.a_review.isChecked(),
+                                       "ai_song_filter": self.a_songai.isChecked(),
                                        "translate_fill": self.a_fill.isChecked()})
 
     def _edit_skills(self):
@@ -2089,15 +2101,29 @@ class ProjectPage(QWidget):
 
         def fn(j, p):
             st = pipeline.ai_cleanup(p, None, eng, j.update, j.cancelled)
-            if not st["changed"]:
+            msg = pipeline.cleanup_note(st)
+            if not msg:
                 return {"message": "AI không thấy chỗ nào cần sửa"}
-            msg = f"AI sửa lỗi nghe {st['fixed']} câu, nối {st['merged']} câu bị cắt"
-            if st["unsure"]:
-                msg += f" · {len(st['unsure'])} chỗ chưa chắc (rê chuột vào câu gốc để xem)"
             if any(p.segments[k].trans.strip() for k in st["changed"]):
                 msg += " · câu đổi được tích sẵn – bấm 'Dịch câu đã tích'"
             return {"message": msg + " · bấm 'Hoàn tác sửa' nếu không ưng", "pick": st["changed"]}
         self.submit("clean", "AI sửa lỗi nghe & nối câu", fn)
+
+    def run_ai_filter(self):
+        """AI lọc lời bài hát / chữ không phải lời thoại theo nội dung (không sửa chữ, không nối câu)."""
+        eng = self._ai_engine_or_warn()
+        if not eng:
+            return
+
+        def fn(j, p):
+            st = pipeline.ai_cleanup(p, None, eng, j.update, j.cancelled, mode="filter")
+            msg = pipeline.cleanup_note(st)
+            if not msg:
+                return {"message": "AI không thấy lời bài hát / chữ nào không phải lời thoại"}
+            if st["songs"]:
+                msg += " · câu 🎵 được tích sẵn – muốn bỏ hẳn phụ đề lời hát thì bấm Xoá"
+            return {"message": msg + " · bấm 'Hoàn tác sửa' nếu không ưng", "pick": st["songs"] or st["changed"]}
+        self.submit("clean", "AI lọc lời bài hát", fn)
 
     def run_join(self):
         """Nối câu bị cắt ngang. Dự án đã dịch: câu mới chưa có bản dịch được DỊCH LUÔN (trước đây để trống, phải tự bấm
@@ -3742,6 +3768,9 @@ class ProjectPage(QWidget):
             ex = self.model.segs[r].extra
             ex.pop("noise", None)
             ex["voice_ok"] = True
+            if ex.pop("ai_song", None) is not None:      # AI đoán nhầm là lời bài hát -> lời thoại, lồng tiếng lại
+                ex.pop("song", None)
+                ex["not_song"] = True
         self.model.dataChanged.emit(self.model.index(rows[0], 0), self.model.index(rows[-1], self.model.columnCount() - 1))
         self._segs_edited()
         self.win.toast(f"Đã bỏ đánh dấu {len(rows)} câu (lần lọc sau không đánh dấu lại)", "ok")

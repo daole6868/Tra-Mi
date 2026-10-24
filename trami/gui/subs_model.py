@@ -221,6 +221,9 @@ class SubsModel(QAbstractTableModel):
                 return tip
             if c == C_ZH and s.extra.get("noise"):
                 return f"⚠ Nghi nghe nhầm: {s.extra['noise']}\nNghe lại câu này – đúng là nhạc / tiếng động thì Xoá"
+            if c == C_ZH and s.extra.get("ai_song") and s.extra.get("song"):
+                return f"🎵 AI: lời bài hát – {s.extra['ai_song']}\nKhông lồng tiếng câu này. Là lời thoại thật: tích rồi " \
+                       "bấm 'Không phải nhạc'"
             if c == C_ZH and (s.extra.get("src_before") or s.extra.get("src_unsure")):
                 tip = f"AI sửa lỗi nghe – trước: {s.extra['src_before']}" if s.extra.get("src_before") else ""
                 if s.extra.get("src_unsure"):
