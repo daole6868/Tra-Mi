@@ -2541,7 +2541,7 @@ def test_skills_cleanup_is_validated():
     assert "src_before" not in new[4].extra       # câu khác hẳn -> bỏ qua; gộp 2 dòng cách 9 s / 5 dòng -> bỏ qua
     assert skills.skill_text({"translate_skill": "meme"}).startswith("- Video hài")
     own = {"translate_skills": [{"id": "u1", "name": "Của tôi", "text": "- 小克 -> Claude"}], "translate_skill": "u1"}
-    assert skills.skill_text(own) == "- 小克 -> Claude" and len(skills.all_skills(own)) == len(skills.BUILTIN) + 1
+    assert skills.skill_text(own) == "- 小克 -> Claude" and len(skills.all_skills(own)) == len(skills.BUILTIN) + 2
     assert "小克 -> Claude" in skills.with_skill("SYS", "- 小克 -> Claude") and skills.with_skill("SYS", "") == "SYS"
 
 
