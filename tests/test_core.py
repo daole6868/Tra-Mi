@@ -817,7 +817,9 @@ def test_qwen3_asr_fallback_and_helpers(sample_video, monkeypatch):
     pr = Project(p.id)
     assert pr.data["asr_engine_used"] == "qwen3" and not pr.data.get("asr_warning")
     assert [s.text for s in pr.segments] == ["好了，不要闹了。", "待会儿变回来，把你打成猫饼。"]
-    assert all("ct" not in s.extra and "chunked" not in s.extra for s in pr.segments)
+    from trami.snap import ct_ok
+
+    assert all(ct_ok(s) and "chunked" not in s.extra for s in pr.segments)   # 2.0.96: mốc từng chữ khớp lời được giữ
     assert asr_qwen.hotwords({"glossary": "林动=Lâm Động\nabc=xyz\n青檀=Thanh Đàn"}) == "热词：林动、青檀"
     p.delete()
 
@@ -3112,9 +3114,9 @@ def test_lone_interjections_dropped_before_dub():
     from trami.project import Project
     from trami.voicefix import lone_interjection
 
-    for t in ("A!", "Ừm.", "Ái!", "Hả?", "Ha ha!", "Ồ…", "Ối!", "Hừ!", '"Ừm"'):
+    for t in ("A!", "Ừm.", "Ái!", "Hả?", "Ha ha!", "Ồ…", "Ối!", "Hừ!", '"Ừm"', "Ừm ừm ừm"):
         assert lone_interjection(t), t
-    for t in ("Ừm, đúng là như vậy.", "A Lan", "Ai?", "Vâng.", "Đi!", "Ừm ừm ừm", "Ơi!", "Ồ, 3 cái"):
+    for t in ("Ừm, đúng là như vậy.", "A Lan", "Ai?", "Vâng.", "Đi!", "Ơi!", "Ồ, 3 cái"):
         assert not lone_interjection(t), t
     p = Project.create("cam_than")
     p.segments = [Segment(0, 1, "啊", "A!"), Segment(1, 3, "嗯，是这样", "Ừm, đúng là như vậy."),
@@ -3237,15 +3239,19 @@ def test_dub_tab_flags_undubbed_and_srt_row(monkeypatch):
     pp.model.segs.insert(1, Segment(1.6, 1.9, "嗯", "Ừm."))
     pp.model.segs[3].trans = "Ừm, đúng là như vậy."
     pp.model.set_segments(pp.model.segs)
+    n_jobs = len(jobs)
     pp._drop_interj_now()
-    assert [s.trans for s in pp.model.segs] == ["Câu 0", "Câu 1", "Ừm, đúng là như vậy.", "Câu 3", "A!"]
+    # 2.0.96: vế cảm thán đứng riêng trong câu dài cũng bỏ (theo danh sách từ) + đọc lại giọng câu đó
+    assert [s.trans for s in pp.model.segs] == ["Câu 0", "Câu 1", "Đúng là như vậy.", "Câu 3", "A!"]
     assert [d["trans"] for d in Project(p.id).data["interj_removed"]] == ["Ừm."]
+    assert pp.model.segs[2].extra["trans_before_interj"] == "Ừm, đúng là như vậy."
+    assert jobs[n_jobs:] and jobs[-1][0] == "redub"
     # Xoá câu đã tích: hỏi lại rồi xoá cả phụ đề
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
     pp.model.set_picked(range(len(pp.model.segs)), False)
     pp.model.set_picked([0, 3])
     pp._delete_picked()
-    assert [s.trans for s in pp.model.segs] == ["Câu 1", "Ừm, đúng là như vậy.", "A!"]
+    assert [s.trans for s in pp.model.segs] == ["Câu 1", "Đúng là như vậy.", "A!"]
     assert len(Project(p.id).segments) == 3
     win.close()
 
@@ -6352,9 +6358,9 @@ def test_gui_subs_tools_delete_project_and_timeline_tip(sample_video, monkeypatc
                          Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
         cv.mouseMoveEvent(ev)
         # khung công cụ: 4 trang, mỗi lúc hiện 1, nhớ trang + thu gọn
-        assert len(pp.s_tools_pages) == 4 and pp.s_srt_trans.text() == "Xuất SRT đã dịch"
+        assert len(pp.s_tools_pages) == 5 and pp.s_srt_trans.text() == "Xuất SRT đã dịch"
         pp._subs_tools(page=2, open_=True)
-        assert [pg.isVisibleTo(pp.s_tools_body) for pg in pp.s_tools_pages] == [False, False, True, False]
+        assert [pg.isVisibleTo(pp.s_tools_body) for pg in pp.s_tools_pages] == [False, False, True, False, False]
         assert load_settings()["subs_tools_tab"] == 2
         pp._subs_tools(open_=False)
         assert not pp.s_tools_body.isVisibleTo(pp.s_tools_card) and load_settings()["subs_tools_open"] is False
@@ -6370,5 +6376,302 @@ def test_gui_subs_tools_delete_project_and_timeline_tip(sample_video, monkeypatc
         assert win.pages.currentWidget() is win.home
     finally:
         save_settings({"subs_tools_tab": old.get("subs_tools_tab", 0), "subs_tools_open": old.get("subs_tools_open", True)})
+        win.close()
+        app.processEvents()
+
+
+def _voice_env_db(spans, total, hop=0.01, floor=-70.0, level=-18.0):
+    """Độ to giả (dB mỗi 10 ms): có tiếng trong các đoạn spans, lặng ngoài đó."""
+    n = int(total / hop)
+    env = np.full(n, floor, np.float32)
+    for a, b in spans:
+        env[int(round(a / hop)):int(round(b / hop))] = level
+    return env
+
+
+def test_snap_edges_to_voice_and_estimated():
+    """Bám mép câu (2.0.96): đầu / cuối câu lệch ±0,15 s về đúng chỗ bắt đầu / thôi nói trên giọng đã tách; không lấn
+    câu bên cạnh; không vượt mốc chữ đầu / chữ cuối đã đo quá CT_SLACK; câu không có mốc từng chữ, không bám được = ước
+    lượng; câu toàn nhạc nhỏ (không đủ tương phản) giữ nguyên."""
+    from trami import snap
+
+    env = _voice_env_db([(1.00, 2.50), (2.80, 4.00), (6.00, 7.20)], 10)
+    segs = [Segment(1.13, 2.37, "你好啊", "a", "S1", {"ct": [[1.0, 1.4], [1.4, 1.9], [1.9, 2.5]]}),
+            Segment(2.95, 3.85, "走", "b", "S1"),
+            Segment(5.82, 7.35, "快点", "c", "S1")]
+    st = snap.snap(segs, env, 0.01, total=10)
+    assert abs(segs[0].start - 1.00) < 0.015 and abs(segs[0].end - 2.50) < 0.015
+    assert abs(segs[1].start - 2.80) < 0.015 and abs(segs[1].end - 4.00) < 0.015
+    assert abs(segs[2].start - 6.00) < 0.015 and abs(segs[2].end - 7.20) < 0.015
+    assert st["moved"] == 3 and st["start"] == 3 and st["end"] == 3 and 0.1 < st["shift"] < 0.2
+    assert all(s.extra["snap"] == [True, True] for s in segs) and st["est"] == 0
+    assert segs[0].end <= segs[1].start
+    # mốc đầu trễ 0,2 s rơi vào trong tiếng nói, ngay trước 1 chỗ ngắt hơi giữa câu: lùi về đầu đoạn tiếng, không nhảy
+    # tới chỗ nói tiếp sau chỗ ngắt (gần hơn nhưng sai)
+    f = Segment(1.2, 2.3, "一二", "f")
+    snap.snap([f], _voice_env_db([(1.0, 1.25), (1.35, 2.5)], 5), 0.01, total=5)
+    assert abs(f.start - 1.0) < 0.015 and abs(f.end - 2.5) < 0.015
+    # câu bên cạnh chặn: không lấn sang câu trước
+    env2 = _voice_env_db([(1.0, 3.0)], 6)
+    a, b = Segment(1.0, 2.0, "一", "x"), Segment(2.05, 3.0, "二", "y")
+    snap.snap([a, b], env2, 0.01, total=6)
+    assert a.end <= b.start and b.start >= a.end + snap.GAP - 1e-6
+    # không có mốc từng chữ + không bám được (nói liền, không có chỗ ngắt gần mép) -> mốc ước lượng
+    c = Segment(2.0, 3.0, "三", "z")
+    snap.snap([c], _voice_env_db([(0.0, 5.0)], 6), 0.01, total=6)
+    assert snap.estimated(c) and (c.start, c.end) == (2.0, 3.0)
+    # tương phản thấp (nhạc rò): giữ nguyên
+    flat = np.full(600, -40.0, np.float32)
+    d = Segment(1.1, 2.2, "四", "w")
+    assert snap.snap([d], flat, 0.01, total=6)["moved"] == 0 and (d.start, d.end) == (1.1, 2.2)
+    # chỉ các câu rows
+    e1, e2 = Segment(1.1, 2.4, "五", "q"), Segment(2.9, 3.9, "六", "r")
+    snap.snap([e1, e2], env, 0.01, rows=[1], total=10)
+    assert (e1.start, e1.end) == (1.1, 2.4) and abs(e2.start - 2.8) < 0.015
+
+
+def test_snap_edges_pipeline_and_ct_kept(monkeypatch):
+    """pipeline.snap_edges dùng giọng đã tách (voice_10ms), lưu snap_stats, đã lồng thì xếp lại; mốc từng chữ khớp lời
+    được giữ khi lưu (không còn bị xoá sau khi nghe), mốc không khớp lời bị bỏ."""
+    from trami import pipeline, silence
+    from trami.align import drop_char_times
+    from trami.project import Project
+
+    p = Project.create("bam_mep")
+    p.data["info"] = {"duration": 10}
+    p.segments = [Segment(1.15, 2.35, "你好", "Xin chào", "S1", {"ct": [[1.0, 1.6], [1.7, 2.5]]}),
+                  Segment(6.1, 7.1, "快点", "Nhanh lên", "S1", {"ct": [[6.0, 6.3]]})]   # sai số chữ -> bỏ
+    p.save()
+    drop_char_times(p.segments)
+    assert "ct" in p.segments[0].extra and "ct" not in p.segments[1].extra
+    env = _voice_env_db([(1.0, 2.5), (6.0, 7.2)], 10)
+    monkeypatch.setattr(pipeline, "stems", lambda pr: {"vocals": "v.wav", "instrumental": "i.wav"})
+    seen = {}
+
+    def fake_loud(src, work, progress=None, cancel=None, total=0.0, name="loud_50ms", hop=0.05):
+        seen.update(src=src, name=name, hop=hop)
+        return env
+    monkeypatch.setattr(silence, "loudness", fake_loud)
+    relaid = []
+    monkeypatch.setattr(pipeline, "has_dub", lambda pr: True)
+    monkeypatch.setattr(pipeline, "relayout", lambda pr, st=None, pg=None, c=None: relaid.append(1))
+    st = pipeline.snap_edges(p, {})
+    assert seen == {"src": "v.wav", "name": pipeline.VOICE_ENV, "hop": 0.01}
+    assert st["moved"] == 2 and st["src"] == "vocals" and relaid == [1]
+    p2 = Project(p.id)
+    assert abs(p2.segments[0].start - 1.0) < 0.015 and abs(p2.segments[1].end - 7.2) < 0.015
+    assert p2.data["snap_stats"]["moved"] == 2 and p2.segments[0].extra["ct"]
+    assert "bám mép 2 câu" in pipeline.snap_note(st)
+
+
+def test_ct_follows_merge_split_and_split_clauses():
+    """Mốc từng chữ đi theo khi gộp (nối tiếp), tách tay (chia lời đúng chữ đang nói ở chỗ tách) và tách câu dịch dài
+    (chỗ tách nằm giữa chữ cuối vế trước và chữ đầu vế sau)."""
+    from trami import align, subtitle
+    from trami.snap import ct_ok
+
+    a = Segment(0.0, 1.0, "你好", "Xin chào", "S1", {"ct": [[0.0, 0.4], [0.5, 1.0]], "snap": [True, False]})
+    b = Segment(1.2, 2.0, "朋友。", "bạn", "S1", {"ct": [[1.2, 1.6], [1.6, 2.0]], "snap": [False, True]})
+    segs = subtitle.merge([a, b], 0)
+    assert len(segs) == 1 and len(segs[0].extra["ct"]) == 4 and ct_ok(segs[0])
+    assert segs[0].extra["snap"] == [True, True]
+    # tách tay tại 1,1 s: 2 chữ đầu nói trước 1,1 s -> "你好" | "朋友。"
+    segs = subtitle.split(segs, 0, 1.1)
+    assert [s.text for s in segs] == ["你好", "朋友。"] and len(segs[0].extra["ct"]) == 2 and ct_ok(segs[1])
+    assert segs[0].extra["snap"] == [True, False] and segs[1].extra["snap"] == [False, True]
+    # mốc không khớp lời (đã sửa chữ) -> gộp bỏ mốc
+    c = Segment(0, 1, "你好吗", "x", "S1", {"ct": [[0, 0.5]]})
+    d = Segment(1, 2, "好", "y", "S1", {"ct": [[1, 2]]})
+    assert "ct" not in subtitle.merge([c, d], 0)[0].extra
+    # tách câu dịch dài theo mốc từng chữ: nhân vật ngừng 2,0 -> 3,0 s sau chữ thứ 6
+    zh = "因为欠债太多了，所以宗门很穷啊。"
+    n = len(align.CJK.findall(zh))
+    ct = [[0.3 * k, 0.3 * k + 0.25] for k in range(7)] + [[3.0 + 0.3 * k, 3.25 + 0.3 * k] for k in range(n - 7)]
+    s = Segment(0.0, ct[-1][1], zh, "Vì món nợ quá nhiều khiến Thiên Kiếm Tông nghèo rớt, cho nên tông môn mới nghèo "
+                "như vậy đấy.", "S1", {"ct": ct})
+    parts = align.split_clauses(s, "vi", 14, 4)
+    assert len(parts) == 2 and parts[0].text.endswith("，") and len(parts[0].extra["ct"]) == 7
+    assert ct[6][1] - 1e-6 <= parts[0].end <= 3.0 and parts[1].start <= 3.0 + 1e-6 and ct_ok(parts[1])
+
+
+def test_follow_dub_display_times():
+    """Giờ HIỆN phụ đề theo giọng lồng (2.0.96, kiểu "always"): hiện trước 0,1 s, giữ thêm 0,3 s, tối thiểu 1 s, nối khoảng
+    hở < 0,3 s; câu chưa có giọng theo giờ nói; không đè câu sau; giờ nói của câu không đổi. Kiểu "shift" như cũ."""
+    from trami import pipeline
+    from trami.subtitle import follow_dub
+
+    segs = [Segment(1.0, 2.0, "a", "Một", "S1", {"dub_at": [1.05, 2.1]}),
+            Segment(2.5, 3.0, "b", "A!", "S1", {"dub_at": [2.5, 2.8]}),
+            Segment(3.6, 4.0, "c", "Ba", "S1"),
+            Segment(6.0, 8.0, "d", "Bốn", "S1", {"dub_at": [6.4, 9.0]})]
+    out = follow_dub(segs, **pipeline.follow_params({}))
+    assert abs(out[0].start - 0.95) < 1e-6 and abs(out[0].end - out[1].start) < 1e-6   # hở 0,0x s -> nối liền
+    assert abs(out[1].start - 2.4) < 1e-6 and out[1].end <= out[2].start               # tối thiểu 1 s nhưng không đè
+    assert abs(out[2].start - 3.6) < 1e-6 and abs(out[2].end - 4.6) < 1e-6             # chưa có giọng: ≥ 1 s
+    assert abs(out[3].start - 6.3) < 1e-6 and abs(out[3].end - 9.3) < 1e-6
+    assert [(s.start, s.end) for s in segs] == [(1.0, 2.0), (2.5, 3.0), (3.6, 4.0), (6.0, 8.0)]
+    old = follow_dub(segs, **pipeline.follow_params({"sub_follow_mode": "shift"}))
+    assert (old[0].start, old[0].end) == (1.0, 2.0) and abs(old[3].start - 6.4) < 1e-6
+    custom = follow_dub(segs, **pipeline.follow_params({"sub_lead": 0.0, "sub_hold": 0.0, "sub_min_dur": 0.3,
+                                                        "sub_join_gap": 0.0}))
+    assert (custom[0].start, custom[0].end) == (1.05, 2.1) and abs(custom[2].end - 4.0) < 1e-6
+
+
+def test_dub_pauses_follow_original_breaks(tmp_path):
+    """Giọng lồng nghỉ đúng chỗ nhân vật ngắt hơi (2.0.96): câu có mốc từng chữ, nhân vật ngừng 1 s ở dấu phẩy -> đoạn giọng
+    bị cắt ở chỗ bộ đọc tự ngắt (dấu phẩy) và phần sau vào đúng lúc nhân vật nói tiếp; chỉ dùng chỗ trống trước câu sau;
+    tắt cài đặt -> giọng liền như cũ; xếp lại kiểu vá ra đúng như dựng cả bản."""
+    from trami import tts
+
+    sr = tts.SR
+    clip = np.concatenate([_speech_like(sr, 0.9, 1) * 3, np.zeros(int(0.15 * sr), np.float32),
+                           _speech_like(sr, 0.8, 2) * 3])
+    clip = np.clip(clip, -0.95, 0.95)
+    f = tmp_path / "c.wav"
+    tts.write_wav(f, clip, sr)
+    g = tmp_path / "d.wav"
+    tts.write_wav(g, np.clip(_speech_like(sr, 0.6, 3) * 3, -0.95, 0.95), sr)
+    ct = [[1.0, 1.2], [1.2, 1.4], [1.4, 1.6], [1.6, 1.8], [2.8, 3.0], [3.0, 3.2]]
+
+    def mk():
+        return [Segment(1.0, 3.3, "我们走吧，快点。", "Chúng ta đi thôi, nhanh lên.", "S1",
+                        {"ct": [list(x) for x in ct], "tts_file": str(f)}),
+                Segment(5.0, 5.8, "好", "Được.", "S1", {"tts_file": str(g)})]
+    segs = mk()
+    st = {}
+    tts.synthesize_dub(segs, tmp_path / "o.wav", 8, tmp_path / "w", stats=st, only=set(), max_speedup=1.0,
+                       settings={"dub_level_match": False})
+    assert st["pauses"] == 1 and segs[0].extra["dub_pauses"] == 1
+    a = tts._decode(tmp_path / "o.wav")
+    win = lambda t0, t1: float(np.abs(a[int(t0 * sr):int(t1 * sr)]).max())   # noqa: E731
+    lead = tts._trim_silence(clip)
+    t_gap = 1.0 + 0.9 + 0.075 - (len(clip) - len(lead)) / sr / 2
+    assert win(t_gap + 0.05, 2.75) < 0.01            # lặng tới lúc nhân vật nói tiếp (2,8 s)
+    assert win(2.8, 3.2) > 0.05
+    assert segs[0].extra["dub_at"][1] - segs[0].extra["dub_at"][0] > len(lead) / sr + 0.5   # đã chèn khoảng nghỉ
+    assert abs(segs[1].extra["dub_at"][0] - 5.0) < 0.01                       # câu sau không xê dịch
+    full = tts._decode(tmp_path / "o.wav")
+    # tắt: giọng liền
+    segs2 = mk()
+    st2 = {}
+    tts.synthesize_dub(segs2, tmp_path / "o2.wav", 8, tmp_path / "w", stats=st2, only=set(), max_speedup=1.0,
+                       settings={"dub_level_match": False, "dub_pauses": False})
+    assert st2["pauses"] == 0 and "dub_pauses" not in segs2[0].extra
+    # vá: bản đang có (không nghỉ) + bật nghỉ -> vá đúng đoạn, kết quả = dựng cả bản
+    import shutil
+
+    shutil.copy(tmp_path / "o2.wav", tmp_path / "o3.wav")
+    segs3 = mk()
+    st3 = {}
+    tts.synthesize_dub(segs3, tmp_path / "o3_new.wav", 8, tmp_path / "w", stats=st3, only=set(), max_speedup=1.0,
+                       settings={"dub_level_match": False},
+                       patch={"wav": str(tmp_path / "o3.wav"), "placed": st2["placed_tab"]})
+    assert st3.get("patched")
+    b = tts._decode(tmp_path / "o3.wav")
+    assert len(b) == len(full) and float(np.abs(b - full).max()) < 2e-4
+    # câu không có dấu câu tương ứng / không có mốc từng chữ -> không chèn
+    s = Segment(1.0, 3.3, "我们走吧快点", "Chúng ta đi thôi nhanh lên", "S1", {"ct": ct})
+    assert tts.orig_pauses(s) == []
+    assert tts.orig_pauses(Segment(1.0, 3.3, "我们走吧，快点。", "Đi, nhanh.", "S1")) == []
+
+
+def test_interjection_user_list_lone_and_inline():
+    """Lọc từ cảm thán theo danh sách người dùng điền (2.0.96): chỉ đúng các từ / cụm đó; câu toàn cảm thán bị xoá, vế
+    cảm thán đứng riêng trong câu dài bị bỏ (cất lời cũ), khôi phục trả lại cả 2; danh sách trống = không lọc."""
+    from trami import pipeline
+    from trami.project import Project
+    from trami.voicefix import interj_list, lone_interjection, strip_interjections
+
+    ph = interj_list({"interj_words": "hả, ui da, Ừm"})
+    assert ph == [("ui", "da"), ("hả",), ("ừm",)]
+    assert lone_interjection("Hả?", ph) and lone_interjection("Ui da!", ph) and lone_interjection("Ừm, hả?", ph)
+    assert not lone_interjection("A!", ph) and not lone_interjection("Ui!", ph)        # không có trong danh sách
+    assert strip_interjections("Ừm, đúng là như vậy.", ph) == "Đúng là như vậy."
+    assert strip_interjections("Đi thôi, hả?", ph) == "Đi thôi?"
+    assert strip_interjections("A, đi thôi.", ph) == "A, đi thôi."                      # "a" không trong danh sách
+    assert strip_interjections("Hả thật à?", ph) == "Hả thật à?"                         # vế có lời thật
+    assert interj_list({"interj_words": ""}) == [] and not lone_interjection("Hả?", [])
+    p = Project.create("cam_than_ds")
+    p.segments = [Segment(0, 1, "啊", "Hả?"), Segment(1, 3, "嗯，是这样", "Ừm, đúng là như vậy."),
+                  Segment(3, 4, "啊", "A!"), Segment(5, 7, "走吧", "Đi thôi.")]
+    p.save()
+    st = {"interj_words": "hả, ừm"}
+    assert pipeline.drop_interjections(p, None, st) == 1
+    segs = p.segments
+    assert pipeline.trim_interjections(segs, st) == [0]
+    assert [s.trans for s in segs] == ["Đúng là như vậy.", "A!", "Đi thôi."]
+    assert segs[0].extra["trans_before_interj"] == "Ừm, đúng là như vậy."
+    p.segments = segs
+    p.save()
+    assert pipeline.restore_interjections(p) == 2
+    assert [s.trans for s in p.segments] == ["Hả?", "Ừm, đúng là như vậy.", "A!", "Đi thôi."]
+    assert pipeline.trim_interjections(p.segments, st) == [] and pipeline.drop_interjections(p, None, st) == 0
+
+
+def test_gui_snap_follow_pauses_interj(sample_video, monkeypatch):
+    """Giao diện 2.0.96: nút Căn mép theo giọng (việc nền), trang Giờ hiện (lưu Cài đặt, gương với tab Lồng tiếng, vạch
+    giờ hiện trên timeline), viền câu mốc ước lượng, ô nghỉ đúng chỗ ngắt hơi, danh sách từ cảm thán + nút Lọc."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+
+    from trami import pipeline
+    from trami.config import load_settings, save_settings
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    keys = ("dub_subs_follow", "sub_follow_mode", "sub_lead", "sub_hold", "sub_min_dur", "sub_join_gap", "dub_pauses",
+            "dub_pause_min", "interj_words", "interj_inline")
+    old = load_settings()
+    win = MainWindow()
+    try:
+        p = Project.create("bam mep gui")
+        p.data["info"] = {"duration": 10}
+        p.data["snap_stats"] = {"moved": 1, "shift": 0.1, "est": 1}
+        p.segments = [Segment(1, 2, "你好", "Ừm, xin chào", "S1", {"dub_at": [1.2, 2.4], "ct": [[1, 1.5], [1.5, 2]]}),
+                      Segment(4, 5, "走", "Hả?", "S1")]
+        p.data["edit"] = {"dub": {"enabled": True}}
+        p.save()
+        win.open_project(p.id)
+        app.processEvents()
+        pp = win.project_page
+        assert pp.tracks.show_est
+        from trami.snap import estimated
+
+        assert not estimated(pp.model.segs[0]) and estimated(pp.model.segs[1])
+        pp.tracks.canvas.repaint()
+        # giờ hiện: đổi ô -> lưu Cài đặt; công tắc gương
+        monkeypatch.setattr(pipeline, "dub_audible", lambda pr, ed=None: True)
+        pp.s_lead.setValue(0.2)
+        assert load_settings()["sub_lead"] == 0.2
+        pp._update_timeline()
+        assert 0 in pp.tracks.shown and abs(pp.tracks.shown[0][0] - 1.0) < 1e-6
+        pp.s_follow.setChecked(False)
+        assert pp.d_follow.isChecked() is False and load_settings()["dub_subs_follow"] is False
+        assert not pp.s_lead.isEnabled()
+        pp.d_follow.setChecked(True)
+        assert pp.s_follow.isChecked() and load_settings()["dub_subs_follow"] is True
+        pp.tracks.canvas.repaint()
+        # nghỉ đúng chỗ ngắt hơi
+        pp.d_pauses.setChecked(False)
+        assert load_settings()["dub_pauses"] is False
+        # nút căn mép: gửi việc nền
+        sub = []
+        monkeypatch.setattr(pp, "submit", lambda kind, title, fn: sub.append((kind, title)))
+        pp.run_snap()
+        pp.s_snap_ct.setChecked(True)
+        pp.run_snap()
+        assert sub == [("snap", "Căn mép câu theo giọng"), ("realign", "Căn mép câu theo giọng")]
+        # từ cảm thán: danh sách người dùng -> Lọc
+        pp.d_interj_words.setText("hả, ừm")
+        pp._interj_words_changed()
+        assert load_settings()["interj_words"] == "hả, ừm"
+        monkeypatch.setattr(pipeline, "has_dub", lambda pr: False)
+        pp._drop_interj_now()
+        assert [s.trans for s in pp.model.segs] == ["Xin chào"]
+        assert pp.model.segs[0].extra["trans_before_interj"] == "Ừm, xin chào"
+    finally:
+        save_settings({k: old.get(k) for k in keys if k in old} | {k: None for k in keys if k not in old})
         win.close()
         app.processEvents()

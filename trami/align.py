@@ -908,11 +908,16 @@ def join_broken(segs: list[Segment], params: dict | None = None, max_chars: int 
     return fix_overlaps(out) if made else out, made
 
 
-def drop_char_times(segs: list[Segment]) -> None:
-    """Xoá dữ liệu tạm của bước nhận dạng (mốc từng chữ, cờ khúc) trước khi lưu dự án."""
+def drop_char_times(segs: list[Segment], keep: bool = True) -> None:
+    """Xoá dữ liệu tạm của bước nhận dạng (cờ khúc) trước khi lưu dự án. Mốc từng chữ (extra["ct"]) còn khớp lời được
+    GIỮ LẠI từ 2.0.96 (gộp / tách / tách câu dài / bám mép câu dùng mốc thật thay vì chia theo tỉ lệ); keep=False: xoá
+    hết để đo lại (Căn khớp thoại)."""
+    from .snap import ct_ok
+
     for s in segs:
-        s.extra.pop("ct", None)
         s.extra.pop("chunked", None)
+        if not keep or ("ct" in s.extra and not ct_ok(s)):
+            s.extra.pop("ct", None)
 
 
 # ------------------------------------------------------------------ nghe lại câu bị sót
@@ -1258,7 +1263,18 @@ def split_clauses(seg: Segment, lang: str = "vi", max_units: float = 14, min_uni
     _, pz, pt, kind = best
     n1, n2 = _vis(zh[:pz]), _vis(zh[pz:])
     est = seg.start + (seg.end - seg.start) * n1 / max(1, n1 + n2)
+    from .subtitle import ct_of
+
+    ct = ct_of(seg)
+    kh = len(CJK.findall(zh[:pz]))
+    use_ct = bool(ct) and 0 < kh < len(ct)
+    if use_ct:   # mốc từng chữ thật (2.0.96): chỗ tách nằm giữa chữ cuối vế trước và chữ đầu vế sau
+        ce, cs = float(ct[kh - 1][1]), float(ct[kh][0])
+        est = (ce + cs) / 2 if cs >= ce else ce
     e1, s2 = _quiet_cut(env, hop, seg.start, seg.end, est)
+    if use_ct:
+        e1 = min(max(e1, ce), max(ce, cs))
+        s2 = min(max(s2, e1), max(ce, cs))
     e1 = min(max(e1, seg.start + 0.3), seg.end - 0.3)
     s2 = min(max(s2, e1), seg.end - 0.3)
     sid = seg.extra.get("split") or f"{seg.start:.3f}"
@@ -1269,6 +1285,11 @@ def split_clauses(seg: Segment, lang: str = "vi", max_units: float = 14, min_uni
         ea["pause_before"] = seg.extra["pause_before"]
     gap = round(float(pause) * (END_PAUSE if kind == "end" else 1.0), 3)
     eb = dict(ex, pause_before=gap) if gap > 0 else dict(ex)
+    if use_ct:
+        ea["ct"], eb["ct"] = ct[:kh], ct[kh:]
+    sn = seg.extra.get("snap")
+    if sn:
+        ea["snap"], eb["snap"] = [bool(sn[0]), False], [False, bool(sn[1])]
     a = Segment(round(seg.start, 3), round(e1, 3), zh[:pz].strip(), tr[:pt].strip(), seg.speaker, ea)
     b = Segment(round(s2, 3), round(seg.end, 3), zh[pz:].strip(), tr[pt:].strip(), seg.speaker, eb)
     return split_clauses(a, lang, max_units, min_units, env, hop, pause) + \

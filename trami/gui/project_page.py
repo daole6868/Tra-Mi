@@ -16,7 +16,7 @@ from ..config import _deep_merge, load_settings
 from ..jobs import manager
 from ..karaoke import DEFAULT_COLOR as KARA_COLOR, MODES as KARA_MODES
 from ..project import Project
-from ..subtitle import Segment, load_subtitles, normalize, save_subtitles
+from ..subtitle import Segment, load_subtitles, normalize, save_subtitles, shift_ct
 from . import common as C
 from . import icons, theme
 from .common import run_async
@@ -510,6 +510,10 @@ class ProjectPage(QWidget):
         tr_card.add(g)
         self.s_tr_card = tr_card
         # ---- các trang của khung "Công cụ" (mỗi lúc hiện 1 trang)
+        self.s_snap_ct = Switch(False)
+        self.s_snap_ct.setToolTip("Bật: đo lại mốc từng chữ bằng Qwen3 trước khi bám mép (dùng card, vài phút với phim dài) – "
+                                  "cho dự án nghe trước bản 2.0.96 (chưa lưu mốc từng chữ, cần để giọng lồng nghỉ đúng chỗ "
+                                  "ngắt hơi). Tắt: chỉ nhìn độ to giọng – nhanh")
         pg_edit = [
             "Bấm đúp vào ô để sửa chữ · Ctrl / Shift chọn nhiều dòng · tích cột Chọn để làm nhiều câu cùng lúc",
             flow(button("Thêm", "plus", "Thêm câu tại vị trí đang phát", on_click=lambda: self._seg_op("insert")),
@@ -527,7 +531,14 @@ class ProjectPage(QWidget):
                  button("Căn khớp thoại", "wand", "Căn mốc từng câu sát lời thoại thật, tách câu ở chỗ nghỉ "
                         "(dùng cho phụ đề đã nhận dạng từ bản cũ)", on_click=self.run_realign),
                  _vsep(),
-                 button("Lưu", "save", on_click=lambda: (self._save_segs_now(), self.win.toast("Đã lưu phụ đề", "ok"))))]
+                 button("Lưu", "save", on_click=lambda: (self._save_segs_now(), self.win.toast("Đã lưu phụ đề", "ok")))),
+            flow(_rowlbl("Mép câu"),
+                 button("Căn mép theo giọng", "silence", "Dời đầu / cuối câu về đúng lúc nhân vật bắt đầu / thôi nói, nhìn "
+                        "độ to giọng đã tách mỗi 0,01 s (như sóng âm dòng Tiếng gốc). Câu đã tích hoặc cả phim. Không "
+                        "đổi chữ, không tách câu; đã lồng tiếng thì xếp lại giọng theo mốc mới (không đọc lại). "
+                        "'1. Nghe & tách câu' tự làm bước này – nút dùng cho dự án cũ / sau khi sửa tay",
+                        on_click=self.run_snap),
+                 hbox(self.s_snap_ct, label("đo lại mốc từng chữ", "muted")))]
         # câu dịch dài: tách ở chỗ hết câu (? ! .) / dấu phẩy thành nhiều dòng phụ đề + đoạn giọng, giữa 2 vế nghỉ 1 nhịp
         self.s_split = Switch(bool(self.settings.get("split_long_trans", True)))
         self.s_split.setToolTip("Sau khi dịch cả phim: câu dịch dài hơn mức đặt có dấu ? ! . hoặc dấu phẩy ở giữa câu (cả câu gốc lẫn "
@@ -596,6 +607,50 @@ class ProjectPage(QWidget):
             flow(button("Tích câu nghi nghe nhầm", "check", flat=True, on_click=lambda: self._pick_flag("noise")),
                  button("Không phải nhạc", "x", "Bỏ đánh dấu các câu đã tích (câu thoại thật) – lần lọc sau không đánh "
                         "dấu lại", flat=True, on_click=self._voice_ok))]
+        # giờ HIỆN phụ đề theo giọng lồng (2.0.96) – không đổi giờ nói của câu
+        from ..subtitle import FOLLOW_MODES
+
+        st0 = self.settings
+        self.s_follow = Switch(bool(st0.get("dub_subs_follow", True)))
+        self.s_follow.setToolTip("Bật: phụ đề đã dịch hiện theo đúng lúc giọng lồng đọc (xem trước, video xuất, SRT đã "
+                                 "dịch). Cùng công tắc với 'Phụ đề chạy theo giọng lồng' ở tab Lồng tiếng")
+        self.s_follow_mode = QComboBox()
+        for k, t in FOLLOW_MODES:
+            self.s_follow_mode.addItem(t, k)
+        set_combo(self.s_follow_mode, st0.get("sub_follow_mode", "always"))
+        self.s_follow_mode.setToolTip("Luôn theo giọng lồng: mọi câu có giọng hiện từ lúc giọng bắt đầu tới lúc đọc xong "
+                                      "(theo các mức bên dưới). Chỉ khi lệch: như bản cũ – chỉ câu giọng đọc sớm / bị "
+                                      "lùi / đọc dài hơn phụ đề quá 0,3 s")
+
+        def _fspin(lo, hi, val, tip):
+            w = QDoubleSpinBox()
+            w.setRange(lo, hi)
+            w.setSingleStep(0.05)
+            w.setDecimals(2)
+            w.setSuffix(" s")
+            w.setValue(float(val))
+            w.setToolTip(tip)
+            w.setMaximumWidth(96)
+            return w
+        self.s_lead = _fspin(0.0, 1.0, st0.get("sub_lead", 0.1), "Chữ hiện trước lúc giọng lồng bắt đầu bấy nhiêu giây "
+                             "(mắt đọc kịp trước khi nghe)")
+        self.s_hold = _fspin(0.0, 2.0, st0.get("sub_hold", 0.3), "Chữ còn trên màn hình bấy nhiêu giây sau khi giọng đọc xong")
+        self.s_min = _fspin(0.3, 4.0, st0.get("sub_min_dur", 1.0), "Câu ngắn (A! / Hả?) vẫn hiện ít nhất bấy nhiêu giây "
+                            "(không đè câu sau)")
+        self.s_join = _fspin(0.0, 1.0, st0.get("sub_join_gap", 0.3), "Khoảng trống giữa 2 câu ngắn hơn mức này -> câu trước "
+                             "giữ tới khi câu sau hiện (chữ không nháy tắt – bật)")
+        self.s_follow.toggledOn.connect(self._follow_opts_changed)
+        self.s_follow_mode.currentIndexChanged.connect(self._follow_opts_changed)
+        for w in (self.s_lead, self.s_hold, self.s_min, self.s_join):
+            w.valueChanged.connect(self._follow_opts_changed)
+        pg_show = [
+            "Chỉ đổi lúc HIỆN chữ trên video, khung xem trước và SRT đã dịch – không đổi giờ nói của câu, chỗ đặt giọng "
+            "lồng, karaoke. Câu chưa có giọng lồng hiện theo giờ nói. Trên timeline: vạch trắng dưới khối phụ đề = giờ hiện",
+            flow(_rowlbl("Theo giọng"), self.s_follow, label("Phụ đề hiện theo giọng lồng", "muted"), self.s_follow_mode),
+            flow(_rowlbl("Thời gian"), hbox(label("Hiện trước", "muted"), self.s_lead),
+                 hbox(label("Giữ thêm", "muted"), self.s_hold), hbox(label("Tối thiểu", "muted"), self.s_min),
+                 hbox(label("Nối khoảng hở <", "muted"), self.s_join),
+                 button("Mặc định", "refresh", "Về 0,1 / 0,3 / 1,0 / 0,3 s", flat=True, on_click=self._follow_defaults))]
         self.profile_edit = QPlainTextEdit()
         self.profile_edit.setPlaceholderText(
             "AI tự lập khi dịch lần đầu: thể loại, nhân vật, xưng hô, tên riêng / meme. Sửa được – AI dùng cho mọi lần "
@@ -660,7 +715,7 @@ class ProjectPage(QWidget):
                  button("Xuất SRT song ngữ", "upload", on_click=lambda: self._export_sub("srt", "both")))]
         tools = Card(padding=12)
         self.s_tools = PillTabs([("Sửa câu", "text"), ("Nối / tách câu", "merge"), ("Lời hát & nghe nhầm", "music"),
-                                 ("Nhập / xuất SRT", "upload")])
+                                 ("Nhập / xuất SRT", "upload"), ("Giờ hiện", "clock")])
         self.s_tools_btn = button("Thu gọn", "chev_down", "Ẩn / hiện các nút công cụ (ẩn để bảng câu cao hơn)", flat=True,
                                   on_click=lambda: self._subs_tools(open_=not self.s_tools_body.isVisible()))
         tools.add(hbox(self.s_tools, None, self.s_tools_btn))
@@ -669,7 +724,7 @@ class ProjectPage(QWidget):
         body.setContentsMargins(2, 0, 2, 0)
         body.setSpacing(8)
         self.s_tools_pages = []
-        for desc, *rows in (pg_edit, pg_join, pg_song, pg_srt):
+        for desc, *rows in (pg_edit, pg_join, pg_song, pg_srt, pg_show):
             pg = QWidget()
             pl = QVBoxLayout(pg)
             pl.setContentsMargins(0, 0, 0, 0)
@@ -1341,9 +1396,10 @@ class ProjectPage(QWidget):
                             "không lồng; bấm lần nữa để bỏ dấu", flat=True, on_click=lambda: self._toggle_flag("song")),
                      button("Bỏ lồng / lồng lại câu đã tích", "x", "Không đọc các câu đã tích (vd. tiếng hét, tiếng động); "
                             "bấm lần nữa để lồng lại", flat=True, on_click=lambda: self._toggle_flag("nodub")),
-                     button("Lọc câu cảm thán", "wand", "Xoá ngay các câu CHỈ có 1–2 tiếng cảm thán đứng lẻ (\"A!\", "
-                            "\"Ừm.\", \"Ái!\", \"Hả?\") – cả phụ đề lẫn giọng lồng. Câu \"Ừm, đúng là như vậy.\" giữ "
-                            "nguyên. Khôi phục được ở mục 3", flat=True, on_click=self._drop_interj_now),
+                     button("Lọc câu cảm thán", "wand", "Theo ô 'Từ cảm thán cần lọc' (mục 3): xoá ngay câu CHỈ gồm các "
+                            "từ đó (\"A!\", \"Ừm.\", \"Hả?\") – cả phụ đề lẫn giọng lồng – và (nếu bật) bỏ vế cảm thán "
+                            "đứng riêng trong câu dài rồi đọc lại giọng câu đó. Khôi phục được ở mục 3", flat=True,
+                            on_click=self._drop_interj_now),
                      button("Xoá câu đã tích", "trash", "Xoá các câu đã tích: cả phụ đề lẫn giọng lồng của chúng "
                             "(bản lồng tiếng được xếp lại ngay, không đọc lại câu nào)", danger=True,
                             on_click=self._delete_picked)))
@@ -1406,19 +1462,37 @@ class ProjectPage(QWidget):
         self.d_rate = f.row("Tốc độ đọc", combo([("-10%", "Chậm"), ("+0%", "Bình thường"), ("+10%", "Nhanh"), ("+20%", "Rất nhanh")], "+0%"))
         self.d_skipsong = f.row("Giữ nguyên bài hát (không lồng câu 🎵)", Switch(bool(self.settings.get("dub_skip_songs", True))))
         self.d_skipsong.toggledOn.connect(self._skip_song_changed)
-        self.d_interj = f.row("Tự xoá câu chỉ có tiếng cảm thán (A, Ừm, Ái…)",
+        self.d_interj = f.row("Xoá câu chỉ có từ cảm thán",
                               Switch(bool(self.settings.get("dub_drop_interj", True))))
-        self.d_interj.setToolTip("Lồng tiếng Việt: trước khi đọc, câu CHỈ gồm 1–2 tiếng cảm thán đứng riêng (\"A!\", "
-                                 "\"Ừm.\", \"Ái!\", \"Hả?\") bị xoá khỏi phụ đề. Câu \"Ừm, đúng là như vậy.\" giữ nguyên.")
+        self.d_interj.setToolTip("Lồng tiếng Việt: trước khi đọc, câu CHỈ gồm các từ trong ô 'Từ cảm thán cần lọc' (\"A!\", "
+                                 "\"Ừm.\", \"Hả?\") bị xoá khỏi phụ đề. Câu \"Ừm, đúng là như vậy.\" giữ nguyên.")
         self.d_interj.toggledOn.connect(lambda on: None if self.loading else self._save_setting("dub_drop_interj", on))
+        self.d_interj_in = f.row("Bỏ từ cảm thán đứng riêng trong câu dài",
+                                 Switch(bool(self.settings.get("interj_inline", True))))
+        self.d_interj_in.setToolTip("\"Ừm, đúng là như vậy.\" -> \"Đúng là như vậy.\", \"Đi thôi, ha ha!\" -> \"Đi thôi!\": chỉ "
+                                    "bỏ vế (ngăn bởi dấu câu) gồm toàn từ trong danh sách, cả phụ đề lẫn giọng lồng. "
+                                    "'Khôi phục câu cảm thán đã xoá' trả lại lời cũ")
+        self.d_interj_in.toggledOn.connect(lambda on: None if self.loading else self._save_setting("interj_inline", on))
+        from ..voicefix import INTERJ_DEFAULT
+
+        iw = self.settings.get("interj_words")
+        self.d_interj_words = QLineEdit(INTERJ_DEFAULT if iw is None else str(iw))
+        self.d_interj_words.setPlaceholderText("Mỗi từ / cụm cách nhau dấu phẩy, VD: a, ừm, hả, ha ha, ui da")
+        self.d_interj_words.setToolTip("Chỉ lọc ĐÚNG các từ / cụm này (không phân biệt hoa thường) – từ cảm thán khác giữ "
+                                       "nguyên. Cụm nhiều chữ (\"ui da\", \"ha ha\") phải khớp cả cụm. Để trống = không lọc")
+        self.d_interj_words.editingFinished.connect(self._interj_words_changed)
+        f.row("Từ cảm thán cần lọc", hbox(self.d_interj_words, button(
+            "Mặc định", "refresh", "Về danh sách có sẵn", flat=True, on_click=lambda: (
+                self.d_interj_words.setText(INTERJ_DEFAULT), self._interj_words_changed()))))
         mix.add(f)
         self.d_voice_note = label("", "muted", wrap=True)
         mix.add(self.d_voice_note)
         mix.add(flow(button("Đổi giọng ở mục 2", "users", "Giọng đọc lấy từ bảng 'Giọng đọc cho từng người nói' (mục 2) "
                             "– câu có giọng riêng (cột Giọng của bảng câu) đọc bằng giọng đó", flat=True,
                             on_click=self._goto_voices),
-                     button("Khôi phục câu cảm thán đã xoá", "refresh", "Đưa lại các câu 'A!', 'Ừm.'… đã bị tự xoá "
-                            "(lần lồng sau không xoá các câu này nữa)", flat=True, on_click=self._restore_interj)))
+                     button("Khôi phục câu cảm thán đã xoá", "refresh", "Đưa lại các câu 'A!', 'Ừm.'… đã bị xoá và lời "
+                            "cũ của câu dài đã bỏ vế cảm thán (lần lồng sau không lọc các câu này nữa)", flat=True,
+                            on_click=self._restore_interj)))
         mix.add(label("Khi câu đọc dài hơn chỗ trống", "h3"))
         g = Form()
         st = self.settings
@@ -1448,16 +1522,25 @@ class ProjectPage(QWidget):
             0.3, 10.0, 0.1, st.get("dub_max_lag", 2.0), "", " s", "Nhiều câu dài liền nhau: giọng được trễ so với hình "
             "tối đa bao nhiêu giây; quá mức này câu sau vào đúng mức đó và đọc đè lên đuôi câu trước"))
         self.d_follow = g.row("Phụ đề chạy theo giọng lồng", Switch(bool(st.get("dub_subs_follow", True))))
-        self.d_follow.setToolTip("Câu có giọng đọc sớm / bị lùi / đọc dài hơn phụ đề: phụ đề tiếng Việt hiện đúng lúc "
-                                 "giọng đọc (xem trước + video xuất)")
+        self.d_follow.setToolTip("Phụ đề đã dịch hiện theo đúng lúc giọng lồng đọc (xem trước, video xuất, SRT đã dịch). "
+                                 "Chỉnh hiện trước / giữ thêm / tối thiểu ở tab Phụ đề → Công cụ → Giờ hiện")
+        self.d_pauses = g.row("Nghỉ đúng chỗ nhân vật ngắt hơi", Switch(bool(st.get("dub_pauses", True))))
+        self.d_pauses.setToolTip("Câu (ngắn hay dài) mà nhân vật ngừng giữa chừng ở chỗ có dấu câu: giọng lồng cũng ngừng ở "
+                                 "dấu câu tương ứng, phần sau vào đúng lúc nhân vật nói tiếp. Chỉ dùng chỗ trống trước câu "
+                                 "sau (không đẩy câu nào), cần mốc từng chữ (câu nghe từ bản 2.0.96 hoặc bấm 'Căn mép theo "
+                                 "giọng' + đo lại mốc từng chữ ở tab Phụ đề). Phụ đề vẫn là 1 dòng")
+        self.d_pause_min = g.row("… khi nhân vật ngừng từ", dspin(
+            0.15, 2.0, 0.05, st.get("dub_pause_min", 0.3), "", " s", "Chỉ tái hiện chỗ nhân vật ngừng ít nhất bấy nhiêu "
+            "giây (ngắn hơn thì để bộ đọc tự ngắt như thường)"))
         self.d_autoshort = g.row("AI tự rút gọn câu quá dài", Switch(bool(st.get("dub_auto_shorten", True))))
         self.d_autoshort.setToolTip("Khi bấm Tạo bản lồng tiếng: câu vẫn quá dài sau khi tăng tốc được AI viết lại ngắn "
                                     "hơn rồi đọc lại (cần công cụ dịch AI; câu bạn tự sửa lời không bị đổi)")
         mix.add(g)
         mix.add(self.d_overflow_help)
         self.d_overflow.currentIndexChanged.connect(self._dub_layout_changed)
-        for w in (self.d_maxspeed, self.d_lead, self.d_maxlag):
+        for w in (self.d_maxspeed, self.d_lead, self.d_maxlag, self.d_pause_min):
             w.valueChanged.connect(self._dub_layout_changed)
+        self.d_pauses.toggledOn.connect(self._dub_layout_changed)
         self.d_follow.toggledOn.connect(self._dub_follow_changed)
         self.d_autoshort.toggledOn.connect(self._dub_autoshort_changed)
         self._update_overflow_help()
@@ -1727,7 +1810,7 @@ class ProjectPage(QWidget):
             if a.get("wave"):
                 import numpy as np
 
-                self.tracks.set_wave(np.load(a["wave"]), a["hop"])
+                self.tracks.set_wave(np.load(a["wave"]).astype(np.float32), a["hop"])
         run_async(lambda: pipeline.timeline_assets(Project(pid)), done, lambda m: None)
 
     def _media_source(self, hs: dict | None = None) -> str:
@@ -2377,6 +2460,8 @@ class ProjectPage(QWidget):
             if o["method"] != "ocr" and p.data.get("noise_found"):
                 msg += (f" · ⚠ {p.data['noise_found']} câu nghi là nhạc / tiếng động bị nghe thành lời – tab Phụ đề "
                         "bấm 'Tích câu nghi nghe nhầm', nghe lại rồi Xoá")
+            if p.data.get("snap_stats"):
+                msg += " · " + pipeline.snap_note(p.data["snap_stats"])
             if o["method"] != "ocr":
                 msg += " · kiểu tách: " + dict(C.SPLIT_STYLES).get(st.get("split_style", "dub"), "").split(" –")[0]
             used = {"qwen3": "Qwen3-ASR", "sensevoice": "SenseVoice", "paraformer": "Paraformer",
@@ -2431,7 +2516,13 @@ class ProjectPage(QWidget):
             self.s_split_n.setValue(int(st.get("split_long_units", 14) or 14))
             self.s_split_p.setValue(float(st.get("split_pause", 0.25)))
             self.d_interj.setChecked(bool(st.get("dub_drop_interj", True)))
+            self.d_interj_in.setChecked(bool(st.get("interj_inline", True)))
+            from ..voicefix import INTERJ_DEFAULT
+
+            iw = st.get("interj_words")
+            self.d_interj_words.setText(INTERJ_DEFAULT if iw is None else str(iw))
             self.a_parallel.setChecked(bool(st.get("auto_parallel", False)))
+            self._sync_follow(st)
             from .. import autoflow
 
             pv = autoflow.preset_values(st)
@@ -2875,6 +2966,26 @@ class ProjectPage(QWidget):
             return {"message": f"Đã căn lại thời gian {n} câu{extra}"}
         self.submit("realign", "Căn lại thời gian", fn)
 
+    def run_snap(self):
+        """Căn mép câu theo giọng (2.0.96): đầu / cuối câu đã tích (không tích -> cả phim) về đúng lúc nhân vật bắt
+        đầu / thôi nói. Ctrl+Z hoàn tác."""
+        if not self.model.segs:
+            return self.win.toast("Chưa có phụ đề", "warn")
+        self.flush()
+        rows = sorted(self.model.selected) or None
+        remeasure = self.s_snap_ct.isChecked()
+
+        def fn(j, p):
+            st = pipeline.snap_edges(p, None, rows, remeasure, True, j.update, j.cancelled)
+            msg = pipeline.snap_note(st)
+            msg = msg[0].upper() + msg[1:]
+            if st.get("measured"):
+                msg += f" · đo lại mốc từng chữ {st['measured']} câu"
+            if pipeline.has_dub(p) and st.get("moved"):
+                msg += " · đã xếp lại giọng lồng theo mốc mới (không đọc lại)"
+            return {"message": msg + (f" ({len(rows)} câu đã tích)" if rows else "")}
+        self.submit("realign" if remeasure else "snap", "Căn mép câu theo giọng", fn)
+
     def run_diarize(self):
         def fn(j, p):
             n = pipeline.diarize(p, None, j.update, j.cancelled)
@@ -3146,6 +3257,9 @@ class ProjectPage(QWidget):
                 continue
             if abs(a - s.start) >= 0.005:
                 shifted[r] = a - s.start
+            if abs((a - s.start) - (b - s.end)) < 0.005:   # kéo cả khối: mốc từng chữ đi theo; kéo mép: giữ nguyên
+                shift_ct(s, a - s.start)
+            s.extra.pop("snap", None)   # người dùng tự đặt mép -> không còn là mép đã bám theo giọng
             s.start, s.end = round(a, 3), round(b, 3)
             moved.append(r)
         if not moved:
@@ -4001,6 +4115,16 @@ class ProjectPage(QWidget):
         keep = (e["trim"].get("start") or 0, e["trim"].get("end") or 0)
         self.timeline.set_data(d, keep, e.get("cuts", []), self.model.segs)
         self.tracks.mark = self.timeline.mark
+        self.tracks.show_est = bool(self.p.data.get("snap_stats"))
+        shown = {}
+        try:   # giờ hiện phụ đề khi khác giờ nói (theo giọng lồng) -> vạch trắng dưới khối phụ đề
+            fs = pipeline.subs_follow_dub(self.p, self.model.segs, e, self.settings, "trans")
+            if fs is not self.model.segs:
+                shown = {i: (b.start, b.end) for i, (a, b) in enumerate(zip(self.model.segs, fs))
+                         if abs(a.start - b.start) > 0.03 or abs(a.end - b.end) > 0.03}
+        except Exception:  # noqa: BLE001 – chỉ để vẽ
+            pass
+        self.tracks.shown = shown
         self.tracks.set_data(d, self.model.segs, clips, keep, e.get("cuts", []),
                              e.get("vsplits", []), e.get("inserts", []), e.get("mute_spans", []))
         self.tracks.set_layers(self._layers)
@@ -4245,13 +4369,18 @@ class ProjectPage(QWidget):
         self.spk_table.setFocus()
 
     def _restore_interj(self):
-        if not self.p or not self.p.data.get("interj_removed"):
-            return self.win.toast("Không có câu cảm thán nào bị xoá", "info")
+        if not self.p or not (self.p.data.get("interj_removed")
+                              or any(x.extra.get("trans_before_interj") for x in self.model.segs)):
+            return self.win.toast("Không có câu cảm thán nào bị xoá / bỏ bớt", "info")
         self.flush()
+        trimmed = {(round(x.start, 3), x.text) for x in self.p.segments if x.extra.get("trans_before_interj")}
         n = pipeline.restore_interjections(self.p)
         self.reload()
-        self.win.toast(f"Đã khôi phục {n} câu – lần lồng tiếng sau các câu này được giữ (bấm 'Tích câu chưa lồng' "
-                       "rồi 'Tạo lại giọng các câu đã tích' để đọc ngay)", "ok")
+        back = [i for i, x in enumerate(self.model.segs) if (round(x.start, 3), x.text) in trimmed]
+        if back and pipeline.has_dub(self.p):   # câu dài được trả lại vế cảm thán: đọc lại giọng đúng các câu đó
+            self._redub_rows(back, play=False)
+        self.win.toast(f"Đã khôi phục {n} câu – lần lồng tiếng sau các câu này được giữ (câu bị xoá: bấm 'Tích câu chưa "
+                       "lồng' rồi 'Tạo lại giọng các câu đã tích' để đọc ngay)", "ok")
 
     def _auto_voices(self):
         """Gán giọng khác nhau cho từng người nói, đúng nam / nữ theo chất giọng (đoán trên CPU vài giây nếu chưa có)."""
@@ -4306,6 +4435,8 @@ class ProjectPage(QWidget):
         self.d_lead.setValue(float(st.get("dub_lead_max", 1.0)))
         self.d_maxlag.setValue(float(st.get("dub_max_lag", 2.0)))
         self.d_follow.setChecked(bool(st.get("dub_subs_follow", True)))
+        self.d_pauses.setChecked(bool(st.get("dub_pauses", True)))
+        self.d_pause_min.setValue(float(st.get("dub_pause_min", 0.3)))
         self.d_autoshort.setChecked(bool(st.get("dub_auto_shorten", True)))
         self._update_overflow_help()
 
@@ -4318,7 +4449,8 @@ class ProjectPage(QWidget):
 
         save_settings({"dub_overflow": self.d_overflow.currentData() or "smart",
                        "tts_max_speedup": round(self.d_maxspeed.value(), 2),
-                       "dub_lead_max": round(self.d_lead.value(), 2), "dub_max_lag": round(self.d_maxlag.value(), 2)})
+                       "dub_lead_max": round(self.d_lead.value(), 2), "dub_max_lag": round(self.d_maxlag.value(), 2),
+                       "dub_pauses": self.d_pauses.isChecked(), "dub_pause_min": round(self.d_pause_min.value(), 2)})
         self.settings = load_settings()
         if self.p and any(x.extra.get("tts_file") for x in self.model.segs) and (self.p.edit.get("dub") or {}).get("wav"):
             self._relayout_timer.start()
@@ -4326,11 +4458,63 @@ class ProjectPage(QWidget):
     def _dub_follow_changed(self, on: bool):
         if self.loading:
             return
+        if self.s_follow.isChecked() != on:   # công tắc gương ở tab Phụ đề -> lưu qua _follow_opts_changed
+            self.s_follow.setChecked(on)
+            return
+        self._follow_opts_changed()
+
+    def _follow_opts_changed(self, *_):
+        """Giờ hiện phụ đề (tab Phụ đề → Công cụ → Giờ hiện): lưu Cài đặt, vẽ lại phụ đề xem trước + vạch giờ hiện."""
+        self._follow_enable()
+        if self.loading:
+            return
+        if self.d_follow.isChecked() != self.s_follow.isChecked():
+            self.loading = True
+            try:
+                self.d_follow.setChecked(self.s_follow.isChecked())
+            finally:
+                self.loading = False
         from ..config import save_settings
 
-        save_settings({"dub_subs_follow": on})
+        save_settings({"dub_subs_follow": self.s_follow.isChecked(),
+                       "sub_follow_mode": self.s_follow_mode.currentData() or "always",
+                       "sub_lead": round(self.s_lead.value(), 2), "sub_hold": round(self.s_hold.value(), 2),
+                       "sub_min_dur": round(self.s_min.value(), 2), "sub_join_gap": round(self.s_join.value(), 2)})
         self.settings = load_settings()
-        self._refresh_overlay()
+        if self.p:
+            self._refresh_overlay()
+            self._update_timeline()
+
+    def _follow_enable(self):
+        always = self.s_follow_mode.currentData() == "always"
+        for w in (self.s_lead, self.s_hold, self.s_min, self.s_join):
+            w.setEnabled(always and self.s_follow.isChecked())
+        self.s_follow_mode.setEnabled(self.s_follow.isChecked())
+
+    def _follow_defaults(self):
+        self.loading = True
+        try:
+            set_combo(self.s_follow_mode, "always")
+            for w, v in ((self.s_lead, 0.1), (self.s_hold, 0.3), (self.s_min, 1.0), (self.s_join, 0.3)):
+                w.setValue(v)
+        finally:
+            self.loading = False
+        self._follow_opts_changed()
+
+    def _sync_follow(self, st: dict):
+        """Ô giờ hiện phụ đề theo Cài đặt (mở dự án / lưu Cài đặt)."""
+        was, self.loading = self.loading, True
+        try:
+            self.s_follow.setChecked(bool(st.get("dub_subs_follow", True)))
+            self.d_follow.setChecked(bool(st.get("dub_subs_follow", True)))
+            set_combo(self.s_follow_mode, st.get("sub_follow_mode", "always"))
+            self.s_lead.setValue(float(st.get("sub_lead", 0.1)))
+            self.s_hold.setValue(float(st.get("sub_hold", 0.3)))
+            self.s_min.setValue(float(st.get("sub_min_dur", 1.0)))
+            self.s_join.setValue(float(st.get("sub_join_gap", 0.3)))
+        finally:
+            self.loading = was
+        self._follow_enable()
 
     def _dub_autoshort_changed(self, on: bool):
         if not self.loading:
@@ -4497,23 +4681,53 @@ class ProjectPage(QWidget):
         self._sub_op("delete", rows)
         self._save_segs_now()
 
+    def _interj_words_changed(self):
+        if self.loading:
+            return
+        txt = self.d_interj_words.text().strip()
+        self._save_setting("interj_words", txt)
+        from ..voicefix import interj_list
+
+        n = len(interj_list({"interj_words": txt}))
+        self.win.toast(f"Danh sách từ cảm thán: {n} từ / cụm" if n else "Danh sách trống – không lọc câu cảm thán", "ok")
+
     def _drop_interj_now(self):
-        """Nút "Lọc câu cảm thán": xoá ngay câu chỉ có 1–2 tiếng cảm thán đứng lẻ (phụ đề + giọng lồng), cất để khôi phục."""
-        from ..voicefix import lone_interjection
+        """Nút "Lọc câu cảm thán" (theo danh sách từ người dùng điền): xoá ngay câu CHỈ gồm từ cảm thán (phụ đề + giọng
+        lồng) và bỏ vế cảm thán đứng riêng trong câu dài (đọc lại giọng câu đó nếu đã lồng); cất để khôi phục."""
+        from ..voicefix import interj_list, lone_interjection
 
         segs = self.model.segs
+        phrases = interj_list(self.settings)
+        if not phrases:
+            return self.win.toast("Danh sách 'Từ cảm thán cần lọc' (mục 3) đang trống", "warn")
         rows = [i for i, x in enumerate(segs) if x.trans.strip() and not x.extra.get("keep_interj")
-                and lone_interjection(x.trans)]
-        if not rows:
-            return self.win.toast("Không có câu nào chỉ có tiếng cảm thán đứng lẻ (A!, Ừm., Ái!…)", "ok")
+                and lone_interjection(x.trans, phrases)]
         self.flush()
+        trimmed = []
+        if self.settings.get("interj_inline", True):
+            gone = set(rows)
+            trimmed = [segs[i] for i in pipeline.trim_interjections(segs, self.settings) if i not in gone]
+        if not rows and not trimmed:
+            return self.win.toast("Không có câu nào chứa từ cảm thán trong danh sách đứng riêng", "ok")
         self.p.reload()
-        self.p.data.setdefault("interj_removed", []).extend(segs[r].to_dict() for r in rows)
-        self.p.save()
-        self._sub_op("delete", rows)
+        if rows:
+            self.p.data.setdefault("interj_removed", []).extend(segs[r].to_dict() for r in rows)
+            self.p.save()
+            self._sub_op("delete", rows)
+        else:
+            self.model.layoutChanged.emit()
+            self._segs_edited()
         self._save_segs_now()
-        self.win.toast(f"Đã lọc và xoá {len(rows)} câu chỉ có tiếng cảm thán – bấm 'Khôi phục câu cảm thán đã xoá' "
-                       "(mục 3) nếu cần lấy lại", "ok")
+        msg = []
+        if rows:
+            msg.append(f"xoá {len(rows)} câu chỉ có tiếng cảm thán")
+        if trimmed:
+            msg.append(f"bỏ vế cảm thán trong {len(trimmed)} câu dài")
+            back = [i for i, x in enumerate(self.model.segs) if any(x is t for t in trimmed)]
+            if pipeline.has_dub(self.p) and back:
+                self._redub_rows(back, play=False)
+                msg[-1] += " (đang đọc lại giọng các câu đó)"
+        self.win.toast("Đã " + ", ".join(msg) + " – 'Khôi phục câu cảm thán đã xoá' (mục 3) để lấy lại", "ok")
 
     def _pick_flag(self, key: str):
         rows = [i for i, s in enumerate(self.model.segs) if s.extra.get(key)]
@@ -5011,8 +5225,12 @@ class ProjectPage(QWidget):
         i = self.p.data.get("info", {})
         st = _deep_merge(self.settings.get("sub_style") or {}, self.current_style())
         st["lang"] = pipeline.trans_lang(self.p)
-        save_subtitles(self.model.segs, path, which, st, i.get("width") or 1920, i.get("height") or 1080)
-        self.win.toast(f"Đã lưu {Path(path).name}", "ok")
+        segs = self.model.segs
+        if which != "source":   # có giọng lồng: phụ đề đã dịch theo giờ HIỆN như video xuất (tab Phụ đề → Giờ hiện)
+            segs = pipeline.subs_follow_dub(self.p, segs, self.collect_edit(), self.settings, which)
+        save_subtitles(segs, path, which, st, i.get("width") or 1920, i.get("height") or 1080)
+        note = " (giờ hiện theo giọng lồng)" if segs is not self.model.segs else ""
+        self.win.toast(f"Đã lưu {Path(path).name}{note}", "ok")
 
     def _fill_outputs(self):
         outs = list(reversed(self.p.data.get("outputs", [])))

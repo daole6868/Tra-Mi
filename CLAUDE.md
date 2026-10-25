@@ -114,6 +114,27 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   223.5.5.5 / bing cùng lúc), `wait_online` (báo "⚠ Mất mạng – … tạm dừng", chờ ≤ 10 phút -> `NetworkDown`),
   `call` (gọi ở luồng phụ, Huỷ dừng ngay), `session` (requests có TCP keepalive). `jobs` chạy mọi tác vụ trong
   `net.task(cancel, report)` -> hàm gọi mạng tự lấy nút Huỷ + dòng trạng thái.
+- `trami/snap.py` (2.0.96) – bám mép câu theo giọng đã tách: `snap(segs, env_db_10ms)` (mốc trong tiếng -> lùi về đầu đoạn
+  tiếng, trong lặng -> tới chỗ bắt đầu nói kế tiếp; ngưỡng theo độ to chính câu; không lấn câu bên; ≤ CT_SLACK quanh chữ
+  đầu / cuối đã đo; 2 lượt) -> `extra["snap"]`; `ct_ok` / `estimated` (viền nét đứt vàng trên timeline khi dự án có
+  `snap_stats`). `pipeline.voice_env` (`voice_10ms` của giọng đã tách / `loud_10ms` tiếng gốc, `silence.loudness(hop=)`),
+  `snap_edges` (cuối `recognize` khi đã tách giọng, cuối `realign`, nút "Căn mép theo giọng" tab Phụ đề, `remeasure` =
+  Qwen3 đo lại mốc từng chữ), `snap_note`. Mốc từng chữ `extra["ct"]` khớp lời được GIỮ khi lưu (`align.drop_char_times
+  (keep=True)`), đi theo `subtitle.merge` / `split` (`ct_of`, `han_cut`) / `align.split_clauses` / kéo khối (`shift_ct`).
+  Sóng âm timeline `tl_wave_10ms.npy` (float16, 0,01 s, cùng lần đo `voice_10ms`).
+- Giờ HIỆN phụ đề (2.0.96): `subtitle.follow_dub(mode="always", lead, hold, min_dur, join)` + `pipeline.follow_params`
+  (Cài đặt `sub_follow_mode` / `sub_lead` 0,1 / `sub_hold` 0,3 / `sub_min_dur` 1 / `sub_join_gap` 0,3, công tắc
+  `dub_subs_follow`) – xem trước, xuất video, SRT đã dịch (`export_subs`, `_export_sub`); tab Phụ đề → Công cụ → "Giờ
+  hiện" (`s_follow` gương `d_follow`), timeline vạch trắng dưới khối (`tracks.shown`). Không đổi giờ nói / `dub_at`.
+- Giọng lồng nghỉ đúng chỗ ngắt hơi (2.0.96): `tts.orig_pauses` (khe ≥ `dub_pause_min` giữa 2 chữ theo `ct` ở chỗ có dấu
+  câu ghép được với câu dịch – `align._pair_cuts`), `clip_gaps` (chỗ bộ đọc tự ngắt, đệm `_ClipMeta.gaps`), `plan_pauses`
+  (phần sau vào đúng lúc nhân vật nói tiếp, chỉ dùng chỗ trống trước câu sau, ≤ `PAUSE_MAX` 1,5 s), `insert_pauses`; bảng
+  `placed` thêm phần tử 7 = [[mẫu cắt, mẫu lặng]] (`_gk` so khoá, vá đoạn vẫn đúng); `extra["dub_pauses"]`,
+  `stats["pauses"]`; Cài đặt `dub_pauses` (tab Lồng tiếng mục 3).
+- Từ cảm thán (2.0.96): `voicefix.interj_list` (Cài đặt `interj_words`, chưa đặt -> `INTERJ_DEFAULT`; chỉ đúng từ / cụm
+  trong danh sách), `lone_interjection(text, phrases)`, `strip_interjections` (bỏ vế toàn cảm thán trong câu dài);
+  `pipeline.drop_interjections` / `trim_interjections` (`trans_before_interj`) / `restore_interjections`; `dub` đầy đủ
+  (`dub_drop_interj`, `interj_inline`), nút "Lọc câu cảm thán" (đọc lại giọng câu bị bỏ vế).
 - `trami/voicecheck.py` – lọc câu nghe nhầm theo cao độ giọng (hồ sơ p10–p90 từng người nói từ câu chắc là lời thoại, ± `pitch_tol` nửa cung) -> `extra["noise"]` + thu đầu / cuối câu thừa; `pipeline.check_voices` / bước 2e của `recognize`.
 - Xuất chia đoạn (`video._render_chunked`, `export_chunks`): phim ≥ 10 phút, đoạn 60 s theo lưới khung xuất, mã đoạn = lệnh +
   file nguồn + dòng ASS trong đoạn -> `work/render/chunks/c_<mã>.mp4`, âm thanh trộn 1 lần `a_<mã>.m4a`, concat `-c copy`.
@@ -159,7 +180,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (171 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (178 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1550,7 +1571,31 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   nút Publish của Business Suite chờ Facebook tải video lên – file nhẹ hơn (Chất lượng Trung bình 23, giữ 1080p; Facebook
   vốn nén lại) / để tab tự tải / Zernio – API riêng tự đăng; đề xuất nút "Bản nhẹ để đăng" (chưa làm, chờ người dùng).
 
+- 2.0.96: "phụ đề đặt không đúng lúc nhân vật nói" (ảnh timeline: dòng Tiếng gốc đúng, khối phụ đề sớm 0,11–0,15 s /
+  trễ 0,13 s) + "làm hết A–E". Nguyên nhân: mốc câu chỉ lấy từ bộ căn thời gian (Qwen3-ForcedAligner, PAD 0,05) / ước
+  lượng, không ai nhìn lại độ to giọng; mốc từng chữ bị xoá sau khi nghe (gộp / tách / Căn khớp thoại đoán theo tỉ lệ);
+  sóng âm 0,05 s quá thô để thấy lệch; phụ đề chỉ chạy theo giọng lồng khi lệch > 0,3 s; giọng lồng đọc liền qua chỗ nhân
+  vật ngừng giữa câu ("Á!" đọc sớm 0,5 s).
+  * A bám mép theo giọng (`trami/snap.py`, tự chạy cuối "1. Nghe & tách câu" / Tự động khi đã tách giọng, cuối Căn khớp
+    thoại; nút "Căn mép theo giọng" + "đo lại mốc từng chữ" ở tab Phụ đề → Công cụ → Sửa câu, việc "snap" / "realign" khi
+    đo lại). Lỗi tìm ra khi thử: chọn chỗ bắt đầu nói GẦN NHẤT làm mốc nhảy vào chỗ ngắt hơi giữa câu -> theo hướng: mốc
+    đang trong tiếng lùi về đầu đoạn tiếng, trong lặng tiến tới chỗ nói kế tiếp. B giữ mốc từng chữ. C câu mốc ước lượng
+    viền nét đứt vàng + tooltip. D sóng âm 0,01 s. Thông báo bước 1 / Tự động có "bám mép N câu…".
+  * Giờ hiện phụ đề theo giọng lồng (kiểu "Luôn theo giọng lồng" mặc định): trang "Giờ hiện" ở tab Phụ đề; SRT đã dịch xuất
+    theo giờ hiện khi có giọng lồng (SRT gốc theo giờ nói). Không ảnh hưởng giờ nói, chỗ đặt giọng, karaoke.
+  * E nghỉ đúng chỗ ngắt hơi (câu ngắn và câu dài, phụ đề vẫn 1 dòng); cần mốc từng chữ (câu nghe từ 2.0.96 hoặc đo lại).
+  * Lọc từ cảm thán theo danh sách người dùng điền (ô "Từ cảm thán cần lọc" tab Lồng tiếng mục 3): câu riêng + vế trong câu
+    dài; "Ừm ừm ừm" giờ cũng bị coi là câu cảm thán (trước chỉ 1–2 tiếng); từ ngoài danh sách không bao giờ bị lọc.
+  * Thử: độ to giả + file âm thanh giả giống tiếng nói (bám đúng ±0,01 s, không lấn câu, câu nhạc nhỏ giữ nguyên), gộp /
+    tách / tách câu dài giữ mốc chữ, giờ hiện (nối khoảng hở, tối thiểu, không đè), giọng lồng có chỗ nghỉ (lặng tới đúng
+    lúc nhân vật nói tiếp, câu sau không xê dịch, vá đoạn = dựng cả bản), giao diện (nút, gương công tắc, lưu Cài đặt, Lọc).
+    Chưa chạy trên phim thật (sandbox không có Qwen3 / giọng đã tách thật).
+
 ## Vấn đề đang mở
+- 2.0.96: chờ người dùng chạy lại "1. Nghe & tách câu" (hoặc dự án cũ: tab Phụ đề → Công cụ → Căn mép theo giọng, bật đo
+  lại mốc từng chữ) rồi xem timeline: khối phụ đề có khớp sóng âm Tiếng gốc không, bao nhiêu câu viền nét đứt; nghe câu dài
+  có chỗ ngắt hơi xem giọng lồng có nghỉ đúng chỗ không; chỉnh Giờ hiện (0,1 / 0,3 / 1 / 0,3 s) có dễ đọc không; điền danh
+  sách từ cảm thán rồi bấm Lọc câu cảm thán.
 - 2.0.92/93: chờ người dùng mở lại dự án phim 3 giờ -> bấm "Căn giờ theo hình" (thanh trên cùng / tab Âm thanh) -> phát lại xem phụ đề
   / giọng lồng còn lệch khẩu hình không (nhất là cuối phim). Nếu bấm nút mà tool báo "đã khớp" (đo không thấy lệch) mà vẫn lệch -> nguyên
   nhân khác (VD bản đã xoá phụ đề của video VFR – chạy lại Xoá sạch, hoặc bản xem trước nhẹ), cần thêm thông tin.

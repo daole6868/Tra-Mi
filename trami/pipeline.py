@@ -459,8 +459,9 @@ def retime(p: Project, settings: dict | None = None, progress: Prog | None = Non
                 bk = [Segment.from_dict(x) for x in old]
                 _retime_segs(bk, to_real)
                 p.data[key] = [x.to_dict() for x in bk]
-    for name in ("asr16k_vocals.wav", "audio16k.wav", "tl_wave.npy", "loud_50ms.npy", "loud_50ms.json",
-                 "voice_50ms.npy", "voice_50ms.json"):
+    for name in ("asr16k_vocals.wav", "audio16k.wav", "tl_wave.npy", TL_WAVE, "loud_50ms.npy", "loud_50ms.json",
+                 "voice_50ms.npy", "voice_50ms.json", VOICE_ENV + ".npy", VOICE_ENV + ".json", "loud_10ms.npy",
+                 "loud_10ms.json"):
         try:       # đang mở ở chỗ khác (Windows) -> để đó, các bản này tự làm lại theo dấu giờ / ngày sửa
             (p.work / name).unlink(missing_ok=True)
         except OSError:
@@ -479,7 +480,6 @@ def retime(p: Project, settings: dict | None = None, progress: Prog | None = Non
 def timeline_assets(p: Project) -> dict:
     """Dải ảnh thu nhỏ + đường sóng âm cho timeline (tạo 1 lần, lưu trong work/). Video dài vẫn ≤ 160 ảnh."""
     import math
-    import subprocess
 
     import numpy as np
 
@@ -499,20 +499,19 @@ def timeline_assets(p: Project) -> dict:
             tmp.replace(strip)
         out.update({"thumbs": str(strip), "step": step, "count": n})
     src = stems(p).get("vocals") or str(p.source)
-    wave = p.work / "tl_wave.npy"
+    wave = p.work / TL_WAVE
     if not wave.exists() or wave.stat().st_mtime < Path(src).stat().st_mtime:
-        raw = subprocess.run([ff.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-i", str(src), "-vn"]
-                             + ff.af_args(ff.audio_sync(src, 4000)) + ["-ac", "1", "-ar", "4000", "-f", "s16le", "pipe:1"],
-                             capture_output=True,
-                             creationflags=ff._NO_WINDOW).stdout
-        a = np.abs(np.frombuffer(raw, np.int16).astype(np.float32) / 32768.0)
-        hop = 200   # 0,05 s
-        env = a[: len(a) // hop * hop].reshape(-1, hop).max(axis=1) if len(a) >= hop else np.zeros(0, np.float32)
+        # sóng âm mịn 0,01 s (2.0.96) – cùng 1 lần đo với bám mép câu (voice_10ms), không giải mã thêm
+        db, hop, _src = voice_env(p)
+        env = np.power(10.0, np.asarray(db, np.float32) / 20.0) if db is not None else np.zeros(0, np.float32)
         if len(env):
             env = np.minimum(1.0, env / max(1e-4, float(np.percentile(env, 99))))
-        np.save(wave, env.astype(np.float32))
-    out.update({"wave": str(wave), "hop": 0.05})
+        np.save(wave, env.astype(np.float16))
+    out.update({"wave": str(wave), "hop": 0.01})
     return out
+
+
+TL_WAVE = "tl_wave_10ms.npy"   # sóng âm timeline mỗi 0,01 s (trước 2.0.96: tl_wave.npy mỗi 0,05 s)
 
 
 def import_stems(p: Project, vocals: str | Path, instrumental: str | Path | None = None) -> tuple[Path, Path]:
@@ -761,16 +760,10 @@ def realign(p: Project, settings: dict | None = None, progress: Prog | None = No
     segs = p.segments
     if not segs:
         raise ValueError("Chưa có phụ đề")
-    st = stems(p)
-    src = st.get("vocals") or str(p.source)
-    wav = p.work / ("asr16k_vocals.wav" if st else "audio16k.wav")
-    if not wav.exists() or wav.stat().st_size < 1000:
-        ff.run(["-i", str(src), "-vn"] + ff.af_args(ff.audio_sync(src, 16000)) + ["-ac", "1", "-ar", "16000", "-c:a",
-               "pcm_s16le", str(wav)], p.data.get("info", {}).get("duration", 0), _sub(progress, 0, 0.1), cancel,
-               "Đang chuẩn bị âm thanh")
+    wav = _voice_wav16(p, _sub(progress, 0, 0.1), cancel)
     from .align import drop_char_times
 
-    drop_char_times(segs)   # đo lại từ đầu theo lời hiện tại (người dùng có thể đã sửa chữ)
+    drop_char_times(segs, keep=False)   # đo lại từ đầu theo lời hiện tại (người dùng có thể đã sửa chữ)
     old_texts = {s.text for s in segs}
     try:
         segs = align_segments(segs, wav, p.data.get("language", "zh"), settings, _sub(progress, 0.1, 0.9), cancel,
@@ -784,9 +777,16 @@ def realign(p: Project, settings: dict | None = None, progress: Prog | None = No
     forget_stale_voice(old_texts, segs, moved=True)
     p.segments = segs
     p.save()
+    if settings.get("snap_edges", True):   # mép câu đúng lúc nhân vật bắt đầu / thôi nói (2.0.96)
+        try:
+            snap_edges(p, settings, relayout_dub=False, progress=_sub(progress, 0.9, 0.93), cancel=cancel)
+        except ff.Cancelled:
+            raise
+        except Exception:  # noqa: BLE001 – bước phụ
+            log_error("Bám mép câu theo giọng")
     if has_dub(p):   # đã lồng tiếng: xếp lại giọng theo mốc mới ngay (không đọc lại) -> độ vừa, màu tính lại
-        relayout(p, settings, _sub(progress, 0.9, 1.0), cancel)
-    return len(segs)
+        relayout(p, settings, _sub(progress, 0.93, 1.0), cancel)
+    return len(p.segments)
 
 
 def recognize(p: Project, method: str = "asr", language: str = "zh", region: dict | None = None,
@@ -1017,7 +1017,7 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
     p.segments = segs
     p.data["sub_source"] = method
     p.data["timeline"] = ff.TIMELINE     # mốc câu tính trên âm thanh giải mã theo giờ của hình (2.0.92)
-    for k in ("asr_cleaned", "ai_filtered", "ai_reviewed", "cleanup_backup"):   # câu mới -> các bước AI chạy lại
+    for k in ("asr_cleaned", "ai_filtered", "ai_reviewed", "cleanup_backup", "snap_stats"):   # câu mới -> làm lại
         p.data.pop(k, None)
     if method == "ocr":
         p.data.pop("asr_warning", None)
@@ -1039,18 +1039,114 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
                 if progress:
                     progress(1.0, f"Bỏ qua phân biệt người nói ({str(e)[:80]})")
         _drop_char_times(p)
+    # 4) bám mép câu theo giọng đã tách: đầu / cuối câu đúng lúc nhân vật bắt đầu / thôi nói (2.0.96)
+    if p.segments and settings.get("snap_edges", True) and stems(p):
+        try:
+            snap_edges(p, settings, relayout_dub=False, cancel=cancel)
+        except ff.Cancelled:
+            raise
+        except Exception:  # noqa: BLE001 – bước phụ
+            log_error("Bám mép câu theo giọng")
     return len(p.segments)
 
 
 def _drop_char_times(p: Project) -> None:
-    """Mốc từng chữ (extra["ct"]) chỉ dùng trong lúc nhận dạng – không lưu vào dự án (sửa chữ sẽ lệch)."""
+    """Bỏ cờ tạm của bước nhận dạng + mốc từng chữ không còn khớp lời (mốc khớp lời được giữ – 2.0.96)."""
     from .align import drop_char_times
 
     segs = p.segments
-    if any("ct" in s.extra or "chunked" in s.extra for s in segs):
-        drop_char_times(segs)
+    before = [(dict(s.extra).get("ct") is not None, "chunked" in s.extra) for s in segs]
+    drop_char_times(segs)
+    if before != [(s.extra.get("ct") is not None, "chunked" in s.extra) for s in segs]:
         p.segments = segs
         p.save()
+
+
+VOICE_ENV = "voice_10ms"   # độ to giọng đã tách mỗi 10 ms (bám mép câu, sóng âm timeline)
+
+
+def voice_env(p: Project, progress: Prog | None = None, cancel=None) -> tuple:
+    """Độ to (dBFS) mỗi 10 ms của giọng đã tách (không có thì tiếng gốc – lẫn nhạc, kém chính xác hơn).
+    Trả (mảng, hop, "vocals" | "mix") hoặc (None, hop, "") nếu không đo được."""
+    from . import silence
+    from .snap import HOP
+
+    st = stems(p)
+    src = st.get("vocals") or (str(p.source) if p.data.get("source") and p.source.exists() else "")
+    if not src:
+        return None, HOP, ""
+    db = silence.loudness(src, p.work, progress, cancel, float(p.data.get("info", {}).get("duration", 0) or 0),
+                          name=VOICE_ENV if st else "loud_10ms", hop=HOP)
+    return db, HOP, "vocals" if st else "mix"
+
+
+def snap_edges(p: Project, settings: dict | None = None, rows: list[int] | None = None, remeasure: bool = False,
+               relayout_dub: bool = True, progress: Prog | None = None, cancel=None) -> dict:
+    """Bám mép câu theo giọng (nút "Căn mép câu theo giọng", cuối "1. Nghe & tách câu" / Căn khớp thoại): đầu / cuối
+    câu về đúng lúc nhân vật bắt đầu / thôi nói (`snap.snap`). remeasure: đo lại mốc từng chữ bằng Qwen3 trước (dự án
+    cũ không lưu mốc từng chữ). Đã lồng tiếng -> xếp lại bản lồng (không đọc lại). Trả thống kê của snap + "src"."""
+    from . import snap
+
+    settings = settings or load_settings()
+    segs = normalize(p.segments)
+    if not segs:
+        raise ValueError("Chưa có phụ đề")
+    measured = 0
+    if remeasure:
+        from . import asr_qwen
+
+        if not asr_qwen.available():
+            raise RuntimeError(f"Chưa đo lại được mốc từng chữ: {asr_qwen.why_unavailable()}")
+        wav = _voice_wav16(p, _sub(progress, 0.0, 0.1), cancel)
+        pick = set(range(len(segs))) if rows is None else set(rows)
+        for i in pick:
+            if 0 <= i < len(segs):
+                segs[i].extra.pop("ct", None)
+        try:
+            measured = asr_qwen.align_qwen([segs[i] for i in sorted(pick) if 0 <= i < len(segs)], wav,
+                                           p.data.get("language", "zh") or "zh", settings, _sub(progress, 0.1, 0.7),
+                                           cancel)
+        finally:
+            asr_qwen.release()
+    env, hop, src = voice_env(p, _sub(progress, 0.7 if remeasure else 0.0, 0.85), cancel)
+    if env is None or not len(env):
+        raise RuntimeError("Chưa có âm thanh để đo (video gốc không còn ở chỗ cũ?)")
+    before = [(s.start, s.end) for s in segs]
+    stats = snap.snap(segs, env, hop, rows, float(p.data.get("info", {}).get("duration", 0) or 0))
+    stats.update({"src": src, "measured": measured})
+    p.segments = segs
+    p.data["snap_stats"] = stats
+    p.save()
+    if relayout_dub and has_dub(p) and before != [(s.start, s.end) for s in segs]:
+        relayout(p, settings, _sub(progress, 0.85, 1.0), cancel)
+    if progress:
+        progress(1.0, "Đã bám mép câu theo giọng")
+    return stats
+
+
+def snap_note(stats: dict | None) -> str:
+    """1 dòng kết quả bám mép câu cho thông báo."""
+    if not stats:
+        return ""
+    t = (f"bám mép {stats['moved']} câu theo giọng (dời trung bình {stats['shift']:.2f} s)" if stats.get("moved")
+         else "mép câu đã khớp giọng")
+    if stats.get("src") == "mix":
+        t += " – đo trên tiếng gốc (chưa tách giọng, kém chính xác hơn)"
+    if stats.get("est"):
+        t += f" · {stats['est']} câu mốc ước lượng (viền nét đứt trên timeline – nên nghe lại)"
+    return t
+
+
+def _voice_wav16(p: Project, progress: Prog | None = None, cancel=None) -> Path:
+    """Bản 16 kHz mono của giọng đã tách (không có thì tiếng gốc) theo giờ của hình – cho bộ căn thời gian."""
+    st = stems(p)
+    src = st.get("vocals") or str(p.source)
+    wav = p.work / ("asr16k_vocals.wav" if st else "audio16k.wav")
+    if not wav.exists() or wav.stat().st_size < 1000 or wav.stat().st_mtime < Path(src).stat().st_mtime:
+        ff.run(["-i", str(src), "-vn"] + ff.af_args(ff.audio_sync(src, 16000)) + ["-ac", "1", "-ar", "16000", "-c:a",
+               "pcm_s16le", str(wav)], p.data.get("info", {}).get("duration", 0), progress, cancel,
+               "Đang chuẩn bị âm thanh")
+    return wav
 
 
 # ------------------------------------------------------------------ dịch
@@ -1659,9 +1755,12 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
                 voices = got
                 p.data["voices"] = got
                 auto_voiced = len(spks)
-    dropped = 0
-    if not inplace and only is None and trans_lang(p) == "vi" and settings.get("dub_drop_interj", True):
-        dropped = drop_interjections(p, segs)   # câu chỉ có "A!", "Ừm.", "Ái!"… -> xoá khỏi phụ đề trước khi đọc
+    dropped = trimmed = 0
+    if not inplace and only is None and trans_lang(p) == "vi":
+        if settings.get("dub_drop_interj", True):   # câu chỉ có "A!", "Ừm.", "Ái!"… -> xoá khỏi phụ đề trước khi đọc
+            dropped = drop_interjections(p, segs, settings)
+        if settings.get("interj_inline", True):     # "Ừm, đúng vậy." -> "Đúng vậy." (chỉ từ trong danh sách)
+            trimmed = len(trim_interjections(segs, settings))
     st = stems(p)
     # mẫu giọng để nhái: lấy từ giọng đã tách (sạch) hoặc âm thanh gốc
     ref_audio = st.get("vocals") or str(p.source)
@@ -1733,6 +1832,7 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
             run(_sub(progress, 0.87, 1.0))
     stats["shortened"] = shortened
     stats["interj"] = dropped
+    stats["interj_trim"] = trimmed
     stats["auto_voiced"] = auto_voiced
     if full[0]:
         try:
@@ -1800,7 +1900,7 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
 
 # kết quả lồng tiếng ghi vào từng câu (xếp lại / đọc lại) – được ghép vào câu tương ứng khi người dùng sửa song song
 _DUB_EXTRA = ("tts_file", "dub_at", "fit", "fit_speed", "fit_need", "fit_have", "fit_shift", "fit_over", "voice_used",
-              "take", "take_pending")
+              "take", "take_pending", "dub_pauses")
 
 
 def _seg_sig(s) -> tuple:
@@ -1847,17 +1947,18 @@ def _keep_user_edits(p: Project, sig0: list) -> None:
     p.data = data
 
 
-def drop_interjections(p: Project, segs: list | None = None) -> int:
-    """Xoá khỏi phụ đề các câu CHỈ có 1–2 tiếng cảm thán (A!, Ừm., Ái!, Hả?…) trước khi lồng tiếng Việt – câu
-    "Ừm, đúng là như vậy." giữ nguyên. Câu bị xoá cất ở p.data["interj_removed"] (khôi phục được); câu đã khôi phục
-    (extra["keep_interj"]) không bị xoá lại. Sửa `segs` tại chỗ (hoặc p.segments) và trả về số câu đã xoá."""
-    from .voicefix import lone_interjection
+def drop_interjections(p: Project, segs: list | None = None, settings: dict | None = None) -> int:
+    """Xoá khỏi phụ đề các câu CHỈ gồm từ cảm thán trong danh sách người dùng điền (A!, Ừm., Ái!, Hả?…) trước khi lồng
+    tiếng Việt – câu "Ừm, đúng là như vậy." giữ nguyên. Câu bị xoá cất ở p.data["interj_removed"] (khôi phục được); câu
+    đã khôi phục (extra["keep_interj"]) không bị xoá lại. Sửa `segs` tại chỗ (hoặc p.segments) và trả về số câu đã xoá."""
+    from .voicefix import interj_list, lone_interjection
 
+    phrases = interj_list(settings if settings is not None else load_settings())
     own = segs is None
     segs = p.segments if own else segs
     keep, gone = [], []
     for s in segs:
-        if s.trans.strip() and not s.extra.get("keep_interj") and lone_interjection(s.trans):
+        if s.trans.strip() and not s.extra.get("keep_interj") and lone_interjection(s.trans, phrases):
             gone.append(s)
         else:
             keep.append(s)
@@ -1869,19 +1970,45 @@ def drop_interjections(p: Project, segs: list | None = None) -> int:
     return len(gone)
 
 
+def trim_interjections(segs: list, settings: dict | None = None) -> list[int]:
+    """Bỏ các vế CHỈ gồm từ cảm thán trong danh sách khỏi câu dịch có lời thật ("Ừm, đúng vậy." -> "Đúng vậy.");
+    bản cũ cất ở extra["trans_before_interj"] (Khôi phục câu cảm thán đưa lại). Trả số thứ tự các câu đã sửa lời."""
+    from .voicefix import interj_list, strip_interjections
+
+    phrases = interj_list(settings if settings is not None else load_settings())
+    out = []
+    for i, s in enumerate(segs):
+        if not s.trans.strip() or s.extra.get("keep_interj"):
+            continue
+        new = strip_interjections(s.trans, phrases)
+        if new != s.trans and new.strip():
+            s.extra.setdefault("trans_before_interj", s.trans)
+            s.trans = new
+            out.append(i)
+    return out
+
+
 def restore_interjections(p: Project) -> int:
-    """Đưa lại các câu cảm thán đã bị xoá vào đúng chỗ theo thời gian (đánh dấu để lần lồng sau không xoá nữa)."""
+    """Đưa lại các câu cảm thán đã bị xoá vào đúng chỗ theo thời gian + trả lại các vế cảm thán đã bỏ trong câu dài
+    (đánh dấu để lần lồng sau không lọc nữa). Trả số câu được khôi phục / trả lại lời."""
     from .subtitle import Segment
 
     back = [Segment.from_dict(d) for d in p.data.pop("interj_removed", []) or []]
-    if not back:
-        return 0
+    segs = p.segments
+    n = 0
+    for s in segs:
+        old = s.extra.pop("trans_before_interj", None)
+        if old:
+            s.trans = old
+            s.extra["keep_interj"] = True
+            n += 1
     for s in back:
         s.extra["keep_interj"] = True
-    segs = sorted(p.segments + back, key=lambda s: (s.start, s.end))
-    p.segments = segs
+    if not back and not n:
+        return 0
+    p.segments = sorted(segs + back, key=lambda s: (s.start, s.end))
     p.save()
-    return len(back)
+    return len(back) + n
 
 
 def vocals16k(p: Project, progress: Prog | None = None, cancel=None, why: str = "đo cao độ") -> Path:
@@ -2049,7 +2176,16 @@ def subs_follow_dub(p: Project, segs: list, edit: dict | None = None, settings: 
     settings = settings if settings is not None else load_settings()
     if which == "source" or not settings.get("dub_subs_follow", True) or not dub_audible(p, edit):
         return segs
-    return follow_dub(segs)
+    return follow_dub(segs, **follow_params(settings))
+
+
+def follow_params(settings: dict) -> dict:
+    """Cài đặt giờ hiện phụ đề (tab Phụ đề → Công cụ → Giờ hiện)."""
+    mode = settings.get("sub_follow_mode", "always")
+    if mode != "always":
+        return {"mode": "shift"}
+    return {"mode": "always", "lead": float(settings.get("sub_lead", 0.1)), "hold": float(settings.get("sub_hold", 0.3)),
+            "min_dur": float(settings.get("sub_min_dur", 1.0)), "join": float(settings.get("sub_join_gap", 0.3))}
 
 
 def karaoke_spans(p: Project, edit: dict | None = None) -> dict[int, list]:
@@ -2543,6 +2679,8 @@ def dub_summary(p: Project) -> str:
         extra.append(f"⧉ {sh['over']} câu đọc đè câu sau")
     if sh.get("cut"):
         extra.append(f"✂ {sh['cut']} câu bị cắt bớt cuối")
+    if st.get("pauses"):
+        extra.append(f"nghỉ đúng chỗ nhân vật ngắt hơi {st['pauses']} chỗ")
     if st.get("shortened"):
         extra.append(f"AI đã rút gọn {st['shortened']} câu")
     if st.get("songs"):
@@ -2553,6 +2691,8 @@ def dub_summary(p: Project) -> str:
         extra.append(f"{st['nodub']} câu 'Bỏ lồng'")
     if st.get("interj"):
         extra.append(f"đã xoá {st['interj']} câu chỉ có tiếng cảm thán (A, Ừm…)")
+    if st.get("interj_trim"):
+        extra.append(f"bỏ tiếng cảm thán đứng riêng trong {st['interj_trim']} câu dài")
     if st.get("errors"):
         extra.append(f"{st['errors']} câu lỗi")
     if st.get("slow_restarts"):
@@ -2621,7 +2761,9 @@ def export_subs(p: Project, fmt: str = "srt", which: str = "trans", settings: di
     tl = trans_lang(p)
     suffix = {"trans": tl, "source": "zh", "both": f"zh-{tl}"}.get(which, tl)
     out = p.output_dir / f"{name}.{suffix}.{fmt}"
-    save_subtitles(p.segments, out, which, {**(settings.get("sub_style") or {}), "lang": tl}, info.get("width") or 1920,
+    # phụ đề đã dịch khi có giọng lồng: theo giờ HIỆN (như video xuất – 2.0.96), phụ đề gốc theo giờ nói
+    segs = subs_follow_dub(p, p.segments, None, settings, which) if which != "source" else p.segments
+    save_subtitles(segs, out, which, {**(settings.get("sub_style") or {}), "lang": tl}, info.get("width") or 1920,
                    info.get("height") or 1080)
     p.add_output(out, "subtitle")
     return out
@@ -2820,6 +2962,8 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
         result["message"] = "Hoàn tất! " + (f"Video: {Path(result['video']).name}" if result.get("video") else "")
     if opts.get("parallel") and p.data.get("live_reused"):
         result["message"] += f"  · vừa tách vừa dịch: dùng lại {p.data['live_reused']} câu dịch sẵn lúc đang nghe"
+    if "recognize" in steps and p.data.get("snap_stats") and result.get("message"):
+        result["message"] += "  · " + snap_note(p.data["snap_stats"])
     if opts.get("dub") and not no_tr:
         result["message"] += "  · " + dub_summary(p)
     if p.data.get("skill_note") and not no_tr:

@@ -17,6 +17,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QDoubleSpinBox, QHBoxLayout, QMenu, QPushButton, QScrollBar, QVBoxLayout, QWidget
 
+from ..snap import estimated as _estimated
 from . import icons, theme
 from .subs_model import fit_tip, spk_color
 from .widgets import IconButton, button, label
@@ -424,6 +425,12 @@ class _Canvas(QWidget):
             elif s:
                 tip = (f"#{row + 1} {s.speaker or ''}\n{s.trans or s.text}\nKéo khối để dời câu (giọng lồng đi theo) · "
                        "kéo mép trái / phải để đổi lúc bắt đầu / kết thúc")
+                sh = self.tl.shown.get(row)
+                if sh:
+                    tip += f"\nPhụ đề hiện {_tc(sh[0], 0.1)} → {_tc(sh[1], 0.1)} (theo giọng lồng – vạch trắng dưới khối)"
+                if self.tl.show_est and _estimated(s):
+                    tip += ("\n⚠ Mốc ước lượng: chưa đo được mốc từng chữ, chưa bám được mép theo giọng – nghe lại, "
+                            "kéo mép nếu lệch")
             elif key in ("video", "audio"):
                 ins = self._insert_at(pos)
                 if ins is not None:
@@ -710,6 +717,14 @@ class _Canvas(QWidget):
                 p.setBrush(QColor("#FFFFFF"))
                 for xh in (r.left() + 2.5, r.right() - 4.5):
                     p.drawRoundedRect(QRectF(xh, r.center().y() - 7, 2, 14), 1, 1)
+            if tl.show_est and not sel and _estimated(s):   # mốc ước lượng: viền nét đứt vàng – nên nghe lại
+                p.setPen(QPen(QColor(theme.WARN), 1.4, Qt.PenStyle.DashLine))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRoundedRect(r.adjusted(0.7, 0.7, -0.7, -0.7), 5, 5)
+            sh = tl.shown.get(i)
+            if sh and i not in sghost:   # giờ hiện phụ đề (theo giọng lồng) khác giờ nói: vạch mảnh dưới khối
+                x0, x1 = self.x(sh[0]), self.x(sh[1])
+                p.fillRect(QRectF(x0, rs.bottom() - 3, max(2.0, x1 - x0), 2), theme.c("#FFFFFF", 150))
             if r.width() > 26:
                 p.setPen(QColor("#FFFFFF"))
                 txt = (s.trans or s.text or "").strip()
@@ -989,6 +1004,8 @@ class TrackTimeline(QWidget):
         self.duration = 0.0
         self.segs: list = []
         self.dub: list = []
+        self.show_est = False     # tô viền nét đứt câu có mốc ước lượng (sau khi đã bám mép theo giọng – 2.0.96)
+        self.shown: dict = {}     # {câu: (giây hiện, giây ẩn)} giờ HIỆN phụ đề khi khác giờ nói (theo giọng lồng)
         self.keep: tuple[float, float] = (0.0, 0.0)
         self.cuts: list = []
         self.pos = 0.0

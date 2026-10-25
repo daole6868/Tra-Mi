@@ -573,9 +573,44 @@ def shift(segs: list[Segment], offset: float, start_from: float = 0.0) -> list[S
     return segs
 
 
+_HAN = re.compile(r"[㐀-鿿]")
+
+
+def ct_of(s: Segment) -> list | None:
+    """Mốc từng chữ Hán của câu (extra["ct"], 2.0.96) nếu còn khớp lời (đủ số chữ); câu không có chữ Hán -> []."""
+    n = len(_HAN.findall(s.text or ""))
+    ct = s.extra.get("ct") or []
+    return list(ct) if len(ct) == n else None
+
+
+def han_cut(text: str, k: int) -> int:
+    """Vị trí trong text ngay sau chữ Hán thứ k (kèm dấu câu đi liền sau nó)."""
+    if k <= 0:
+        return 0
+    seen = 0
+    for i, ch in enumerate(text):
+        if _HAN.match(ch):
+            seen += 1
+            if seen == k:
+                j = i + 1
+                while j < len(text) and not _HAN.match(text[j]) and not text[j].isalnum() and not text[j].isspace():
+                    j += 1
+                return j
+    return len(text)
+
+
+def shift_ct(s: Segment, d: float) -> None:
+    """Dời mốc từng chữ theo câu (kéo cả khối câu trên timeline)."""
+    ct = s.extra.get("ct")
+    if ct and abs(d) > 1e-4:
+        s.extra["ct"] = [[round(float(x) + d, 3), round(float(y) + d, 3)] for x, y in ct]
+
+
 def merge(segs: list[Segment], i: int) -> list[Segment]:
     if 0 <= i < len(segs) - 1:
         a, b = segs[i], segs[i + 1]
+        ca, cb = ct_of(a), ct_of(b)
+        sa, sb = a.extra.get("snap"), b.extra.get("snap")
         # gộp thường là để nối câu bị cắt ngang ("一只真" + "的鹈鹕", "最强" + "AI。") -> nối thẳng, không chèn dấu phẩy;
         # chỉ chèn dấu cách giữa 2 chữ Latin / số
         x, y = a.text.rstrip(), b.text.lstrip()
@@ -583,6 +618,12 @@ def merge(segs: list[Segment], i: int) -> list[Segment]:
         a.text = x + joiner + y
         a.trans = (a.trans.rstrip() + " " + b.trans.lstrip()).strip()
         a.end = b.end
+        if ca is not None and cb is not None and ca + cb:   # mốc từng chữ nối tiếp (đúng thứ tự chữ)
+            a.extra["ct"] = ca + cb
+        else:
+            a.extra.pop("ct", None)
+        if sa or sb:     # bám mép: đầu theo câu trước, cuối theo câu sau
+            a.extra["snap"] = [bool((sa or [0, 0])[0]), bool((sb or [0, 0])[1])]
         del segs[i + 1]
     return segs
 
@@ -594,10 +635,22 @@ def split(segs: list[Segment], i: int, at: float | None = None) -> list[Segment]
     at = at if at and s.start < at < s.end else (s.start + s.end) / 2
     ratio = (at - s.start) / max(0.001, s.duration)
     zc = max(1, round(len(s.text) * ratio)) if s.text else 0
+    ct = ct_of(s)
+    k = 0
+    if ct and len(ct) >= 2:   # có mốc từng chữ thật: chia lời đúng chữ đang nói ở chỗ tách (2.0.96)
+        k = min(len(ct) - 1, max(1, sum(1 for x, y in ct if (float(x) + float(y)) / 2 < at)))
+        zc = han_cut(s.text, k)
     words = s.trans.split()
     wc = max(1, round(len(words) * ratio)) if words else 0
     b = Segment(at, s.end, s.text[zc:], " ".join(words[wc:]), s.speaker)
     s.text, s.trans, s.end = s.text[:zc], " ".join(words[:wc]), at
+    sn = s.extra.get("snap")
+    if k:
+        s.extra["ct"], b.extra["ct"] = ct[:k], ct[k:]
+    else:
+        s.extra.pop("ct", None)
+    if sn:
+        s.extra["snap"], b.extra["snap"] = [bool(sn[0]), False], [False, bool(sn[1])]
     segs.insert(i + 1, b)
     return segs
 
@@ -623,26 +676,46 @@ def remap_after_cut(segs: list[Segment], keep: list[tuple[float, float]]) -> lis
     return out
 
 
-def follow_dub(segs: list[Segment], min_shift: float = 0.3) -> list[Segment]:
-    """Phụ đề hiện theo GIỌNG LỒNG (extra["dub_at"] = đoạn giọng đang phát của câu): câu có giọng đọc sớm / bị lùi /
-    đọc dài hơn phụ đề quá min_shift giây -> hiện từ lúc giọng bắt đầu tới lúc đọc xong (+0,15 s), không đè câu sau.
-    Trả về bản sao (không đổi thời gian gốc của câu)."""
+FOLLOW_MODES = [("always", "Luôn theo giọng lồng"), ("shift", "Chỉ khi giọng lệch phụ đề > 0,3 s")]
+
+
+def follow_dub(segs: list[Segment], min_shift: float = 0.3, mode: str = "shift", lead: float = 0.0,
+               hold: float = 0.15, min_dur: float = 0.6, join: float = 0.0) -> list[Segment]:
+    """Giờ HIỆN phụ đề theo GIỌNG LỒNG (extra["dub_at"] = đoạn giọng đang phát của câu). Trả về bản sao – không đổi
+    giờ nói của câu (mốc câu, chỗ đặt giọng lồng, karaoke giữ nguyên).
+    mode "always" (2.0.96): mọi câu có giọng hiện từ lúc giọng bắt đầu − lead tới lúc đọc xong + hold, ≥ min_dur giây;
+    câu chưa có giọng hiện theo giờ nói (vẫn ≥ min_dur); khoảng hở giữa 2 câu < join giây -> câu trước giữ tới khi câu
+    sau hiện (chữ không nháy tắt). mode "shift" (cũ): chỉ câu có giọng lệch > min_shift giây.
+    Không bao giờ đè câu sau."""
     out = [Segment(s.start, s.end, s.text, s.trans, s.speaker, dict(s.extra)) for s in segs]
+    always = mode == "always"
     moved = set()
     for i, s in enumerate(out):
         at = s.extra.get("dub_at")
         if not at or len(at) < 2:
+            if always and s.end - s.start < min_dur:
+                s.end = s.start + min_dur
+                moved.add(i)
             continue
         a, b = float(at[0]), float(at[1])
-        if abs(a - s.start) < min_shift and b <= s.end + min_shift:
+        if not always and abs(a - s.start) < min_shift and b <= s.end + min_shift:
             continue
-        s.start, s.end = a, max(b + 0.15, a + 0.6)
+        s.start = max(0.0, a - lead)
+        s.end = max(b + hold, s.start + min_dur)
         moved.add(i)
-    if moved:
-        order = sorted(range(len(out)), key=lambda q: (out[q].start, q))
+    if not moved and not (always and join > 0):
+        return out
+    order = sorted(range(len(out)), key=lambda q: (out[q].start, q))
+    for x, y in zip(order, order[1:]):
+        if (always or x in moved or y in moved) and out[x].end > out[y].start - 0.02:
+            out[x].end = max(out[x].start + 0.3, out[y].start - 0.02)
+            if out[x].end > out[y].start - 0.02:     # câu trước quá ngắn: câu sau hiện muộn lại 1 chút
+                out[y].start = out[x].end + 0.02
+                out[y].end = max(out[y].end, out[y].start + 0.3)
+    if always and join > 0:
         for x, y in zip(order, order[1:]):
-            if (x in moved or y in moved) and out[x].end > out[y].start - 0.02:
-                out[x].end = max(out[x].start + 0.3, out[y].start - 0.02)
+            if 0 < out[y].start - out[x].end < join:
+                out[x].end = out[y].start
     return out
 
 

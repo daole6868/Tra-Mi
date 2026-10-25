@@ -126,6 +126,17 @@ tiếng của từng câu: giọng Microsoft tiếng Anh (6 giọng), Thái, Nh�
 VieNeu chỉ đọc tiếng Việt nên câu tiếng khác tự đọc bằng Microsoft. Nạp file SRT đã dịch tiếng khác thì dự án tự đổi
 *Dịch sang* theo.
 
+**Khớp thoại** (2.0.96): sau khi nghe, đầu / cuối mỗi câu được **bám theo giọng đã tách** (nhìn độ to giọng mỗi
+0,01 s – như sóng âm dòng *Tiếng gốc* trên timeline) để phụ đề hiện đúng lúc nhân vật bắt đầu / thôi nói; mốc từng chữ
+được giữ lại (gộp / tách / kéo câu vẫn đúng). Dự án cũ: tab Phụ đề → Công cụ → *Sửa câu* → **Căn mép theo giọng** (bật
+*đo lại mốc từng chữ* nếu dự án nghe trước 2.0.96). Câu chỉ có mốc ước lượng có viền nét đứt vàng trên timeline – nên
+nghe lại. **Giờ hiện** (tab Phụ đề → Công cụ): phụ đề hiện theo giọng lồng – hiện trước 0,1 s, giữ thêm 0,3 s, ít nhất
+1 s, nối khoảng hở < 0,3 s (chỉ đổi lúc hiện chữ, không đổi giờ nói / chỗ đặt giọng). **Nghỉ đúng chỗ ngắt hơi** (tab
+Lồng tiếng mục 3): nhân vật ngừng giữa câu ở dấu phẩy / chấm thì giọng lồng cũng ngừng ở dấu tương ứng, phần sau vào đúng
+lúc nhân vật nói tiếp (câu ngắn hay dài đều vậy, chỉ dùng chỗ trống trước câu sau). **Từ cảm thán cần lọc**: bạn tự điền
+danh sách (a, ừm, hả, ha ha…) – câu chỉ gồm các từ đó bị xoá, vế cảm thán đứng riêng trong câu dài bị bỏ ("Ừm, đúng vậy."
+→ "Đúng vậy."); từ không có trong danh sách giữ nguyên.
+
 **Bộ nhận dạng giọng nói** (chọn ở tab Tự động hoặc trang Cài đặt):
 - **Qwen3-ASR** (mặc định): nghe tiếng Trung chuẩn nhất, tự đặt dấu câu theo nghĩa, kèm bộ căn giờ từng chữ (lệch ~0,03 s)
   để tách câu đúng chỗ nghỉ. Cần `transformers` ≥ 5.13: `.venv\Scripts\python -m pip install -U "transformers>=5.13" accelerate`.

@@ -162,7 +162,7 @@ class LivePipeline:
     # ------------------------------------------------------------ đọc trước giọng (Edge)
     def _dub_loop(self):
         from .tts import synthesize_dub
-        from .voicefix import lone_interjection
+        from .voicefix import interj_list, lone_interjection
 
         d = self.dub
         with net.task(self._cancelled, self._report):
@@ -178,7 +178,8 @@ class LivePipeline:
                         return
                     part, self.to_read = self.to_read[:TTS_GROUP], self.to_read[TTS_GROUP:]
                 if d.get("drop_interj"):   # câu chỉ có "A!", "Ừm." sẽ bị xoá trước khi lồng -> không đọc
-                    part = [x for x in part if not lone_interjection(x.trans)]
+                    phrases = interj_list(d["settings"])
+                    part = [x for x in part if not lone_interjection(x.trans, phrases)]
                 st0 = d["settings"]
                 if st0.get("split_long_trans", True):   # câu dài sẽ bị tách thành nhiều vế sau khi dịch -> không đọc cả câu
                     from .align import split_clauses

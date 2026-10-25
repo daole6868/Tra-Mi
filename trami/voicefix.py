@@ -4,7 +4,9 @@
   Bộ đọc AI gặp chữ số hay đọc sai hoặc phát ra tiếng "bíp".
 - `voice_problem`: phát hiện file giọng hỏng (im lặng, tiếng ù một chiều, tiếng bíp / còi một tần số) để đọc lại.
 - `speech_level` + `level_gains`: câu nào nhỏ hơn hẳn các câu khác cùng giọng thì tăng lên cho đều.
-- `lone_interjection`: câu CHỈ có 1–2 tiếng cảm thán ("A!", "Ừm.", "Ái!", "Hả?") -> xoá trước khi lồng tiếng Việt.
+- `lone_interjection`: câu CHỈ gồm từ cảm thán trong danh sách ("A!", "Ừm.", "Ái!", "Hả?") -> xoá trước khi lồng tiếng Việt;
+  `strip_interjections`: bỏ vế chỉ gồm từ cảm thán trong câu dài ("Ừm, đúng vậy." -> "Đúng vậy."). Danh sách từ do người
+  dùng điền (Cài đặt `interj_words`, 2.0.96) – chỉ lọc đúng các từ đó.
 """
 from __future__ import annotations
 
@@ -202,25 +204,82 @@ def level_gains(levels: dict, groups: dict, max_boost_db: float = 9.0, tol_db: f
 
 # tiếng cảm thán / tiếng đệm (không mang nghĩa) – câu chỉ gồm 1–2 tiếng này thì bỏ khi lồng tiếng Việt.
 # KHÔNG có từ có nghĩa dễ trùng ("ai" = ai đó, "ơi" = dạ, "vâng", "dạ", "ừ thì"…) để không xoá nhầm câu trả lời.
-INTERJ_VI = set("""
-a á à ả ã ạ â ầ ấ ẩ ái ài ải ây ầy
-ơ ờ ớ ở ỡ ợ ô ồ ố ổ ỗ ộ o ò ó ỏ oa oà oá oái oải ồi
-ư ừ ứ ử ừm ứm ửm ưm ừa ừh
-hừ hứ hử hừm hửm hứm hm hmm hự hơ hờ hở hả há hà ha haha hahaha hê hế hề hì hí hi hihi hehe hô hố hồ
-ê ế ề ể ối ôi ui úi ùi uầy uây ới ứa
-chà chậc chặc tặc xì xí ặc ọe ọc phù phì
-ah oh uh um umm hmmm eh huh ha ho oops wow
-""".split())
 _WORD = re.compile(r"[^\W\d_]+", re.UNICODE)
 
 
-def lone_interjection(text: str) -> bool:
-    """Câu chỉ có 1–2 tiếng cảm thán, không có chữ nào khác: "A!", "Ừm…", "Ái!", "Hả?", "Ha ha". "Ừm, đúng là như vậy."
-    hay "A Lan" -> False (có lời thật)."""
+# danh sách mặc định (người dùng sửa ở tab Lồng tiếng mục 3): mỗi mục 1 từ / cụm, cách nhau dấu phẩy
+INTERJ_DEFAULT = ("a, á, à, ạ, ơ, ờ, ớ, ồ, ô, ừ, ừm, ưm, ứ, hừ, hừm, hử, hả, hứ, hm, hmm, ha ha, hì hì, hi hi, hehe, "
+                  "ui, ui da, úi, ối, ôi, ái, ái da, chà, chậc, chặc, tặc, xì, ặc, phù, oa, uầy, ah, oh, uh, um")
+
+
+def interj_list(settings: dict | None = None) -> list[tuple[str, ...]]:
+    """Danh sách từ / cụm cảm thán cần lọc (Cài đặt `interj_words`, chưa đặt -> INTERJ_DEFAULT), dạng bộ từ thường."""
+    import unicodedata
+
+    raw = (settings or {}).get("interj_words")
+    raw = INTERJ_DEFAULT if raw is None else str(raw)
+    out = set()
+    for it in re.split(r"[,;\n]+", raw):
+        w = tuple(_WORD.findall(unicodedata.normalize("NFC", it).lower()))
+        if w:
+            out.add(w)
+    return sorted(out, key=lambda x: (-len(x), x))
+
+
+def _covered(words: list[str], phrases: list[tuple[str, ...]]) -> bool:
+    """Dãy từ ghép được hoàn toàn từ các từ / cụm trong danh sách."""
+    ok = [True] + [False] * len(words)
+    for i in range(1, len(words) + 1):
+        for ph in phrases:
+            n = len(ph)
+            if n <= i and ok[i - n] and tuple(words[i - n:i]) == ph:
+                ok[i] = True
+                break
+    return bool(words) and ok[-1]
+
+
+def lone_interjection(text: str, phrases: list[tuple[str, ...]] | None = None) -> bool:
+    """Câu CHỈ gồm từ cảm thán trong danh sách: "A!", "Ừm…", "Ái!", "Hả?", "Ha ha". "Ừm, đúng là như vậy." hay "A Lan"
+    -> False (có lời thật). phrases None = danh sách mặc định."""
     import unicodedata
 
     t = unicodedata.normalize("NFC", text or "").lower()
     if any(c.isdigit() for c in t):
         return False
     words = _WORD.findall(t)
-    return 1 <= len(words) <= 2 and all(w in INTERJ_VI for w in words)
+    return 1 <= len(words) <= 8 and _covered(words, phrases if phrases is not None else interj_list())
+
+
+_PIECE = re.compile(r"[^,.!?…;:]+[,.!?…;:]*|[,.!?…;:]+")
+_END = "!?.…"
+
+
+def strip_interjections(text: str, phrases: list[tuple[str, ...]] | None = None) -> str:
+    """Bỏ các vế (ngăn bởi dấu câu) CHỈ gồm từ cảm thán trong danh sách khỏi câu có lời thật: "Ừm, đúng là như vậy."
+    -> "Đúng là như vậy.", "Đi thôi, ha ha!" -> "Đi thôi!". Câu toàn cảm thán / không có vế nào như vậy -> giữ nguyên."""
+    import unicodedata
+
+    phrases = phrases if phrases is not None else interj_list()
+    t = unicodedata.normalize("NFC", text or "")
+    pieces = _PIECE.findall(t)
+    keep, removed_end = [], ""
+    for pc in pieces:
+        body = pc.rstrip(",.!?…;: ")
+        words = _WORD.findall(body.lower())
+        if words and not any(c.isdigit() for c in body) and _covered(words, phrases):
+            if keep and not keep[-1].rstrip()[-1:] in _END:
+                removed_end = pc.strip()[len(body.strip()):].strip()
+            continue
+        keep.append(pc)
+        removed_end = ""
+    if len(keep) == len(pieces) or not any(_WORD.search(x) for x in keep):
+        return text
+    if removed_end and any(c in _END for c in removed_end):   # bỏ vế cuối: câu kết bằng dấu của vế đó
+        last = keep[-1].rstrip()
+        keep[-1] = last.rstrip(",;:") + "".join(c for c in removed_end if c in _END)
+    out = re.sub(r"\s{2,}", " ", "".join(keep)).strip()
+    first = next((c for c in t if c.isalpha()), "")
+    i = next((k for k, c in enumerate(out) if c.isalpha()), None)
+    if i is not None and (first.isupper() or not first) and out[i].islower():
+        out = out[:i] + out[i].upper() + out[i + 1:]
+    return out

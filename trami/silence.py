@@ -45,29 +45,29 @@ def preset_of(opts: dict) -> str:
 
 
 # ------------------------------------------------------------------ đo âm lượng tiếng gốc (1 lần, nhớ trong dự án)
-def _sig(src: Path) -> dict:
+def _sig(src: Path, hop: float = HOP) -> dict:
     st = src.stat()
     from .ffmpeg import TIMELINE
 
-    return {"path": str(src), "size": st.st_size, "mtime": int(st.st_mtime), "hop": HOP, "tl": TIMELINE}
+    return {"path": str(src), "size": st.st_size, "mtime": int(st.st_mtime), "hop": hop, "tl": TIMELINE}
 
 
 def loudness(src: str | Path, work: str | Path, progress=None, cancel=None, duration: float = 0.0,
-             name: str = "loud_50ms") -> np.ndarray:
-    """Độ to (dBFS) mỗi HOP giây của tiếng gốc (hoặc giọng đã tách: name="voice_50ms") – giải mã 1 lần, lưu
-    work/<name>.npy."""
+             name: str = "loud_50ms", hop: float = HOP) -> np.ndarray:
+    """Độ to (dBFS) mỗi `hop` giây của tiếng gốc (hoặc giọng đã tách: name="voice_50ms"; bám mép câu: hop 0,01 s
+    "voice_10ms") – giải mã 1 lần, lưu work/<name>.npy."""
     from . import ffmpeg as ff
 
     src, work = Path(src), Path(work)
     f, meta = work / f"{name}.npy", work / f"{name}.json"
-    sig = _sig(src)
+    sig = _sig(src, hop)
     if f.exists() and meta.exists():
         try:
             if json.loads(meta.read_text("utf-8")) == sig:
                 return np.load(f).astype(np.float32)
         except Exception:  # noqa: BLE001
             pass
-    n = int(SR * HOP)
+    n = int(round(SR * hop))
     cmd = [ff.ffmpeg_bin(), "-hide_banner", "-nostdin", "-v", "error", "-i", str(src), "-vn"] + \
         ff.af_args(ff.audio_sync(src, SR)) + ["-ac", "1", "-ar", str(SR), "-f", "s16le", "-"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -92,7 +92,7 @@ def loudness(src: str | Path, work: str | Path, progress=None, cancel=None, dura
             out.append(10 * np.log10(np.mean(x * x, axis=1) + 1e-10))
             done += x.shape[0]
             if progress and duration:
-                progress(min(0.99, done * HOP / duration), "Đang đo âm lượng tiếng gốc (chỉ đo 1 lần)…" if
+                progress(min(0.99, done * hop / duration), "Đang đo âm lượng tiếng gốc (chỉ đo 1 lần)…" if
                          name == "loud_50ms" else "Đang tìm chỗ ngắt hơi trong giọng nói (chỉ đo 1 lần)…")
     finally:
         proc.stdout.close()
@@ -104,10 +104,10 @@ def loudness(src: str | Path, work: str | Path, progress=None, cancel=None, dura
     return db.astype(np.float32)
 
 
-def has_loudness(src: str | Path, work: str | Path, name: str = "loud_50ms") -> bool:
+def has_loudness(src: str | Path, work: str | Path, name: str = "loud_50ms", hop: float = HOP) -> bool:
     f, meta = Path(work) / f"{name}.npy", Path(work) / f"{name}.json"
     try:
-        return f.exists() and json.loads(meta.read_text("utf-8")) == _sig(Path(src))
+        return f.exists() and json.loads(meta.read_text("utf-8")) == _sig(Path(src), hop)
     except Exception:  # noqa: BLE001
         return False
 

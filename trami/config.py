@@ -115,6 +115,14 @@ DEFAULT_SETTINGS: dict = {
     "dub_lead_max": 1.0,              # "Tự động": câu dài được bắt đầu sớm tối đa (giây)
     "dub_max_lag": 2.0,               # "Tự động": câu sau bị lùi tối đa (giây), quá thì đọc đè
     "dub_subs_follow": True,          # phụ đề Việt hiện theo đúng lúc giọng lồng đọc (khi giọng sớm / trễ / dài)
+    "sub_follow_mode": "always",      # giờ hiện phụ đề: always = luôn theo giọng lồng / shift = chỉ khi lệch > 0,3 s
+    "sub_lead": 0.1,                  # hiện trước lúc giọng lồng bắt đầu (giây)
+    "sub_hold": 0.3,                  # giữ thêm sau khi giọng đọc xong
+    "sub_min_dur": 1.0,               # mỗi câu hiện ít nhất
+    "sub_join_gap": 0.3,              # khoảng hở giữa 2 câu ngắn hơn -> câu trước giữ tới câu sau (không nháy)
+    "snap_edges": True,               # bám mép câu theo giọng đã tách sau khi nghe (2.0.96)
+    "dub_pauses": True,               # giọng lồng nghỉ đúng chỗ nhân vật ngắt hơi giữa câu (cần mốc từng chữ)
+    "dub_pause_min": 0.3,             # ... khi nhân vật ngừng ít nhất (giây)
     "dub_fit": True,                  # AI dịch vừa thời lượng câu (giới hạn số tiếng)
     "dub_auto_shorten": True,         # câu đọc vẫn quá dài -> AI rút gọn rồi đọc lại
     "align_words": True,              # căn thời gian từng chữ sau khi nhận dạng
@@ -150,6 +158,7 @@ DEFAULT_SETTINGS: dict = {
     "dl_cookie_file": "",                     # file cookies.txt (Netscape) người dùng xuất từ trình duyệt
     "dub_skip_songs": True,           # không lồng tiếng các câu đang hát -> giữ nguyên bài hát gốc
     "dub_drop_interj": True,          # lồng tiếng Việt: xoá câu chỉ có 1–2 tiếng cảm thán (A!, Ừm., Ái!) trước khi đọc
+    "interj_inline": True,            # bỏ vế chỉ gồm từ cảm thán (theo danh sách interj_words) trong câu dài
     "dub_voice_all": "",              # 1 giọng cho MỌI người nói (tab Tự động / Lồng tiếng mục 2), "@auto" = tự gán nam / nữ
     "auto_preset": {},                # thiết lập tự động dùng chung (tab Tự động, Trang chủ, hàng loạt) – autoflow.PRESET_DEFAULT
     "batch_render": False,            # Xử lý hàng loạt: tự xuất video luôn (mặc định dừng trước bước xuất)
