@@ -135,6 +135,9 @@ DEFAULT_SETTINGS: dict = {
     "browser_exe": "",                        # "Mở Chrome & điền sẵn": đường dẫn chrome.exe / msedge.exe (trống = tự tìm)
     "publish_privacy": "public", "publish_category": "24", "publish_notify": True, "publish_synthetic": False,
     "channel_name": "",                       # tab Chữ & Logo: tên kênh cho logo mẫu
+    # câu dịch dài hơn N tiếng (quy đổi theo tốc độ nói của tiếng đích) có dấu phẩy ở cả câu gốc lẫn câu dịch -> tách
+    # thành các vế sau khi dịch cả phim; vế sau nghỉ split_pause giây khi lồng tiếng (align.split_clauses)
+    "split_long_trans": True, "split_long_units": 14, "split_pause": 0.25,
     # Rút khoảng lặng / cắt bài hát (silence.py) – mức tìm đoạn để cắt, nhớ cho video sau
     "silence": {"by": "speech", "db": -30, "min": 4.0, "max": 60.0, "keep": 1.5, "where": "split",
                 "skip_songs": True, "skip_head": 0.0, "skip_tail": 0.0, "song_pad": 15.0},

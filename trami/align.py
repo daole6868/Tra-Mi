@@ -1108,3 +1108,125 @@ def draft_lines(segs: list[Segment], settings: dict | None = None, total: float 
     for s in out:
         s.extra = {}
     return [s for s in out if s.text.strip()]
+
+
+# ------------------------------------------------------------------ tách câu DỊCH dài ở dấu phẩy (sau khi dịch)
+# Câu trọn ý (kiểu tách "dub") dịch liền mạch nhưng có câu rất dài ("为…的账，为…的雷，" -> 19 tiếng) -> phụ đề 2 dòng
+# chữ dày đặc, giọng lồng đọc 1 hơi dài. Sau khi dịch: câu dài hơn mức đặt, có cùng số dấu ngắt vế (，；：) ở câu gốc
+# và câu dịch -> tách đúng ở dấu ngắt chia đôi đều nhất (câu dịch đã đủ ý nên mỗi vế giữ đúng bản dịch của nó); mốc
+# thời gian đặt ở chỗ ngắt hơi thật (chỗ lặng nhất của giọng quanh vị trí ước theo số chữ), vế sau có "pause_before"
+# -> giọng lồng nghỉ 1 nhịp giữa 2 vế.
+CLAUSE_ZH = "，,；;：:"
+CLAUSE_TR = {"ja": "、，,；;：:", "zh": "，,；;：:"}
+CLAUSE_TR_DEFAULT = ",;:，；："
+_TAIL_JUNK = " \t\"'”’)）」』】…。！？!?.,，;；:："
+SPLIT_KEEP = ("voice", "speed", "overflow", "nodub", "trans_user", "song", "not_song")
+
+
+def _clause_cuts(text: str, marks: str) -> list[int]:
+    """Chỉ số ngay sau từng dấu ngắt vế BÊN TRONG câu (dấu ở cuối câu không tính)."""
+    out = []
+    for i, c in enumerate(text):
+        if c in marks and text[i + 1:].strip(_TAIL_JUNK):
+            out.append(i + 1)
+    return out
+
+
+def _vis(text: str) -> int:
+    """Số chữ có nghĩa (Hán, chữ cái, số) – ước vị trí thời gian theo câu gốc."""
+    return sum(1 for c in text if c.isalnum())
+
+
+def _quiet_cut(env: np.ndarray | None, hop: float, a: float, b: float, est: float) -> tuple[float, float]:
+    """Chỗ ngắt hơi quanh est trong câu [a, b]: (hết vế trước, bắt đầu vế sau). Không đo được -> (est, est)."""
+    if env is None or not len(env) or b - a < 0.8:
+        return est, est
+    dur = b - a
+    lo, hi = max(a + 0.2 * dur, est - 0.3 * dur), min(b - 0.2 * dur, est + 0.3 * dur)
+    ia, ib = int(lo / hop), int(hi / hop) + 1
+    sa, sb = int(a / hop), int(b / hop) + 1
+    if ib - ia < 3 or sb > len(env) + 2:
+        return est, est
+    seg = np.asarray(env[sa:min(sb, len(env))], np.float32)
+    win = np.asarray(env[ia:min(ib, len(env))], np.float32)
+    if not len(seg) or len(win) < 3:
+        return est, est
+    k = max(1, int(round(0.1 / hop)))      # làm mượt 0,1 s
+    sm = np.convolve(win, np.ones(k) / k, mode="same") if len(win) >= k else win
+    # ưu tiên chỗ lặng gần vị trí ước (phạt 6 dB mỗi 1/3 câu lệch)
+    pos = np.arange(len(sm)) * hop + ia * hop
+    score = sm + 6.0 * np.abs(pos - est) / max(0.1, dur / 3)
+    j = int(np.argmin(score))
+    floor = float(np.median(seg))
+    if sm[j] > floor - 8.0:                 # không có chỗ lặng rõ -> cắt tại chỗ ước, 2 vế liền nhau
+        t = float(pos[j]) if abs(float(pos[j]) - est) < 0.15 * dur else est
+        return t, t
+    thr = float(sm[j]) + 4.0
+    l = r = j
+    while l > 0 and sm[l - 1] <= thr:
+        l -= 1
+    while r + 1 < len(sm) and sm[r + 1] <= thr:
+        r += 1
+    t0, t1 = float(pos[l]), float(pos[r]) + hop
+    if t1 - t0 > 0.6 * dur:
+        mid = (t0 + t1) / 2
+        return mid, mid
+    return round(t0 + 0.02, 3), round(t1 - 0.02, 3) if t1 - t0 > 0.08 else round(t0 + 0.02, 3)
+
+
+def split_clauses(seg: Segment, lang: str = "vi", max_units: float = 14, min_units: float = 4,
+                  env: np.ndarray | None = None, hop: float = 0.05, pause: float = 0.25) -> list[Segment]:
+    """Tách 1 câu đã dịch quá dài (> max_units tiếng – quy đổi theo tốc độ nói của tiếng đích) thành các vế ở dấu
+    ngắt vế, chỉ khi câu gốc và câu dịch có CÙNG số dấu ngắt vế (vế i của bản dịch ứng với vế i của câu gốc). Mỗi vế
+    ≥ min_units tiếng. Không tách được -> [seg] (đúng đối tượng cũ)."""
+    from . import langs
+
+    tr, zh = (seg.trans or "").strip(), (seg.text or "").strip()
+    if not tr or not zh or seg.extra.get("song") or seg.end - seg.start < 1.2:
+        return [seg]
+    lang = langs.norm(lang)
+    k = langs.INFO[lang]["rate"] / langs.INFO["vi"]["rate"]
+    lim, mn = max_units * k, max(1.0, min_units * k)
+    if langs.units(tr, lang) <= lim:
+        return [seg]
+    cz = _clause_cuts(zh, CLAUSE_ZH)
+    ct = _clause_cuts(tr, CLAUSE_TR.get(lang, CLAUSE_TR_DEFAULT))
+    if not cz or len(cz) != len(ct):
+        return [seg]
+    best = None
+    for i, (pz, pt) in enumerate(zip(cz, ct)):
+        u1, u2 = langs.units(tr[:pt], lang), langs.units(tr[pt:], lang)
+        if u1 < mn or u2 < mn or _vis(zh[:pz]) < 2 or _vis(zh[pz:]) < 2:
+            continue
+        sc = abs(u1 - u2)
+        if best is None or sc < best[0]:
+            best = (sc, pz, pt)
+    if best is None:
+        return [seg]
+    _, pz, pt = best
+    n1, n2 = _vis(zh[:pz]), _vis(zh[pz:])
+    est = seg.start + (seg.end - seg.start) * n1 / max(1, n1 + n2)
+    e1, s2 = _quiet_cut(env, hop, seg.start, seg.end, est)
+    e1 = min(max(e1, seg.start + 0.3), seg.end - 0.3)
+    s2 = min(max(s2, e1), seg.end - 0.3)
+    ex = {k2: v for k2, v in seg.extra.items() if k2 in SPLIT_KEEP}
+    a = Segment(round(seg.start, 3), round(e1, 3), zh[:pz].strip(), tr[:pt].strip(), seg.speaker, dict(ex, clause=1))
+    b = Segment(round(s2, 3), round(seg.end, 3), zh[pz:].strip(), tr[pt:].strip(), seg.speaker,
+                dict(ex, clause=2, pause_before=round(float(pause), 3)) if pause > 0 else dict(ex, clause=2))
+    return split_clauses(a, lang, max_units, min_units, env, hop, pause) + \
+        split_clauses(b, lang, max_units, min_units, env, hop, pause)
+
+
+def split_long_lines(segs: list[Segment], lang: str = "vi", max_units: float = 14, min_units: float = 4,
+                     env: np.ndarray | None = None, hop: float = 0.05, pause: float = 0.25,
+                     rows=None) -> tuple[list[Segment], list[int]]:
+    """Tách mọi câu dịch quá dài (hoặc chỉ các câu rows). Trả (danh sách mới, số thứ tự các câu mới)."""
+    out: list[Segment] = []
+    made: list[int] = []
+    pick = set(rows) if rows is not None else None
+    for i, s in enumerate(segs):
+        parts = split_clauses(s, lang, max_units, min_units, env, hop, pause) if pick is None or i in pick else [s]
+        if len(parts) > 1:
+            made += list(range(len(out), len(out) + len(parts)))
+        out += parts
+    return out, made

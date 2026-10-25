@@ -886,7 +886,8 @@ def plan_layout(items: list[dict], total: float, mode: str = "smart", max_speedu
     """Xếp các đoạn giọng lồng theo thời gian (chỉ tính toán, không đụng âm thanh).
 
     items: {"k": số câu, "want": lúc nên bắt đầu (giây), "dur": thời lượng giọng ở ×1, "user": tốc độ tối thiểu đặt tay
-    (0 = không), "fixed": người dùng đã kéo đoạn giọng (giữ đúng chỗ, không đọc sớm), "mode": cách xếp riêng ("" = chung)}.
+    (0 = không), "fixed": người dùng đã kéo đoạn giọng (giữ đúng chỗ, không đọc sớm), "mode": cách xếp riêng ("" = chung),
+    "pause": nghỉ tối thiểu trước đoạn này (vế sau của câu dài đã tách ở dấu phẩy – không có = GAP)}.
     Trả về {k: {"start", "end", "speed", "keep" (giây giữ lại khi phải cắt, None = đủ), "fit" ok/fast/long,
     "shift" (bắt đầu − lúc nên bắt đầu: âm = đọc sớm, dương = bị lùi), "over" (giây đè lên câu sau), "mode"}}.
 
@@ -902,6 +903,8 @@ def plan_layout(items: list[dict], total: float, mode: str = "smart", max_speedu
     nxt = [want[i + 1] if i + 1 < n else max(float(total), want[i] + 0.3) for i in range(n)]
     modes = [(x.get("mode") if x.get("mode") in _MODE_IDS else mode if mode in _MODE_IDS else "smart") for x in its]
     fixed = [bool(x.get("fixed")) for x in its]
+    # khoảng nghỉ tối thiểu SAU câu i (= nghỉ trước câu i + 1): vế sau của câu đã tách ở dấu phẩy nghỉ 1 nhịp
+    ga = [max(GAP, float(its[i + 1].get("pause") or 0)) if i + 1 < n else GAP for i in range(n)]
     base = [min(2.0, max(0.5, float(x["user"]))) if x.get("user") else 1.0 for x in its]
     has_user = [bool(x.get("user")) for x in its]
     cap = [max(max_speedup, b) for b in base]
@@ -914,15 +917,15 @@ def plan_layout(items: list[dict], total: float, mode: str = "smart", max_speedu
 
     def after(i: int, st: float, en: float) -> float:
         """Lúc câu sau được phép bắt đầu khi câu i đọc từ st tới en (không bao giờ trước câu i)."""
-        m = modes[i]
-        if m == "overlap":
-            return min(en + GAP, max(nxt[i], st + SHIFT_OK))
-        if m == "smart" and i + 1 < n:
-            return min(en + GAP, max(nxt[i] + max(0.0, max_lag), st + SHIFT_OK))
-        return en + GAP
+        m, g = modes[i], ga[i]
+        if m == "overlap" and g <= GAP:
+            return min(en + g, max(nxt[i], st + SHIFT_OK))
+        if m == "smart" and i + 1 < n and g <= GAP:
+            return min(en + g, max(nxt[i] + max(0.0, max_lag), st + SHIFT_OK))
+        return en + g
 
     def overflows(i: int, busy: float) -> bool:
-        return max(want[i], busy) + dur[i] / base[i] + GAP > nxt[i] + 1e-3
+        return max(want[i], busy) + dur[i] / base[i] + ga[i] > nxt[i] + 1e-3
 
     def place_group(run: list[int], busy: float, f: float, lead_on: bool):
         """Vị trí các câu trong cụm với tốc độ chung f: (starts, ends, câu sau có bị lùi quá _TOL không)."""
@@ -932,7 +935,7 @@ def plan_layout(items: list[dict], total: float, mode: str = "smart", max_speedu
         for t in range(len(run) - 1, -1, -1):        # muộn nhất có thể mà vẫn chừa chỗ cho câu sau
             q = run[t]
             lo = want[q] - (lead[q] if lead_on else 0.0)
-            lim[t] = max(lo, min(want[q], nx - GAP - d[t]))
+            lim[t] = max(lo, min(want[q], nx - ga[q] - d[t]))
             nx = lim[t]
         sts, ens, late = [], [], False
         b = busy
@@ -944,7 +947,7 @@ def plan_layout(items: list[dict], total: float, mode: str = "smart", max_speedu
                 st = min(st, max(want[q] + max_lag, prev_st + SHIFT_OK))
             prev_st = st
             en = st + d[t]
-            late = late or en + GAP > nxt[q] + _TOL
+            late = late or en + ga[q] > nxt[q] + _TOL
             sts.append(st)
             ens.append(en)
             b = after(q, st, en)
@@ -975,10 +978,10 @@ def plan_layout(items: list[dict], total: float, mode: str = "smart", max_speedu
             while j < n and seq[j] and not fixed[j]:
                 st = max(want[j], b)
                 en = st + dur[j] / base[j]
-                if run and en + GAP <= nxt[j] + 1e-3:
+                if run and en + ga[j] <= nxt[j] + 1e-3:
                     break
                 run.append(j)
-                b = en + GAP
+                b = en + ga[j]
                 j += 1
             policy = modes[i]
             top = max(1.0, max_speedup)
@@ -1000,7 +1003,7 @@ def plan_layout(items: list[dict], total: float, mode: str = "smart", max_speedu
             continue
         st = max(want[i], busy)
         need = dur[i] / base[i]
-        slot = max(0.3, nxt[i] - GAP - st)
+        slot = max(0.3, nxt[i] - ga[i] - st)
         if m == "cut" and need > slot and not fixed[i]:
             # mượn khoảng lặng phía trước (tối đa 0,15 s)
             borrow = min(BORROW, need - slot, max(0.0, want[i] - busy))
@@ -1012,7 +1015,7 @@ def plan_layout(items: list[dict], total: float, mode: str = "smart", max_speedu
             sp = max(sp, min(cap[i], dur[i] / slot))
         en = st + dur[i] / sp
         if m == "cut":
-            hard = nxt[i] + DELAY - GAP            # câu sau được lùi tối đa 0,25 s
+            hard = nxt[i] + DELAY - ga[i]          # câu sau được lùi tối đa 0,25 s
             if en > hard and i + 1 < n:
                 keep[i] = max(0.3, hard - st)
                 en = st + keep[i]
@@ -1027,13 +1030,13 @@ def plan_layout(items: list[dict], total: float, mode: str = "smart", max_speedu
     out: dict[int, dict] = {}
     for i, x in enumerate(its):
         full_end = start[i] + dur[i] / speed[i]
-        long_ = keep[i] is not None or full_end + GAP > nxt[i] + SHIFT_OK
+        long_ = keep[i] is not None or full_end + ga[i] > nxt[i] + SHIFT_OK
         fit = "long" if long_ else ("ok" if speed[i] <= 1.06 or (has_user[i] and speed[i] <= base[i] + 0.005)
                                     else "fast")
         out[int(x["k"])] = {"start": start[i], "end": end[i], "speed": speed[i], "keep": keep[i], "fit": fit,
                             "shift": start[i] - want[i], "over": over[i], "mode": modes[i],
-                            "have": max(0.3, nxt[i] - GAP - start[i]),
-                            "slot": max(0.3, nxt[i] - GAP - want[i])}   # chỗ trống của chính câu (không tính bị đẩy)
+                            "have": max(0.3, nxt[i] - ga[i] - start[i]),
+                            "slot": max(0.3, nxt[i] - ga[i] - want[i])}   # chỗ trống của chính câu (không tính bị đẩy)
     return out
 
 
@@ -1611,7 +1614,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         # tốc độ người dùng đặt cho câu (tab Lồng tiếng / timeline) = mức TỐI THIỂU: câu vốn phải đọc nhanh hơn để vừa
         # thì giữ tốc độ đó; < 1 = đọc chậm lại (nếu còn chỗ)
         items.append({"k": k, "want": want(k), "dur": meta.n(files[k]) / SR, "user": float(s.extra.get("speed") or 0),
-                      "fixed": bool(s.extra.get("dub_shift")), "mode": s.extra.get("overflow") or ""})
+                      "fixed": bool(s.extra.get("dub_shift")), "mode": s.extra.get("overflow") or "",
+                      "pause": float(s.extra.get("pause_before") or 0)})
     durs = {it["k"]: it["dur"] for it in items}
     user_min = {it["k"]: it["user"] for it in items if it["user"]}
     plan = plan_layout(items, total, settings.get("dub_overflow", "smart"), max_speedup,

@@ -5385,8 +5385,8 @@ def test_gui_aspect_layers_timeline_silence_undo(sample_video, tmp_path):
     pp.e_safe.setChecked(True)
     pp.player.view.on_layer_changed(lid, {"y": 0.03})
     pp._apply_live()
-    pp.player.update_layers(2.0)
     app.processEvents()
+    pp.player.update_layers(2.0)  # (trình phát có thể vừa báo vị trí 0 -> lớp 1–3 s bị ẩn)
     assert any("TIÊU ĐỀ" in x for x in pp.player.view.safe_issues())
     pp._safe_fix()
     assert next(x for x in pp._layers if x["id"] == lid)["y"] > 0.12
@@ -5406,3 +5406,45 @@ def test_gui_aspect_layers_timeline_silence_undo(sample_video, tmp_path):
         pp.tabs.set_current(i)
         app.processEvents()
     win.close()
+
+
+def test_split_long_translations_at_commas(sample_video):
+    from trami import align, pipeline, tts
+    from trami.project import Project
+
+    s1 = Segment(3710.3, 3714.5, "为俺们天剑宗变穷的账，为大师兄挨的雷，",
+                 "Vì món nợ khiến Thiên Kiếm Tông nghèo rớt, vì những đạo sét đại sư huynh phải chịu,", "S1",
+                 extra={"voice": "edge:vi-VN-HoaiMyNeural", "tts_file": "x.mp3", "dub_at": [3710.3, 3714.6]})
+    short = Segment(0, 2, "好的，走吧", "Được, đi thôi", "S1")
+    mismatch = Segment(10, 15, "我们今天一定要去那个地方看一看", "Hôm nay, nhất định chúng ta phải đến nơi đó, xem cho biết",
+                       "S1")
+    out, made = align.split_long_lines([short, s1, mismatch])
+    assert made == [1, 2] and out[0] is short and out[3] is mismatch
+    a, b = out[1], out[2]
+    assert (a.text, a.trans) == ("为俺们天剑宗变穷的账，", "Vì món nợ khiến Thiên Kiếm Tông nghèo rớt,")
+    assert (b.text, b.trans) == ("为大师兄挨的雷，", "vì những đạo sét đại sư huynh phải chịu,")
+    assert a.start == 3710.3 and b.end == 3714.5 and a.end <= b.start
+    assert b.extra["pause_before"] == 0.25 and "pause_before" not in a.extra
+    assert a.extra["voice"] == b.extra["voice"] and "tts_file" not in a.extra and "dub_at" not in b.extra
+    # có chỗ ngắt hơi thật trong giọng -> mốc đặt đúng chỗ lặng
+    hop = 0.05
+    env = np.full(int(3721 / hop), -20.0, np.float32)
+    env[int(3712.4 / hop):int(3712.7 / hop)] = -55
+    (a, b), _ = align.split_long_lines([s1], env=env, hop=hop)
+    assert 3712.35 <= a.end <= 3712.5 and 3712.6 <= b.start <= 3712.75
+    # mức tách cao hơn độ dài câu -> giữ nguyên; tiếng Anh quy đổi theo tốc độ nói
+    assert align.split_long_lines([s1], max_units=25)[1] == []
+    en = Segment(0, 4, "为俺们天剑宗变穷的账，为大师兄挨的雷，",
+                 "For the debt that made our Sword Sect poor, for the lightning our senior took,", "S1")
+    assert len(align.split_long_lines([en], "en")[0]) == 2
+    # giọng lồng: vế sau nghỉ ít nhất 0,3 s sau vế trước
+    plan = tts.plan_layout([{"k": 0, "want": 0, "dur": 2.6}, {"k": 1, "want": 2.5, "dur": 2.0, "pause": 0.3}], 10)
+    assert plan[1]["start"] - plan[0]["end"] >= 0.3 - 1e-6
+    # dự án: tách + hoàn tác
+    p = Project.create("split")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [short, Segment(0.5, 5.5, s1.text, s1.trans, "S1")]
+    p.save()
+    rows = pipeline.split_long(p)
+    assert rows == [1, 2] and len(Project(p.id).segments) == 3
+    assert pipeline.undo_split(Project(p.id)) == 2 and len(Project(p.id).segments) == 2

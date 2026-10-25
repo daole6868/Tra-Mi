@@ -50,12 +50,14 @@ def _sig(src: Path) -> dict:
     return {"path": str(src), "size": st.st_size, "mtime": int(st.st_mtime), "hop": HOP}
 
 
-def loudness(src: str | Path, work: str | Path, progress=None, cancel=None, duration: float = 0.0) -> np.ndarray:
-    """Độ to (dBFS) mỗi HOP giây của tiếng gốc – giải mã 1 lần, lưu work/loud_50ms.npy."""
+def loudness(src: str | Path, work: str | Path, progress=None, cancel=None, duration: float = 0.0,
+             name: str = "loud_50ms") -> np.ndarray:
+    """Độ to (dBFS) mỗi HOP giây của tiếng gốc (hoặc giọng đã tách: name="voice_50ms") – giải mã 1 lần, lưu
+    work/<name>.npy."""
     from . import ffmpeg as ff
 
     src, work = Path(src), Path(work)
-    f, meta = work / "loud_50ms.npy", work / "loud_50ms.json"
+    f, meta = work / f"{name}.npy", work / f"{name}.json"
     sig = _sig(src)
     if f.exists() and meta.exists():
         try:
@@ -88,7 +90,8 @@ def loudness(src: str | Path, work: str | Path, progress=None, cancel=None, dura
             out.append(10 * np.log10(np.mean(x * x, axis=1) + 1e-10))
             done += x.shape[0]
             if progress and duration:
-                progress(min(0.99, done * HOP / duration), "Đang đo âm lượng tiếng gốc (chỉ đo 1 lần)…")
+                progress(min(0.99, done * HOP / duration), "Đang đo âm lượng tiếng gốc (chỉ đo 1 lần)…" if
+                         name == "loud_50ms" else "Đang tìm chỗ ngắt hơi trong giọng nói (chỉ đo 1 lần)…")
     finally:
         proc.stdout.close()
         proc.wait()
@@ -99,8 +102,8 @@ def loudness(src: str | Path, work: str | Path, progress=None, cancel=None, dura
     return db.astype(np.float32)
 
 
-def has_loudness(src: str | Path, work: str | Path) -> bool:
-    f, meta = Path(work) / "loud_50ms.npy", Path(work) / "loud_50ms.json"
+def has_loudness(src: str | Path, work: str | Path, name: str = "loud_50ms") -> bool:
+    f, meta = Path(work) / f"{name}.npy", Path(work) / f"{name}.json"
     try:
         return f.exists() and json.loads(meta.read_text("utf-8")) == _sig(Path(src))
     except Exception:  # noqa: BLE001

@@ -471,6 +471,32 @@ class ProjectPage(QWidget):
                     button("Căn khớp thoại", "wand", "Căn mốc từng câu sát lời thoại thật, tách câu ở chỗ nghỉ "
                            "(dùng cho phụ đề đã nhận dạng từ bản cũ)", on_click=self.run_realign),
                     button("Tìm && thay", "search", on_click=self._replace))
+        # câu dịch dài: tách ở dấu phẩy thành 2 dòng phụ đề + 2 đoạn giọng, giữa 2 vế nghỉ 1 nhịp
+        self.s_split = Switch(bool(self.settings.get("split_long_trans", True)))
+        self.s_split.setToolTip("Sau khi dịch cả phim: câu dịch dài hơn mức đặt có dấu phẩy ở cả câu gốc lẫn câu dịch "
+                                "-> tự tách thành các vế (mỗi vế 1 dòng phụ đề, giọng lồng nghỉ 1 nhịp giữa 2 vế)")
+        self.s_split_n = QSpinBox()
+        self.s_split_n.setRange(6, 60)
+        self.s_split_n.setSuffix(" tiếng")
+        self.s_split_n.setValue(int(self.settings.get("split_long_units", 14) or 14))
+        self.s_split_n.setToolTip("Câu dịch dài hơn số tiếng này mới tách (tiếng Anh / Thái / Nhật / Hàn tự quy đổi "
+                                  "theo tốc độ nói)")
+        self.s_split_p = QDoubleSpinBox()
+        self.s_split_p.setRange(0.0, 1.5)
+        self.s_split_p.setSingleStep(0.05)
+        self.s_split_p.setDecimals(2)
+        self.s_split_p.setSuffix(" s")
+        self.s_split_p.setValue(float(self.settings.get("split_pause", 0.25)))
+        self.s_split_p.setToolTip("Giọng lồng nghỉ tối thiểu bấy nhiêu giây giữa 2 vế của câu đã tách")
+        for w in (self.s_split, self.s_split_n, self.s_split_p):
+            (w.toggledOn if w is self.s_split else w.valueChanged).connect(self._split_opts_changed)
+        self.bar_split = flow(
+            hbox(self.s_split, label("Tự tách câu dịch dài ở dấu phẩy, câu dài hơn", "muted"), self.s_split_n),
+            hbox(label("nghỉ giữa 2 vế", "muted"), self.s_split_p),
+            button("Tách câu dài", "split", "Tách ngay các câu dịch dài hơn mức đặt ở dấu phẩy (các câu đã tích, chưa "
+                   "tích thì cả phim). Câu gốc và câu dịch phải có cùng số dấu phẩy. Mốc đặt đúng chỗ ngắt hơi. Đã lồng "
+                   "tiếng thì đọc lại giọng các vế mới", on_click=self.run_split_long),
+            button("Hoàn tác tách", "refresh", flat=True, on_click=self.run_undo_split))
         # câu nghe nhầm: nhạc / tiếng động bị chép thành lời -> lọc theo cao độ giọng thật của từng người nói
         self.s_ptol = QDoubleSpinBox()
         self.s_ptol.setRange(1.0, 12.0)
@@ -554,6 +580,7 @@ class ProjectPage(QWidget):
                            "(giữ nguyên lời gốc, thời gian, người nói). Câu có dấu ♪ tự đánh dấu là bài hát 🎵",
                            on_click=self._import_translation))
         v.addWidget(bar1)
+        v.addWidget(self.bar_split)
         v.addWidget(bar2)
         v.addWidget(self.bar_pitch)
         v.addWidget(bar3)
@@ -2312,6 +2339,45 @@ class ProjectPage(QWidget):
                 msg += " và tạo lại giọng các câu đó"
             return {"message": msg + " · bấm 'Hoàn tác nối' nếu không ưng", "pick": rows}
         self.submit("redub" if pipeline.has_dub(self.p) else "join", "Nối câu bị cắt", fn)
+
+    def _split_opts_changed(self, *_):
+        from ..config import save_settings
+
+        d = {"split_long_trans": self.s_split.isChecked(), "split_long_units": int(self.s_split_n.value()),
+             "split_pause": round(self.s_split_p.value(), 2)}
+        save_settings(d)
+        self.settings.update(d)
+
+    def run_split_long(self):
+        """Tách câu dịch dài ở dấu phẩy (câu đã tích, chưa tích thì cả phim). Đã lồng tiếng: đọc lại giọng các vế."""
+        if not self.model.segs or not any(x.trans.strip() for x in self.model.segs):
+            return self.win.toast("Chưa có bản dịch – dịch trước rồi mới tách câu dài", "warn")
+        self.flush()
+        picked = sorted(self.model.selected)
+        tts_eng, rate = self.d_engine.currentData(), self.d_rate.currentData()
+        st = dict(load_settings())
+        st["dub_skip_songs"] = self.d_skipsong.isChecked()
+
+        def fn(j, p):
+            j.update(0.05, "Đang tìm câu dịch dài có dấu phẩy…")
+            rows = pipeline.split_long(p, st, picked or None, lambda x, m="": j.update(0.05 + 0.3 * x, m), j.cancelled)
+            if not rows:
+                return {"message": f"Không có câu dịch nào dài hơn {st.get('split_long_units', 14)} tiếng mà tách được "
+                                   "(câu gốc và câu dịch cần cùng số dấu phẩy)"}
+            msg = f"Đã tách thành {len(rows)} câu ngắn (được tích sẵn)"
+            if pipeline.has_dub(p) or any(x.extra.get("tts_file") for x in p.segments):
+                pipeline.redub(p, rows, rate, st, lambda x, m="": j.update(0.4 + 0.6 * x, m), j.cancelled, tts_eng)
+                msg += " và đọc lại giọng các vế"
+            return {"message": msg + " · bấm 'Hoàn tác tách' nếu không ưng", "pick": rows}
+        self.submit("redub" if pipeline.has_dub(self.p) else "join", "Tách câu dài", fn)
+
+    def run_undo_split(self):
+        if not self.p or not self.p.data.get("split_backup"):
+            return self.win.toast("Chưa có lần tách câu dài nào để hoàn tác", "info")
+        self.flush()
+        n = pipeline.undo_split(self.p, self.settings)
+        self.reload()
+        self.win.toast(f"Đã về bản trước khi tách câu ({n} câu)", "ok")
 
     def run_undo_join(self):
         if not self.p or not self.p.data.get("join_backup"):

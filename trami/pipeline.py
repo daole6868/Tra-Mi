@@ -1177,6 +1177,61 @@ def join_lines(p: Project, settings: dict | None = None) -> list[int]:
     return [k for k, s in enumerate(new) if id(s) not in old_ids]
 
 
+def speech_env(p: Project, progress: Prog | None = None, cancel=None) -> tuple:
+    """Độ to giọng nói mỗi 0,05 s (giọng đã tách nếu có, không thì tiếng gốc) – tìm chỗ ngắt hơi. (None, hop) nếu lỗi."""
+    from . import silence
+
+    st = stems(p)
+    src = st.get("vocals") or (str(p.source) if p.data.get("source") and p.source.exists() else "")
+    if not src:
+        return None, silence.HOP
+    try:
+        db = silence.loudness(src, p.work, progress, cancel, float(p.data.get("info", {}).get("duration", 0) or 0),
+                              name="voice_50ms" if st else "loud_50ms")
+    except ff.Cancelled:
+        raise
+    except Exception:  # noqa: BLE001 – không đo được: chia theo số chữ
+        log_error("Đo chỗ ngắt hơi")
+        return None, silence.HOP
+    return db, silence.HOP
+
+
+def split_long(p: Project, settings: dict | None = None, rows: list[int] | None = None, progress: Prog | None = None,
+               cancel=None) -> list[int]:
+    """Tách câu DỊCH dài ở dấu phẩy (align.split_clauses): mỗi vế 1 dòng phụ đề + 1 đoạn giọng, giữa 2 vế nghỉ 1 nhịp.
+    rows: chỉ các câu này. Giọng lồng của câu cũ bị bỏ (đọc lại 2 vế). Trả về số thứ tự các câu mới."""
+    from . import align
+
+    settings = settings or load_settings()
+    segs = p.segments
+    lang = trans_lang(p)
+    if not any(s.trans.strip() for s in segs):
+        return []
+    env, hop = speech_env(p, progress, cancel)
+    new, made = align.split_long_lines(segs, lang, float(settings.get("split_long_units", 14) or 14), 4, env, hop,
+                                       float(settings.get("split_pause", 0.25) or 0), rows)
+    if not made:
+        return []
+    p.data["split_backup"] = [s.to_dict() for s in segs]
+    p.segments = new
+    p.save()
+    return made
+
+
+def undo_split(p: Project, settings: dict | None = None) -> int:
+    """Hoàn tác lần tách câu dài gần nhất. Trả về số câu sau khi hoàn tác (0 = không có gì)."""
+    from .subtitle import Segment
+
+    back = p.data.pop("split_backup", None)
+    if not back:
+        return 0
+    p.segments = [Segment.from_dict(d) for d in back]
+    p.save()
+    if has_dub(p):
+        relayout(p, settings or load_settings())
+    return len(back)
+
+
 def undo_join(p: Project, settings: dict | None = None) -> int:
     """Hoàn tác lần "Nối câu bị cắt" gần nhất. Trả về số câu sau khi hoàn tác (0 = không có gì để hoàn tác)."""
     from .subtitle import Segment
@@ -1361,6 +1416,16 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
         except Exception as e:  # noqa: BLE001
             log_error("AI kiểm tra bản dịch")
             p.data["skill_warning"] = f"Bỏ qua bước AI kiểm tra bản dịch ({err_text(e)[:120]})"
+            p.save()
+    if whole and settings.get("split_long_trans", True):
+        # câu dịch quá dài (> N tiếng) có dấu phẩy ở cả câu gốc lẫn câu dịch -> tách thành các vế, giữa 2 vế nghỉ 1 nhịp
+        before = len(p.segments)
+        # câu đã có giọng lồng giữ nguyên (tách thì mất giọng) – muốn tách thì bấm "Tách câu dài" ở tab Phụ đề
+        made = split_long(p, settings, [k for k, x in enumerate(p.segments) if not x.extra.get("tts_file")], None,
+                          cancel)
+        if made:
+            p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + \
+                f"tách {len(p.segments) - before} câu dịch dài ở dấu phẩy thành {len(made)} câu ngắn"
             p.save()
     return sum(1 for s in p.segments if s.trans)
 

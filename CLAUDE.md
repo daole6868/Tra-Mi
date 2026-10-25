@@ -67,7 +67,12 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `shift_tails` (nối quá dài -> chuyển mẩu sau dấu phẩy cuối sang dòng sau), `heard_junction` (so lời nghe lại quanh chỗ
   cắt khúc); `asr_qwen.relisten_cuts` (nghe lại ±6 s quanh chỗ cắt khúc giữa lúc đang nói, Cài đặt `asr_relisten`);
   AI nối câu theo nghĩa `pipeline.join_engine` / `ai_join_lines` / `ai_join` (`skills.clean_lines(mode="join")`, Cài đặt
-  `ai_join_engine`: auto / off / tên AI).
+  `ai_join_engine`: auto / off / tên AI). Tách câu DỊCH dài ở dấu phẩy (2.0.80): `align.split_clauses` /
+  `split_long_lines` (chỉ khi câu gốc + câu dịch cùng số dấu phẩy giữa câu; mốc theo tỉ lệ chữ Trung, dời tới chỗ lặng
+  nhất của giọng `_quiet_cut`; vế sau `extra["pause_before"]` -> `tts.plan_layout` item "pause" = khoảng nghỉ tối thiểu)
+  -> `pipeline.split_long` / `undo_split` (`split_backup`) / `speech_env` (độ to 50 ms của giọng đã tách `voice_50ms`,
+  không thì tiếng gốc); tự chạy cuối `translate` khi dịch cả phim (Cài đặt `split_long_trans`, `split_long_units` 14,
+  `split_pause` 0,25), bỏ qua câu đã có giọng.
 - `trami/textfit.py` – đo bề rộng chữ phụ đề như libass (Qt khi có giao diện, không thì Pillow+fontTools, không thì ước
   lượng) + `fit_lines` (xếp câu vào dòng: % bề rộng, số dòng tối đa, thu nhỏ chữ). `subtitle.layout_event` dùng chung
   cho `to_ass` và khung xem trước (`player.SubtitleItem._layout`) -> xuống dòng / cỡ chữ / ô nền giống hệt.
@@ -132,7 +137,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (156 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (157 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1312,7 +1317,29 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   * `Project.edit` trả bản sao sâu của DEFAULT_EDIT (trước đây list / dict mặc định dùng chung). `effective_style(p,
     style, ed)`. `Project.add_output(**extra)`.
 
+- 2.0.80: "câu dịch quá dài ("Vì món nợ khiến Thiên Kiếm Tông nghèo rớt, vì những đạo sét đại sư huynh phải chịu,") –
+  tách ở dấu phẩy thành 2 dòng, nghỉ 1 chút ở giữa". Tách SAU khi dịch (cả câu vẫn được dịch trong ngữ cảnh):
+  * `align.split_clauses(seg, lang, max_units=14, min_units=4, env, hop, pause=0,25)`: câu dịch > max_units tiếng
+    (tiếng khác quy đổi theo tốc độ nói `langs.INFO`), câu gốc và câu dịch có CÙNG số dấu ngắt giữa câu (，；： / , ; :;
+    tiếng Nhật 、) -> chọn dấu phẩy chia đôi số tiếng đều nhất (mỗi vế ≥ 4), tách đệ quy; mốc = tỉ lệ chữ Trung, có đường
+    độ to giọng thì dời tới chỗ lặng nhất trong ±30 % (lặng hơn trung vị ≥ 8 dB). Vế giữ giọng riêng / tốc độ / cách xếp /
+    bỏ lồng / 🎵 (`SPLIT_KEEP`), bỏ file giọng cũ; vế sau `pause_before`.
+  * `tts.plan_layout`: mỗi câu có "pause" -> khoảng cách tối thiểu với câu trước (`ga[i]` thay `GAP` ở mọi chỗ: tràn,
+    cụm câu dài, chỗ trống, đọc sớm); câu có pause không dùng lối tắt "đọc đè".
+  * `pipeline.split_long(p, settings, rows)` (lưu `split_backup`), `undo_split`, `speech_env`; `translate` dịch cả phim
+    xong tự tách câu chưa có giọng (`skill_note` "tách N câu dịch dài…"). `silence.loudness(name=)` / `has_loudness`.
+  * Tab Phụ đề hàng mới: công tắc "Tự tách câu dịch dài ở dấu phẩy, câu dài hơn [14 tiếng]", "nghỉ giữa 2 vế [0,25 s]",
+    nút "Tách câu dài" (câu đã tích hoặc cả phim; đã lồng -> `redub` đúng các vế mới, job "redub"; tích sẵn các vế) +
+    "Hoàn tác tách". Ctrl+Z cũng hoàn tác.
+  * Thử trên đúng 2 câu người dùng gửi: "Vì món nợ khiến Thiên Kiếm Tông nghèo rớt," | "vì những đạo sét đại sư huynh phải
+    chịu,", "vì bím tóc tam sư huynh bị sét đánh cháy," | "vì cái tạp dề tứ sư huynh bị đánh tan,"; câu ngắn / số dấu phẩy
+    lệch giữ nguyên; có chỗ ngắt hơi trong giọng -> mốc đúng chỗ lặng; giọng vế sau cách vế trước ≥ khoảng nghỉ đặt.
+  * Sửa test giao diện chập chờn (trình phát báo vị trí 0 giữa lúc kiểm tra vùng an toàn -> lớp 1–3 s bị ẩn).
+
 ## Vấn đề đang mở
+- 2.0.80: chờ người dùng thử "Tách câu dài" trên phim thật (dự án cũ đã lồng: đọc lại các vế mới) – mức 14 tiếng có hợp
+  không, mốc tách có đúng chỗ nhân vật ngắt hơi không (cần đã tách giọng), câu có số dấu phẩy khác nhau giữa bản Trung /
+  Việt thì không tách (có thể làm thêm: AI tách theo nghĩa).
 - 2.0.79: chờ người dùng thử trên máy thật: xuất 9:16 + 16:9 cùng lúc, kéo chữ / logo khi xem thử từng tỉ lệ, GIF logo
   động, font riêng, nét cọ vàng có đẹp không; "Rút khoảng lặng" trên phim dài (theo âm lượng đo 1 lần ~ vài chục giây) và
   "Tìm / cắt đoạn bài hát" (bài hát có được cắt trọn kể cả nhạc dạo không, có cắt nhầm lời thoại không). Chưa làm: hiệu
