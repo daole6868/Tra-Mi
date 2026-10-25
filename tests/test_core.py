@@ -5083,10 +5083,16 @@ def test_browser_post_fills_and_stops_before_post(monkeypatch, tmp_path):
     if not exe:
         pytest.skip("không có chromium")
     pages = {"/yt": _FAKE_YT, "/tt": _FAKE_TT, "/fb": _FAKE_FB}
+    hits = {"/fbslow": 0}
 
     class H(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
-            b = pages.get(self.path.split("?")[0], "").encode()
+            path = self.path.split("?")[0]
+            if path == "/fbslow":      # Business Suite kẹt trang trắng ở lần tải đầu, tải lại thì hiện
+                hits[path] += 1
+                b = ("<html><body></body></html>" if hits[path] == 1 else _FAKE_FB).encode()
+            else:
+                b = pages.get(path, "").encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(b)))
@@ -5169,9 +5175,19 @@ def test_browser_post_fills_and_stops_before_post(monkeypatch, tmp_path):
         assert "bia.jpg" in js(tok, "document.getElementById('subvideo-note').textContent")
         assert js(tok, "window.fbfile") == "phim.mp4" and js(tok, "window.posted || 0") == 0
         assert "Mô tả FB" in js(tok, "document.getElementById('cap').innerText")
+        # trang trắng (đang tải / kẹt) -> chờ, quá BLANK_RELOAD giây thì tải lại 1 lần rồi điền như thường
+        monkeypatch.setattr(bp, "FB_URLS", {"video": base + "/fbslow", "reel": base + "/fbslow"})
+        monkeypatch.setattr(bp, "BLANK_RELOAD", 1)
+        tok, rep = eng.call(bp._do_fill, s, "main", {"platform": "facebook", "kind": "video", "file": str(vid),
+                                                     "title": "", "description": "Mô tả 2", "hashtags": []})
+        assert hits["/fbslow"] == 2 and "gắn file video" in rep["done"], (hits, rep)
+        assert "đã tải lại trang" in rep["note"] and "chọn đúng Trang" in rep["note"]
+        assert "Mô tả 2" in js(tok, "document.getElementById('cap').innerText")
     finally:
         eng.close_profile("main")
         srv.shutdown()
+    # Windows / máy thường: bật sandbox của Chrome (Playwright mặc định thêm --no-sandbox -> dải cảnh báo của Chrome)
+    assert bp.SANDBOX is (not (sys.platform.startswith("linux") and os.geteuid() == 0))
 
 
 # ------------------------------------------------------------------ 2.0.79: tỉ lệ khung, lớp phủ chữ / logo, rút khoảng lặng

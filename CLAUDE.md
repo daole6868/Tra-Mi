@@ -1537,10 +1537,20 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   căn hoặc nghe sau 2.0.92 – không dời câu thêm lần nữa; thông báo nhắc bản đã xoá phụ đề cũ của video VFR). Xoá các bản
   đệm (16 kHz, sóng âm, âm lượng) bị khoá không làm hỏng việc căn.
 
+- 2.0.94: ảnh Chrome điền sẵn Facebook: dải "Bạn đang sử dụng một cờ dòng lệnh không được hỗ trợ: --no-sandbox…" + trang
+  Business Suite trắng (đang tải). Playwright mặc định thêm `--no-sandbox` khi không đặt `chromiumSandbox` (đã đọc
+  coreBundle.js: `if (options.chromiumSandbox !== true) push("--no-sandbox")`) -> `browser_post.SANDBOX` (bật, trừ Linux
+  chạy root – máy thử) truyền `chromium_sandbox=`. Trang trắng: `_wait_ready` chờ tới khi có ô chọn file / nút Thêm video
+  (≤ `WAIT_FILE`), trắng trơn (`_blank`: không chữ, không ô nhập) quá `BLANK_RELOAD` 20 s -> tải lại 1 lần, ghi chú
+  `_Report.add_note`. Người dùng hỏi thêm "căn giờ xong phụ đề đúng chưa": có – `retime` dời mốc câu (phụ đề lấy bằng
+  nghe) cùng `dub_at` / karaoke; phụ đề OCR vốn theo hình; đoạn cắt "Rút khoảng lặng" làm TRƯỚC khi căn không được dời.
+
 ## Vấn đề đang mở
 - 2.0.92/93: chờ người dùng mở lại dự án phim 3 giờ -> bấm "Căn giờ theo hình" (thanh trên cùng / tab Âm thanh) -> phát lại xem phụ đề
   / giọng lồng còn lệch khẩu hình không (nhất là cuối phim). Nếu bấm nút mà tool báo "đã khớp" (đo không thấy lệch) mà vẫn lệch -> nguyên
   nhân khác (VD bản đã xoá phụ đề của video VFR – chạy lại Xoá sạch, hoặc bản xem trước nhẹ), cần thêm thông tin.
+- 2.0.94: chờ người dùng thử lại Chrome điền sẵn Facebook: hết dải cảnh báo --no-sandbox, trang Business Suite có hiện
+  không (tool tự tải lại khi trắng quá 20 s); vẫn trắng -> có thể Meta chặn trình duyệt bị điều khiển, dùng Tự tải lên.
 - 2.0.91: chờ người dùng thử lại ảnh bìa: Chrome điền sẵn (YouTube: ảnh có hiện ở mục Hình thu nhỏ không – kênh
   chưa xác minh số điện thoại thì không có nút; TikTok: tool có tự mở Sửa ảnh bìa không), Tự tải lên (file
   `<video>.anh_bia.jpg` cạnh video). Ô nào báo "điền tay" -> xin ảnh chụp trang để thêm bộ chọn.

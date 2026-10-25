@@ -34,6 +34,10 @@ TT_URL = "https://www.tiktok.com/tiktokstudio/upload?from=webapp"
 LOGIN_URLS = {"youtube": "https://studio.youtube.com", "facebook": "https://business.facebook.com",
               "tiktok": "https://www.tiktok.com/login"}
 HEADLESS = False                 # test chạy ẩn
+# Playwright mặc định thêm --no-sandbox (Chrome hiện dải cảnh báo "cờ dòng lệnh không được hỗ trợ", tắt lớp bảo vệ của
+# Chrome) -> bật lại sandbox; chỉ Linux chạy bằng root (máy thử) mới không chạy được sandbox
+SANDBOX = not (sys.platform.startswith("linux") and hasattr(os, "geteuid") and os.geteuid() == 0)
+BLANK_RELOAD = 20                # trang vẫn trắng trơn sau ngần ấy giây -> tải lại 1 lần
 INSTALL_CMD = r".venv\Scripts\python -m pip install playwright"
 WAIT_FILE = 45                   # chờ trang tải lên hiện ô chọn file (giây)
 WAIT_FORM = 150                  # chờ ô tiêu đề / chú thích hiện ra sau khi gắn file (video lớn đọc lâu)
@@ -211,7 +215,7 @@ class _Engine:
         try:
             c = self.pw.chromium.launch_persistent_context(
                 str(profile_dir(pid)), executable_path=exe or None, headless=HEADLESS, no_viewport=True,
-                args=["--start-maximized", "--no-first-run", "--no-default-browser-check"])
+                chromium_sandbox=SANDBOX, args=["--start-maximized", "--no-first-run", "--no-default-browser-check"])
         except Exception as e:  # noqa: BLE001
             low = str(e).lower()
             if "in use" in low or "existing browser" in low or "closed" in low or "exited" in low:
@@ -263,6 +267,41 @@ def _first(page, sels: list[str], timeout: float, attached: bool = False):
         if time.time() >= end:
             return None
         page.wait_for_timeout(300)
+
+
+def _blank(page) -> bool:
+    """Trang chưa vẽ gì (Business Suite / Studio đang tải hoặc kẹt): không có chữ nào, không có ô nhập nào."""
+    try:
+        return bool(page.evaluate("() => !document.body || (!(document.body.innerText || '').trim() && "
+                                  "!document.querySelector('input,textarea,[contenteditable=true]'))"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _wait_ready(page, ready, timeout: float, rep=None) -> bool:
+    """Chờ trang tải lên sẵn sàng (ready(page) = True). Trang nặng có lúc trắng trơn rất lâu -> trắng quá BLANK_RELOAD
+    giây thì tải lại trang 1 lần rồi chờ thêm. False = hết giờ."""
+    t0 = time.time()
+    end, reloaded = t0 + timeout, False
+    while True:
+        try:
+            if ready(page):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        now = time.time()
+        if not reloaded and now - t0 > BLANK_RELOAD and _blank(page):
+            reloaded = True
+            if rep is not None:
+                rep.add_note(f"trang trắng sau {BLANK_RELOAD} s – đã tải lại trang")
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=60000)
+            except Exception:  # noqa: BLE001
+                pass
+            end = time.time() + timeout
+        if now >= end:
+            return False
+        page.wait_for_timeout(500)
 
 
 def _button(page, names: list[str], timeout: float):
@@ -335,6 +374,9 @@ class _Report:
         self.need_login = False
         self.note = ""
 
+    def add_note(self, text: str) -> None:
+        self.note = "; ".join(x for x in (self.note, text) if x)
+
     def step(self, name: str, fn) -> bool:
         """Chạy 1 bước; lỗi / không thấy -> ghi "điền tay", không dừng các bước sau."""
         try:
@@ -382,7 +424,7 @@ def _fill_youtube(page, item: dict, rep: _Report):
         page.wait_for_timeout(700)
     if item.get("publish_at"):
         rep.step("mở mục Lên lịch", lambda: _click(page, YT["schedule"], 8))
-        rep.note = f"chọn ngày giờ đăng {_when_text(item['publish_at'])} ở mục Lên lịch"
+        rep.add_note(f"chọn ngày giờ đăng {_when_text(item['publish_at'])} ở mục Lên lịch")
     else:
         rep.step("chế độ hiển thị", lambda: _click(page, YT[item.get("privacy") or "public"], 10))
     link = _first(page, YT["link"], 5)
@@ -405,6 +447,14 @@ def _fill_facebook(page, item: dict, rep: _Report):
         rep.need_login = True
         rep.miss.append("gắn file video")
         return
+    # Business Suite tải rất lâu (trang trắng) -> chờ tới khi có ô chọn file / nút Thêm video rồi mới gắn file
+    if not _wait_ready(page, lambda pg: _first(pg, FB["file"], 0, attached=True) is not None
+                       or _button(pg, FB["add"], 0) is not None or _logged_out(pg), WAIT_FILE, rep):
+        rep.add_note("Business Suite chưa tải xong – đợi trang hiện rồi gắn video bằng tay")
+    if _logged_out(page):
+        rep.need_login = True
+        rep.miss.append("gắn file video")
+        return
     if not _attach(page, FB, item["file"]):
         rep.miss.append("gắn file video")
     else:
@@ -420,7 +470,7 @@ def _fill_facebook(page, item: dict, rep: _Report):
     if item.get("thumbnail"):
         rep.miss.append("ảnh bìa")    # không tự gắn: ô chọn file của trang nhận cả ảnh -> dễ thành ảnh của bài đăng
     if item.get("publish_at"):
-        rep.note = f"chọn Lên lịch {_when_text(item['publish_at'])}"
+        rep.add_note(f"chọn Lên lịch {_when_text(item['publish_at'])}")
     rep.note = "; ".join(x for x in (rep.note, "chọn đúng Trang ở góc trên nếu tool mở nhầm Trang") if x)
     post = _button(page, FB["post"], 6)
     if post is not None:
