@@ -157,6 +157,26 @@ class SubsModel(QAbstractTableModel):
             self.dataChanged.emit(self.index(0, C_SEL), self.index(len(self.segs) - 1, C_SEL))
         self.picked.emit()
 
+    def set_voices(self, rows, vid: str) -> list[int]:
+        """Giọng riêng cho nhiều câu, báo đổi 1 lần. Đặt từng câu bằng setData thì mọi thứ chạy theo mỗi lần sửa (ảnh
+        chụp hoàn tác cả danh sách câu, phụ đề xem trước, đoạn giọng trên timeline…) lặp N lần – 2.600 câu đơ vài phút.
+        Trả số thứ tự các câu thật sự đổi giọng."""
+        vid = (vid or "").strip()
+        changed = []
+        for r in rows:
+            if 0 <= r < len(self.segs):
+                ex = self.segs[r].extra
+                if (ex.get("voice") or "") != vid:
+                    if vid:
+                        ex["voice"] = vid
+                    else:
+                        ex.pop("voice", None)
+                    changed.append(r)
+        if changed:
+            self.dataChanged.emit(self.index(min(changed), 0), self.index(max(changed), len(COLS) - 1))
+            self.edited.emit()
+        return changed
+
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self.segs)
 

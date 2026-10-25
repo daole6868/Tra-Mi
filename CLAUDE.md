@@ -200,7 +200,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (192 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (193 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1667,7 +1667,16 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `rescue_segments` của Paraformer (cần `is_ready("sensevoice")`) bị bỏ qua từ 2.0.89. Đã tái hiện bằng modelscope 1.40.2
   thật (thư viện thấy, tool không thấy) -> sau sửa tool trả đúng thư mục thư viện trả.
 
+- 2.1.2: "tích tất cả câu ở tab Lồng tiếng rồi chọn giọng cho câu đã tích -> tool đơ 3–5 phút". `_set_line_voice` (và
+  `_redub_picked`, bỏ giọng riêng khi chọn giọng chung / giọng người nói) đặt giọng TỪNG CÂU bằng `model.setData` -> mỗi
+  câu 1 lần `edited` -> `_undo_mark` 2 lần (ảnh chụp JSON CẢ danh sách câu) + `_segs_edited` (phụ đề xem trước,
+  `dub_clips`, timeline…) -> O(N²). Đo máy thử 2.610 câu đơn giản: 38,6 s (phim thật có mốc từng chữ / dữ liệu lồng tiếng
+  nặng hơn -> vài phút). Sửa: `SubsModel.set_voices(rows, vid)` đổi mọi câu rồi báo đổi 1 lần (1 `dataChanged` + 1
+  `edited`) -> 0,10 s, hoàn tác vẫn đúng 1 bước. Các nút hàng loạt khác (bỏ lồng, 🎵, tốc độ, cách xếp, không phải nhạc)
+  vốn đã báo đổi 1 lần.
+
 ## Vấn đề đang mở
+- 2.1.2: chờ người dùng thử lại tích hết câu → chọn "Giọng cho câu đã tích" trên phim dài (phải xong ngay, không đơ).
 - 2.1.1: chờ người dùng mở tab Tài liệu xem SenseVoice / Paraformer / FA-zh đã về "✓ Đã có trên máy" chưa (không phải tải lại).
 - 2.1.0: chờ người dùng `pip install pypinyin`, tải FireRedASR2 (tab Tài liệu – xem có tải được qua HF / ModelScope, mô
   hình thật nạp được không: tên tham số trong model.pth.tar phải khớp mã đã chép), thử bộ nghe FireRedASR2 + "Nghe 2 bộ

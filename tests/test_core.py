@@ -7316,6 +7316,59 @@ def test_firered_tiny_worker_end_to_end(tmp_path):
         os.environ.pop("TRAMI_FIRERED_PUNC", None)
 
 
+def test_gui_line_voice_bulk_one_update(sample_video):
+    """Tích hết câu ở tab Lồng tiếng rồi chọn "Giọng cho câu đã tích": đổi giọng mọi câu trong 1 lần báo đổi (trước
+    2.1.2 mỗi câu 1 lần setData -> ảnh chụp hoàn tác + phụ đề xem trước + timeline chạy lại N lần: 2.610 câu đơ vài phút)."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+
+    from trami import pipeline
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    n = 400
+    p = Project.create("doi giong nhieu cau")
+    pipeline.attach_source(p, sample_video)
+    p.data["info"]["duration"] = n * 2.5
+    p.segments = [Segment(i * 2.5, i * 2.5 + 2, f"第{i}句", f"Câu {i}", f"S{i % 2 + 1}") for i in range(n)]
+    p.save()
+    win = MainWindow()
+    try:
+        win.open_project(p.id)
+        app.processEvents()
+        pg = win.project_page
+        pg._toggle_pick_all(pg.dub_proxy)
+        assert len(pg.model.selected) == n
+        cb = pg.d_line_voice
+        cb.setCurrentIndex(next(i for i in range(cb.count()) if cb.itemData(i)))
+        vid = cb.currentData()
+        edits, marks = [], []
+        pg.model.edited.connect(lambda: edits.append(1))
+        real_mark = pg._undo_mark
+        pg._undo_mark = lambda *a, **k: (marks.append(1), real_mark(*a, **k))
+        pg._set_line_voice()
+        app.processEvents()
+        assert len(edits) == 1 and len(marks) <= 4
+        assert all(s.extra.get("voice") == vid for s in pg.model.segs)
+        p.reload()
+        assert all(s.extra.get("voice") == vid for s in p.segments)
+        pg._set_line_voice()           # đã đúng giọng: không báo đổi thêm lần nào
+        assert len(edits) == 1
+        pg._undo_mark = real_mark
+        pg.undo()                      # 1 bước hoàn tác cho cả lần đổi
+        app.processEvents()
+        assert not any(s.extra.get("voice") for s in pg.model.segs)
+        # bỏ giọng riêng hàng loạt (chọn giọng chung / giọng người nói) cũng 1 lần
+        pg.model.set_voices(range(n), vid)
+        edits.clear()
+        assert len(pg.model.set_voices(range(n), "")) == n and len(edits) == 1
+    finally:
+        win.close()
+        win.deleteLater()
+
+
 def test_gui_listen_accuracy_controls(sample_video, monkeypatch):
     """Giao diện 2.1.0: Cài đặt có bộ nghe FireRedASR2 + Nghe 2 bộ rồi so / AI hỗ trợ nghe / gợi ý tên / nghe lại tên;
     tab Tự động: nguồn "OCR + nghe", công tắc gương "Nghe 2 bộ rồi so"; tab Phụ đề: chữ gốc tô xanh câu 2 bộ khác

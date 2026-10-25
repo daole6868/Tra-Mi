@@ -4400,9 +4400,7 @@ class ProjectPage(QWidget):
         self.p.data["voices"] = {x["speaker"]: v for x in pipeline.speaker_list(self.p)}
         self.p.save()
         own = [r for r, x in enumerate(self.model.segs) if x.extra.get("voice")]
-        for r in own:   # giọng riêng từng câu đè lên giọng chung -> bỏ
-            self.model.setData(self.model.index(r, C_VOICE), "")
-        if own:
+        if self.model.set_voices(own, ""):   # giọng riêng từng câu đè lên giọng chung -> bỏ
             self._save_segs_now()
         self.loading = True
         try:
@@ -4439,8 +4437,7 @@ class ProjectPage(QWidget):
                 self, "Câu có giọng riêng",
                 f"{len(own)} câu của {spk} đang có giọng riêng (đặt ở cột Giọng / 'Đổi giọng' câu đã tích) nên KHÔNG đổi "
                 f"theo giọng vừa chọn.\n\nDùng giọng mới cho cả {len(own)} câu này?") == QMessageBox.StandardButton.Yes:
-            for r in own:
-                self.model.setData(self.model.index(r, C_VOICE), "")
+            self.model.set_voices(own, "")
             self._save_segs_now()
         self._update_voice_note()
 
@@ -4991,10 +4988,7 @@ class ProjectPage(QWidget):
         if not rows:
             return self.win.toast("Tích chọn câu cần đổi giọng ở cột Chọn trước", "warn")
         vid = self.d_line_voice.currentData() or ""
-        changed = [r for r in rows if (self.model.segs[r].extra.get("voice") or "") != vid]
-        for r in changed:
-            self.model.setData(self.model.index(r, C_VOICE), vid)
-        if changed:
+        if self.model.set_voices(rows, vid):   # 1 lần cho mọi câu (từng câu 1: 2.600 câu đơ vài phút)
             self._save_segs_now()
         name = self.d_line_voice.currentText() if vid else "giọng của người nói"
         self.win.toast(f"{len(rows)} câu đã tích đọc bằng {name} – bấm 'Tạo lại giọng các câu đã tích' để đọc lại", "ok")
@@ -5045,10 +5039,8 @@ class ProjectPage(QWidget):
         if not rows:
             return self.win.toast("Tích chọn câu cần tạo lại giọng ở cột Chọn trước", "warn")
         vid = self.d_line_voice.currentData() or ""
-        if vid and any((self.model.segs[r].extra.get("voice") or "") != vid for r in rows):
-            # ô "Giọng cho câu đã tích" đang chọn 1 giọng mà câu tích chưa mang giọng đó -> áp trước khi đọc lại
-            for r in rows:
-                self.model.setData(self.model.index(r, C_VOICE), vid)
+        # ô "Giọng cho câu đã tích" đang chọn 1 giọng mà câu tích chưa mang giọng đó -> áp trước khi đọc lại
+        if vid and self.model.set_voices(rows, vid):
             self._save_segs_now()
         self._redub_rows(rows)
 
