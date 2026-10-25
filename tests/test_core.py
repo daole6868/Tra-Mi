@@ -5444,6 +5444,17 @@ def test_gui_aspect_layers_timeline_silence_undo(sample_video, tmp_path):
     assert pp.x_amode.currentData() == "color"
     pp._save_edit_now()
     assert Project(p.id).edit["aspect"] == "4:5" and Project(p.id).edit["aspect_mode"] == "color"
+    # độ phân giải: ô ở tab Xuất (dưới Chất lượng) = ô ở tab Chỉnh sửa
+    from trami.gui.widgets import set_combo
+
+    set_combo(pp.x_res, "1080p")
+    assert pp.e_res.currentData() == "1080p"
+    set_combo(pp.e_res, "720p")
+    assert pp.x_res.currentData() == "720p"
+    pp._save_edit_now()
+    assert Project(p.id).edit["resolution"] == "720p"
+    set_combo(pp.e_res, "original")
+    pp._save_edit_now()
     # thêm mẫu chữ cọ vàng, kéo trên video (ô Ngang / Dọc cập nhật), kéo trên timeline
     pp.layers_tab.add_text("brush_yellow")
     lid = pp.layers_tab.sel

@@ -1509,6 +1509,9 @@ class ProjectPage(QWidget):
         self.x_name.setPlaceholderText("(tự động: tên video + _vietsub)")
         self.x_crf = f.row("Chất lượng", combo([("16", "Rất cao (file lớn)"), ("20", "Cao (khuyên dùng)"),
                                                 ("23", "Trung bình"), ("28", "Nhẹ")], "20"))
+        # cùng 1 giá trị với "Độ phân giải" ở tab Chỉnh sửa (đổi bên nào cũng đổi bên kia)
+        self.e_res.setToolTip("Độ phân giải video xuất ra – chung cho tab Chỉnh sửa và tab Xuất")
+        self.x_res = f.row("Độ phân giải", self._mirror(self.e_res))
         card.add(f)
         from .aspect_ui import AspectPicker, ExtraRatios
 

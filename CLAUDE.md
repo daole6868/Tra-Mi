@@ -1545,6 +1545,11 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `_Report.add_note`. Người dùng hỏi thêm "căn giờ xong phụ đề đúng chưa": có – `retime` dời mốc câu (phụ đề lấy bằng
   nghe) cùng `dub_at` / karaoke; phụ đề OCR vốn theo hình; đoạn cắt "Rút khoảng lặng" làm TRƯỚC khi căn không được dời.
 
+- 2.0.95: "thêm Độ phân giải vào tab Xuất dưới Chất lượng, chung 1 giá trị với tab Chỉnh sửa" -> `x_res` =
+  `_mirror(self.e_res)` (đổi bên nào cũng đổi bên kia, lưu `edit["resolution"]` như cũ). Trước đó tư vấn đăng nhanh hơn:
+  nút Publish của Business Suite chờ Facebook tải video lên – file nhẹ hơn (Chất lượng Trung bình 23, giữ 1080p; Facebook
+  vốn nén lại) / để tab tự tải / Zernio – API riêng tự đăng; đề xuất nút "Bản nhẹ để đăng" (chưa làm, chờ người dùng).
+
 ## Vấn đề đang mở
 - 2.0.92/93: chờ người dùng mở lại dự án phim 3 giờ -> bấm "Căn giờ theo hình" (thanh trên cùng / tab Âm thanh) -> phát lại xem phụ đề
   / giọng lồng còn lệch khẩu hình không (nhất là cuối phim). Nếu bấm nút mà tool báo "đã khớp" (đo không thấy lệch) mà vẫn lệch -> nguyên
