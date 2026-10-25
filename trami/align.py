@@ -964,9 +964,10 @@ def repeats_neighbor(text: str, segs: list[Segment], t0: float, t1: float, near:
 
 
 def rescue_missed(segs: list[Segment], audio: np.ndarray, decode: Callable, max_chars: int = 22,
-                  progress: Prog | None = None, cancel=None) -> list[Segment]:
+                  progress: Prog | None = None, cancel=None, keep_lines: bool = False) -> list[Segment]:
     """Nghe lại các đoạn có tiếng mà chưa có câu: decode(clip) -> (lời, nhãn). Trả về các câu mới (chưa sắp xếp);
-    câu cũ được gộp vào câu mới có extra["absorbed"] = True – người gọi bỏ chúng đi."""
+    câu cũ được gộp vào câu mới có extra["absorbed"] = True – người gọi bỏ chúng đi. keep_lines: không gộp câu cũ
+    (câu phụ đề OCR – chữ đã đúng, chỉ thêm câu mới)."""
     from .asr import is_hallucination
     from .asr_funasr import split_long
     from .ffmpeg import Cancelled
@@ -979,8 +980,9 @@ def rescue_missed(segs: list[Segment], audio: np.ndarray, decode: Callable, max_
         if progress:
             progress(k / max(1, len(wins)), f"Nghe lại đoạn bị sót {k + 1}/{len(wins)}")
         # câu ngắn nằm SÁT cửa sổ nghe lại thường là nửa kia của cùng 1 câu ("不要再" | "说") -> nghe gộp cả hai
-        touch = [s for s in segs if not s.extra.get("absorbed") and s.duration <= 2.5
-                 and len(CJK.findall(s.text)) <= 8 and (abs(s.start - hi) <= 0.15 or abs(lo - s.end) <= 0.15)]
+        touch = [] if keep_lines else [
+            s for s in segs if not s.extra.get("absorbed") and s.duration <= 2.5
+            and len(CJK.findall(s.text)) <= 8 and (abs(s.start - hi) <= 0.15 or abs(lo - s.end) <= 0.15)]
         if touch:
             lo2, hi2 = min([lo] + [s.start for s in touch]), max([hi] + [s.end for s in touch])
             text, tags = decode(audio[int(lo2 * SR):int(hi2 * SR)])

@@ -53,8 +53,12 @@ def summary(settings: dict | None = None) -> str:
     parts = []
     if o["method"] == "ocr":
         parts.append("OCR phụ đề cứng")
+    elif o["method"] == "hybrid":
+        parts.append("OCR + nghe bằng " + name(C.ASR_ENGINES, o["asr_engine"]))
     else:
         parts.append(name(C.ASR_ENGINES, o["asr_engine"]))
+    if o["method"] != "ocr" and st.get("asr_dual"):
+        parts.append("nghe 2 bộ rồi so")
     if o["engine"] == "none":
         parts.append("không dịch")
     else:
@@ -152,8 +156,10 @@ def _download(pid: str, url: str):
 
         pr = Project(pid)
         notes: list[str] = []
-        path = pipeline.download_video(url, pr.dir / "source", j.update, j.cancelled, notes=notes)
+        meta: dict = {}
+        path = pipeline.download_video(url, pr.dir / "source", j.update, j.cancelled, notes=notes, meta=meta)
         pipeline.attach_source(pr, path)
+        pr.data["video_meta"] = meta   # tiêu đề / mô tả: gợi ý tên riêng cho bộ nghe
         pr.data["name"] = video_name(path)
         pr.data["dl_warning"] = " ".join(notes)
         pr.save()

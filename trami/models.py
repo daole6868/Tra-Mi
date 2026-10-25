@@ -25,6 +25,10 @@ MS_IDS = {
     "fa-zh": "iic/speech_timestamp_prediction-v1-16k-offline",
 }
 VIENEU_REPO = "pnnbao-ump/VieNeu-TTS-v3-Turbo"
+FIRERED_REPO = "FireRedTeam/FireRedASR2-AED"
+FIRERED_PUNC = "FireRedTeam/FireRedPunc"
+FIRERED_FILES = ("model.pth.tar", "cmvn.ark", "dict.txt")
+FIRERED_PUNC_FILES = ("model.pth.tar", "out_dict", "chinese-bert-wwm-ext_vocab.txt", "chinese-lert-base/config.json")
 
 
 @dataclass
@@ -51,6 +55,9 @@ MODELS = [
     ModelInfo("hymt", "Dịch trên máy – Hy-MT2 1.8B", "Mô hình chuyên dịch của Tencent: dịch Trung -> Việt ngay trên máy, "
               "miễn phí, không cần API key (chọn \"Hy-MT2\" ở Công cụ dịch; GPU nhanh, CPU chậm)", "~3,6 GB",
               ("transformers", "torch"), "globe"),
+    ModelInfo("firered", "Nhận dạng – FireRedASR2", "Bộ nghe thứ 2 (Xiaohongshu): rất chuẩn tiếng Phổ thông + giọng địa "
+              "phương, nghe được lời hát, có điểm tin cậy; chọn làm bộ nghe ở Cài đặt / tab Tự động hoặc dùng \"Nghe 2 bộ "
+              "rồi so\" cùng Qwen3-ASR (kèm bộ đặt dấu câu FireRedPunc)", "~4,8 GB", ("torch", "transformers"), "mic"),
     ModelInfo("sensevoice", "Nhận dạng – SenseVoice + VAD", "Nghe tiếng Trung nhanh, nhẹ; VAD dùng chung cho Qwen3-ASR",
               "~900 MB", ("funasr", "modelscope"), "mic"),
     ModelInfo("paraformer", "Nhận dạng – Paraformer + dấu câu + CAM++",
@@ -224,6 +231,16 @@ def _whisper_cached(name: str) -> bool:
     return any(d.glob("snapshots/*/model.bin"))
 
 
+def _files_ready(repo: str, files) -> bool:
+    snap = _hf_snapshot(repo)
+    return bool(snap) and all((snap / f).is_file() and (snap / f).stat().st_size > 0 for f in files)
+
+
+def firered_ready() -> bool:
+    """Đã tải đủ FireRedASR2-AED (bộ đặt dấu câu không bắt buộc nhưng tải cùng)."""
+    return _files_ready(FIRERED_REPO, FIRERED_FILES)
+
+
 def missing_packages(key: str) -> list[str]:
     miss = [p for p in BY_KEY[key].packages if not installed(p)]
     if key in ("qwen_asr", "qwen_align") and not miss:
@@ -257,6 +274,8 @@ def is_ready(key: str, settings: dict | None = None) -> bool:
             from .translate import HYMT_REPO
 
             return _hf_complete((settings or {}).get("hymt_model") or HYMT_REPO)
+        if key == "firered":
+            return firered_ready() and _files_ready(FIRERED_PUNC, FIRERED_PUNC_FILES)
         if key == "sensevoice":
             return _ms_cached(MS_IDS["sensevoice"]) and _ms_cached(MS_IDS["fsmn-vad"])
         if key == "align":
@@ -387,6 +406,16 @@ def download(key: str, progress: Prog | None = None, cancel=None, settings: dict
         hf_download.download(repo, HF_FILES, token=(settings or {}).get("hf_token") or None, progress=progress,
                              cancel=cancel, label=label)
         if not _hf_complete(repo):
+            raise RuntimeError("Tải chưa đủ file mô hình (mạng bị ngắt?) – bấm Tải về lần nữa để tải tiếp phần còn thiếu.")
+    elif key == "firered":
+        from . import hf_download
+
+        token = (settings or {}).get("hf_token") or None
+        # mô hình chính (~4,4 GB) rồi bộ đặt dấu câu (~0,4 GB); tải cả kho (file .pth.tar / .ark / dict không thuộc HF_FILES)
+        hf_download.download(FIRERED_REPO, None, token=token, progress=progress, cancel=cancel, label=label, hi=0.9)
+        hf_download.download(FIRERED_PUNC, None, token=token, progress=progress, cancel=cancel,
+                             label=label + " (bộ đặt dấu câu)", lo=0.9)
+        if not is_ready("firered"):
             raise RuntimeError("Tải chưa đủ file mô hình (mạng bị ngắt?) – bấm Tải về lần nữa để tải tiếp phần còn thiếu.")
     elif key == "gender":
         from .gender import model_path

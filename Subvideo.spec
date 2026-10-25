@@ -6,7 +6,7 @@ import importlib.util
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
-datas = [("fonts", "fonts"), ("assets", "assets")]
+datas = [("fonts", "fonts"), ("assets", "assets"), ("trami/firered/LICENSE", "trami/firered")]   # giấy phép mã FireRedASR2
 binaries = []
 hiddenimports = collect_submodules("trami") + ["PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets", "PySide6.QtSvg"]
 
@@ -15,7 +15,7 @@ PKGS = ("faster_whisper", "ctranslate2", "rapidocr_onnxruntime", "onnxruntime", 
         "deep_translator", "imageio_ffmpeg", "funasr", "modelscope", "audio_separator", "speechbrain", "hyperpyyaml",
         "vieneu", "vieneu_utils", "sea_g2p", "omnivoice", "transformers", "tokenizers", "safetensors", "accelerate",
         "huggingface_hub", "hf_xet", "librosa", "soundfile", "torchaudio", "torchcodec", "kaldi_native_fbank",
-        "sentencepiece", "einops", "rotary_embedding_torch", "beartype", "onnx", "pydub", "playwright")
+        "sentencepiece", "einops", "rotary_embedding_torch", "beartype", "onnx", "pydub", "playwright", "pypinyin")
 for pkg in PKGS:
     if importlib.util.find_spec(pkg) is None:
         continue

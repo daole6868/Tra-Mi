@@ -39,7 +39,7 @@ def cli_translate(args):
     from .project import Project
 
     opts = {
-        "method": "ocr" if args.ocr else "asr",
+        "method": "hybrid" if args.ocr_nghe else "ocr" if args.ocr else "asr",
         "engine": args.engine,
         "style": args.style,
         "target": args.dich_sang,
@@ -103,6 +103,8 @@ def main(argv=None):
     d.add_argument("--dich-sang", default=None, choices=["vi", "en", "th", "ja", "ko"],
                    help="Ngôn ngữ đích: vi (Việt, mặc định) / en (Anh) / th (Thái) / ja (Nhật) / ko (Hàn)")
     d.add_argument("--ocr", action="store_true", help="Lấy phụ đề bằng OCR chữ Trung có sẵn trên video")
+    d.add_argument("--ocr-nghe", action="store_true",
+                   help="OCR + nghe: chữ từ phụ đề in sẵn, giờ từ giọng nói, câu phụ đề không có thì bộ nghe nghe thêm")
     d.add_argument("--xoa-phude", default="none", choices=["none", "blur", "box", "delogo", "inpaint", "patch", "stretch"],
                    help="Cách xử lý phụ đề Trung cũ trên video")
     d.add_argument("--long-tieng", action="store_true", help="Lồng tiếng (đọc bản dịch) bằng AI")

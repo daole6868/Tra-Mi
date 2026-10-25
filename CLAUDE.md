@@ -42,7 +42,23 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   đoạn thay đổi vào bản lồng đang dùng theo bảng `placed` của bản đó – 2.0.73), `clean_tts_text`,
   `preview_voice`, `plan_layout` (xếp giọng theo thời gian, thuần – không đụng âm thanh; `OVERFLOW_MODES`). VieNeu API: `Vieneu(mode="v3turbo").infer(text, voice="<tên preset>" | ref_audio=...)` → numpy 48 kHz.
 - `trami/asr_qwen.py` + `qwen_asr_worker.py` (Qwen3-ASR + Qwen3-ForcedAligner, tiến trình riêng `--qwen-asr-worker`,
-  transformers ≥ 5.13, mặc định từ 2.0.29), `trami/asr.py` (faster-whisper), `asr_funasr.py` (SenseVoice/Paraformer, `mark_songs`), `diarize.py` (ECAPA),
+  transformers ≥ 5.13, mặc định từ 2.0.29; `transcribe_qwen` / `relisten_cuts` / `qwen_decoder` / `align_qwen` nhận
+  `engine` "qwen3" | "firered" – `asr_worker(engine)`), FireRedASR2-AED (2.1.0): mã suy luận chép từ FireRedASR2S
+  (Apache-2.0) vào `trami/firered/` (fbank Kaldi + CMVN numpy `feat.py`, căn CTC Viterbi numpy `ctc.py` thay
+  torchaudio, WordPiece riêng `tokenizer.py`, bộ đặt dấu câu FireRedPunc `punc.py`; không cài gói `fireredasr2s` vì ghim
+  torch / transformers), tiến trình `--firered-worker` (`firered_worker.py`, cùng giao thức Qwen: "asr" / "align", bf16
+  khi card < 12 GB), `asr_firered.py` (`FireRedWorker`, `ready`), tab Tài liệu "firered" (`models.FIRERED_REPO` +
+  `FIRERED_PUNC`, ModelScope `xukaituo/…`); `trami/dual.py` "Nghe 2 bộ rồi so" (`alt_spans`, `assign` – khớp chữ bộ 2
+  vào từng câu bằng SequenceMatcher, `merge_alt` giữ dấu câu, AI chọn `PICK_PROMPT` / `parse_pick`: C chỉ khi mọi chữ có
+  trong A ∪ B) -> `pipeline.dual_listen` (cuối `recognize` nếu `asr_dual`) / `dual_check` (nút tab Phụ đề) / `use_alt`;
+  `extra["asr_alt"]` / `asr_alt_eng` / `asr_pick` / `asr_unsure` (chữ gốc xanh); `trami/names.py` tên riêng: `names_of`
+  (bảng thuật ngữ + hồ sơ phim), `context_text` (热词 + tiêu đề / mô tả / thẻ video `p.data["video_meta"]` -> lời nhắc
+  Qwen3 qua `settings["_asr_context"]`), `candidates` (pypinyin: tên 2 chữ cần cùng thanh + không phải từ jieba thông
+  dụng; loose = chỉ chọn câu nghe lại), `fix` -> `pipeline.name_pass` (nghe lại câu nghi sai tên kèm gợi ý, vẫn sai thì
+  sửa theo âm, chưa có tên mà có AI -> `_learn_profile` lập hồ sơ phim) / `fix_names_now`; "OCR + nghe" (`method`
+  "hybrid", `pipeline.hybrid_listen`: chữ OCR + căn giờ từng chữ từ giọng (pad 0,6), `rescue_segments(keep_lines=True)`
+  thêm câu OCR sót `extra["from_asr"]` (chữ cam), `sub_source` "hybrid"); Cài đặt `asr_dual` / `asr_ai` / `asr_context`
+  / `asr_name_pass`; `pipeline.listen_note`, `_listen_audio`. `trami/asr.py` (faster-whisper), `asr_funasr.py` (SenseVoice/Paraformer, `mark_songs`), `diarize.py` (ECAPA),
   `separate.py` (audio-separator; phim > ~13 phút tách từng đoạn 10 phút `plan_chunks` / `_Joiner`), `lama.py` + `inpaint.py` (xoá chữ), `ocr.py` (RapidOCR),
   `skills.py` (kỹ năng dịch AI: sửa lỗi nghe & nối câu, hồ sơ phim, kiểm tra bản dịch, kỹ năng riêng – `gui/skills_dialog.py`),
   `translate.py` (`LLMClient` gọi HTTP: anthropic / OpenAI-compatible / gemini / deepseek / ollama; Google gtx;
@@ -182,9 +198,9 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   "pyz+py" cho transformers / torch / omnivoice / vieneu / funasr / speechbrain, loại gradio / tensorflow / matplotlib…),
   `DongGoi_EXE.bat` (chép bin\ffmpeg, ghi `datadir.txt` = thư mục data của bản Python, gọi `TaoBieuTuong.bat`),
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
-  TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
+  TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (181 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (187 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1622,7 +1638,30 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   "<tên>"). `sitelogin.extract_urls`: nhiều link trên 1 dòng / dính liền nhau cũng nhận (Trang chủ, Hàng loạt). Tên dự án
   `autoflow.video_name` bỏ " [mã]", tiêu đề dài bị cắt mất "p02" -> thêm "(P2)" (3 phần không trùng tên).
 
+- 2.1.0: người dùng: "bộ nghe thường sai rất nhiều tên riêng, có đủ loại lỗi (đồng âm, nói nhanh, lẫn nhạc) nhưng không
+  nhiều – làm full A B C; FireRedASR2 thêm vào tab Tài liệu để tải; tự chọn bộ nghe".
+  * C FireRedASR2-AED (Xiaohongshu 2/2026, Apache-2.0; bảng đo của tác giả: tiếng Phổ thông 3,05 % lỗi chữ so với
+    Qwen3-ASR-1.7B 3,76 %, lời hát 1,17 % / 2,57 %): bộ nghe thứ 3 chọn ở Cài đặt / tab Tự động ("firered"), tab Tài liệu
+    tải ~4,8 GB (mô hình + FireRedPunc). Chép mã suy luận (không dùng gói pip – ghim torch 2.10 / transformers 5.1, sẽ
+    phá torch cu128 của người dùng), viết lại phần cần torchaudio / kaldi_native_fbank / sentencepiece bằng numpy (fbank
+    khớp knf ≤ 5e-5, căn CTC = Viterbi). Chưa tải / lỗi -> tự dùng Qwen3-ASR + `asr_warning`.
+  * C2 Nghe 2 bộ rồi so (`asr_dual`, tab Tự động + Cài đặt): bộ còn lại nghe đúng các câu (gom khúc ≤ 28 s), câu khác chữ
+    -> AI hỗ trợ nghe (`asr_ai`: theo công cụ dịch / tắt / tên AI; lô 40 câu kèm 2 câu trước / sau + hồ sơ phim) chọn A /
+    B / C; đổi chữ thì căn lại giờ câu đó; AI không chắc / không có AI -> chữ xanh + tooltip chữ bộ 2. Tab Phụ đề → Công cụ
+    → Lời hát & nghe nhầm: "Nghe 2 bộ rồi so" (việc GPU "dual"), "Tích câu 2 bộ nghe khác nhau", "Dùng bản bộ nghe 2".
+    Đổi chữ gốc không xoá giọng lồng / bản dịch (tích sẵn câu đổi -> "Dịch câu đã tích").
+  * A tên riêng: gợi ý trước khi nghe (Qwen3-ASR nhận ngữ cảnh chữ; tải từ link thì lưu tiêu đề / mô tả / thẻ video),
+    nghe lại câu đọc giống tên mà viết khác, sửa theo âm đọc (nút "Sửa tên theo âm đọc"); requirements thêm `pypinyin`.
+  * B Nguồn phụ đề "OCR + nghe" (tab Tự động / Hàng loạt / dòng lệnh `--ocr-nghe`): chữ OCR, giờ từ giọng, câu OCR sót
+    lấy từ bộ nghe; có thể kèm Nghe 2 bộ (so với chữ OCR).
+  * Thử: mô hình FireRed tí hon trọng số ngẫu nhiên qua tiến trình thật (asr / align / dấu câu, venv có torch), bộ nghe
+    giả cho dual / name_pass / hybrid / fallback, giao diện offscreen. Mô hình thật chưa chạy (sandbox chặn HF / ModelScope).
+
 ## Vấn đề đang mở
+- 2.1.0: chờ người dùng `pip install pypinyin`, tải FireRedASR2 (tab Tài liệu – xem có tải được qua HF / ModelScope, mô
+  hình thật nạp được không: tên tham số trong model.pth.tar phải khớp mã đã chép), thử bộ nghe FireRedASR2 + "Nghe 2 bộ
+  rồi so" trên phim thật (bao nhiêu câu khác nhau, AI chọn có đúng không, chậm thêm bao nhiêu), "OCR + nghe" trên video có
+  phụ đề Trung, và tên riêng (điền Bảng tên riêng trước rồi nghe lại).
 - 2.0.99: chờ người dùng dán lại 3 link phần 1/2/3 ở Trang chủ -> "Tải về & dịch tự động": thông báo "tải lại 3 video lần
   trước chưa tải xong", 3 dự án tên có p01 / p02 / p03 (hoặc "(P2)"), mỗi dự án đúng phần của nó.
 - 2.0.96: chờ người dùng chạy lại "1. Nghe & tách câu" (hoặc dự án cũ: tab Phụ đề → Công cụ → Căn mép theo giọng, bật đo

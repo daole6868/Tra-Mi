@@ -75,7 +75,7 @@ def max_running() -> int:
         _limit_cache[0] = now
     return _limit_cache[1]
 # việc nặng GPU (mỗi lúc 1 việc); việc khác (mạng / CPU) chạy song song
-GPU_KINDS = {"auto", "recognize", "separate", "diarize", "inpaint", "dub", "redub", "realign"}
+GPU_KINDS = {"auto", "recognize", "separate", "diarize", "inpaint", "dub", "redub", "realign", "dual"}
 # việc chỉ ĐỌC dự án (không ghi project.json) -> chạy được song song với việc khác của cùng dự án
 READONLY_KINDS = {"preview", "tool", "publish"}   # publish chỉ ghi posts.json riêng
 # việc rất nhẹ (vài giây, không dùng card): xếp lại bản lồng sau khi xoá / kéo / gộp câu -> không phải chờ việc dài của

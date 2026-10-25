@@ -17,12 +17,17 @@ STYLES = [("auto", "Tự nhận biết"), ("co_trang", "Cổ trang / tiên hiệ
           ("hien_dai", "Hiện đại / ngôn tình / đô thị"), ("review", "Review / tóm tắt phim"),
           ("hoat_hinh", "Hoạt hình / donghua"), ("tai_lieu", "Tài liệu / hướng dẫn / bán hàng")]
 ASR_ENGINES = [("qwen3", "Qwen3-ASR – nghe chuẩn nhất, căn giờ từng chữ (khuyên dùng, cần GPU)"),
+               ("firered", "FireRedASR2 – rất chuẩn tiếng Phổ thông + giọng địa phương, lời hát (tải ở tab Tài liệu)"),
                ("sensevoice", "SenseVoice – nhanh, nhẹ"),
                ("paraformer", "Paraformer – có dấu câu + tự phân người nói"),
                ("whisper", "Whisper large-v3 – đa ngôn ngữ")]
 LANGS = [("zh", "Tiếng Trung (Phổ thông)"), ("yue", "Tiếng Quảng Đông"), ("auto", "Tự nhận diện"),
          ("en", "Tiếng Anh"), ("ja", "Tiếng Nhật"), ("ko", "Tiếng Hàn")]
-METHODS = [("asr", "Nhận dạng giọng nói"), ("ocr", "OCR phụ đề cứng có sẵn trên video")]
+DUAL_HELP = ("Nghe xong bằng bộ chính, bộ còn lại (Qwen3-ASR ↔ FireRedASR2) nghe lại đúng các câu đó rồi so chữ từng "
+             "câu: câu 2 bộ nghe khác nhau -> AI hỗ trợ nghe chọn bản đúng theo ngữ cảnh; không chắc -> chữ gốc tô xanh "
+             "để bạn nghe lại. Cần tải FireRedASR2 ở tab Tài liệu; lâu hơn ~1,5–2 lần")
+METHODS = [("asr", "Nhận dạng giọng nói"), ("ocr", "OCR phụ đề cứng có sẵn trên video"),
+           ("hybrid", "OCR + nghe – chữ từ phụ đề in sẵn, giờ từ giọng nói (chuẩn nhất khi có phụ đề Trung)")]
 SPLIT_STYLES = [("dub", "Câu trọn ý – hợp lồng tiếng (khuyên dùng)"), ("short", "Câu ngắn – hợp phụ đề đọc nhanh")]
 SPLIT_HELP = ("Câu trọn ý: tin dấu câu của bộ nghe, chỉ cắt ở chỗ nghỉ rất dài (≥ 1,6 s) hoặc dấu phẩy + nghỉ ≥ 0,7 s, "
               "tự nối dòng chưa hết câu → dịch và lồng tiếng liền mạch. Câu ngắn: cắt ở mọi chỗ nghỉ ≥ 0,8 s / dấu phẩy + "

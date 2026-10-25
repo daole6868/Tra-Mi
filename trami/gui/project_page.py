@@ -303,6 +303,9 @@ class ProjectPage(QWidget):
         self.a_spk = f.row("Phân biệt người nói", Switch(bool(s.get("diarize", True))),
                            "Cùng 1 công tắc với Cài đặt → Tự phân biệt người nói. Số người nói / độ nhạy ở Cài đặt")
         self.a_split = f.row("Kiểu tách câu", combo(C.SPLIT_STYLES, s.get("split_style", "dub")), C.SPLIT_HELP)
+        self.a_dual = f.row("Nghe 2 bộ rồi so", Switch(bool(s.get("asr_dual", False))),
+                            C.DUAL_HELP + ". Cùng 1 công tắc với Cài đặt → Nhận dạng giọng nói")
+        self.a_dual.toggled.connect(self._audio_opts_changed)
         self.a_sep.toggled.connect(self._audio_opts_changed)
         self.a_spk.toggled.connect(self._audio_opts_changed)
         self.a_split.currentIndexChanged.connect(self._audio_opts_changed)
@@ -380,8 +383,8 @@ class ProjectPage(QWidget):
         self.a_denoise = f.row("Lọc nhiễu âm thanh", Switch(False))
         self.a_force = f.row("Nhận dạng lại từ đầu", Switch(False))
         self.a_method.currentIndexChanged.connect(
-            lambda: (self.a_asr.setEnabled(self.a_method.currentData() == "asr"),
-                     self.a_ocrfps.setEnabled(self.a_method.currentData() == "ocr")))
+            lambda: (self.a_asr.setEnabled(self.a_method.currentData() in ("asr", "hybrid")),
+                     self.a_ocrfps.setEnabled(self.a_method.currentData() in ("ocr", "hybrid"))))
         # 1 công cụ dịch cho cả tool: đổi ở đây = đổi ở Cài đặt (nút Dịch, AI rút gọn, dịch lại đều dùng chung)
         self.a_engine.currentIndexChanged.connect(self._engine_changed)
         self.a_style.currentIndexChanged.connect(self._engine_changed)
@@ -610,7 +613,18 @@ class ProjectPage(QWidget):
                  hbox(label("lệch cao độ cho phép", "muted"), self.s_ptol)),
             flow(button("Tích câu nghi nghe nhầm", "check", flat=True, on_click=lambda: self._pick_flag("noise")),
                  button("Không phải nhạc", "x", "Bỏ đánh dấu các câu đã tích (câu thoại thật) – lần lọc sau không đánh "
-                        "dấu lại", flat=True, on_click=self._voice_ok))]
+                        "dấu lại", flat=True, on_click=self._voice_ok)),
+            flow(_rowlbl("2 bộ nghe"),
+                 button("Nghe 2 bộ rồi so", "mic", C.DUAL_HELP + ". Chạy cho câu đã tích (chưa tích = cả phim)",
+                        on_click=self.run_dual),
+                 button("Tích câu 2 bộ nghe khác nhau", "check", "Câu chữ gốc màu xanh: 2 bộ nghe ra khác nhau mà chưa "
+                        "chọn được – rê chuột vào chữ gốc xem bản của bộ 2", flat=True,
+                        on_click=lambda: self._pick_flag("asr_alt")),
+                 button("Dùng bản bộ nghe 2", "refresh", "Câu đã tích: thay chữ gốc bằng chữ bộ nghe thứ 2 nghe được (giữ "
+                        "dấu câu). Ctrl+Z hoàn tác", flat=True, on_click=self._use_alt)),
+            flow(_rowlbl("Tên riêng"),
+                 button("Sửa tên theo âm đọc", "wand", "Chỗ đọc giống hệt 1 tên trong Bảng tên riêng / hồ sơ phim mà viết "
+                        "khác (临北 → 林北) -> sửa thành đúng tên. Ctrl+Z hoàn tác", flat=True, on_click=self._fix_names))]
         # giờ HIỆN phụ đề theo giọng lồng (2.0.96) – không đổi giờ nói của câu
         from ..subtitle import FOLLOW_MODES
 
@@ -2458,7 +2472,7 @@ class ProjectPage(QWidget):
         if not self.p or not self.p.data.get("source"):
             return self.win.toast("Dự án chưa có video", "err")
         opts = self._auto_opts()
-        if opts["method"] == "ocr" and self._hs_regions:   # vùng chữ bạn đã khoanh (như nút "1. Nghe & tách câu")
+        if opts["method"] in ("ocr", "hybrid") and self._hs_regions:   # vùng chữ đã khoanh (như "1. Nghe & tách câu")
             opts["region"] = self._hs_regions[0]
         if self.p.segments and not opts["force_recognize"]:
             done = (any(x.trans.strip() for x in self.p.segments)
@@ -2475,8 +2489,9 @@ class ProjectPage(QWidget):
             return
         o = self._auto_opts()
         st = dict(load_settings())
-        st.update({"asr_engine": o["asr_engine"], "diarize": o["diarize"], "sep_before_asr": o["separate"]})
-        region = self._hs_regions[0] if (o["method"] == "ocr" and self._hs_regions) else None
+        st.update({"asr_engine": o["asr_engine"], "diarize": o["diarize"], "sep_before_asr": o["separate"],
+                   "asr_dual": self.a_dual.isChecked()})
+        region = self._hs_regions[0] if (o["method"] in ("ocr", "hybrid") and self._hs_regions) else None
 
         def fn(j, p):
             n = pipeline.recognize(p, o["method"], o["language"], region, o["ocr_fps"], st, j.update, j.cancelled,
@@ -2499,13 +2514,15 @@ class ProjectPage(QWidget):
             if o["method"] != "ocr" and p.data.get("noise_found"):
                 msg += (f" · ⚠ {p.data['noise_found']} câu nghi là nhạc / tiếng động bị nghe thành lời – tab Phụ đề "
                         "bấm 'Tích câu nghi nghe nhầm', nghe lại rồi Xoá")
+            if pipeline.listen_note(p):
+                msg += " · " + pipeline.listen_note(p)
             if p.data.get("snap_stats"):
                 msg += " · " + pipeline.snap_note(p.data["snap_stats"])
-            if o["method"] != "ocr":
+            if o["method"] == "asr":
                 msg += " · kiểu tách: " + dict(C.SPLIT_STYLES).get(st.get("split_style", "dub"), "").split(" –")[0]
-            used = {"qwen3": "Qwen3-ASR", "sensevoice": "SenseVoice", "paraformer": "Paraformer",
-                    "whisper": "Whisper"}.get(p.data.get("asr_engine_used", ""), "")
-            if o["method"] != "ocr" and used:
+            used = {"qwen3": "Qwen3-ASR", "firered": "FireRedASR2", "sensevoice": "SenseVoice",
+                    "paraformer": "Paraformer", "whisper": "Whisper"}.get(p.data.get("asr_engine_used", ""), "")
+            if o["method"] == "asr" and used:
                 msg += f" · nghe bằng {used}"
             if o["method"] != "ocr" and p.data.get("asr_warning"):
                 msg += "  ⚠ " + p.data["asr_warning"]
@@ -2515,7 +2532,7 @@ class ProjectPage(QWidget):
                 msg += f" · đã tách giọng / nhạc nền bằng {pipeline.sep_model_name(p)} (dùng được ở tab Âm thanh)"
             if o["method"] != "ocr":
                 msg += " · " + pipeline.speaker_note(p, st)
-            if o["method"] == "ocr":
+            if o["method"] in ("ocr", "hybrid"):
                 ost = p.data.get("ocr_stats") or {}
                 if ost.get("frames"):
                     msg += f" · quét {ost['frames']} khung ({ost.get('fps', 4):g} lần/giây), đọc chữ {ost['ocr_runs']} lần"
@@ -2573,8 +2590,9 @@ class ProjectPage(QWidget):
             self.a_denoise.setChecked(bool(pv["denoise"]))
             set_combo(self.a_asr, st.get("asr_engine"))
             set_combo(self.a_ocrfps, str(st.get("ocr_fps", "4")))
-            self.a_asr.setEnabled(pv["method"] == "asr")
-            self.a_ocrfps.setEnabled(pv["method"] == "ocr")
+            self.a_asr.setEnabled(pv["method"] in ("asr", "hybrid"))
+            self.a_ocrfps.setEnabled(pv["method"] in ("ocr", "hybrid"))
+            self.a_dual.setChecked(bool(st.get("asr_dual", False)))
         finally:
             self.loading = was
         self._update_engine_label()
@@ -2850,7 +2868,8 @@ class ProjectPage(QWidget):
         self.settings = save_settings({"sep_before_asr": self.a_sep.isChecked(), "diarize": self.a_spk.isChecked(),
                                        "sep_model": self.d_sepmodel.currentData() or self.settings.get("sep_model"),
                                        "split_style": self.a_split.currentData() or "dub",
-                                       "ai_join_engine": self.a_joinai.currentData() or "auto"})
+                                       "ai_join_engine": self.a_joinai.currentData() or "auto",
+                                       "asr_dual": self.a_dual.isChecked()})
 
     def _engine_changed(self, *_):
         self._update_engine_label()
@@ -4821,8 +4840,12 @@ class ProjectPage(QWidget):
         self.win.toast("Đã " + ", ".join(msg) + " – 'Khôi phục câu cảm thán đã xoá' (mục 3) để lấy lại", "ok")
 
     def _pick_flag(self, key: str):
-        rows = [i for i, s in enumerate(self.model.segs) if s.extra.get(key)]
-        what = "nghi nghe nhầm (nhạc / tiếng động)" if key == "noise" else "bài hát 🎵"
+        if key == "asr_alt":   # chưa chọn được bản đúng trước; không có thì mọi câu 2 bộ nghe khác nhau
+            rows = [i for i, s in enumerate(self.model.segs) if s.extra.get("asr_unsure")] or \
+                [i for i, s in enumerate(self.model.segs) if s.extra.get("asr_alt") is not None]
+        else:
+            rows = [i for i, s in enumerate(self.model.segs) if s.extra.get(key)]
+        what = {"noise": "nghi nghe nhầm (nhạc / tiếng động)", "asr_alt": "2 bộ nghe ra khác nhau"}.get(key, "bài hát 🎵")
         if not rows:
             return self.win.toast(f"Không có câu nào đánh dấu {what}", "ok")
         self.model.set_picked(range(len(self.model.segs)), False)
@@ -4830,6 +4853,62 @@ class ProjectPage(QWidget):
         self._select_line(rows[0], seek=True)
         self.win.toast(f"Đã tích {len(rows)} câu {what}" + (" – rê chuột vào chữ gốc để xem lý do, nghe lại rồi bấm "
                        "Xoá (hoặc 'Không phải nhạc' cho câu thoại thật)" if key == "noise" else ""), "ok")
+
+    def run_dual(self):
+        """Nghe 2 bộ rồi so cho phụ đề đã có (câu đã tích / cả phim)."""
+        if not self.model.segs:
+            return self.win.toast("Chưa có phụ đề", "warn")
+        p = self.p
+        primary = "ocr" if p.data.get("sub_source") in ("ocr", "hybrid") else p.data.get("asr_engine_used") or \
+            self.settings.get("asr_engine", "qwen3")
+        eng, why = pipeline.dual_engine(primary, p.data.get("language", "zh") or "zh", self.settings)
+        if not eng:
+            return self.win.toast("Chưa nghe 2 bộ được: " + why, "warn")
+        rows = sorted(self.model.selected) or None
+
+        def fn(j, p):
+            st = pipeline.dual_check(p, None, rows, j.update, j.cancelled)
+            pick = [i for i, x in enumerate(p.segments) if x.extra.get("asr_unsure")] + st.get("changed", [])
+            msg = pipeline.dual_note(st) or "Đã nghe 2 bộ"
+            if st.get("changed") and any(p.segments[i].trans.strip() for i in st["changed"]):
+                msg += " · câu đổi chữ gốc đã tích sẵn – bấm 'Dịch câu đã tích' để dịch lại"
+            return {"message": msg, "pick": sorted(set(pick))}
+        self.submit("dual", "Nghe 2 bộ rồi so", fn)
+
+    def _use_alt(self):
+        rows = [r for r in sorted(self.model.selected) if 0 <= r < len(self.model.segs)]
+        if not rows:
+            return self.win.toast("Tích câu (chữ gốc màu xanh) trước – 'Tích câu 2 bộ nghe khác nhau'", "warn")
+        self.flush()
+        self._undo_mark()
+        done = pipeline.use_alt(self.p, rows)
+        self.reload()
+        if not done:
+            return self.win.toast("Các câu đã tích không có bản khác của bộ nghe 2", "warn")
+        self.model.set_picked(range(len(self.model.segs)), False)
+        self.model.set_picked(done)
+        tr = any(self.model.segs[i].trans.strip() for i in done if i < len(self.model.segs))
+        self.win.toast(f"Đã dùng bản bộ nghe 2 cho {len(done)} câu" + (" – bấm 'Dịch câu đã tích' để dịch lại" if tr
+                                                                     else ""), "ok")
+
+    def _fix_names(self):
+        if not self.model.segs:
+            return self.win.toast("Chưa có phụ đề", "warn")
+        self.flush()
+        self._undo_mark()
+        try:
+            rows = pipeline.fix_names_now(self.p, self.settings)
+        except ValueError as e:
+            return self.win.toast(str(e), "warn")
+        self.reload()
+        if not rows:
+            return self.win.toast("Không thấy chỗ nào đọc giống tên riêng mà viết khác", "ok")
+        self.model.set_picked(range(len(self.model.segs)), False)
+        self.model.set_picked(rows)
+        self._select_line(rows[0], seek=False)
+        tr = any(self.model.segs[i].trans.strip() for i in rows if i < len(self.model.segs))
+        self.win.toast(f"Đã sửa tên riêng ở {len(rows)} câu (rê chuột vào chữ gốc xem chỗ sửa)" +
+                       (" – bấm 'Dịch câu đã tích' để dịch lại" if tr else ""), "ok")
 
     def _ptol_changed(self, v: float):
         if not self.loading:

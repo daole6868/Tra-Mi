@@ -89,13 +89,14 @@ def _dl_error(e: BaseException, url: str, used_cookies: bool) -> str:
 
 
 def download_video(url: str, dest_dir: Path, progress: Prog | None = None, cancel=None,
-                   notes: list | None = None, settings: dict | None = None) -> Path:
+                   notes: list | None = None, settings: dict | None = None, meta: dict | None = None) -> Path:
     """Tải video từ Douyin, Bilibili, YouTube, TikTok, Weibo, Xigua... bằng yt-dlp.
 
     `url` có thể là cả dòng chia sẻ của app ("【tên】 https://b23.tv/xx") – tự lấy link. Bilibili đã đăng nhập bằng mã QR
     (sitelogin) -> tải 720p/1080p; trang khác dùng cookie trình duyệt / file cookies.txt ở Cài đặt. Chọn ≤ 1080p, ưu
     tiên H.264 (trình phát + FFmpeg mở nhanh, không phải tạo bản xem trước như HEVC/AV1). Tiến độ gộp hình + tiếng
-    (Bilibili / YouTube tải 2 file rồi ghép). `notes` nhận lời nhắc (vd. chỉ 480p vì chưa đăng nhập)."""
+    (Bilibili / YouTube tải 2 file rồi ghép). `notes` nhận lời nhắc (vd. chỉ 480p vì chưa đăng nhập).
+    `meta` nhận tiêu đề / mô tả / thẻ / kênh của video (gợi ý tên riêng cho bộ nghe – names.context_text)."""
     import yt_dlp
 
     from . import sitelogin
@@ -226,6 +227,10 @@ def download_video(url: str, dest_dir: Path, progress: Prog | None = None, cance
             path = cands[0]
     if not path.exists():
         raise RuntimeError("Tải video thất bại.")
+    if meta is not None:
+        meta.update({"title": str(info.get("title") or "")[:200], "uploader": str(info.get("uploader") or "")[:80],
+                     "description": str(info.get("description") or "")[:600],
+                     "tags": [str(t)[:30] for t in (info.get("tags") or [])[:20]], "url": url})
     h = int(info.get("height") or 0)
     if bili and h and h <= 480 and not cookie_opts and notes is not None:
         notes.append(f"Video chỉ {h}p vì chưa đăng nhập Bilibili – ở Trang chủ bấm 'Đăng nhập Bilibili (quét mã QR)' "
@@ -448,7 +453,7 @@ def retime(p: Project, settings: dict | None = None, progress: Prog | None = Non
         return np.where(t > c[-1], pt[-1] + (t - c[-1]), r)
 
     moved = 0
-    if p.data.get("sub_source") == "asr":
+    if p.data.get("sub_source") in ("asr", "hybrid"):   # giờ câu đo trên âm thanh (OCR thuần theo hình – không dời)
         segs = p.segments
         _retime_segs(segs, to_real)
         p.segments = segs
@@ -674,11 +679,12 @@ def align_segments(segs, wav: Path, language: str, settings: dict, progress: Pro
     try:
         audio = load_wav16k(wav)
         zh = language in ("zh", "auto", "yue")
-        if zh and use_qwen_align(engine, settings):
+        if zh and (engine == "firered" or use_qwen_align(engine, settings)):
             from . import asr_qwen
 
-            try:
-                asr_qwen.align_qwen(segs, wav, language, settings, _sub(progress, 0.0, 0.7), cancel)
+            try:   # FireRedASR2: căn câu chưa có mốc (câu nghe lại…) bằng chính nhánh CTC của nó (không nạp thêm Qwen3)
+                asr_qwen.align_qwen(segs, wav, language, settings, _sub(progress, 0.0, 0.7), cancel,
+                                    engine="firered" if engine == "firered" else "qwen3")
             except ff.Cancelled:
                 raise
             except Exception as e:  # noqa: BLE001 – dùng fa-zh / độ to thay thế
@@ -715,7 +721,7 @@ def split_lines(segs, max_chars: int = 28):
 
 
 def rescue_segments(segs, wav: Path, engine: str, language: str, settings: dict, keep_speakers: bool = False,
-                    progress: Prog | None = None, cancel=None) -> tuple[list, int]:
+                    progress: Prog | None = None, cancel=None, keep_lines: bool = False) -> tuple[list, int]:
     """Tìm đoạn có tiếng nói (trên giọng đã tách) mà chưa có câu nào, nghe lại từng đoạn. Trả về (câu, số câu thêm)."""
     from . import align
     from .asr_funasr import load_wav16k
@@ -725,10 +731,10 @@ def rescue_segments(segs, wav: Path, engine: str, language: str, settings: dict,
             from .asr import whisper_decoder
 
             decode = whisper_decoder(settings, language)
-        elif engine == "qwen3":
+        elif engine in ("qwen3", "firered"):
             from .asr_qwen import qwen_decoder
 
-            decode = qwen_decoder(settings, language, Path(wav).parent)
+            decode = qwen_decoder(settings, language, Path(wav).parent, engine=engine)
         else:
             from . import models
             from .asr_funasr import sensevoice_decoder
@@ -737,7 +743,7 @@ def rescue_segments(segs, wav: Path, engine: str, language: str, settings: dict,
                 return segs, 0
             decode = sensevoice_decoder(settings, language)
         new = align.rescue_missed(segs, load_wav16k(wav), decode, int(settings.get("asr_max_chars", 28)),
-                                  progress, cancel)
+                                  progress, cancel, keep_lines=keep_lines)
     except ff.Cancelled:
         raise
     except Exception as e:  # noqa: BLE001 – bước phụ, lỗi thì giữ kết quả nhận dạng
@@ -789,12 +795,364 @@ def realign(p: Project, settings: dict | None = None, progress: Prog | None = No
     return len(p.segments)
 
 
+# ------------------------------------------------------------------ nghe chính xác hơn (2.1.0)
+
+def _heard(text: str, language: str) -> str:
+    from .asr import to_simplified
+
+    t = (text or "").strip()
+    if language in ("zh", "yue", "auto"):
+        z = to_simplified(t)
+        if len(z) == len(t):
+            t = z
+    return t
+
+
+def _cjk_count(text: str) -> int:
+    from .align import CJK
+
+    return len(CJK.findall(text or ""))
+
+
+def _learn_profile(p: Project, segs, settings: dict) -> bool:
+    """AI đọc lời vừa nghe -> hồ sơ phim (tên nhân vật, thuật ngữ) – lưu vào dự án, bước dịch dùng lại (không gọi lại)."""
+    from . import langs, skills
+    from .translate import LLMClient, glossary_text, parse_glossary
+
+    eng, _why = join_engine(settings, "asr_ai")
+    texts = [x.text for x in segs if x.text.strip()]
+    if not eng or not texts or p.data.get("film_profile", "").strip():
+        return False
+    target = target_lang(p, settings)
+    text, terms = skills.make_profile(LLMClient(settings, eng), texts, langs.INFO[target]["name"].lower(),
+                                      skills.skill_text(settings))
+    gkey = glossary_key(target)
+    g = parse_glossary(p.data.get(gkey, ""))
+    for k, v in terms.items():
+        g.setdefault(k, v)
+    p.data[gkey] = glossary_text(g)
+    p.data["film_profile"] = text
+    return True
+
+
+def name_pass(p: Project, segs, wav: Path, engine: str, language: str, settings: dict,
+              progress: Prog | None = None, cancel=None) -> dict:
+    """Tên riêng (2.1.0): chưa có tên nào (bảng thuật ngữ / hồ sơ phim) mà có AI hỗ trợ nghe -> AI lập hồ sơ phim từ
+    lời vừa nghe; câu có chữ đọc giống 1 tên (cùng âm) mà viết khác -> Qwen3-ASR nghe lại câu đó kèm gợi ý tên (nhận
+    khi lời mới có đúng tên, phần còn lại gần như giữ nguyên); còn lại -> sửa theo âm đọc (names.fix, chặt hơn).
+    Trả {names, profile, listened, heard, fixed}."""
+    from difflib import SequenceMatcher
+
+    from . import asr_qwen, dual, names
+
+    st = {"names": 0, "profile": False, "listened": 0, "heard": 0, "fixed": 0}
+    nm = names.names_of(p, settings)
+    if not nm:
+        try:
+            st["profile"] = _learn_profile(p, segs, settings)
+        except ff.Cancelled:
+            raise
+        except Exception as e:  # noqa: BLE001 – mất mạng / hết lượt: bỏ qua bước này
+            log_error("AI lập hồ sơ phim khi nghe")
+            st["error"] = f"AI lập hồ sơ phim: {err_text(e)[:120]}"
+        nm = names.names_of(p, settings)
+    st["names"] = len(nm)
+    if not nm:
+        return st
+    rows = [i for i, x in enumerate(segs) if names.candidates(x.text, nm, loose=True)]
+    if rows and engine == "qwen3" and asr_qwen.available():
+        r = asr_qwen.asr_worker("qwen3", settings).call(
+            {"cmd": "asr", "wav": str(Path(wav).resolve()), "language": language, "align": False,
+             "prompt": names.context_text(p, settings, nm),
+             "spans": [[max(0.0, segs[i].start - 0.2), segs[i].end + 0.2] for i in rows]}, progress, cancel)
+        st["listened"] = len(rows)
+        realign = []
+        for i, it in zip(rows, r.get("items") or []):
+            old = segs[i].text
+            hc, oc = dual.core(_heard(it.get("text", ""), language)), dual.core(old)
+            got = [n for n in nm if n in hc and n not in oc]
+            if got and hc != oc and SequenceMatcher(None, hc, oc).ratio() >= 0.6:
+                segs[i].text = dual.merge_alt(old, hc)
+                segs[i].extra.setdefault("src_before", old)
+                segs[i].extra["name_fix"] = got
+                if _cjk_count(segs[i].text) != _cjk_count(old):
+                    segs[i].extra.pop("ct", None)
+                    realign.append(segs[i])
+                st["heard"] += 1
+        if realign:
+            asr_qwen.align_qwen(realign, wav, language, settings, cancel=cancel)
+    st["fixed"] = len(names.fix(segs, nm))
+    return st
+
+
+def dual_engine(primary: str, language: str, settings: dict | None = None) -> tuple[str | None, str]:
+    """Bộ nghe thứ 2 cho "Nghe 2 bộ rồi so": bộ còn lại trong Qwen3-ASR / FireRedASR2 (bộ chính là OCR / SenseVoice /
+    Whisper -> FireRedASR2 nếu đã tải, không thì Qwen3-ASR). Trả (bộ | None, tên / lý do)."""
+    from . import asr_firered, asr_qwen
+
+    order = ["qwen3"] if primary == "firered" else ["firered"] if primary == "qwen3" else ["firered", "qwen3"]
+    why = []
+    for e in order:
+        if e == "firered":
+            if language not in asr_firered.LANGS:
+                why.append("FireRedASR2 không nghe tiếng này")
+            elif not asr_firered.ready():
+                why.append(f"FireRedASR2: {asr_firered.why_unavailable()}")
+            else:
+                return e, "FireRedASR2"
+        elif asr_qwen.available():
+            return e, "Qwen3-ASR"
+        else:
+            why.append(f"Qwen3-ASR: {asr_qwen.why_unavailable()}")
+    return None, "; ".join(why)
+
+
+PICK_BATCH = 40
+
+
+def dual_listen(p: Project, segs, wav: Path, primary: str, language: str, settings: dict,
+                progress: Prog | None = None, cancel=None) -> dict:
+    """Nghe 2 bộ rồi so (2.1.0): bộ thứ 2 nghe lại đúng các đoạn của câu -> so chữ từng câu (`dual.assign`). Câu khác
+    nhau: extra["asr_alt"] = chữ bộ 2; có AI hỗ trợ nghe -> AI chọn A / B / ghép (chắc chắn -> sửa câu, extra
+    ["asr_pick"]); không chắc / không có AI -> extra["asr_unsure"] (chữ gốc tô xanh, nghe lại). Trả thống kê."""
+    from . import asr_qwen, dual
+    from .translate import ENGINE_NAMES, LLMClient
+
+    second, name = dual_engine(primary, language, settings)
+    st = {"second": second or "", "checked": 0, "differ": 0, "ai_fixed": 0, "ai_kept": 0, "unsure": 0}
+    if not second:
+        st["error"] = name
+        return st
+    total = float(p.data.get("info", {}).get("duration", 0) or 0)
+    spans = dual.alt_spans(segs, total=total)
+    if not spans:
+        return st
+    try:
+        r = asr_qwen.asr_worker(second, settings).call(
+            {"cmd": "asr", "wav": str(Path(wav).resolve()), "language": language, "align": False,
+             "prompt": asr_qwen.hotwords(settings), "spans": [[a, b] for a, b, _ in spans]},
+            _sub(progress, 0.0, 0.75), cancel)
+        items = [dict(it, text=_heard(it.get("text", ""), language)) for it in (r.get("items") or [])]
+        alts = dual.assign(segs, spans, items)
+        st["checked"] = len(alts)
+        rows = [i for i, a in sorted(alts.items()) if dual.differs(segs[i].text, a)]
+        for i in rows:
+            segs[i].extra["asr_alt"] = alts[i]
+            segs[i].extra["asr_alt_eng"] = second
+        st["differ"] = len(rows)
+        picked: dict = {}
+        eng, why = join_engine(settings, "asr_ai")
+        ask = [i for i in rows if alts[i]]   # bộ 2 không nghe ra chữ nào -> chỉ đánh dấu (có thể là nhạc bị chép thành lời)
+        if eng and ask:
+            llm = LLMClient(settings, eng)
+            try:
+                for a in range(0, len(ask), PICK_BATCH):
+                    part = ask[a:a + PICK_BATCH]
+                    if progress:
+                        progress(0.75 + 0.2 * a / len(ask), f"AI chọn bản đúng {a + len(part)}/{len(ask)} câu khác nhau")
+                    reply = llm.chat(dual.PICK_PROMPT, dual.pick_payload(segs, part, alts, p.data.get("film_profile", "")),
+                                     max_tokens=6000, temperature=0.1)
+                    picked.update(dual.parse_pick(reply, segs, part, alts))
+                st["ai"] = ENGINE_NAMES.get(eng, eng)
+            except ff.Cancelled:
+                raise
+            except Exception as e:  # noqa: BLE001 – mất mạng / hết lượt: câu còn lại để người dùng nghe lại
+                log_error("AI chọn bản nghe đúng")
+                st["ai_error"] = err_text(e)[:120]
+        elif ask:
+            st["ai_off"] = why
+        realign = []
+        for i in rows:
+            pk = picked.get(i)
+            if not (pk and pk[2]):
+                segs[i].extra["asr_unsure"] = True
+                st["unsure"] += 1
+                continue
+            choice, new_core, _sure, reason = pk
+            segs[i].extra["asr_pick"] = choice + (f": {reason}" if reason else "")
+            segs[i].extra.pop("asr_unsure", None)
+            if choice == "A" or new_core == dual.core(segs[i].text):
+                st["ai_kept"] += 1
+                continue
+            old = segs[i].text
+            segs[i].text = dual.merge_alt(old, new_core)
+            segs[i].extra.setdefault("src_before", old)
+            if _cjk_count(segs[i].text) != _cjk_count(old):
+                segs[i].extra.pop("ct", None)
+                realign.append(segs[i])
+            st["ai_fixed"] += 1
+        if realign:   # câu đổi số chữ -> đo lại mốc từng chữ bằng chính bộ đang mở
+            asr_qwen.align_qwen(realign, wav, language, settings, cancel=cancel, engine=second)
+    finally:
+        asr_qwen.release()
+    return st
+
+
+def dual_note(st: dict | None) -> str:
+    """1 dòng kết quả "Nghe 2 bộ rồi so" cho thông báo."""
+    if not st:
+        return ""
+    if st.get("error") and not st.get("checked"):
+        return f"⚠ chưa nghe 2 bộ được ({st['error']})"
+    name = {"firered": "FireRedASR2", "qwen3": "Qwen3-ASR"}.get(st.get("second", ""), "bộ 2")
+    if not st.get("differ"):
+        return f"nghe lại bằng {name}: {st.get('checked', 0)} câu khớp nhau"
+    t = f"nghe lại bằng {name}: {st['differ']}/{st.get('checked', 0)} câu khác nhau"
+    if st.get("ai_fixed") or st.get("ai_kept"):
+        t += f" – AI {st.get('ai', '')} sửa {st.get('ai_fixed', 0)}, giữ {st.get('ai_kept', 0)}".replace("  ", " ")
+    if st.get("unsure"):
+        t += f", {st['unsure']} câu cần nghe lại (chữ gốc màu xanh – tab Phụ đề → Tích câu 2 bộ nghe khác nhau)"
+    if st.get("ai_error"):
+        t += f" · ⚠ AI lỗi ({st['ai_error']})"
+    elif st.get("ai_off") and st.get("unsure"):
+        t += f" · chưa có AI chọn bản đúng ({st['ai_off']})"
+    return t
+
+
+def name_note(st: dict | None) -> str:
+    if not st:
+        return ""
+    if st.get("error") and not st.get("names"):
+        return f"⚠ {st['error']}"
+    if not st.get("names"):
+        return ""
+    parts = []
+    if st.get("profile"):
+        parts.append("AI lập hồ sơ tên nhân vật")
+    if st.get("heard"):
+        parts.append(f"nghe lại ra đúng tên {st['heard']}/{st.get('listened', 0)} câu")
+    if st.get("fixed"):
+        parts.append(f"sửa {st['fixed']} chỗ đọc giống tên")
+    return ("tên riêng: " + ", ".join(parts)) if parts else ""
+
+
+def hybrid_listen(p: Project, segs, settings: dict, language: str, engine: str, denoise: bool = False,
+                  progress: Prog | None = None, cancel=None) -> list:
+    """OCR + nghe (2.1.0): chữ lấy từ phụ đề Trung in sẵn (đúng tên riêng, chữ), giờ đo trên giọng nói (căn từng chữ
+    của chính câu OCR vào âm thanh – Qwen3-ForcedAligner / nhánh CTC FireRedASR2), đoạn có tiếng nói mà phụ đề không
+    có câu nào (OCR đọc sót, câu không có phụ đề) -> bộ nghe nghe thêm (extra["from_asr"]). Bật "Nghe 2 bộ rồi so" thì
+    bộ nghe đọc lại từng câu OCR để bắt chữ OCR đọc sai (AI chọn)."""
+    from . import asr_firered, asr_qwen
+
+    st = {"lines": len(segs), "timed": 0, "added": 0}
+    p.data.pop("asr_dual", None)
+    audio_in, wav = _listen_audio(p, settings, denoise, _sub(progress, 0.0, 0.5), cancel)
+    if settings.get("asr_context", True):
+        from .names import context_text
+
+        settings["_asr_context"] = context_text(p, settings)
+    for s in segs:
+        s.extra["ocr_time"] = [s.start, s.end]
+    al = "qwen3" if asr_qwen.available() and (engine == "qwen3" or use_qwen_align("qwen3", settings)) else \
+        "firered" if asr_firered.ready() else ""
+    try:
+        if al and language in ("zh", "yue", "auto"):
+            try:
+                asr_qwen.align_qwen(segs, wav, language, settings, _sub(progress, 0.5, 0.75), cancel, engine=al,
+                                    pad=0.6)
+            except ff.Cancelled:
+                raise
+            except Exception as e:  # noqa: BLE001 – không căn được: giữ giờ hiện chữ
+                log_error("OCR + nghe: căn giờ câu OCR")
+                st["error"] = err_text(e)[:120]
+        for s in segs:
+            ct = s.extra.get("ct")
+            if ct:
+                s.start, s.end = round(max(0.0, ct[0][0] - 0.05), 3), round(ct[-1][1] + 0.05, 3)
+                st["timed"] += 1
+        from .align import fix_overlaps
+
+        segs = fix_overlaps(sorted(segs, key=lambda x: x.start))
+        if audio_in != Path(p.source):   # câu phụ đề không có mà có tiếng nói -> bộ nghe nghe thêm
+            ears = engine if engine in ("qwen3", "firered") else (al or "qwen3")
+            before = {id(x) for x in segs}
+            segs, st["added"] = rescue_segments(segs, wav, ears, language, settings, False,
+                                                _sub(progress, 0.75, 0.95), cancel, keep_lines=True)
+            for x in segs:
+                if id(x) not in before:
+                    x.extra["from_asr"] = True
+        p.data["hybrid"] = st
+        p.data["asr_engine_used"] = engine
+        p.data["language"] = language
+        if segs and settings.get("asr_dual"):
+            try:
+                p.data["asr_dual"] = dual_listen(p, segs, wav, "ocr", language, settings, _sub(progress, 0.95, 0.99),
+                                                 cancel)
+            except ff.Cancelled:
+                raise
+            except Exception as e:  # noqa: BLE001
+                log_error("OCR + nghe: so chữ OCR với bộ nghe")
+                p.data["asr_dual"] = {"error": err_text(e)[:160]}
+        if audio_in != Path(p.source):
+            if settings.get("song_detect", True):
+                try:
+                    from .songs import mark_sung
+
+                    p.data["songs_found"] = mark_sung(segs, wav)
+                except Exception:  # noqa: BLE001
+                    log_error("Đoán đoạn hát")
+    finally:
+        asr_qwen.release()
+    return segs
+
+
+def hybrid_note(st: dict | None) -> str:
+    if not st:
+        return ""
+    t = f"OCR + nghe: {st.get('timed', 0)}/{st.get('lines', 0)} câu phụ đề căn giờ theo giọng nói"
+    if st.get("added"):
+        t += f", bộ nghe thêm {st['added']} câu phụ đề không có (chữ cam nhạt – nên xem lại)"
+    if st.get("error"):
+        t += f" · ⚠ căn giờ lỗi ({st['error']})"
+    return t
+
+
+def _listen_audio(p: Project, settings: dict, denoise: bool = False, progress: Prog | None = None,
+                  cancel=None) -> tuple[Path, Path]:
+    """Âm thanh để nghe: tách giọng khỏi nhạc nền (nếu bật) -> wav 16 kHz mono theo giờ của hình. Trả (file đã nghe
+    – bản giọng đã tách hoặc video gốc, wav 16 kHz). progress: 0 -> 0,33 của bước nghe."""
+    from . import separate as sepmod
+
+    src = p.source
+    info_dur = p.data.get("info", {}).get("duration", 0)
+    # 1) tách giọng trước để nhận dạng chính xác hơn khi có nhạc nền (bản tách dùng luôn cho tab Âm thanh / Lồng
+    # tiếng). Lỗi / chưa cài -> vẫn nghe trên tiếng gốc nhưng BÁO RÕ (trước đây bỏ qua lặng lẽ -> tab Âm thanh
+    # báo "chưa tách" mà người dùng không biết vì sao)
+    audio_in: Path = Path(src)
+    p.data.pop("sep_warning", None)
+    if settings.get("sep_before_asr", True) and not sepmod.available():
+        p.data["sep_warning"] = ("Chưa tách được giọng khỏi nhạc nền: chưa cài bộ tách giọng (audio-separator, cài AI "
+                                 "nâng cao) – đã nghe trên tiếng gốc")
+    elif settings.get("sep_before_asr", True):
+        try:
+            v, _ = separate_audio(p, settings, _sub(progress, 0.0, 0.3), cancel)
+            audio_in = v
+        except Exception as e:  # không chặn cả quy trình nếu tách giọng lỗi
+            if isinstance(e, ff.Cancelled):
+                raise
+            log_error("Tách giọng trước khi nghe")
+            p.data["sep_warning"] = (f"Tách giọng khỏi nhạc nền bị lỗi ({err_text(e)[:160]}) – đã nghe trên tiếng "
+                                     "gốc. Thử lại ở tab Âm thanh → 'Tách giọng / nhạc nền'")
+            if progress:
+                progress(0.3, f"Bỏ qua tách giọng ({str(e)[:80]})")
+    # 2) chuẩn hoá về wav 16k mono
+    wav = p.work / ("asr16k_vocals.wav" if audio_in != Path(src) else "audio16k.wav")
+    if not wav.exists() or wav.stat().st_size < 1000 or denoise or p.data.get("timeline") != ff.TIMELINE:
+        # theo đúng giờ của hình (2.0.92); bản 16 kHz cũ (giải mã nối liền) thì làm lại
+        args = ["-i", str(audio_in), "-vn", "-ac", "1", "-ar", "16000"] + ff.af_args(
+            ff.audio_sync(audio_in, 16000),
+            "highpass=f=80,lowpass=f=8000,afftdn=nf=-25,dynaudnorm=f=200" if denoise else "")
+        args += ["-c:a", "pcm_s16le", str(wav)]
+        ff.run(args, info_dur, _sub(progress, 0.3, 0.33), cancel, "Đang chuẩn bị âm thanh")
+    return audio_in, wav
+
+
 def recognize(p: Project, method: str = "asr", language: str = "zh", region: dict | None = None,
               ocr_fps: float = 4.0, settings: dict | None = None, progress: Prog | None = None, cancel=None,
               denoise: bool = False, engine: str | None = None,
               on_draft: Callable[[list[Segment]], None] | None = None) -> int:
     """Lấy phụ đề gốc.  method: asr (giọng nói) | ocr (chữ trên video).
-    engine (asr): qwen3 | sensevoice | paraformer | whisper.
+    engine (asr): qwen3 | firered | sensevoice | paraformer | whisper.
     on_draft: chế độ vừa tách vừa dịch – nhận CÂU NHÁP ngay khi có (Qwen3: sau mỗi nhóm khúc vừa nghe; bộ khác: nghe
     xong cả phim, trước các bước căn thời gian / phân biệt người nói)."""
 
@@ -808,11 +1166,12 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
                 raise
             except Exception:  # noqa: BLE001 – câu nháp lỗi không được làm hỏng việc nghe
                 log_error("Câu nháp vừa tách vừa dịch")
-    settings = settings or load_settings()
+    settings = dict(settings or load_settings())   # bản sao: khoá tạm "_asr_context" không lọt vào Cài đặt
     src = p.source
     engine = engine or settings.get("asr_engine", "qwen3")
     want_spk = bool(settings.get("diarize", True))
-    if method == "ocr":
+    if method in ("ocr", "hybrid"):
+        opr = progress if method == "ocr" else _sub(progress, 0.0, 0.4)
         from .ocr import detect_subtitle_region, expand_region, extract_hardsubs
 
         if region:   # vùng khoanh ở tab Xoá phụ đề (vừa khít 1 dòng) -> mở rộng: hết ngang, thêm dòng trên / dưới
@@ -820,10 +1179,10 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         else:
             if progress:
                 progress(0.0, "Đang dò vùng phụ đề (kỹ ở 5 giây đầu và 5 giây cuối)…")
-            scan = detect_subtitle_region(src, _sub(progress, 0.0, 0.05))
+            scan = detect_subtitle_region(src, _sub(opr, 0.0, 0.05))
         boxes = p.work / "ocr_boxes.json"
         stats: dict = {}
-        segs = extract_hardsubs(src, scan, fps=float(ocr_fps or 4), progress=_sub(progress, 0.05, 0.85),
+        segs = extract_hardsubs(src, scan, fps=float(ocr_fps or 4), progress=_sub(opr, 0.05, 0.85),
                                 cancel=cancel, boxes_out=boxes, stats=stats)
         if on_draft and segs:
             on_draft([Segment(x.start, x.end, x.text) for x in segs])
@@ -841,46 +1200,52 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
             ed["hardsub"]["regions"] = [box]
             p.data["edit"] = ed
         spk_from_asr = False
+        asr_end = 0.85
+        if method == "hybrid":   # chữ lấy từ phụ đề in sẵn, giờ đo trên giọng nói, câu OCR sót lấy từ bộ nghe
+            segs = hybrid_listen(p, segs, settings, language, engine, denoise, _sub(progress, 0.4, 0.92), cancel)
+            asr_end = 0.92
     else:
-        from . import asr_funasr, separate as sepmod
+        from . import asr_funasr
 
         info_dur = p.data.get("info", {}).get("duration", 0)
-        # 1) tách giọng trước để nhận dạng chính xác hơn khi có nhạc nền (bản tách dùng luôn cho tab Âm thanh / Lồng
-        # tiếng). Lỗi / chưa cài -> vẫn nghe trên tiếng gốc nhưng BÁO RÕ (trước đây bỏ qua lặng lẽ -> tab Âm thanh
-        # báo "chưa tách" mà người dùng không biết vì sao)
-        audio_in: Path = Path(src)
-        p.data.pop("sep_warning", None)
-        if settings.get("sep_before_asr", True) and not sepmod.available():
-            p.data["sep_warning"] = ("Chưa tách được giọng khỏi nhạc nền: chưa cài bộ tách giọng (audio-separator, cài AI "
-                                     "nâng cao) – đã nghe trên tiếng gốc")
-        elif settings.get("sep_before_asr", True):
-            try:
-                v, _ = separate_audio(p, settings, _sub(progress, 0.0, 0.3), cancel)
-                audio_in = v
-            except Exception as e:  # không chặn cả quy trình nếu tách giọng lỗi
-                if isinstance(e, ff.Cancelled):
-                    raise
-                log_error("Tách giọng trước khi nghe")
-                p.data["sep_warning"] = (f"Tách giọng khỏi nhạc nền bị lỗi ({err_text(e)[:160]}) – đã nghe trên tiếng "
-                                         "gốc. Thử lại ở tab Âm thanh → 'Tách giọng / nhạc nền'")
-                if progress:
-                    progress(0.3, f"Bỏ qua tách giọng ({str(e)[:80]})")
-        # 2) chuẩn hoá về wav 16k mono
-        wav = p.work / ("asr16k_vocals.wav" if audio_in != Path(src) else "audio16k.wav")
-        if not wav.exists() or wav.stat().st_size < 1000 or denoise or p.data.get("timeline") != ff.TIMELINE:
-            # theo đúng giờ của hình (2.0.92); bản 16 kHz cũ (giải mã nối liền) thì làm lại
-            args = ["-i", str(audio_in), "-vn", "-ac", "1", "-ar", "16000"] + ff.af_args(
-                ff.audio_sync(audio_in, 16000),
-                "highpass=f=80,lowpass=f=8000,afftdn=nf=-25,dynaudnorm=f=200" if denoise else "")
-            args += ["-c:a", "pcm_s16le", str(wav)]
-            ff.run(args, info_dur, _sub(progress, 0.3, 0.33), cancel, "Đang chuẩn bị âm thanh")
+        audio_in, wav = _listen_audio(p, settings, denoise, progress, cancel)
+        if settings.get("asr_context", True):   # gợi ý tên riêng + tiêu đề video cho Qwen3-ASR (2.1.0)
+            from .names import context_text
+
+            settings["_asr_context"] = context_text(p, settings)
         asr_end = 0.78 if want_spk else 0.92
         pr = _sub(progress, 0.33, asr_end)
         segs = None
         streamed = False
         p.data.pop("asr_warning", None)
         p.data.pop("asr_relisten", None)
-        if engine == "qwen3":
+        if engine == "firered":
+            from . import asr_firered, asr_qwen
+
+            if language not in asr_firered.LANGS:
+                p.data["asr_warning"] = "FireRedASR2 chỉ nghe tiếng Trung / Quảng Đông / Anh – đã dùng Qwen3-ASR."
+                engine = "qwen3"
+            elif not asr_firered.ready():
+                p.data["asr_warning"] = f"Chưa dùng được FireRedASR2 ({asr_firered.why_unavailable()}) – đã dùng Qwen3-ASR."
+                engine = "qwen3"
+            else:
+                try:
+                    rl: dict = {}
+                    segs = asr_qwen.transcribe_qwen(wav, settings, language, pr, cancel,
+                                                    on_chunk=draft if on_draft else None, stats=rl, engine="firered")
+                    p.data["asr_relisten"] = rl
+                    streamed = True
+                except ff.Cancelled:
+                    asr_qwen.release()
+                    raise
+                except Exception as e:  # noqa: BLE001 – lỗi nạp / thiếu bộ nhớ GPU… -> Qwen3-ASR
+                    log_error("FireRedASR2")
+                    asr_qwen.release()
+                    p.data["asr_warning"] = f"FireRedASR2 lỗi ({str(e)[:160]}) – đã dùng Qwen3-ASR thay thế."
+                    if progress:
+                        progress(0.33, "FireRedASR2 lỗi → chuyển sang Qwen3-ASR")
+                    engine = "qwen3"
+        if engine == "qwen3" and segs is None:
             from . import asr_qwen
 
             if not asr_qwen.available():
@@ -977,7 +1342,31 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
                     p.data["ai_join_note"] = f"bỏ qua AI nối câu ({err_text(e)[:120]})"
             elif settings.get("ai_join_engine", "auto") not in ("auto", "off"):
                 p.data["ai_join_note"] = f"chưa chạy AI nối câu – {why}"
-        if engine in ("sensevoice", "qwen3"):
+        # 2f) tên riêng: câu có chữ đọc giống tên nhân vật -> nghe lại kèm gợi ý tên / sửa theo âm đọc (2.1.0)
+        p.data.pop("name_pass", None)
+        if segs and language in ("zh", "yue", "auto") and settings.get("asr_name_pass", True):
+            try:
+                p.data["name_pass"] = name_pass(p, segs, wav, engine, language, settings,
+                                                _sub(progress, min(0.95, asr_end + 0.1), min(0.96, asr_end + 0.11)),
+                                                cancel)
+            except ff.Cancelled:
+                raise
+            except Exception as e:  # noqa: BLE001 – bước phụ
+                log_error("Nghe lại tên riêng")
+                p.data["name_pass"] = {"error": err_text(e)[:160]}
+        # 2g) nghe 2 bộ rồi so: bộ thứ 2 nghe lại đúng các câu -> câu khác nhau: AI chọn / tô xanh để nghe lại
+        p.data.pop("asr_dual", None)
+        if segs and settings.get("asr_dual"):
+            try:
+                p.data["asr_dual"] = dual_listen(p, segs, wav, engine, language, settings,
+                                                 _sub(progress, min(0.96, asr_end + 0.11), min(0.97, asr_end + 0.13)),
+                                                 cancel)
+            except ff.Cancelled:
+                raise
+            except Exception as e:  # noqa: BLE001 – bước phụ
+                log_error("Nghe 2 bộ rồi so")
+                p.data["asr_dual"] = {"error": err_text(e)[:160]}
+        if engine in ("sensevoice", "qwen3", "firered"):
             from .asr_funasr import mark_songs
 
             mark_songs(segs)
@@ -1019,12 +1408,17 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
     p.data["timeline"] = ff.TIMELINE     # mốc câu tính trên âm thanh giải mã theo giờ của hình (2.0.92)
     for k in ("asr_cleaned", "ai_filtered", "ai_reviewed", "cleanup_backup", "snap_stats"):   # câu mới -> làm lại
         p.data.pop(k, None)
-    if method == "ocr":
-        p.data.pop("asr_warning", None)
+    if method != "hybrid":
+        p.data.pop("hybrid", None)
+    if method in ("ocr", "hybrid"):
+        p.data.pop("name_pass", None)
         p.data.pop("asr_joined", None)
         p.data.pop("asr_relisten", None)
         p.data.pop("ai_joined", None)
+    if method == "ocr":
+        p.data.pop("asr_warning", None)
         p.data.pop("songs_found", None)
+        p.data.pop("asr_dual", None)
     p.save()
     # 3) phân biệt người nói
     if want_dz:
@@ -1093,9 +1487,12 @@ def snap_edges(p: Project, settings: dict | None = None, rows: list[int] | None 
         raise ValueError("Chưa có phụ đề")
     measured = 0
     if remeasure:
-        from . import asr_qwen
+        from . import asr_firered, asr_qwen
 
-        if not asr_qwen.available():
+        # đo bằng bộ nghe đã nghe dự án này; FireRedASR2 (nhánh CTC) khi chưa dùng được Qwen3
+        meng = "firered" if asr_firered.ready() and (p.data.get("asr_engine_used") == "firered"
+                                                       or not asr_qwen.available()) else "qwen3"
+        if meng == "qwen3" and not asr_qwen.available():
             raise RuntimeError(f"Chưa đo lại được mốc từng chữ: {asr_qwen.why_unavailable()}")
         wav = _voice_wav16(p, _sub(progress, 0.0, 0.1), cancel)
         pick = set(range(len(segs))) if rows is None else set(rows)
@@ -1105,7 +1502,7 @@ def snap_edges(p: Project, settings: dict | None = None, rows: list[int] | None 
         try:
             measured = asr_qwen.align_qwen([segs[i] for i in sorted(pick) if 0 <= i < len(segs)], wav,
                                            p.data.get("language", "zh") or "zh", settings, _sub(progress, 0.1, 0.7),
-                                           cancel)
+                                           cancel, engine=meng)
         finally:
             asr_qwen.release()
     env, hop, src = voice_env(p, _sub(progress, 0.7 if remeasure else 0.0, 0.85), cancel)
@@ -1135,6 +1532,90 @@ def snap_note(stats: dict | None) -> str:
     if stats.get("est"):
         t += f" · {stats['est']} câu mốc ước lượng (viền nét đứt trên timeline – nên nghe lại)"
     return t
+
+
+def dual_check(p: Project, settings: dict | None = None, rows: list[int] | None = None, progress: Prog | None = None,
+               cancel=None) -> dict:
+    """Nút "Nghe 2 bộ rồi so" (tab Phụ đề) cho phụ đề đã có: bộ nghe còn lại nghe lại các câu (đã tích / cả phim),
+    AI chọn bản đúng. Chỉ đổi chữ gốc (bản dịch / giọng lồng giữ nguyên – giao diện tích sẵn câu đổi để dịch lại);
+    Ctrl+Z hoàn tác. Trả thống kê + "changed" (số thứ tự câu đổi chữ)."""
+    settings = dict(settings or load_settings())
+    segs = p.segments
+    if not segs:
+        raise ValueError("Chưa có phụ đề")
+    primary = "ocr" if p.data.get("sub_source") in ("ocr", "hybrid") else p.data.get("asr_engine_used") or \
+        settings.get("asr_engine", "qwen3")
+    language = p.data.get("language", "zh") or "zh"
+    if dual_engine(primary, language, settings)[0] is None:
+        raise RuntimeError("Chưa có bộ nghe thứ 2: " + dual_engine(primary, language, settings)[1])
+    wav = _voice_wav16(p, _sub(progress, 0.0, 0.1), cancel)
+    if settings.get("asr_context", True):
+        from .names import context_text
+
+        settings["_asr_context"] = context_text(p, settings)
+    pick = set(range(len(segs))) if rows is None else {r for r in rows if 0 <= r < len(segs)}
+    sub = [segs[i] for i in sorted(pick)]
+    for x in sub:
+        for k in ("asr_alt", "asr_alt_eng", "asr_unsure", "asr_pick"):
+            x.extra.pop(k, None)
+    before = [x.text for x in segs]
+    st = dual_listen(p, sub, wav, primary, language, settings, _sub(progress, 0.1, 1.0), cancel)
+    changed = [i for i, (a, x) in enumerate(zip(before, segs)) if a != x.text]
+    p.segments = segs
+    p.data["asr_dual"] = st
+    p.save()
+    st["changed"] = changed
+    return st
+
+
+def use_alt(p: Project, rows: list[int]) -> list[int]:
+    """"Dùng bản bộ nghe 2" cho các câu đã tích: thay chữ bằng chữ bộ nghe thứ 2 (giữ dấu câu). Trả số câu đã đổi."""
+    from . import dual
+
+    segs = p.segments
+    out = []
+    for i in rows:
+        if not (0 <= i < len(segs)):
+            continue
+        x = segs[i]
+        alt = x.extra.get("asr_alt")
+        if not alt or not dual.differs(x.text, alt):
+            continue
+        old = x.text
+        x.text = dual.merge_alt(old, alt)
+        x.extra.setdefault("src_before", old)
+        x.extra.pop("asr_unsure", None)
+        x.extra["asr_pick"] = "B: bạn chọn"
+        if _cjk_count(x.text) != _cjk_count(old):
+            x.extra.pop("ct", None)
+        out.append(i)
+    if out:
+        p.segments = segs
+        p.save()
+    return out
+
+
+def fix_names_now(p: Project, settings: dict | None = None) -> list[int]:
+    """Nút "Sửa tên theo âm đọc": thay chỗ đọc giống tên riêng (bảng tên riêng / hồ sơ phim) mà viết khác."""
+    from . import names
+
+    settings = settings or load_settings()
+    nm = names.names_of(p, settings)
+    if not nm:
+        raise ValueError("Chưa có tên riêng nào – điền Bảng tên riêng (vd. 林北=Lâm Bắc) hoặc bấm 'AI lập lại hồ sơ phim'")
+    segs = p.segments
+    rows = names.fix(segs, nm)
+    if rows:
+        p.segments = segs
+        p.save()
+    return rows
+
+
+def listen_note(p: Project) -> str:
+    """Kết quả các bước nghe chính xác hơn (2.1.0) cho thông báo xong "1. Nghe & tách câu" / Tự động."""
+    out = [x for x in (hybrid_note(p.data.get("hybrid")) if p.data.get("sub_source") == "hybrid" else "",
+                       name_note(p.data.get("name_pass")), dual_note(p.data.get("asr_dual"))) if x]
+    return " · ".join(out)
 
 
 def _voice_wav16(p: Project, progress: Prog | None = None, cancel=None) -> Path:
@@ -1309,17 +1790,18 @@ def join_engine_choices(settings: dict) -> list[tuple[str, str]]:
     return out
 
 
-def join_engine(settings: dict) -> tuple[str | None, str]:
-    """AI dùng cho "AI nối câu theo nghĩa" (Cài đặt `ai_join_engine`): "auto" = công cụ dịch đang chọn nếu là AI có key,
-    "off" = tắt, hoặc 1 công cụ AI trong Cài đặt. Trả (công cụ | None, lý do / tên hiển thị)."""
+def join_engine(settings: dict, key: str = "ai_join_engine") -> tuple[str | None, str]:
+    """AI dùng cho "AI nối câu theo nghĩa" (Cài đặt `ai_join_engine`) / "AI hỗ trợ nghe" (`asr_ai`): "auto" = công cụ
+    dịch đang chọn nếu là AI có key, "off" = tắt, hoặc 1 công cụ AI trong Cài đặt. Trả (công cụ | None, lý do / tên)."""
     from .translate import AI_ENGINES, ENGINE_NAMES, api_keys
 
-    v = settings.get("ai_join_engine", "auto") or "auto"
+    v = settings.get(key, "auto") or "auto"
     if v == "off":
         return None, "đã tắt"
     eng = settings.get("translate_engine", "google") if v == "auto" else v
     if eng not in AI_ENGINES:
-        return None, "công cụ dịch đang chọn không phải AI – chọn 1 AI ở ô 'AI nối câu theo nghĩa'"
+        box = "AI hỗ trợ nghe" if key == "asr_ai" else "AI nối câu theo nghĩa"
+        return None, f"công cụ dịch đang chọn không phải AI – chọn 1 AI ở ô '{box}'"
     if eng != "ollama" and not api_keys(settings, eng):
         return None, f"chưa có API key {ENGINE_NAMES[eng]} trong Cài đặt → Công cụ dịch"
     return eng, ENGINE_NAMES[eng]
@@ -2984,6 +3466,8 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
         result["message"] = "Hoàn tất! " + (f"Video: {Path(result['video']).name}" if result.get("video") else "")
     if opts.get("parallel") and p.data.get("live_reused"):
         result["message"] += f"  · vừa tách vừa dịch: dùng lại {p.data['live_reused']} câu dịch sẵn lúc đang nghe"
+    if "recognize" in steps and result.get("message") and listen_note(p):
+        result["message"] += "  · " + listen_note(p)
     if "recognize" in steps and p.data.get("snap_stats") and result.get("message"):
         result["message"] += "  · " + snap_note(p.data["snap_stats"])
     if opts.get("dub") and not no_tr:
@@ -3028,9 +3512,13 @@ def _auto_steps(p: Project, opts: dict, steps: list, weights: dict, total_w: flo
         pr = _sub(progress, a, acc / total_w)
         if st == "download":
             notes: list[str] = []
-            path = download_video(opts["url"], p.dir / "source", pr, cancel, notes=notes, settings=settings)
+            meta: dict = {}
+            path = download_video(opts["url"], p.dir / "source", pr, cancel, notes=notes, settings=settings, meta=meta)
+            p.data["video_meta"] = meta
             attach_source(p, path)
-            p.data["name"] = path.stem[:80]
+            from .autoflow import video_name
+
+            p.data["name"] = video_name(path)
             p.data["dl_warning"] = " ".join(notes)
             p.save()
         elif st == "recognize":

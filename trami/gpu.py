@@ -66,9 +66,10 @@ def _workers(kinds: set[str] | None = None):
         for w in (getattr(tts, "_vn_model", None), getattr(tts, "_omni_model", None)):
             if w is not None:
                 out.append(("tts", w))
-    q = sys.modules.get("trami.asr_qwen")
-    if q is not None and getattr(q, "_worker", None) is not None:
-        out.append(("asr", q._worker))
+    for name in ("trami.asr_qwen", "trami.asr_firered"):
+        q = sys.modules.get(name)
+        if q is not None and getattr(q, "_worker", None) is not None:
+            out.append(("asr", q._worker))
     tr = sys.modules.get("trami.translate")
     if tr is not None and getattr(tr, "_hymt", None) is not None:
         out.append(("mt", tr._hymt))
@@ -200,15 +201,17 @@ def vram_need(kind: str, settings: dict | None = None) -> int:
     st = settings or {}
     if kind in ("recognize", "auto"):
         eng = st.get("asr_engine", "qwen3")
-        if eng == "qwen3":
-            return 2600 if "0.6" in str(st.get("qwen_asr_model", "")) else 4600
+        if eng in ("qwen3", "firered"):   # nghe 2 bộ: lần lượt từng bộ (bộ trước tắt rồi bộ sau mới nạp)
+            q = 2600 if "0.6" in str(st.get("qwen_asr_model", "")) else 4600
+            return q if eng == "qwen3" or st.get("asr_dual") else 3000
         return 3000 if eng == "whisper" else 1800
     if kind in ("dub", "redub"):
         eng = st.get("tts_engine", "edge")
         return {"vieneu": 2600, "omnivoice": 4600}.get(eng, 0)
     if kind == "translate":
         return 4600 if st.get("translate_engine") == "hymt" else 0
-    return {"separate": 3000, "inpaint": 1600, "render": 1600, "realign": 2200, "diarize": 900}.get(kind, 0)
+    return {"separate": 3000, "inpaint": 1600, "render": 1600, "realign": 2200, "diarize": 900,
+            "dual": 4600}.get(kind, 0)
 
 
 def wait_for_vram(kind: str, report=None, cancel=None, settings: dict | None = None,

@@ -76,7 +76,11 @@ DEFAULT_SETTINGS: dict = {
     "diarize_speakers": 0,            # 0 = tự đoán số người nói
     "diarize_threshold": 0.62,        # độ giống nhau để coi là cùng 1 người (0..1)
     # Nhận dạng giọng nói
-    "asr_engine": "qwen3",            # qwen3 / sensevoice / paraformer / whisper (qwen3 chưa cài -> sensevoice)
+    "asr_engine": "qwen3",            # qwen3 / firered / sensevoice / paraformer / whisper (qwen3 chưa cài -> sensevoice)
+    "asr_dual": False,                # nghe 2 bộ rồi so (Qwen3-ASR + FireRedASR2): câu khác nhau -> AI chọn / tô xanh
+    "asr_ai": "auto",                 # AI hỗ trợ nghe (chọn bản đúng khi 2 bộ khác nhau, lập hồ sơ tên nhân vật): auto/off/tên AI
+    "asr_context": True,              # gợi ý cho bộ nghe: tên riêng (bảng thuật ngữ, hồ sơ phim) + tiêu đề / mô tả video
+    "asr_name_pass": True,            # nghe xong: tìm câu có chữ đọc giống tên nhân vật -> nghe lại với gợi ý tên / sửa theo âm
     "qwen_asr_model": "Qwen/Qwen3-ASR-1.7B-hf",   # hoặc Qwen/Qwen3-ASR-0.6B-hf (GPU yếu)
     "asr_model": "large-v3",          # (Whisper) tiny/base/small/medium/large-v3/large-v3-turbo
     "asr_device": "auto",             # auto/cuda/cpu

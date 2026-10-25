@@ -6865,3 +6865,468 @@ def test_gui_cut_card_and_undo_buttons(monkeypatch):
     finally:
         win.close()
         app.processEvents()
+
+
+# ------------------------------------------------------------------ 2.1.0: nghe chính xác hơn
+
+def test_firered_ctc_align_fbank_and_cmvn(tmp_path):
+    """FireRedASR2 (mã chép, Apache-2.0): căn CTC numpy cho kết quả tối ưu như duyệt hết (thay torchaudio đã bỏ
+    forced_align), chữ lặp có blank chen giữa, chữ nhiều hơn khung -> []; fbank Kaldi bằng numpy (khớp
+    kaldi_native_fbank nếu có); đọc cmvn.ark nhị phân / có khoá / dạng chữ."""
+    import itertools
+    import struct
+
+    from trami.firered.ctc import ctc_forced_align
+    from trami.firered.feat import CMVN, kaldi_fbank, read_kaldi_matrix
+
+    def score(path, logp):
+        return sum(logp[t, k] for t, k in enumerate(path))
+
+    def collapse(path):
+        out, prev = [], None
+        for k in path:
+            if k != prev and k != 0:
+                out.append(k)
+            prev = k
+        return out
+
+    rng = np.random.default_rng(3)
+    for trial in range(30):
+        T, V = int(rng.integers(3, 7)), 4
+        y = [int(v) for v in rng.integers(1, V, size=int(rng.integers(1, 3)))]
+        logp = np.log(rng.dirichlet(np.ones(V), size=T))
+        best = max((p for p in itertools.product(range(V), repeat=T) if collapse(p) == y),
+                   key=lambda p: score(p, logp), default=None)
+        got = ctc_forced_align(logp, y)
+        if best is None:
+            assert got == []
+        else:
+            assert collapse(got) == y and score(got, logp) == pytest.approx(score(best, logp))
+    assert ctc_forced_align(np.log(np.full((5, 4), 0.25)), [1, 1]) == [1, 0, 1, 0, 0]
+    assert ctc_forced_align(np.log(np.full((2, 4), 0.25)), [1, 2, 3]) == []
+
+    t = np.arange(16000) / 16000
+    x = (np.sin(2 * np.pi * 440 * t) * 8000 + rng.standard_normal(16000) * 50)
+    fb = kaldi_fbank(x)
+    assert fb.shape == (98, 80) and np.isfinite(fb).all()
+    assert int(np.argmax(fb[50])) in range(10, 30)             # 440 Hz rơi vào kênh mel thấp
+    if importlib.util.find_spec("kaldi_native_fbank"):
+        from trami.firered.feat import fbank
+
+        assert np.abs(fbank(x) - fb).max() < 1e-3
+    m = np.vstack([rng.random(81) * 100, rng.random(81) * 1000])
+    m[0, 80] = 50
+    binm = b"\0BFM " + struct.pack("<bi", 4, 2) + struct.pack("<bi", 4, 81) + m.astype("<f4").tobytes()
+    (tmp_path / "a.ark").write_bytes(binm)
+    (tmp_path / "k.ark").write_bytes(b"global " + binm)
+    (tmp_path / "t.ark").write_text("global  [\n " + " ".join(map(str, m[0])) + "\n " + " ".join(map(str, m[1]))
+                                    + " ]\n", "utf-8")
+    for n in ("a.ark", "k.ark", "t.ark"):
+        assert np.allclose(read_kaldi_matrix(str(tmp_path / n)), m, rtol=1e-5)
+    c = CMVN(str(tmp_path / "a.ark"))
+    assert c.dim == 80 and c(np.zeros((2, 80))).shape == (2, 80)
+
+
+def test_firered_tokenizer_wordpiece(tmp_path):
+    """Bảng chữ FireRedASR2 (tách mã để căn CTC, ghép lại lời, gộp mảnh tiếng Anh) + tách chữ cho FireRedPunc."""
+    from trami.firered.tokenizer import AedTokenizer, TokenDict, WordPiece
+
+    (tmp_path / "dict.txt").write_text("\n".join(f"{w} {i}" for i, w in enumerate(
+        ["<blank>", "<unk>", "<sos>", "<eos>", "你", "好", "▁HELLO", "▁WOR", "LD"])) + "\n", "utf-8")
+    tok = AedTokenizer(str(tmp_path / "dict.txt"))
+    assert tok.tokenize("你，好！") == [4, 5] and tok.detokenize([4, 5, 6]) == "你好 HELLO"
+    assert tok.merge_spm_timestamp([("▁wor", 0.0, 0.2), ("ld", 0.2, 0.4), ("你", 0.5, 0.6)]) == \
+        [("wor" + "ld", 0.0, 0.4), ("你", 0.5, 0.6)]
+    (tmp_path / "v.txt").write_text("\n".join(["[PAD]", "[UNK]", "[CLS]", "你", "好", "iphone", "##s", "1", "##5"]),
+                                    "utf-8")
+    wp = WordPiece(TokenDict(str(tmp_path / "v.txt"), unk="[UNK]"))
+    assert wp.tokenize("你好iPhones 15鬱") == [("你", "你"), ("好", "好"), ("iphone", "iPhone"), ("##s", "s"),
+                                            ("1", "1"), ("##5", "5"), ("[UNK]", "鬱")]
+
+
+def test_dual_assign_merge_and_ai_pick():
+    """Nghe 2 bộ rồi so: chữ bộ 2 chia về đúng câu theo khớp chữ (không theo mốc giờ), chữ thừa giữa 2 câu theo giờ;
+    thay chữ giữ dấu câu; AI chỉ được chọn A / B / ghép từ chữ của 2 bản."""
+    from trami import dual
+
+    segs = [Segment(0, 2, "临北师兄，你来了。"), Segment(2.2, 4, "我们去吃饭吧！"), Segment(9, 10, "好的。"),
+            Segment(10.2, 11, "♪♪", extra={"song": True})]
+    sp = dual.alt_spans(segs)
+    assert [(round(a, 2), round(b, 2), r) for a, b, r in sp] == [(0.0, 4.25, [0, 1]), (8.75, 10.25, [2])]
+    items = [{"text": "林北师兄你来了呀我们去吃饭", "words": [[ch, 0.25 * k, 0.25 * k + 0.2] for k, ch in
+                                                    enumerate("林北师兄你来了呀我们去吃饭")]},
+             {"text": "好的", "words": []}]
+    alts = dual.assign(segs, sp, items)
+    assert alts == {0: "林北师兄你来了呀", 1: "我们去吃饭", 2: "好的"}
+    assert dual.differs(segs[0].text, alts[0]) and not dual.differs(segs[2].text, alts[2])
+    assert dual.merge_alt("临北师兄，你来了。", "林北师兄你来了") == "林北师兄，你来了。"
+    assert dual.merge_alt("你好，世界。", "你好呀世界") == "你好呀，世界。"
+    assert dual.merge_alt("我们去吃饭吧！", "我们去吃饭") == "我们去吃饭！"
+    assert dual.merge_alt("我用iPhone，很好。", "我用iphone很好") == "我用iPhone，很好。"
+    rows = [0, 1]
+    reply = json.dumps({"1": {"chon": "B", "cau": "林北师兄你来了呀", "chac": True, "ly_do": "tên nhân vật"},
+                        "2": {"chon": "C", "cau": "我们去吃饭吧", "chac": True},
+                        "3": {"chon": "B"}}, ensure_ascii=False)
+    got = dual.parse_pick(reply, segs, rows, alts)
+    assert got[0][:3] == ("B", "林北师兄你来了呀", True) and got[1][:2] == ("C", "我们去吃饭吧")
+    bad = json.dumps({"1": {"chon": "C", "cau": "王五师兄你来了"}, "2": {"chon": "A", "chac": False}})
+    got = dual.parse_pick(bad, segs, rows, alts)
+    assert 0 not in got and got[1] == ("A", "我们去吃饭吧", False, "")   # chữ ngoài 2 bản -> bỏ; không chắc -> giữ cờ
+    pay = json.loads(dual.pick_payload(segs, rows, alts).split("CÁC CÂU CẦN CHỌN:\n", 1)[1])
+    assert pay["1"]["B"] == "林北师兄你来了呀" and pay["2"]["truoc"] == ["临北师兄，你来了。"]
+
+
+def test_names_context_candidates_and_fix():
+    """Tên riêng: lấy từ bảng tên riêng + hồ sơ phim, gợi ý kèm tiêu đề / mô tả video; chỗ đọc giống tên (cùng âm) mà
+    viết khác -> sửa (tên 2 chữ phải cùng cả thanh điệu, không đổi từ thông dụng); chọn câu nghe lại thì lỏng hơn."""
+    pytest.importorskip("pypinyin")
+    from trami import names
+    from trami.project import Project
+
+    p = Project.create("tên riêng")
+    try:
+        p.data["glossary"] = "林北=Lâm Bắc\nabc=x"
+        p.data["film_profile"] = ("Nhân vật:\n- 延旭将军 (Diên Húc tướng quân) – nói 我们\n"
+                                  "Tên riêng / thuật ngữ / meme:\n- 万仙盟 = Vạn Tiên Minh\nGhi chú: 林北")
+        p.data["video_meta"] = {"title": "【万仙盟】第3集 林北下山", "description": "林北拜师之后……", "tags": ["仙侠", "abc"]}
+        nm = names.names_of(p, {})
+        assert nm == ["延旭将军", "万仙盟", "林北"]
+        ctx = names.context_text(p, {}, nm)
+        assert ctx.startswith("热词：延旭将军、万仙盟、林北") and "视频标题：【万仙盟】" in ctx and "标签：仙侠" in ctx
+        assert names.candidates("临北师兄，你来了。", nm) == [(0, 2, "林北")]
+        assert names.candidates("林贝，快走！", nm) == [] and names.candidates("林贝，快走！", nm, loose=True)
+        assert names.candidates("他在万先盟等你", nm) == [(2, 5, "万仙盟")]
+        assert names.candidates("我们临别时说的话", nm) == [] and names.candidates("林北来了", nm) == []
+        segs = [Segment(0, 2, "临北师兄，你来了。", extra={"ct": [[0.1 * k, 0.1 * k + 0.08] for k in range(7)]}),
+                Segment(3, 4, "王子来了")]
+        assert names.fix(segs, nm + ["王子"]) == [0]
+        assert segs[0].text == "林北师兄，你来了。" and segs[0].extra["name_fix"] == [["临北", "林北"]]
+        assert len(segs[0].extra["ct"]) == 7 and segs[0].extra["src_before"] == "临北师兄，你来了。"
+    finally:
+        p.delete()
+
+
+def test_name_pass_and_dual_listen_pipeline(monkeypatch, tmp_path):
+    """Nghe 2 bộ rồi so + nghe lại câu có tên trong pipeline (bộ nghe giả): chưa có tên -> AI lập hồ sơ; Qwen3 nghe lại
+    câu nghi sai tên kèm gợi ý tên; FireRedASR2 nghe lại đúng các đoạn; câu khác nhau -> AI chọn (chắc thì sửa + đo lại
+    mốc chữ, không chắc -> tô xanh); thông báo đủ kết quả; hết việc tắt tiến trình nghe."""
+    from trami import asr_firered, asr_qwen, models, pipeline, skills
+    from trami.project import Project
+
+    calls = []
+
+    class Q:
+        def call(self, req, progress=None, cancel=None):
+            calls.append(("qwen", req["cmd"], req.get("prompt", ""), len(req.get("spans") or req.get("items"))))
+            if req["cmd"] == "align":
+                return {"items": [{"words": [[ch, 0.1 * k, 0.1 * k + 0.08] for k, ch in enumerate(re.sub(r"\W", "", t))]}
+                                  for _a, _b, t in req["items"]]}
+            return {"items": [{"text": "林北师兄，你来了。"}]}
+
+    class F:
+        def call(self, req, progress=None, cancel=None):
+            calls.append(("firered", req["cmd"], "", len(req.get("spans") or req.get("items"))))
+            if req["cmd"] == "align":
+                return {"items": [{"words": []} for _ in req["items"]]}
+            return {"items": [{"text": "林北师兄你来了我们去吃饭", "words": []}, {"text": "好吧", "words": []}]}
+
+    released = []
+    monkeypatch.setattr(asr_qwen, "worker", lambda st=None: Q())
+    monkeypatch.setattr(asr_firered, "worker", lambda st=None: F())
+    monkeypatch.setattr(asr_qwen, "available", lambda: True)
+    monkeypatch.setattr(asr_qwen, "release", lambda: released.append(1))
+    monkeypatch.setattr(models, "firered_ready", lambda: True)
+    monkeypatch.setattr(asr_firered, "available", lambda: True)
+    monkeypatch.setattr(skills, "make_profile", lambda llm, texts, tn, sk="": (
+        "Nhân vật:\n- 林北 (Lâm Bắc)", {"林北": "Lâm Bắc"}))
+
+    class LLM:
+        def __init__(self, *a, **k):
+            pass
+
+        def chat(self, system, user, max_tokens=0, temperature=0.0):
+            assert "HỒ SƠ PHIM" in user and "林北" in user
+            return json.dumps({"1": {"chon": "B", "cau": "我们去吃饭", "chac": True, "ly_do": "khớp nghĩa"},
+                               "2": {"chon": "A", "chac": False}}, ensure_ascii=False)
+
+    monkeypatch.setattr("trami.translate.LLMClient", LLM)
+    st = {"translate_engine": "deepseek", "deepseek_api_keys": ["k"], "asr_ai": "auto"}
+    p = Project.create("2 bộ nghe")
+    try:
+        p.data["info"] = {"duration": 20}
+        segs = [Segment(0, 2, "临贝师兄，你来了。", extra={"ct": [[0.1 * k, 0.1 * k + 0.08] for k in range(7)]}),
+                Segment(2.2, 4, "我们去吃饭吧。"), Segment(9, 10, "好的。")]
+        res = pipeline.name_pass(p, segs, tmp_path / "a.wav", "qwen3", "zh", dict(st))
+        assert res["profile"] and res["names"] == 1 and res["listened"] == 1 and res["heard"] == 1
+        assert segs[0].text == "林北师兄，你来了。" and p.data["film_profile"].startswith("Nhân vật")
+        assert "林北 = Lâm Bắc" in p.data["glossary"] and calls[0][:2] == ("qwen", "asr") and "热词：林北" in calls[0][2]
+        calls.clear()
+        d = pipeline.dual_listen(p, segs, tmp_path / "a.wav", "qwen3", "zh", dict(st))
+        assert d["second"] == "firered" and d["checked"] == 3 and d["differ"] == 2 and d["ai_fixed"] == 1
+        assert d["unsure"] == 1 and released
+        assert segs[1].text == "我们去吃饭。" and segs[1].extra["asr_pick"].startswith("B")
+        assert segs[2].extra["asr_unsure"] and segs[2].extra["asr_alt"] == "好吧"
+        assert "asr_alt" not in segs[0].extra
+        assert ("firered", "align", "", 1) in calls     # câu đổi số chữ -> đo lại mốc bằng chính bộ 2
+        note = pipeline.dual_note(d)
+        assert "2/3 câu khác nhau" in note and "sửa 1" in note and "1 câu cần nghe lại" in note
+        assert "nghe lại ra đúng tên 1/1" in pipeline.name_note(res)
+        # bộ chính FireRedASR2 -> bộ 2 là Qwen3; chưa tải FireRedASR2 + bộ chính Qwen3 -> báo lý do
+        assert pipeline.dual_engine("firered", "zh", st)[0] == "qwen3"
+        monkeypatch.setattr(models, "firered_ready", lambda: False)
+        eng, why = pipeline.dual_engine("qwen3", "zh", st)
+        assert eng is None and "FireRedASR2" in why
+        assert pipeline.dual_listen(p, segs, tmp_path / "a.wav", "qwen3", "zh", dict(st))["error"]
+        assert pipeline.dual_engine("ocr", "zh", st)[0] == "qwen3"
+        # dùng bản bộ nghe 2 cho câu đã tích; sửa tên theo âm đọc cho dự án
+        p.segments = segs
+        p.save()
+        assert pipeline.use_alt(p, [2]) == [2] and p.segments[2].text == "好吧。"
+        p.segments = [Segment(0, 1, "临北来了"), Segment(1, 2, "你好")]
+        p.save()
+        assert pipeline.fix_names_now(p, {}) == [0] and p.segments[0].text == "林北来了"
+    finally:
+        p.delete()
+
+
+def test_recognize_firered_engine_and_fallback(monkeypatch, sample_video):
+    """Chọn bộ nghe FireRedASR2: nghe bằng tiến trình FireRedASR2 (cùng đường chia khúc / căn của Qwen3); chưa tải mô
+    hình / tiếng không hỗ trợ -> tự dùng Qwen3-ASR + báo; gợi ý tên riêng gửi kèm cho Qwen3."""
+    from trami import asr_firered, asr_qwen, models, pipeline
+    from trami.project import Project
+
+    used = []
+
+    def fake_tq(wav, settings, language="zh", progress=None, cancel=None, on_chunk=None, stats=None,
+                engine="qwen3", spans=None):
+        used.append((engine, settings.get("_asr_context", "")))
+        return [Segment(0.5, 2.0, "你好世界。"), Segment(2.5, 4.0, "林北来了。")]
+
+    monkeypatch.setattr(asr_qwen, "transcribe_qwen", fake_tq)
+    monkeypatch.setattr(asr_qwen, "available", lambda: True)
+    monkeypatch.setattr(asr_firered, "available", lambda: True)
+    st = {"asr_engine": "firered", "sep_before_asr": False, "diarize": False, "align_words": False,
+          "asr_rescue": False, "song_detect": False, "pitch_check": False, "snap_edges": False, "ai_join_engine": "off",
+          "asr_name_pass": False}
+    p = Project.create("firered")
+    try:
+        pipeline.attach_source(p, sample_video)
+        p.data["glossary"] = "林北=Lâm Bắc"
+        monkeypatch.setattr(models, "firered_ready", lambda: True)
+        assert pipeline.recognize(p, settings=dict(st)) == 2
+        assert used[-1][0] == "firered" and p.data["asr_engine_used"] == "firered" and not p.data.get("asr_warning")
+        monkeypatch.setattr(models, "firered_ready", lambda: False)
+        pipeline.recognize(p, settings=dict(st))
+        assert used[-1][0] == "qwen3" and "FireRedASR2" in p.data["asr_warning"] and "热词：林北" in used[-1][1]
+        assert p.data["asr_engine_used"] == "qwen3"
+        monkeypatch.setattr(models, "firered_ready", lambda: True)
+        pipeline.recognize(p, language="ja", settings=dict(st))
+        assert used[-1][0] == "qwen3" and "chỉ nghe" in p.data["asr_warning"]
+    finally:
+        p.delete()
+
+
+def test_hybrid_ocr_listen(monkeypatch, tmp_path, sample_video):
+    """OCR + nghe: chữ giữ nguyên của phụ đề in sẵn, giờ lấy theo mốc từng chữ căn trên giọng nói, đoạn có tiếng mà
+    phụ đề không có câu nào -> bộ nghe thêm (đánh dấu from_asr, câu OCR không bị gộp)."""
+    from trami import asr_qwen, pipeline
+    from trami.project import Project
+
+    p = Project.create("ocr+nghe")
+    try:
+        pipeline.attach_source(p, sample_video)
+        voc = tmp_path / "vocals.wav"
+        voc.write_bytes(b"x")
+        monkeypatch.setattr(pipeline, "_listen_audio", lambda p, st, dn=False, pr=None, c=None: (voc, tmp_path / "a.wav"))
+        monkeypatch.setattr(asr_qwen, "available", lambda: True)
+        monkeypatch.setattr(asr_qwen, "release", lambda: None)
+        seen = {}
+
+        def fake_align(segs, wav, language, settings, progress=None, cancel=None, engine="qwen3", pad=0.3):
+            seen.update(engine=engine, pad=pad)
+            for s in segs:
+                s.extra["ct"] = [[s.start + 0.3 + 0.1 * k, s.start + 0.38 + 0.1 * k] for k in range(4)]
+            return len(segs)
+
+        def fake_rescue(segs, wav, engine, language, settings, keep_speakers=False, progress=None, cancel=None,
+                        keep_lines=False):
+            seen["keep"] = keep_lines
+            return sorted(segs + [Segment(5.0, 5.8, "嗯好的")], key=lambda x: x.start), 1
+
+        monkeypatch.setattr(asr_qwen, "align_qwen", fake_align)
+        monkeypatch.setattr(pipeline, "rescue_segments", fake_rescue)
+        ocr = [Segment(1.0, 2.5, "林北来了"), Segment(2.5, 4.0, "快走快走")]
+        out = pipeline.hybrid_listen(p, ocr, {"asr_engine": "qwen3", "song_detect": False}, "zh", "qwen3")
+        assert [x.text for x in out] == ["林北来了", "快走快走", "嗯好的"] and seen == {"engine": "qwen3", "pad": 0.6,
+                                                                               "keep": True}
+        assert out[0].start == pytest.approx(1.25) and out[0].end == pytest.approx(1.73)
+        assert out[0].extra["ocr_time"] == [1.0, 2.5] and out[2].extra["from_asr"] and "from_asr" not in out[0].extra
+        assert p.data["hybrid"] == {"lines": 2, "timed": 2, "added": 1}
+        assert "2/2 câu phụ đề căn giờ" in pipeline.hybrid_note(p.data["hybrid"])
+        p.data["sub_source"] = "hybrid"
+        assert "bộ nghe thêm 1 câu" in pipeline.listen_note(p)
+    finally:
+        p.delete()
+
+
+def test_firered_models_entry_and_worker_wiring(monkeypatch, tmp_path):
+    """Tab Tài liệu có FireRedASR2 (đủ file mới báo đã tải), tải từ kho chính + bộ đặt dấu câu (ModelScope của tác giả
+    là nguồn dự phòng); TraMi.py nhận --firered-worker; GPU: tiến trình FireRedASR2 tắt cùng Qwen3."""
+    from trami import asr_firered, asr_qwen, gpu, hf_download, models
+
+    assert "firered" in models.BY_KEY and models.FIRERED_REPO in hf_download.MS_MIRRORS
+    snap = tmp_path / "aed"
+    punc = tmp_path / "punc"
+    monkeypatch.setattr(models, "_hf_snapshot", lambda repo: snap if repo == models.FIRERED_REPO else punc)
+    (snap).mkdir()
+    for f in ("model.pth.tar", "cmvn.ark"):
+        (snap / f).write_bytes(b"x")
+    assert not models.firered_ready()
+    (snap / "dict.txt").write_bytes(b"x")
+    assert models.firered_ready() and not models.is_ready("firered")
+    (punc / "chinese-lert-base").mkdir(parents=True)
+    for f in models.FIRERED_PUNC_FILES:
+        (punc / f).write_bytes(b"x")
+    assert models.is_ready("firered")
+    got = []
+    monkeypatch.setattr(hf_download, "download", lambda repo, pats, **k: got.append((repo, pats, k.get("lo", 0))))
+    monkeypatch.setattr(models, "missing_packages", lambda key: [])
+    models.download("firered")
+    assert [g[0] for g in got] == [models.FIRERED_REPO, models.FIRERED_PUNC] and got[0][1] is None
+    assert "--firered-worker" in (Path(__file__).resolve().parent.parent / "TraMi.py").read_text("utf-8")
+    w = asr_firered.FireRedWorker(models.FIRERED_REPO)
+    assert w._cmd()[-2:] == ["--firered-worker", models.FIRERED_REPO] and asr_qwen.engine_name("firered") == "FireRedASR2"
+    monkeypatch.setattr(asr_firered, "_worker", w)
+    assert ("asr", w) in gpu._workers({"asr"})
+    assert gpu.vram_need("recognize", {"asr_engine": "firered"}) == 3000
+    assert gpu.vram_need("recognize", {"asr_engine": "firered", "asr_dual": True}) == 4600
+
+
+def test_firered_tiny_worker_end_to_end(tmp_path):
+    """Chạy THẬT tiến trình FireRedASR2 với mô hình tí hon trọng số ngẫu nhiên (đúng định dạng file bản thật): nghe,
+    căn lời có sẵn bằng nhánh CTC, đặt dấu câu FireRedPunc – cần torch + transformers (máy không có thì bỏ qua)."""
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+    import argparse
+    import wave
+
+    import torch
+    import transformers
+
+    from trami.firered.model import FireRedAsrAed
+    from trami.firered.punc import FireRedPuncBert
+
+    aed, pdir = tmp_path / "aed", tmp_path / "punc"
+    aed.mkdir()
+    vocab = ["<blank>", "<unk>", "<sos>", "<eos>", "<pad>"] + list("你好世界我们今天去哪里吃饭")
+    (aed / "dict.txt").write_text("".join(f"{w} {i}\n" for i, w in enumerate(vocab)), "utf-8")
+    a = argparse.Namespace(idim=80, n_layers_enc=1, n_head=2, d_model=16, residual_dropout=0.1, dropout_rate=0.1,
+                           kernel_size=5, pe_maxlen=5000, sos_id=2, eos_id=3, pad_id=4, odim=len(vocab), n_layers_dec=1)
+    torch.save({"args": a, "model_state_dict": FireRedAsrAed.from_args(a).state_dict()}, aed / "model.pth.tar")
+    st = np.zeros((2, 81))
+    st[0, :80], st[1, :80], st[0, 80] = 500.0, 2900.0, 100
+    import struct
+
+    (aed / "cmvn.ark").write_bytes(b"\0BDM " + struct.pack("<bi", 4, 2) + struct.pack("<bi", 4, 81) +
+                                   st.astype("<f8").tobytes())
+    (pdir / "chinese-lert-base").mkdir(parents=True)
+    pv = ["[PAD]", "[UNK]", "[CLS]", "[SEP]"] + list("你好世界我们")
+    (pdir / "chinese-bert-wwm-ext_vocab.txt").write_text("\n".join(pv), "utf-8")
+    (pdir / "out_dict").write_text(" \n，\n。\n", "utf-8")
+    bert = transformers.BertModel(transformers.BertConfig(vocab_size=len(pv), hidden_size=16, num_hidden_layers=1,
+                                                          num_attention_heads=2, intermediate_size=32,
+                                                          max_position_embeddings=64))
+    bert.save_pretrained(pdir / "chinese-lert-base")
+    torch.save({"args": argparse.Namespace(classifier_dropout=0.1, odim=3, cls_id=2),
+                "model_state_dict": FireRedPuncBert(bert, 0.1, 3, 2).state_dict()}, pdir / "model.pth.tar")
+    wav = tmp_path / "a.wav"
+    with wave.open(str(wav), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes((np.random.default_rng(0).standard_normal(16000 * 4) * 3000).astype(np.int16).tobytes())
+    os.environ["TRAMI_FIRERED_DIR"], os.environ["TRAMI_FIRERED_PUNC"] = str(aed), str(pdir)
+    from trami import asr_firered
+
+    w = asr_firered.FireRedWorker("FireRedTeam/FireRedASR2-AED")
+    try:
+        r = w.call({"cmd": "asr", "wav": str(wav), "spans": [[0, 2], [2.2, 4]], "language": "zh", "align": True})
+        assert len(r["items"]) == 2 and all("conf" in it for it in r["items"])
+        r = w.call({"cmd": "align", "wav": str(wav), "items": [[0, 2, "你好，世界。"], [2.2, 4, "我们去吃饭"]]})
+        words = [it["words"] for it in r["items"]]
+        assert [x[0] for x in words[0]] == list("你好世界") and len(words[1]) == 5
+        assert all(a <= b for x in words for _c, a, b in x)
+    finally:
+        w.stop()
+        os.environ.pop("TRAMI_FIRERED_DIR", None)
+        os.environ.pop("TRAMI_FIRERED_PUNC", None)
+
+
+def test_gui_listen_accuracy_controls(sample_video, monkeypatch):
+    """Giao diện 2.1.0: Cài đặt có bộ nghe FireRedASR2 + Nghe 2 bộ rồi so / AI hỗ trợ nghe / gợi ý tên / nghe lại tên;
+    tab Tự động: nguồn "OCR + nghe", công tắc gương "Nghe 2 bộ rồi so"; tab Phụ đề: chữ gốc tô xanh câu 2 bộ khác
+    nhau (chú thích có bản bộ 2), Tích câu 2 bộ nghe khác nhau, Dùng bản bộ nghe 2, Sửa tên theo âm đọc (Ctrl+Z)."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    pytest.importorskip("pypinyin")
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+
+    from trami.config import load_settings, save_settings
+    from trami.gui import common as C
+    from trami.gui.main import MainWindow
+    from trami.gui.subs_model import C_ZH
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    old = load_settings()
+    win = MainWindow()
+    try:
+        sp = win.settings_page
+        assert dict(C.ASR_ENGINES).get("firered") and dict(C.METHODS).get("hybrid")
+        for a in ("asr_dual", "asr_ai", "asr_context", "asr_name_pass"):
+            assert hasattr(sp, a)
+        p = Project.create("nghe chuan gui")
+        p.data["info"] = {"duration": 10}
+        p.data["glossary"] = "林北=Lâm Bắc"
+        p.segments = [Segment(1, 2, "临北来了。", "Lâm Bắc đến rồi", "S1"),
+                      Segment(3, 4, "好的。", "", "S1", {"asr_alt": "好吧", "asr_alt_eng": "firered",
+                                                       "asr_unsure": True}),
+                      Segment(5, 6, "走吧。", "", "S1")]
+        p.save()
+        win.open_project(p.id)
+        app.processEvents()
+        pp = win.project_page
+        pp.a_dual.setChecked(True)
+        assert load_settings()["asr_dual"] is True
+        pp.a_dual.setChecked(False)
+        assert load_settings()["asr_dual"] is False
+        k = [i for i in range(pp.a_method.count()) if pp.a_method.itemData(i) == "hybrid"][0]
+        pp.a_method.setCurrentIndex(k)
+        assert pp.a_ocrfps.isEnabled() and pp.a_asr.isEnabled()
+        m = pp.model
+        assert m.data(m.index(1, C_ZH), Qt.ItemDataRole.ForegroundRole).name().lower() == "#6fc8e8"
+        tip = m.data(m.index(1, C_ZH), Qt.ItemDataRole.ToolTipRole)
+        assert "FireRedASR2: 好吧" in tip and "Dùng bản bộ nghe 2" in tip
+        pp._pick_flag("asr_alt")
+        assert set(m.selected) == {1}
+        pp._use_alt()
+        assert pp.model.segs[1].text == "好吧。" and not pp.model.segs[1].extra.get("asr_unsure")
+        pp._fix_names()
+        assert pp.model.segs[0].text == "林北来了。" and set(pp.model.selected) == {0}
+        assert "临北 → 林北" in pp.model.data(pp.model.index(0, C_ZH), Qt.ItemDataRole.ToolTipRole)
+        pp.undo()
+        assert pp.model.segs[0].text == "临北来了。"
+        pp.undo()
+        assert pp.model.segs[1].text == "好的。"
+        got = []
+        monkeypatch.setattr(pp, "submit", lambda kind, title, fn, quiet=False: got.append(kind))
+        monkeypatch.setattr("trami.pipeline.dual_engine", lambda *a: ("firered", "FireRedASR2"))
+        pp.run_dual()
+        assert got == ["dual"]
+        pp._subs_tools(2)
+        app.processEvents()
+    finally:
+        save_settings({"asr_dual": old.get("asr_dual", False)})
+        win.close()
+        Project(p.id).delete()

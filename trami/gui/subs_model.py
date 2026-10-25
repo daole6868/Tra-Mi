@@ -44,6 +44,33 @@ def fit_text(s: Segment) -> str:
     return out
 
 
+ENGINE_LABEL = {"firered": "FireRedASR2", "qwen3": "Qwen3-ASR"}
+
+
+def asr_tip(s) -> str:
+    """Chú thích chữ gốc: 2 bộ nghe khác nhau / câu bộ nghe thêm (OCR + nghe) / tên đã sửa."""
+    lines = []
+    if s.extra.get("asr_alt") is not None:
+        who = ENGINE_LABEL.get(s.extra.get("asr_alt_eng", ""), "Bộ nghe 2")
+        alt = s.extra["asr_alt"] or "(không nghe ra chữ nào – có thể là nhạc / tiếng động)"
+        lines.append(f"2 bộ nghe ra khác nhau – {who}: {alt}")
+        pick = s.extra.get("asr_pick")
+        if pick:
+            lines.append({"A": "AI giữ bản đang có", "B": f"AI chọn bản của {who}",
+                          "C": "AI ghép từ 2 bản"}.get(pick[:1], "AI chọn") + (pick[1:] if len(pick) > 1 else ""))
+        elif s.extra.get("asr_unsure"):
+            lines.append("Chưa chọn được – nghe lại rồi sửa chữ, hoặc tích câu rồi bấm 'Dùng bản bộ nghe 2'")
+    if s.extra.get("from_asr"):
+        lines.append("OCR + nghe: phụ đề in sẵn không có câu này – bộ nghe nghe thêm (nên nghe lại)")
+    if s.extra.get("name_fix"):   # [[chữ cũ, tên]] (sửa theo âm đọc) hoặc [tên] (nghe lại ra đúng tên)
+        parts = [f"{x[0]} → {x[1]}" if isinstance(x, (list, tuple)) and len(x) == 2 else f"nghe lại ra {x}"
+                 for x in s.extra["name_fix"]]
+        lines.append("Sửa tên riêng: " + ", ".join(parts))
+    if s.extra.get("src_before"):
+        lines.append(f"Trước khi sửa: {s.extra['src_before']}")
+    return "\n".join(lines)
+
+
 def fit_tip(s: Segment) -> str:
     """Giải thích đầy đủ độ vừa của câu (chú thích cột Độ vừa, khung Câu đang chọn, timeline)."""
     ex = s.extra
@@ -200,6 +227,10 @@ class SubsModel(QAbstractTableModel):
             if c == C_ZH:
                 if s.extra.get("noise"):
                     return QColor("#B98CFF")       # tím = nghi nhạc / tiếng động bị nghe thành lời
+                if s.extra.get("asr_unsure"):
+                    return QColor("#6FC8E8")       # xanh = 2 bộ nghe ra khác nhau, chưa chọn được -> nghe lại
+                if s.extra.get("from_asr"):
+                    return QColor("#E8A87C")       # cam nhạt = OCR + nghe: câu phụ đề không có, bộ nghe thêm vào
                 return QColor("#E8C26A" if s.extra.get("src_unsure") else "#C3CAD6")   # vàng = AI sửa mà chưa chắc
             if c == C_FIT:
                 return QColor(FIT_COLOR.get(s.extra.get("fit"), theme.MUTED))
@@ -224,6 +255,8 @@ class SubsModel(QAbstractTableModel):
             if c == C_ZH and s.extra.get("ai_song") and s.extra.get("song"):
                 return f"🎵 AI: lời bài hát – {s.extra['ai_song']}\nKhông lồng tiếng câu này. Là lời thoại thật: tích rồi " \
                        "bấm 'Không phải nhạc'"
+            if c == C_ZH and (s.extra.get("asr_alt") is not None or s.extra.get("from_asr") or s.extra.get("name_fix")):
+                return asr_tip(s)
             if c == C_ZH and (s.extra.get("src_before") or s.extra.get("src_unsure")):
                 tip = f"AI sửa lỗi nghe – trước: {s.extra['src_before']}" if s.extra.get("src_before") else ""
                 if s.extra.get("src_unsure"):
@@ -268,6 +301,7 @@ class SubsModel(QAbstractTableModel):
             elif c == C_ZH:
                 s.text = " ".join(v.split())
                 s.extra.pop("src_unsure", None)   # người dùng đã xem / sửa
+                s.extra.pop("asr_unsure", None)
             elif c == C_VI:
                 s.trans = " ".join(v.split())
                 s.extra.pop("fit", None)   # bản dịch đổi -> cần tạo lại bản lồng để đo lại

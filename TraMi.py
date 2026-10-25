@@ -20,6 +20,10 @@ if __name__ == "__main__":
         from trami.qwen_asr_worker import main as qa_main
 
         qa_main(sys.argv[2] if len(sys.argv) > 2 else "Qwen/Qwen3-ASR-1.7B-hf")
+    elif len(sys.argv) > 1 and sys.argv[1] == "--firered-worker":   # tiến trình riêng nghe tiếng Trung FireRedASR2
+        from trami.firered_worker import main as fr_main
+
+        fr_main(sys.argv[2] if len(sys.argv) > 2 else "FireRedTeam/FireRedASR2-AED")
     elif len(sys.argv) > 1 and sys.argv[1] == "--hymt-worker":   # tiến trình riêng dịch trên máy Hy-MT2
         from trami.hymt_worker import main as mt_main
 

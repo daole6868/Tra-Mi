@@ -100,15 +100,37 @@ def worker(settings: dict | None = None) -> QwenAsrWorker:
 
 
 def release() -> None:
-    """Tắt tiến trình Qwen3-ASR – trả bộ nhớ GPU cho các bước sau (phân biệt người nói, lồng tiếng)."""
+    """Tắt tiến trình Qwen3-ASR (và FireRedASR2 nếu đang mở) – trả bộ nhớ GPU cho các bước sau (phân biệt người nói,
+    lồng tiếng)."""
+    import sys
+
     global _worker
     if _worker is not None:
         _worker.stop()
         _worker = None
+    fr = sys.modules.get("trami.asr_firered")
+    if fr is not None:
+        fr.release()
+
+
+def asr_worker(engine: str, settings: dict | None = None) -> QwenAsrWorker:
+    """Tiến trình nghe theo bộ nghe: "firered" -> FireRedASR2, còn lại Qwen3-ASR (cùng giao thức)."""
+    if engine == "firered":
+        from . import asr_firered
+
+        return asr_firered.worker(settings)
+    return worker(settings)
+
+
+def engine_name(engine: str) -> str:
+    return "FireRedASR2" if engine == "firered" else "Qwen3-ASR"
 
 
 def hotwords(settings: dict) -> str:
-    """Tên riêng / thuật ngữ tiếng Trung trong bảng thuật ngữ (Cài đặt) -> gợi ý cho Qwen3-ASR nghe đúng."""
+    """Tên riêng / thuật ngữ tiếng Trung trong bảng thuật ngữ (Cài đặt) -> gợi ý cho Qwen3-ASR nghe đúng.
+    pipeline.recognize đặt sẵn `_asr_context` (names.context_text: tên của dự án + hồ sơ phim + tiêu đề video)."""
+    if settings.get("_asr_context") is not None:
+        return str(settings["_asr_context"])
     terms = []
     for line in (settings.get("glossary") or "").splitlines():
         zh = line.split("=", 1)[0].strip()
@@ -160,7 +182,8 @@ MERGE_MAX = 56.0    # khúc sau khi nối ≤ 56 s (bộ căn thời gian chạy
 
 
 def relisten_cuts(raw: list[tuple[float, float, str]], wav: str | Path, settings: dict, language: str,
-                  progress: Prog | None = None, cancel=None, stats: dict | None = None) -> list[tuple[float, float, str]]:
+                  progress: Prog | None = None, cancel=None, stats: dict | None = None,
+                  engine: str = "qwen3") -> list[tuple[float, float, str]]:
     """raw: [(đầu, cuối, lời)] từng khúc theo thứ tự. Bộ nghe hay tự đặt "。" ở cuối mỗi khúc; ở chỗ cắt khúc KHÔNG có
     khoảng nghỉ (cắt giữa lúc đang nói) dấu đó thường là giả ("我刚回来就。" | "收到…"). Nghe lại 12 s quanh mỗi chỗ cắt
     như vậy (6 s mỗi bên): nghe có ngữ cảnh mà không có dấu kết câu ở chỗ nối -> bỏ dấu, nối 2 khúc (bước tách câu sau
@@ -183,8 +206,9 @@ def relisten_cuts(raw: list[tuple[float, float, str]], wav: str | Path, settings
         return raw
     if progress:
         progress(0.0, f"Nghe lại {len(todo)} chỗ cắt khúc giữa lúc đang nói…")
-    r = worker(settings).call({"cmd": "asr", "wav": _wav_path(wav), "language": language, "prompt": hotwords(settings),
-                               "align": False, "spans": [[a, b] for _, a, b in todo]}, progress, cancel)
+    r = asr_worker(engine, settings).call({"cmd": "asr", "wav": _wav_path(wav), "language": language,
+                                           "prompt": hotwords(settings), "align": False,
+                                           "spans": [[a, b] for _, a, b in todo]}, progress, cancel)
     raw = list(raw)
     merge: dict[int, str] = {}
     for (k, _a, _b), it in zip(todo, r.get("items") or []):
@@ -213,25 +237,34 @@ def relisten_cuts(raw: list[tuple[float, float, str]], wav: str | Path, settings
 
 def transcribe_qwen(wav: str | Path, settings: dict, language: str = "zh", progress: Prog | None = None,
                     cancel=None, on_chunk: Callable[[list[Segment]], None] | None = None,
-                    stats: dict | None = None) -> list[Segment]:
+                    stats: dict | None = None, engine: str = "qwen3",
+                    spans: list[tuple[float, float]] | None = None) -> list[Segment]:
     """Nghe cả video: chia đoạn có tiếng -> gộp thành khúc ≤ 28 s (nghe trọn câu) -> Qwen3-ASR -> nghe lại chỗ cắt khúc
     giữa lúc đang nói (`relisten_cuts`) -> mốc từng chữ. Mỗi khúc trả về 1 Segment có extra["ct"]; bước căn thời gian
     (align.refine) tách câu theo dấu câu + chỗ nghỉ.
     on_chunk: nghe theo từng nhóm khúc, nghe xong nhóm nào gọi on_chunk(các khúc đó) ngay (vừa tách vừa dịch).
-    stats: nhận {"cuts", "merged", "fixed"} của bước nghe lại chỗ cắt khúc."""
+    stats: nhận {"cuts", "merged", "fixed"} của bước nghe lại chỗ cắt khúc.
+    engine: "qwen3" | "firered" (FireRedASR2 trả luôn mốc từng chữ khi nghe – chỉ khúc bị nối mới phải căn lại).
+    spans: nghe đúng các khúc này (bộ nghe thứ 2 nghe lại đúng khúc của bộ thứ nhất) thay vì tự chia đoạn."""
     from .align import chunk_spans, split_params
     from .asr_funasr import load_wav16k
 
     if progress:
         progress(0.0, "Đang chia đoạn giọng nói…")
-    audio = load_wav16k(wav)
-    chunks = chunk_spans(_spans(audio, settings), audio, max_gap=split_params(settings)["chunk_gap"], max_len=28.0)
+    if spans is not None:
+        chunks = [(float(a), float(b)) for a, b in spans]
+    else:
+        audio = load_wav16k(wav)
+        chunks = chunk_spans(_spans(audio, settings), audio, max_gap=split_params(settings)["chunk_gap"], max_len=28.0)
+        del audio
     if not chunks:
         return []
     simplify = language in ("zh", "yue", "auto")
     want_align = bool(settings.get("align_words", True))
+    w = asr_worker(engine, settings)
     req = {"cmd": "asr", "wav": _wav_path(wav), "language": language, "prompt": hotwords(settings),
            "align": want_align}
+    heard_words: dict[tuple, list] = {}   # FireRedASR2 trả mốc từng chữ ngay khi nghe
     # NGHE hết (chưa căn) -> nghe lại chỗ cắt khúc -> CĂN 1 lần cho cả phim (bộ căn chỉ nạp sau khi nghe xong).
     # Vừa tách vừa dịch: nghe theo từng nhóm khúc -> gửi câu nháp ngay. (2.0.64 nghe + căn xen kẽ từng nhóm -> từ nhóm 2
     # bộ căn 0.6B nằm sẵn trên card trong lúc bộ nghe 1.7B chạy -> đỉnh bộ nhớ cao hơn ~1,2 GB, card nhỏ tràn sang RAM)
@@ -244,38 +277,42 @@ def transcribe_qwen(wav: str | Path, settings: dict, language: str = "zh", progr
         if progress:
             def pr(x, m, lo=lo, hi=hi, g=g):
                 progress(lo + (hi - lo) * x, m + (f" (phần {g + 1}/{len(groups)})" if len(groups) > 1 else ""))
-        r = worker(settings).call(dict(req, spans=[list(c) for c in part], align=False), pr, cancel)
+        r = w.call(dict(req, spans=[list(c) for c in part], align=False), pr, cancel)
         new = []
         for (s, e), it in zip(part, r.get("items") or []):
             text = (it.get("text") or "").strip()
             raw.append((s, e, text))
+            if it.get("words"):
+                heard_words[(s, e, text)] = it["words"]
             if x := _segment(s, e, {"text": text}, simplify):
                 new.append(x)
         if new and on_chunk:
             on_chunk(new)
     if settings.get("asr_relisten", True) and len(raw) > 1:
         rpr = (lambda x, m: progress(a_end + 0.03 * x, m)) if progress else None
-        raw = relisten_cuts(raw, wav, settings, language, rpr, cancel, stats)
+        raw = relisten_cuts(raw, wav, settings, language, rpr, cancel, stats, engine=engine)
     a_end = min(0.97, a_end + 0.03)
-    words: list = [[] for _ in raw]
+    words: list = [heard_words.get(x, []) for x in raw]
     if want_align and raw:
-        todo = [k for k, (_s, _e, t) in enumerate(raw) if t]
+        todo = [k for k, (_s, _e, t) in enumerate(raw) if t and not words[k]]
         apr = (lambda x, m: progress(a_end + (1 - a_end) * x, m)) if progress else None
-        r = worker(settings).call({"cmd": "align", "wav": _wav_path(wav), "language": language,
-                                   "items": [[raw[k][0], raw[k][1], raw[k][2]] for k in todo]}, apr, cancel)
+        r = w.call({"cmd": "align", "wav": _wav_path(wav), "language": language,
+                    "items": [[raw[k][0], raw[k][1], raw[k][2]] for k in todo]}, apr, cancel) if todo else {}
         for k, it in zip(todo, r.get("items") or []):
             words[k] = it.get("words") or []
         if r.get("align_error") and progress:
-            progress(1.0, "Không căn được thời gian bằng Qwen3 (" + r["align_error"][:80] + ") – dùng cách dự phòng")
+            progress(1.0, f"Không căn được thời gian bằng {engine_name(engine)} (" + r["align_error"][:80]
+                     + ") – dùng cách dự phòng")
     return [x for (s, e, t), w in zip(raw, words) if (x := _segment(s, e, {"text": t, "words": w}, simplify))]
 
 
-def qwen_decoder(settings: dict, language: str, work: Path) -> Callable[[np.ndarray], tuple[str, list[str]]]:
-    """Hàm nghe 1 đoạn ngắn bằng Qwen3-ASR – dùng để nghe lại các đoạn bị bộ chia đoạn bỏ sót."""
+def qwen_decoder(settings: dict, language: str, work: Path,
+                 engine: str = "qwen3") -> Callable[[np.ndarray], tuple[str, list[str]]]:
+    """Hàm nghe 1 đoạn ngắn bằng Qwen3-ASR / FireRedASR2 – dùng để nghe lại các đoạn bị bộ chia đoạn bỏ sót."""
     from .tts import write_wav
 
-    w = worker(settings)
-    tmp = Path(work) / "qwen_clip.wav"
+    w = asr_worker(engine, settings)
+    tmp = Path(work) / f"{engine}_clip.wav"
 
     def decode(clip: np.ndarray) -> tuple[str, list[str]]:
         if len(clip) < SR * 0.2:
@@ -292,7 +329,7 @@ def qwen_decoder(settings: dict, language: str, work: Path) -> Callable[[np.ndar
 
 
 def align_qwen(segs: list[Segment], wav: str | Path, language: str, settings: dict, progress: Prog | None = None,
-               cancel=None) -> int:
+               cancel=None, engine: str = "qwen3", pad: float = 0.3) -> int:
     """Đo mốc từng chữ (extra["ct"]) cho các câu chưa có – câu từ bộ nhận dạng khác, câu nghe lại, câu đã sửa lời.
     Trả về số câu đo được."""
     from .align import CJK, _char_positions, times_from_words
@@ -302,12 +339,12 @@ def align_qwen(segs: list[Segment], wav: str | Path, language: str, settings: di
     if not todo:
         return 0
     items = []
-    for k in todo:
+    for k in todo:   # pad: câu OCR (giờ hiện chữ, có thể lệch lúc nói ~0,5 s) căn trong khoảng rộng hơn
         s = segs[k]
-        a = max(0.0, s.start - 0.3)
-        items.append([a, s.end + 0.3, s.text])
-    r = worker(settings).call({"cmd": "align", "wav": _wav_path(wav), "items": items, "language": language},
-                              progress, cancel)
+        a = max(0.0, s.start - pad)
+        items.append([a, s.end + pad, s.text])
+    r = asr_worker(engine, settings).call({"cmd": "align", "wav": _wav_path(wav), "items": items,
+                                           "language": language}, progress, cancel)
     if r.get("align_error"):
         raise RuntimeError(r["align_error"])
     n = 0

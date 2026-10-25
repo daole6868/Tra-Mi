@@ -687,7 +687,8 @@ class SettingsPage(QWidget):
         ("ocr_fps", "ocr_fps", "c"),
         ("asr_device", "asr_device", "c"),
         ("asr_max", "asr_max_chars", "i"), ("asr_beam", "asr_beam_size", "i"), ("asr_vad", "asr_vad", "b"),
-        ("split_style", "split_style", "c"),
+        ("split_style", "split_style", "c"), ("asr_dual", "asr_dual", "b"), ("asr_ai", "asr_ai", "c"),
+        ("asr_context", "asr_context", "b"), ("asr_name_pass", "asr_name_pass", "b"),
         ("sep_model", "sep_model", "c"), ("sep_before", "sep_before_asr", "b"), ("diarize", "diarize", "b"),
         ("spk_n", "diarize_speakers", "i"), ("spk_thr", "diarize_threshold", "f"),
         ("engine", "translate_engine", "c"), ("style", "translate_style", "c"), ("ai_join", "ai_join_engine", "c"),
@@ -756,6 +757,19 @@ class SettingsPage(QWidget):
         self.ocr_fps = f.row("Tốc độ quét phụ đề cứng (OCR)", combo(C.OCR_SPEEDS),
                              "Lấy phụ đề bằng OCR chữ Trung in sẵn: quét vùng chữ bao nhiêu lần mỗi giây")
         self.split_style = f.row("Kiểu tách câu", combo(C.SPLIT_STYLES), C.SPLIT_HELP)
+        self.asr_dual = f.row("Nghe 2 bộ rồi so", Switch(), C.DUAL_HELP)
+        from ..pipeline import join_engine_choices as _jec
+
+        self.asr_ai = f.row("AI hỗ trợ nghe", combo(_jec(load_settings())),
+                            "AI chọn bản đúng khi 2 bộ nghe ra khác nhau + lập hồ sơ tên nhân vật (để nghe lại câu có "
+                            "tên riêng). Theo công cụ dịch = dùng AI đang dịch (Google / Hy-MT2 thì không có)")
+        self.asr_context = f.row("Gợi ý tên riêng cho bộ nghe", Switch(),
+                                 "Qwen3-ASR nghe kèm tên trong Bảng tên riêng / hồ sơ phim + tiêu đề, mô tả của video "
+                                 "(khi tải từ link) -> ít sai tên nhân vật, môn phái, chiêu thức")
+        self.asr_name_pass = f.row("Nghe lại câu có tên riêng", Switch(),
+                                   "Nghe xong: câu có chữ đọc giống tên nhân vật mà viết khác (临北 / 林北) -> nghe lại câu "
+                                   "đó kèm gợi ý tên; vẫn sai thì sửa theo âm đọc. Chưa có tên nào mà có AI hỗ trợ nghe -> "
+                                   "AI đọc lời vừa nghe lập hồ sơ tên nhân vật trước (bước dịch dùng lại)")
         self.asr_max = f.row("Số chữ Hán tối đa / câu", spin(8, 60),
                              "Câu dài hơn mới chia đôi (ở dấu phẩy / chỗ nghỉ gần giữa); dấu phẩy nói liền không tách")
         self.asr_beam = f.row("Beam size (Whisper)", spin(1, 10))
@@ -782,6 +796,7 @@ class SettingsPage(QWidget):
         self.spk_n = f.row("Số người nói (0 = tự đoán)", spin(0, 20))
         self.spk_thr = f.row("Độ nhạy gộp giọng (0.5–0.8)", dspin(0.3, 0.95, 0.02))
         b.add(f)
+        b.lay.addStretch(1)   # thẻ bên trái cao hơn -> nội dung bám mép trên, không dồn giữa
 
         t = SectionCard("Dịch thuật", "globe", "DeepSeek: giỏi tiếng Trung, rẻ – dịch cả bộ phim chỉ vài nghìn đồng. "
                         "Hy-MT2: dịch ngay trên máy, miễn phí (tải 1 lần ~3,6 GB ở tab Tài liệu của dự án).")

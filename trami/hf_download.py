@@ -39,6 +39,8 @@ BEAT = 0.5
 MS_MIRRORS = {
     "tencent/Hy-MT2-1.8B": ["Tencent-Hunyuan/Hy-MT2-1.8B"],
     "tencent/Hy-MT2-7B": ["Tencent-Hunyuan/Hy-MT2-7B"],
+    "FireRedTeam/FireRedASR2-AED": ["xukaituo/FireRedASR2-AED"],   # tác giả FireRedASR2 (Kaituo Xu) tự đăng
+    "FireRedTeam/FireRedPunc": ["xukaituo/FireRedPunc"],
 }
 MS_SAME_ORGS = ("Qwen",)   # tổ chức đăng cùng tên kho trên cả 2 nơi
 

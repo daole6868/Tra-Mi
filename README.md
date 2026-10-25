@@ -142,6 +142,18 @@ danh sách (a, ừm, hả, ha ha…) – câu chỉ gồm các từ đó bị xo
 - **Qwen3-ASR** (mặc định): nghe tiếng Trung chuẩn nhất, tự đặt dấu câu theo nghĩa, kèm bộ căn giờ từng chữ (lệch ~0,03 s)
   để tách câu đúng chỗ nghỉ. Cần `transformers` ≥ 5.13: `.venv\Scripts\python -m pip install -U "transformers>=5.13" accelerate`.
   GPU dưới 6 GB chọn bản 0.6B ở Cài đặt. Chưa cài thì tool tự dùng SenseVoice.
+- **FireRedASR2** (2.1.0): bộ nghe thứ 2, rất chuẩn tiếng Phổ thông + giọng địa phương + lời hát, có mốc từng chữ.
+  Tải ở tab **Tài liệu** → *Nhận dạng – FireRedASR2* → **Tải về** (~4,8 GB, kèm bộ đặt dấu câu), rồi chọn ở *Bộ nhận
+  dạng*. Chưa tải thì tool tự dùng Qwen3-ASR.
+- **Nghe 2 bộ rồi so** (tab Tự động / Cài đặt): nghe bằng bộ chính xong, bộ còn lại (Qwen3-ASR ↔ FireRedASR2) nghe lại
+  đúng các câu đó; câu 2 bộ nghe khác nhau → *AI hỗ trợ nghe* (Cài đặt) đọc ngữ cảnh chọn bản đúng; AI không chắc → chữ
+  gốc tô xanh, rê chuột xem chữ của bộ 2. Lâu hơn ~1,5–2 lần. Dự án cũ: tab Phụ đề → Công cụ → *Lời hát & nghe nhầm* →
+  **Nghe 2 bộ rồi so** / *Tích câu 2 bộ nghe khác nhau* / *Dùng bản bộ nghe 2*.
+- **Tên riêng**: bộ nghe được gợi ý trước tên trong *Bảng tên riêng*, hồ sơ phim và tiêu đề / mô tả video (khi tải từ
+  link); nghe xong, câu có chữ đọc giống tên mà viết khác (临北 ↔ 林北) được nghe lại kèm gợi ý tên, vẫn sai thì sửa theo âm
+  đọc. Nút **Sửa tên theo âm đọc** ở cùng trang công cụ. Cần gói `pypinyin` (`.venv\Scripts\python -m pip install pypinyin`).
+- **OCR + nghe** (Nguồn phụ đề): video có phụ đề Trung in sẵn → chữ lấy từ phụ đề (OCR), giờ đầu / cuối câu lấy từ giọng
+  nói (bộ căn giờ từng chữ), câu không có phụ đề in sẵn thì lấy từ bộ nghe (chữ gốc màu cam).
 - **SenseVoice**: nhanh, giỏi tiếng Phổ thông và Quảng Đông, tự nhận biết đoạn đang hát.
 - **Paraformer**: có dấu câu và tự phân biệt người nói ngay trong lúc nhận dạng.
 - **Whisper large-v3**: đa ngôn ngữ, dùng cho tiếng Anh, Nhật, Hàn.
@@ -156,7 +168,8 @@ các key* → *Lưu cài đặt*. Gói miễn phí giới hạn số lần gửi
 hạn một chút, *Số câu mỗi lần gửi* 30–60; key hết lượt hôm nay tool tự chuyển sang key sau. Kỹ năng *Dịch chuẩn* (mặc
 định) giữ đúng số câu đã tách, không gộp, tên riêng / địa danh chuẩn – sửa ở tab Tự động → *Kỹ năng dịch AI* → *Sửa / thêm…*.
 
-- Video đã có chữ Trung in sẵn: dùng **OCR**, cho chữ và thời gian gần như tuyệt đối chính xác.
+- Video đã có chữ Trung in sẵn: dùng **OCR** (chữ gần như tuyệt đối chính xác) hoặc **OCR + nghe** (chữ từ OCR, giờ theo
+  đúng lúc nhân vật nói, câu không có phụ đề in sẵn được bộ nghe bổ sung).
 - Video chỉ có tiếng: bật **Tách giọng khỏi nhạc trước**, rồi dùng **Qwen3-ASR** (hoặc SenseVoice). Mỗi dòng phụ đề là
   1 câu trọn nghĩa: chỉ tách ở cuối câu (。！？) hoặc chỗ nghỉ thật, không bao giờ cắt giữa 1 từ; dòng bị cắt ngang câu
   được tự nối lại. **Kiểu tách câu** (tab Tự động / Cài đặt): *Câu trọn ý – hợp lồng tiếng* (mặc định) hoặc *Câu ngắn –
@@ -197,7 +210,7 @@ python TraMi.py dich phim.mp4 --long-tieng --xuat-video      # mặc định d�
 ```
 Subvideo/
 ├─ TraMi.py            mở phần mềm (bản đóng gói: Subvideo.exe)
-├─ trami/              phần xử lý: asr, asr_funasr, ocr, translate, separate, diarize,
+├─ trami/              phần xử lý: asr, asr_funasr, asr_qwen, asr_firered (+ firered/), dual, names, ocr, translate, separate, diarize,
 │  │                   skills, tts, lama, inpaint, video, overlay (chữ / logo), silence
 │  │                   (khoảng lặng / bài hát), pipeline, jobs, project
 │  └─ gui/             giao diện PySide6 vẽ bằng QPainter (theme, icons, widgets,
@@ -211,6 +224,7 @@ Subvideo/
 ## 7. Bản quyền các mô hình
 - Bộ tách giọng (UVR / audio-separator – github.com/nomadkaraoke/python-audio-separator): MIT. Cập nhật để có Mel-RoFormer Kim và chế độ kết hợp: `.venv\Scripts\python -m pip install -U "audio-separator>=0.44" -c torch-constraints.txt`
 - Qwen3-ASR, Qwen3-ForcedAligner (github.com/QwenLM/Qwen3-ASR), FunASR / SenseVoice, LaMa: Apache-2.0.
+- FireRedASR2-AED + FireRedPunc (github.com/FireRedTeam/FireRedASR2S): Apache-2.0 – mã suy luận chép vào `trami/firered/` (kèm LICENSE, ghi rõ chỗ sửa).
 - VieNeu-TTS: Apache-2.0, kèm watermark âm thanh chống lạm dụng.
 - SpeechBrain: Apache-2.0.
 
