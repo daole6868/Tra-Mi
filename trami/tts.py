@@ -1870,8 +1870,11 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     return Path(patch["wav"]) if stats.get("patched") is not None else Path(out_wav)
 
 
-def wave_peaks(a: np.ndarray, sr: int, hop: float = 0.05) -> np.ndarray:
-    """Đỉnh mỗi 0,05 s (chưa chuẩn hoá)."""
+ENV_HOP = 0.01   # sóng âm bản lồng trên timeline: đỉnh mỗi 0,01 s (trước 2.0.97: 0,05 s)
+
+
+def wave_peaks(a: np.ndarray, sr: int, hop: float = ENV_HOP) -> np.ndarray:
+    """Đỉnh mỗi `hop` giây (chưa chuẩn hoá)."""
     n = max(1, int(sr * hop))
     if len(a) < n:
         return np.zeros(0, np.float32)
@@ -1886,8 +1889,8 @@ def norm_peaks(peaks: np.ndarray, top: float) -> np.ndarray:
     return np.clip(peaks / max(top, 1e-4), 0, 1).astype(np.float16)
 
 
-def wave_envelope(a: np.ndarray, sr: int, hop: float = 0.05) -> np.ndarray:
-    """Sóng âm rút gọn (đỉnh mỗi 0,05 s, 0..1) để vẽ trên timeline."""
+def wave_envelope(a: np.ndarray, sr: int, hop: float = ENV_HOP) -> np.ndarray:
+    """Sóng âm rút gọn (đỉnh mỗi `hop` giây, 0..1) để vẽ trên timeline."""
     peaks = wave_peaks(a, sr, hop)
     if not len(peaks):
         return np.zeros(0, np.float16)

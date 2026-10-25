@@ -2086,7 +2086,44 @@ def relayout(p: Project, settings: dict | None = None, progress: Prog | None = N
 
 
 def dub_env_path(wav: str | Path) -> Path:
+    """Sóng âm 0,01 s của bản lồng (2.0.97; bản cũ "<bản lồng>.env.npy" 0,05 s – tự làm lại khi mở)."""
+    return Path(wav).with_suffix(".env10.npy")
+
+
+def _old_env_path(wav: str | Path) -> Path:
     return Path(wav).with_suffix(".env.npy")
+
+
+def _dub_env_full(wav: str | Path) -> float:
+    """Tính sóng âm cả bản lồng (đọc từng khối từ đĩa, không nạp cả phim vào RAM), lưu dub_env_path. Trả mức chuẩn."""
+    import numpy as np
+
+    from .tts import ENV_HOP, SR, env_top, norm_peaks, wav_info, wave_peaks
+
+    off, frames, sr, ch, sw = wav_info(wav)
+    envp = dub_env_path(wav)
+    if (sr, ch, sw) != (SR, 1, 2):     # bản lồng lạ (không phải tool ghi): giải mã cả file như cũ
+        import wave as _wave
+
+        with _wave.open(str(wav)) as w:
+            a = np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32) / 32768.0
+            if w.getnchannels() > 1:
+                a = a.reshape(-1, w.getnchannels()).mean(axis=1)
+        peaks = wave_peaks(a, w.getframerate())
+    else:
+        hop = int(SR * ENV_HOP)
+        a = np.memmap(str(wav), dtype=np.int16, mode="r", offset=off, shape=(frames,))
+        step = hop * 20000
+        peaks = np.concatenate([wave_peaks(a[i:i + step].astype(np.float32) / 32767.0, SR)
+                                for i in range(0, frames, step)] or [np.zeros(0, np.float32)])
+        del a
+    top = env_top(peaks)
+    np.save(envp, norm_peaks(peaks, top))
+    try:
+        _old_env_path(wav).unlink(missing_ok=True)   # sóng âm 0,05 s của bản trước 2.0.97
+    except OSError:
+        pass
+    return top
 
 
 def _patch_dub_env(wav: str | Path, regions: list, top: float | None) -> float:
@@ -2094,10 +2131,10 @@ def _patch_dub_env(wav: str | Path, regions: list, top: float | None) -> float:
     Trả mức chuẩn hoá (đỉnh 99,5 %) đang dùng."""
     import numpy as np
 
-    from .tts import SR, env_top, norm_peaks, wav_info, wave_peaks
+    from .tts import ENV_HOP, SR, wav_info, wave_peaks
 
     off, frames, sr, _ch, _sw = wav_info(wav)
-    hop = int(SR * 0.05)
+    hop = int(SR * ENV_HOP)
     envp = dub_env_path(wav)
     env = None
     if top is not None and envp.exists():
@@ -2106,14 +2143,7 @@ def _patch_dub_env(wav: str | Path, regions: list, top: float | None) -> float:
         except (OSError, ValueError):
             env = None
     if env is None or len(env) != frames // hop:
-        a = np.memmap(str(wav), dtype=np.int16, mode="r", offset=off, shape=(frames,))
-        step = hop * 20000
-        peaks = np.concatenate([wave_peaks(a[i:i + step].astype(np.float32) / 32767.0, SR)
-                                for i in range(0, frames, step)] or [np.zeros(0, np.float32)])
-        del a
-        top = env_top(peaks)
-        np.save(envp, norm_peaks(peaks, top))
-        return top
+        return _dub_env_full(wav)
     with open(wav, "rb") as f:
         for r0, r1 in regions:
             h0, h1 = r0 // hop, min(len(env), -(-r1 // hop))
@@ -2131,21 +2161,12 @@ def dub_wave(p: Project) -> tuple[str, float] | None:
     wav = (p.edit.get("dub") or {}).get("wav")
     if not wav or not Path(wav).exists():
         return None
+    from .tts import ENV_HOP
+
     env = dub_env_path(wav)
     if not env.exists() or env.stat().st_mtime < Path(wav).stat().st_mtime:
-        import wave as _wave
-
-        import numpy as np
-
-        from .tts import wave_envelope
-
-        with _wave.open(str(wav)) as w:
-            sr = w.getframerate()
-            a = np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32) / 32768.0
-            if w.getnchannels() > 1:
-                a = a.reshape(-1, w.getnchannels()).mean(axis=1)
-        np.save(env, wave_envelope(a, sr))
-    return str(env), 0.05
+        _dub_env_full(wav)
+    return str(env), ENV_HOP
 
 
 
@@ -2529,6 +2550,7 @@ def delete_dub_version(p: Project, wav: str) -> None:
     try:
         Path(wav).unlink(missing_ok=True)
         dub_env_path(wav).unlink(missing_ok=True)
+        _old_env_path(wav).unlink(missing_ok=True)
     except OSError:
         pass  # file đang được mở ở chương trình khác -> để lại, chỉ bỏ khỏi danh sách
     p.data["dub_versions"] = vers

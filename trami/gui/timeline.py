@@ -1126,7 +1126,7 @@ class TrackTimeline(QWidget):
         self.wave, self.wave_hop = env, hop
         self.canvas.update()
 
-    def set_dub_wave(self, env: np.ndarray | None, hop: float = 0.05):
+    def set_dub_wave(self, env: np.ndarray | None, hop: float = 0.01):
         self.dub_wave, self.dub_hop = env, hop
         self.canvas.update()
 

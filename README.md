@@ -127,7 +127,7 @@ VieNeu chỉ đọc tiếng Việt nên câu tiếng khác tự đọc bằng Mi
 *Dịch sang* theo.
 
 **Khớp thoại** (2.0.96): sau khi nghe, đầu / cuối mỗi câu được **bám theo giọng đã tách** (nhìn độ to giọng mỗi
-0,01 s – như sóng âm dòng *Tiếng gốc* trên timeline) để phụ đề hiện đúng lúc nhân vật bắt đầu / thôi nói; mốc từng chữ
+0,01 s – như sóng âm dòng *Tiếng gốc* trên timeline; dòng *Lồng tiếng* cũng vẽ mịn 0,01 s từ 2.0.97) để phụ đề hiện đúng lúc nhân vật bắt đầu / thôi nói; mốc từng chữ
 được giữ lại (gộp / tách / kéo câu vẫn đúng). Dự án cũ: tab Phụ đề → Công cụ → *Sửa câu* → **Căn mép theo giọng** (bật
 *đo lại mốc từng chữ* nếu dự án nghe trước 2.0.96). Câu chỉ có mốc ước lượng có viền nét đứt vàng trên timeline – nên
 nghe lại. **Giờ hiện** (tab Phụ đề → Công cụ): phụ đề hiện theo giọng lồng – hiện trước 0,1 s, giữ thêm 0,3 s, ít nhất

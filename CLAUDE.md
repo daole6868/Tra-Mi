@@ -121,7 +121,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `snap_edges` (cuối `recognize` khi đã tách giọng, cuối `realign`, nút "Căn mép theo giọng" tab Phụ đề, `remeasure` =
   Qwen3 đo lại mốc từng chữ), `snap_note`. Mốc từng chữ `extra["ct"]` khớp lời được GIỮ khi lưu (`align.drop_char_times
   (keep=True)`), đi theo `subtitle.merge` / `split` (`ct_of`, `han_cut`) / `align.split_clauses` / kéo khối (`shift_ct`).
-  Sóng âm timeline `tl_wave_10ms.npy` (float16, 0,01 s, cùng lần đo `voice_10ms`).
+  Sóng âm timeline `tl_wave_10ms.npy` (float16, 0,01 s, cùng lần đo `voice_10ms`); dòng Lồng tiếng `tts.ENV_HOP` 0,01 s
+  (`<bản lồng>.env10.npy`, `pipeline._dub_env_full` đọc từng khối; file 0,05 s cũ `.env.npy` tự làm lại + xoá – 2.0.97).
 - Giờ HIỆN phụ đề (2.0.96): `subtitle.follow_dub(mode="always", lead, hold, min_dur, join)` + `pipeline.follow_params`
   (Cài đặt `sub_follow_mode` / `sub_lead` 0,1 / `sub_hold` 0,3 / `sub_min_dur` 1 / `sub_join_gap` 0,3, công tắc
   `dub_subs_follow`) – xem trước, xuất video, SRT đã dịch (`export_subs`, `_export_sub`); tab Phụ đề → Công cụ → "Giờ
@@ -180,7 +181,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (178 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (179 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1590,6 +1591,12 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     tách / tách câu dài giữ mốc chữ, giờ hiện (nối khoảng hở, tối thiểu, không đè), giọng lồng có chỗ nghỉ (lặng tới đúng
     lúc nhân vật nói tiếp, câu sau không xê dịch, vá đoạn = dựng cả bản), giao diện (nút, gương công tắc, lưu Cài đặt, Lọc).
     Chưa chạy trên phim thật (sandbox không có Qwen3 / giọng đã tách thật).
+- 2.0.97: dòng Lồng tiếng (xanh lá) trên timeline cũng mịn 0,01 s như dòng Tiếng gốc: `tts.ENV_HOP`, `wave_peaks` /
+  `wave_envelope` mặc định 0,01 s, file `<bản lồng>.env10.npy`; bản lồng cũ (chỉ có `.env.npy` 0,05 s) tự tính lại khi mở
+  dự án (đọc file theo từng khối – trước đây nạp cả bản lồng vào RAM, phim 3 giờ ~1 GB), xoá file cũ; vá đoạn
+  (`_patch_dub_env`), karaoke (`karaoke_spans` theo bước thật của file) dùng cùng bước mới. Người dùng xác nhận 2.0.96 khớp
+  (ảnh: phụ đề + giọng lồng bắt đầu 4,06 s đúng lúc nhân vật nói, giọng lồng nghỉ sau "Lâm Bắc," 4,40 → 4,70 s, nhân vật
+  4,40 → 4,76 s); cuối khối phụ đề trễ ~0,1 s so với lúc thôi nói (tiếng vang / hơi thở trong giọng đã tách).
 
 ## Vấn đề đang mở
 - 2.0.96: chờ người dùng chạy lại "1. Nghe & tách câu" (hoặc dự án cũ: tab Phụ đề → Công cụ → Căn mép theo giọng, bật đo

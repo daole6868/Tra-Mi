@@ -760,7 +760,7 @@ def test_dub_clip_moved_on_timeline(monkeypatch):
     lay = {int(k): a for a, b, k, f in p.data["dub_layout"]}
     assert abs(lay[1] - 2.5) < 0.2 and len(spoken) == 3
     env, hop = pipeline.dub_wave(p)
-    assert Path(env).exists() and hop == 0.05 and len(np.load(env)) > 100
+    assert Path(env).exists() and hop == 0.01 and len(np.load(env)) > 500     # 2.0.97: 0,01 s
     spoken.clear()
     segs = p.segments
     segs[1].extra["dub_shift"] = 0.8
@@ -6675,3 +6675,28 @@ def test_gui_snap_follow_pauses_interj(sample_video, monkeypatch):
         save_settings({k: old.get(k) for k in keys if k in old} | {k: None for k in keys if k not in old})
         win.close()
         app.processEvents()
+
+
+def test_dub_wave_10ms_and_old_env_rebuilt(tmp_path):
+    """Sóng âm dòng Lồng tiếng mịn 0,01 s (2.0.97): bản lồng cũ chỉ có "<bản lồng>.env.npy" (0,05 s) -> tự làm lại file
+    0,01 s (đọc từng khối, không nạp cả phim), xoá file cũ; chỗ nghỉ 0,1 s giữa 2 tiếng hiện rõ trên sóng âm."""
+    from trami import pipeline, tts
+    from trami.project import Project
+
+    sr = tts.SR
+    a = np.zeros(sr * 3, np.float32)
+    a[int(0.5 * sr):int(1.0 * sr)] = 0.5
+    a[int(1.1 * sr):int(1.6 * sr)] = 0.5          # nghỉ 0,1 s ở 1,0–1,1 s
+    p = Project.create("song am 10ms")
+    wav = p.work / "dubs" / "dub_1.wav"
+    wav.parent.mkdir(parents=True, exist_ok=True)
+    tts.write_wav(wav, a, sr)
+    old = wav.with_suffix(".env.npy")
+    np.save(old, np.ones(60, np.float16))
+    p.data["edit"] = {"dub": {"enabled": True, "wav": str(wav)}}
+    p.save()
+    f, hop = pipeline.dub_wave(Project(p.id))
+    env = np.load(f).astype(np.float32)
+    assert hop == 0.01 and len(env) == 300 and not old.exists() and f.endswith(".env10.npy")
+    assert env[103] < 0.05 and env[95] > 0.9 and env[115] > 0.9   # thấy rõ chỗ nghỉ 0,1 s
+    assert np.allclose(env, tts.wave_envelope(tts.read_wav(wav)[0], sr).astype(np.float32), atol=0.01)
