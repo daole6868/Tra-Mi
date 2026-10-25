@@ -55,6 +55,10 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `auto_preset` = các ô riêng tab Tự động, còn lại là Cài đặt chung) + `queue_links` (mỗi link 1 dự án: việc "download"
   rồi "auto"; `link_key` nhận ra cùng video dù khác dạng link, `find_by_url` -> dự án cũ, không tải lại); hộp
   `gui/auto_settings.AutoSettingsDialog` ("Thiết lập…" ở Trang chủ / Hàng loạt); thẻ dự án `main.project_badge`.
+  `trami/packmodels.py` (2.0.89) – `TraMi.py --pack-models <data>` (`DongGoi_MoHinh.bat` -> `dist\Subvideo_GuiBan`):
+  chép data/models + các kho HuggingFace mà mã nguồn tool / vieneu / omnivoice / speechbrain có nhắc tên (`used_hf_repos`;
+  chỉ refs + snapshots, file thật) -> <data>/models/hf; KHÔNG chép settings / accounts / cookies / browser / voices /
+  projects. `config`: có data/models/hf (và chưa đặt HF_HUB_CACHE / HF_HOME) -> `HF_HUB_CACHE` = đó.
   `trami/stream.py` – `LivePipeline` (tab Tự động "Vừa tách vừa dịch"); `trami/gpu.py` – trả bộ nhớ card giữa các
   việc (`before_job` / `after_job` trong `jobs._run`, `reap_idle` tắt VieNeu/Omni để không 10 phút); `trami/gui/*` –
   giao diện (QPainter), `common.run_async`,
@@ -146,7 +150,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (164 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (166 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1441,7 +1445,31 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     dài 0 câu -> "tách câu dài: không có câu dịch nào dài hơn N tiếng mà có dấu câu ở giữa".
   * Dòng tóm tắt thiết lập (Trang chủ / Hàng loạt) ghi các bước AI đang bật ("AI sửa lỗi nghe, kiểm tra bản dịch").
 
+- 2.0.89: (1) "bấm xoá dự án chỉ xoá bên trong, tên dự án vẫn còn": `Project.delete` chỉ `rmtree(ignore_errors)` – trên
+  Windows file nghe trực tiếp (memmap `work/live/*.raw`) đang mở -> thư mục không xoá hết, rồi việc nền / hẹn giờ lưu của dự
+  án ghi lại project.json -> dự án hiện lại. Giờ: xoá project.json TRƯỚC, `_DELETED` chặn mọi `save()` sau đó, thử lại 4
+  lần, còn file bị giữ -> dấu `.deleted` (list_all bỏ qua) + `purge_deleted` dọn ở nền khi mở tool; nút Xoá dự án huỷ việc
+  của dự án (báo số việc), dừng hẹn giờ lưu, `set_live_mix(None)` + gc nhả file.
+  (2) Tab Phụ đề gọn lại: khung **Dịch** (3 nút dịch ở tiêu đề, 4 ô chọn lưới 2 × 2) + khung **Công cụ** (`PillTabs`
+  `s_tools`: Sửa câu / Nối – tách câu / Lời hát & nghe nhầm / Nhập – xuất SRT, mỗi lúc 1 trang `s_tools_pages`, nhãn đầu
+  hàng `_rowlbl`, vạch chia nhóm `_vsep`, "Thu gọn" / "Mở công cụ" – Cài đặt `subs_tools_tab` / `subs_tools_open`, chưa
+  chọn thì màn < 900 px cao mở đầu thu gọn; `_subs_tools`).
+  (3) RAM: trang Cài đặt (`refresh_status`) không còn `import torch` + `get_device_name` (đọc bản PyTorch từ thông tin gói
+  `gpu.torch_build`, tên card `gpu.gpu_name` qua nvidia-smi); tab Tài liệu xem mô hình đã tải không nạp modelscope (kéo
+  theo PyTorch – `ms_location(probe=False)`) / faster-whisper (`_whisper_cached` tìm thư mục theo `_WHISPER_REPOS`). Đo
+  (torch giả lập): mở tool + qua 10 tab + các trang không còn nạp torch, RSS 267 -> 239 MB (máy có torch CUDA đỡ ~0,5–1 GB).
+  (4) `Project.list_all` nhớ tóm tắt theo (giờ sửa, cỡ) project.json (`_SUMMARY`) – trước đọc lại mọi dự án mỗi lần 1 việc
+  bắt đầu / xong (30 phim 2600 câu ~0,3 s trên luồng giao diện). (5) Sửa `timeline.mouseMoveEvent` UnboundLocalError 'tip'
+  (rê chuột dòng Video / Tiếng gốc lúc chưa có video, hay gặp khi dự án đang tải từ link). (6) Xoá 8 hàm không còn dùng
+  (`video.remove_vocals` / `quick_cut`, `ffmpeg.escape_filter_path` / `join_filters`, `align._clause_cuts`,
+  `langs.no_spaces`, `translate.hymt_available`, `widgets.expanding`). (7) `DongGoi_MoHinh.bat` + `trami/packmodels.py`.
+  Người dùng hỏi thêm (làm sau): chức năng phải chạy Python (cài Playwright, Cập nhật trình tải yt-dlp bằng pip) trong
+  bản exe thế nào.
+
 ## Vấn đề đang mở
+- 2.0.89: chờ người dùng thử xoá dự án trên Windows (tên mất ngay, mở lại tool không còn thư mục), xem tab Phụ đề mới;
+  chạy `DongGoi_MoHinh.bat` (kiểm tra máy nhận dùng được mô hình, nhất là VieNeu: kho phụ của VieNeu chỉ được chép nếu mã
+  gói vieneu có ghi tên kho). Còn chờ trả lời: bản exe với các nút cần pip (Playwright, Cập nhật trình tải).
 - 2.0.88: chờ người dùng chạy lại tự động (Vừa tách vừa dịch + Gemini) xem thông báo xong có đủ các bước AI / tách câu dài.
 - 2.0.87: chờ người dùng dán 2–3 link Bilibili / Douyin thật vào Trang chủ -> "Tải về & dịch tự động": video 2 tải trong
   lúc video 1 đang nghe, mỗi dự án dừng ở "Chờ kiểm tra & xuất"; dán lại link cũ -> mở dự án cũ.

@@ -484,12 +484,6 @@ HYMT_REPO = "tencent/Hy-MT2-1.8B"
 _hymt = None
 
 
-def hymt_available() -> bool:
-    from .config import installed
-
-    return installed("transformers", "torch")
-
-
 class HymtWorker(VieneuWorker):
     """Tiến trình riêng chạy Hy-MT2 (trami/hymt_worker.py), cùng cách điều khiển với VieNeu / Qwen3."""
     title = "Hy-MT2"

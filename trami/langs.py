@@ -127,8 +127,3 @@ def subtitle_font(code: str, base_font: str) -> str:
     if sys.platform == "darwin":
         return {"th": "Thonburi", "ja": "Hiragino Sans", "ko": "Apple SD Gothic Neo"}[code]
     return {"th": "Loma", "ja": "Noto Sans CJK JP", "ko": "Noto Sans CJK KR"}[code]
-
-
-def no_spaces(code: str) -> bool:
-    """Tiếng viết liền không có dấu cách giữa các từ (ngắt dòng / karaoke theo từng chữ)."""
-    return norm(code) in ("th", "ja")

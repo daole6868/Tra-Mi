@@ -41,7 +41,8 @@ echo   XONG! Phan mem: dist\Subvideo\Subvideo.exe
 echo   Bieu tuong Subvideo da co tren Desktop va Start menu.
 echo   Du lieu (du an, cai dat, mo hinh): %~dp0data
 echo.
-echo   Mang sang may khac: nen thu muc dist\Subvideo thanh .zip.
+echo   Mang sang may khac: nen thu muc dist\Subvideo thanh .zip,
+echo   hoac chay DongGoi_MoHinh.bat de gui kem mo hinh AI da tai.
 echo   May do chi can driver NVIDIA (khong can cai Python);
 echo   du lieu luu o %%LOCALAPPDATA%%\Subvideo, mo hinh tai lai o tab Tai lieu.
 echo ============================================================

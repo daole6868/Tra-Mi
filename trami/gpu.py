@@ -135,6 +135,29 @@ def _smi(args: list[str]) -> list[str] | None:
     return [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
 
 
+def gpu_name() -> str:
+    """Tên card NVIDIA thứ nhất ('' = không có / không đo được) – hỏi nvidia-smi, không nạp PyTorch."""
+    out = _smi(["--query-gpu=name", "--format=csv,noheader"])
+    return out[0] if out else ""
+
+
+def torch_build() -> str:
+    """Bản PyTorch đã cài, đọc từ thông tin gói (vd '2.11.0+cu128' / '2.11.0+cpu') – KHÔNG import torch (import torch +
+    khởi động CUDA trong tiến trình giao diện giữ ~0,5–1 GB RAM tới khi tắt tool). '' = chưa cài."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+    except ImportError:   # pragma: no cover
+        return ""
+    try:
+        return version("torch")
+    except PackageNotFoundError:
+        if "torch" in sys.modules:   # bản đóng gói exe không còn thông tin gói – torch đã nạp thì hỏi thẳng
+            return str(getattr(sys.modules["torch"], "__version__", ""))
+        return ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def vram_free() -> tuple[int, int] | None:
     """(MB còn trống, MB tổng) của card NVIDIA thứ nhất – tính cả chương trình khác. None = không đo được."""
     out = _smi(["--query-gpu=memory.free,memory.total", "--format=csv,noheader,nounits"])

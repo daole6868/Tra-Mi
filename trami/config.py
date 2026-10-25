@@ -50,6 +50,10 @@ CACHE_DIR = DATA_DIR / "cache"
 # Mô hình ModelScope (SenseVoice, VAD, Paraformer, căn thời gian…) luôn cất ở MỘT chỗ: data/models/funasr
 # (trước 2.0.22: lúc dịch cất ở đây nhưng tab Tài liệu lại tải vào ~/.cache/modelscope -> tải lại 2 lần)
 os.environ.setdefault("MODELSCOPE_CACHE", str(MODELS_DIR / "funasr"))
+# Bản mang đi kèm mô hình (DongGoi_MoHinh.bat / trami/packmodels.py): kho HuggingFace nằm trong data/models/hf cạnh exe
+# -> dùng kho đó (không thì như cũ: %USERPROFILE%\.cache\huggingface). Tiến trình phụ (Qwen3, VieNeu…) kế thừa biến này.
+if (MODELS_DIR / "hf").is_dir() and not (os.environ.get("HF_HUB_CACHE") or os.environ.get("HF_HOME")):
+    os.environ["HF_HUB_CACHE"] = str(MODELS_DIR / "hf")
 # Windows không bật Developer Mode thì kho HuggingFace chép file thay cho symlink – chỉ là cảnh báo, không phải lỗi
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 # Máy này từng bị treo khi tải kiểu Xet (hf_download.py) -> mọi chỗ tải HuggingFace dùng tải thường

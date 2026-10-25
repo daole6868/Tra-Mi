@@ -14,6 +14,11 @@ from .subtitle import Segment
 
 _locks: dict[str, threading.RLock] = {}
 _glock = threading.Lock()
+# dự án đã xoá trong phiên này: không việc nền / hẹn giờ lưu nào được ghi lại project.json (trước đây việc nền đang chạy
+# ghi lại -> dự án "xoá rồi mà tên vẫn còn")
+_DELETED: set[str] = set()
+TOMB = ".deleted"
+_SUMMARY: dict[str, tuple[tuple[int, int], dict]] = {}   # list_all: tóm tắt dự án theo (giờ sửa, cỡ) project.json   # dấu đã xoá: Windows còn file bị giữ (trình phát, file nghe trực tiếp) -> lần mở tool sau dọn nốt
 
 DEFAULT_EDIT = {
     "trim": {"start": 0, "end": 0},
@@ -79,26 +84,72 @@ class Project:
 
     @classmethod
     def list_all(cls) -> list[dict]:
+        """Tóm tắt mọi dự án cho Trang chủ / thanh bên. Chỉ đọc lại project.json nào vừa đổi (theo giờ sửa + cỡ file) –
+        trước đây mỗi lần 1 việc bắt đầu / xong đọc lại cả chục file vài MB trên luồng giao diện."""
         out = []
         for d in sorted(PROJECTS_DIR.iterdir(), reverse=True):
             f = d / "project.json"
-            if f.exists():
-                try:
-                    j = json.loads(f.read_text("utf-8"))
-                    out.append({"id": j["id"], "name": j.get("name"), "created": j.get("created"),
-                                "updated": j.get("updated"), "info": j.get("info", {}),
-                                "n_segments": len(j.get("segments", [])),
-                                "n_translated": sum(1 for s in j.get("segments", []) if s.get("trans")),
-                                "outputs": j.get("outputs", [])[-3:], "status": j.get("status", {})})
-                except Exception:
-                    continue
+            if d.name in _DELETED or (d / TOMB).exists():
+                continue
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            sig = (st.st_mtime_ns, st.st_size)
+            hit = _SUMMARY.get(d.name)
+            if hit and hit[0] == sig:
+                out.append(dict(hit[1]))
+                continue
+            try:
+                j = json.loads(f.read_text("utf-8"))
+                item = {"id": j["id"], "name": j.get("name"), "created": j.get("created"),
+                        "updated": j.get("updated"), "info": j.get("info", {}),
+                        "n_segments": len(j.get("segments", [])),
+                        "n_translated": sum(1 for s in j.get("segments", []) if s.get("trans")),
+                        "outputs": j.get("outputs", [])[-3:], "status": j.get("status", {})}
+            except Exception:
+                continue
+            _SUMMARY[d.name] = (sig, item)
+            out.append(dict(item))
         return out
 
-    def delete(self):
-        shutil.rmtree(self.dir, ignore_errors=True)
+    def delete(self) -> bool:
+        """Xoá hẳn dự án. True = đã xoá hết thư mục; False = còn vài file đang bị giữ (để dấu .deleted, dự án không
+        còn hiện ở danh sách, lần mở tool sau `purge_deleted` dọn nốt)."""
+        _DELETED.add(self.id)
+        with _lock(self.id):
+            for f in (self.file, self.file.with_suffix(".tmp")):   # xoá project.json TRƯỚC: mất khỏi danh sách ngay
+                try:
+                    f.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        for i in range(4):
+            shutil.rmtree(self.dir, ignore_errors=True)
+            if not self.dir.exists():
+                return True
+            time.sleep(0.25 * (i + 1))   # file vừa được nhả (trình phát / luồng phát tiếng) – thử lại
+        try:
+            (self.dir / TOMB).write_text("1", "utf-8")
+        except OSError:
+            pass
+        return False
+
+    @staticmethod
+    def purge_deleted() -> int:
+        """Dọn nốt thư mục của các dự án đã xoá mà lần trước còn file bị giữ. Trả số thư mục đã dọn."""
+        n = 0
+        if not PROJECTS_DIR.exists():
+            return 0
+        for d in PROJECTS_DIR.iterdir():
+            if d.is_dir() and (d / TOMB).exists():
+                shutil.rmtree(d, ignore_errors=True)
+                n += not d.exists()
+        return n
 
     # ------------------------------------------------------------ lưu / đọc
     def save(self):
+        if self.id in _DELETED or (self.dir / TOMB).exists() or not self.dir.is_dir():
+            return   # dự án đã xoá: không tạo lại
         with _lock(self.id):
             self.data["updated"] = time.time()
             tmp = self.file.with_suffix(".tmp")

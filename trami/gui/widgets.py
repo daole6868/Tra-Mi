@@ -884,8 +884,3 @@ class Toast(QWidget):
         p.setPen(QColor(theme.TEXT))
         p.setFont(self.font())
         p.drawText(r.adjusted(46, 8, -14, -8), Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap, self.text)
-
-
-def expanding(w: QWidget) -> QWidget:
-    w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-    return w

@@ -62,6 +62,10 @@ Cài xong (kể cả AI nâng cao) thì chạy **`DongGoi_EXE.bat`** (15–40 ph
 - Mang sang máy khác: nén cả thư mục `dist\Subvideo` (~5–8 GB vì có PyTorch). Máy đó chỉ cần driver NVIDIA, không cần
   Python; dữ liệu lưu ở `%LOCALAPPDATA%\Subvideo` (hoặc thư mục `data` đặt cạnh Subvideo.exe), mô hình tải lại ở tab
   Tài liệu.
+- Gửi kèm mô hình đã tải (người nhận khỏi tải lại): chạy **`DongGoi_MoHinh.bat`** sau `DongGoi_EXE.bat` -> thư mục
+  `dist\Subvideo_GuiBan\` = phần mềm + `data\models` (mô hình tách giọng, nhận dạng, đọc giọng, Qwen3, Hy-MT2… đã tải
+  trên máy bạn). KHÔNG chép cài đặt (API key), tài khoản YouTube / Facebook, cookie, hồ sơ Chrome, giọng ghi âm, dự án.
+  Đừng tự gửi cả thư mục `data` của bạn – trong đó có các thông tin riêng này.
 - Sửa mã thì phải chạy lại `DongGoi_EXE.bat`.
 
 ---

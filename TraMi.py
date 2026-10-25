@@ -28,6 +28,10 @@ if __name__ == "__main__":
         from trami.hf_download import child_main
 
         child_main(sys.argv[2])
+    elif len(sys.argv) > 1 and sys.argv[1] == "--pack-models":   # gom mô hình đã tải cho bản mang đi (DongGoi_MoHinh.bat)
+        from trami.packmodels import main as pack_main
+
+        sys.exit(pack_main(sys.argv[2:]))
     elif len(sys.argv) > 1:          # có tham số -> chế độ dòng lệnh (VD: python TraMi.py dich video.mp4)
         from trami.config import fix_std_streams
 

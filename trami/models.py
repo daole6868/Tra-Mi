@@ -6,6 +6,7 @@ video tool dùng luôn bản đã tải mà không tải lại.
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -147,8 +148,9 @@ def _has_weights(d: Path) -> bool:
         return False
 
 
-def ms_location(model_id: str) -> Path | None:
-    """Thư mục chứa mô hình ModelScope đã tải (mỗi bản ModelScope lưu một kiểu khác nhau) – None nếu chưa có."""
+def ms_location(model_id: str, probe: bool = True) -> Path | None:
+    """Thư mục chứa mô hình ModelScope đã tải (mỗi bản ModelScope lưu một kiểu khác nhau) – None nếu chưa có.
+    probe False (tab Tài liệu xem đã tải chưa): chỉ tìm thư mục, không hỏi thư viện modelscope."""
     org, name = model_id.split("/", 1)
     names = {name, name.replace(".", "___")}
     bases = []
@@ -162,14 +164,15 @@ def ms_location(model_id: str) -> Path | None:
                 d = base / sub / n
                 if d.is_dir() and _has_weights(d):
                     return d
-    try:   # thử hỏi chính ModelScope (bản mới)
-        from modelscope.hub.snapshot_download import snapshot_download
+    if probe:   # thử hỏi chính ModelScope (bản mới) – chỉ khi sắp nạp mô hình (modelscope kéo theo cả PyTorch)
+        try:
+            from modelscope.hub.snapshot_download import snapshot_download
 
-        d = snapshot_download(model_id, local_files_only=True)
-        if d and Path(d).is_dir() and _has_weights(Path(d)):
-            return Path(d)
-    except Exception:  # noqa: BLE001
-        pass
+            d = snapshot_download(model_id, local_files_only=True)
+            if d and Path(d).is_dir() and _has_weights(Path(d)):
+                return Path(d)
+        except Exception:  # noqa: BLE001
+            pass
     for base in bases:   # tìm sâu hơn (chậm hơn) nếu cấu trúc thư mục khác
         if base.is_dir():
             for n in names:
@@ -190,7 +193,35 @@ def ms_local_path(name: str) -> str:
 
 
 def _ms_cached(model_id: str) -> bool:
-    return ms_location(model_id) is not None
+    return ms_location(model_id, probe=False) is not None
+
+
+# tên mô hình -> kho HuggingFace (như faster_whisper.utils._MODELS – chép ra để khỏi nạp thư viện chỉ để xem đã tải chưa)
+_WHISPER_REPOS = {"large": "Systran/faster-whisper-large-v3", "turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+                  "large-v3-turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+                  "distil-large-v2": "Systran/faster-distil-whisper-large-v2",
+                  "distil-medium.en": "Systran/faster-distil-whisper-medium.en",
+                  "distil-small.en": "Systran/faster-distil-whisper-small.en",
+                  "distil-large-v3": "Systran/faster-distil-whisper-large-v3",
+                  "distil-large-v3.5": "distil-whisper/distil-large-v3.5-ct2"}
+
+
+def _whisper_cached(name: str) -> bool:
+    """Mô hình faster-whisper đã tải vào data/models chưa – tìm thẳng thư mục kho HuggingFace (không nạp faster-whisper)."""
+    p = Path(name)
+    if p.is_dir():
+        return (p / "model.bin").is_file()
+    if "faster_whisper" in sys.modules:   # đã nạp sẵn (vừa dùng Whisper) -> hỏi chính thư viện cho chắc
+        try:
+            from faster_whisper.utils import download_model
+
+            download_model(name, cache_dir=str(MODELS_DIR), local_files_only=True)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+    repo = _WHISPER_REPOS.get(name, name if "/" in name else f"Systran/faster-whisper-{name}")
+    d = MODELS_DIR / f"models--{repo.replace('/', '--')}"
+    return any(d.glob("snapshots/*/model.bin"))
 
 
 def missing_packages(key: str) -> list[str]:
@@ -233,11 +264,7 @@ def is_ready(key: str, settings: dict | None = None) -> bool:
         if key == "paraformer":
             return all(_ms_cached(MS_IDS[k]) for k in ("paraformer-zh", "fsmn-vad", "ct-punc", "cam++"))
         if key == "whisper":
-            name = (settings or {}).get("asr_model", "large-v3")
-            from faster_whisper.utils import download_model
-
-            download_model(name, cache_dir=str(MODELS_DIR), local_files_only=True)
-            return True
+            return _whisper_cached((settings or {}).get("asr_model", "large-v3"))
         if key == "ecapa":
             return (MODELS_DIR / "spkrec-ecapa" / "embedding_model.ckpt").exists()
         if key == "gender":

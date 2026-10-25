@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -964,15 +965,19 @@ class SettingsPage(QWidget):
             from .. import asr_funasr, diarize, lama, separate, tts
             from ..asr import detect_device
 
+            from .. import gpu
+
             torch_info = "chưa cài"
             if lama.available():
-                try:
-                    import torch
-
-                    torch_info = (f"GPU ✓ ({torch.cuda.get_device_name(0)})" if torch.cuda.is_available()
-                                  else f"CPU ⚠ (bản {torch.__version__} không dùng được card NVIDIA)")
-                except Exception as e:  # noqa: BLE001
-                    torch_info = f"lỗi: {str(e)[:80]}"
+                # KHÔNG import torch ở đây (giữ ~0,5–1 GB RAM tới lúc tắt tool): bản CUDA / CPU đọc từ thông tin gói,
+                # tên card hỏi nvidia-smi
+                ver, card = gpu.torch_build(), gpu.gpu_name()
+                if "+cpu" in ver:
+                    torch_info = f"CPU ⚠ (bản {ver} không dùng được card NVIDIA)"
+                elif card:
+                    torch_info = f"GPU ✓ ({card})" + (f" · PyTorch {ver}" if ver else "")
+                else:
+                    torch_info = "CPU (không thấy card NVIDIA)" + (f" · PyTorch {ver}" if ver else "")
             return (detect_device()[0], separate.available(), asr_funasr.available(), diarize.available(),
                     tts.vieneu_available(), lama.available(), torch_info)
 
@@ -1457,6 +1462,8 @@ class MainWindow(QMainWindow):
         self.refresh_projects()
         self.show_page("home")
         self._sysinfo()
+        # dự án đã xoá lần trước mà còn file bị giữ (Windows) -> dọn nốt ở nền
+        threading.Thread(target=Project.purge_deleted, daemon=True, name="trami-purge").start()
 
     # ------------------------------------------------------------ điều hướng
     def show_page(self, key: str):

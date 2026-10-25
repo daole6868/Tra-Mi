@@ -1161,11 +1161,6 @@ def _bounds(text: str, ends: str, clauses: str) -> list[tuple[int, str]]:
     return out
 
 
-def _clause_cuts(text: str, marks: str) -> list[int]:
-    """Chỉ số ngay sau từng dấu ngắt vế BÊN TRONG câu (dấu ở cuối câu không tính)."""
-    return [p for p, _ in _bounds(text, "", marks)]
-
-
 def _vis(text: str) -> int:
     """Số chữ có nghĩa (Hán, chữ cái, số) – ước vị trí thời gian theo câu gốc."""
     return sum(1 for c in text if c.isalnum())

@@ -5858,3 +5858,143 @@ def test_ai_steps_run_with_live_drafts(monkeypatch):
     sm = autoflow.summary({**st_, "ai_clean_before_translate": False})
     assert "AI lọc lời hát, kiểm tra bản dịch" in sm
     assert "AI " not in autoflow.summary({**st_, "translate_engine": "google"})
+
+
+def test_project_delete_cache_and_light_model_checks(tmp_path, monkeypatch):
+    """Xoá dự án: mất khỏi danh sách ngay, việc nền còn giữ dự án cũ không ghi lại project.json (trước đây "xoá rồi mà
+    tên vẫn còn"), file bị giữ -> dấu .deleted rồi dọn nốt; danh sách dự án chỉ đọc lại file vừa đổi; tab Tài liệu xem
+    mô hình đã tải mà không nạp modelscope / faster-whisper; gom mô hình cho bản mang đi."""
+    import shutil
+    import subprocess
+    import types
+
+    from trami import models, packmodels, project as pj
+    from trami.project import Project
+
+    p = Project.create("xoá thử")
+    stale = Project(p.id)                 # như việc nền đang giữ dự án
+    assert any(x["id"] == p.id for x in Project.list_all())
+    assert p.delete() is True and not p.dir.exists()
+    stale.data["name"] = "hiện lại?"
+    stale.save()                          # không tạo lại
+    assert not p.dir.exists() and all(x["id"] != p.id for x in Project.list_all())
+    # Windows: còn file đang bị giữ -> để dấu, không hiện ở danh sách, lần mở sau dọn nốt
+    q = Project.create("bị giữ file")
+    real = shutil.rmtree
+    monkeypatch.setattr(pj.shutil, "rmtree", lambda *a, **k: None)
+    monkeypatch.setattr(pj.time, "sleep", lambda s: None)
+    assert q.delete() is False and (q.dir / pj.TOMB).exists() and not q.file.exists()
+    assert all(x["id"] != q.id for x in Project.list_all())
+    monkeypatch.setattr(pj.shutil, "rmtree", real)
+    assert Project.purge_deleted() >= 1 and not q.dir.exists()
+    # danh sách dự án: file không đổi -> không đọc lại
+    r = Project.create("đếm lần đọc")
+    Project.list_all()
+    reads = []
+    real_loads = pj.json.loads
+    monkeypatch.setattr(pj.json, "loads", lambda t, *a, **k: reads.append(1) or real_loads(t, *a, **k))
+    Project.list_all()
+    assert reads == []
+    r.data["name"] = "tên mới"
+    r.save()
+    assert next(x["name"] for x in Project.list_all() if x["id"] == r.id) == "tên mới" and len(reads) == 1
+    monkeypatch.setattr(pj.json, "loads", real_loads)
+    # xem mô hình ModelScope đã tải: không hỏi thư viện modelscope (kéo theo PyTorch)
+    called = []
+    fake = types.ModuleType("modelscope.hub.snapshot_download")
+    fake.snapshot_download = lambda *a, **k: called.append(a) or ""
+    monkeypatch.setitem(sys.modules, "modelscope.hub.snapshot_download", fake)
+    models._ms_cached("iic/SenseVoiceSmall")
+    assert called == []
+    models.ms_location("iic/SenseVoiceSmall", probe=True)
+    assert called
+    # Whisper: tìm thẳng thư mục, không nạp faster-whisper
+    monkeypatch.setattr(models, "MODELS_DIR", tmp_path / "m")
+    monkeypatch.delitem(sys.modules, "faster_whisper", raising=False)
+    assert not models._whisper_cached("large-v3")
+    snap = tmp_path / "m" / "models--Systran--faster-whisper-large-v3" / "snapshots" / "x"
+    snap.mkdir(parents=True)
+    (snap / "model.bin").write_bytes(b"0")
+    assert models._whisper_cached("large-v3") and models._whisper_cached("large")
+    assert not models._whisper_cached("turbo") and "faster_whisper" not in sys.modules
+    # gom mô hình: chỉ kho tool có dùng, file thật thay cho symlink, bỏ file tải dở, không chép blobs
+    src, hf = tmp_path / "src", tmp_path / "hf"
+    (src / "separator").mkdir(parents=True)
+    (src / "separator" / "m.ckpt").write_bytes(b"w" * 10)
+    (src / "separator" / "x.incomplete").write_bytes(b"p")
+    for repo in ("models--Qwen--Qwen3-ASR-1.7B-hf", "models--nguoi-khac--mo-hinh-la"):
+        (hf / repo / "blobs").mkdir(parents=True)
+        (hf / repo / "snapshots" / "abc").mkdir(parents=True)
+        (hf / repo / "blobs" / "123").write_bytes(b"trong-so")
+        try:
+            (hf / repo / "snapshots" / "abc" / "model.safetensors").symlink_to(hf / repo / "blobs" / "123")
+        except OSError:
+            shutil.copyfile(hf / repo / "blobs" / "123", hf / repo / "snapshots" / "abc" / "model.safetensors")
+    monkeypatch.setattr(packmodels, "MODELS_DIR", src)
+    monkeypatch.setattr(packmodels, "hf_cache", lambda: hf)
+    out = tmp_path / "out" / "data"
+    res = packmodels.pack(out)
+    assert [r for r, _ in res["hf"]] == ["Qwen/Qwen3-ASR-1.7B-hf"]
+    got = out / "models" / "hf" / "models--Qwen--Qwen3-ASR-1.7B-hf" / "snapshots" / "abc" / "model.safetensors"
+    assert got.is_file() and not got.is_symlink() and got.read_bytes() == b"trong-so"
+    assert not (out / "models" / "hf" / "models--Qwen--Qwen3-ASR-1.7B-hf" / "blobs").exists()
+    assert (out / "models" / "separator" / "m.ckpt").is_file() and not (out / "models" / "separator" / "x.incomplete").exists()
+    # máy nhận: thư mục data có models/hf -> kho HuggingFace của tool là chỗ đó
+    env = {k: v for k, v in os.environ.items() if k not in ("HF_HUB_CACHE", "HF_HOME")}
+    env["TRAMI_DATA"] = str(out)
+    r = subprocess.run([sys.executable, "-c", "import os, trami.config; print(os.environ.get('HF_HUB_CACHE'))"],
+                       capture_output=True, text=True, env=env, cwd=str(Path(__file__).resolve().parents[1]))
+    assert r.stdout.strip() == str(out / "models" / "hf")
+
+
+def test_gui_subs_tools_delete_project_and_timeline_tip(sample_video, monkeypatch):
+    """Tab Phụ đề: khung Dịch + khung Công cụ (mỗi lúc 1 trang, thu gọn được, nhớ trang ở Cài đặt); nút Xoá dự án xoá
+    hẳn (huỷ việc nền của dự án, không còn tên ở danh sách); rê chuột trên dòng Video lúc chưa có video không lỗi."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from trami.config import load_settings, save_settings
+    from trami.gui.main import MainWindow
+    from trami.jobs import manager
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    old = load_settings()
+    win = MainWindow()
+    try:
+        p = Project.create("công cụ phụ đề")
+        p.segments = [Segment(0, 1, "你好", "Xin chào", "S1")]
+        p.save()
+        win.open_project(p.id)
+        app.processEvents()
+        pp = win.project_page
+        # rê chuột qua dòng Video khi chưa biết độ dài video: trước đây UnboundLocalError 'tip'
+        cv = pp.tracks.canvas
+        y = cv.track_rect("video").center().y()
+        ev = QMouseEvent(QEvent.Type.MouseMove, QPointF(cv.HEAD + 40, y), QPointF(cv.HEAD + 40, y),
+                         Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+        cv.mouseMoveEvent(ev)
+        # khung công cụ: 4 trang, mỗi lúc hiện 1, nhớ trang + thu gọn
+        assert len(pp.s_tools_pages) == 4 and pp.s_srt_trans.text() == "Xuất SRT đã dịch"
+        pp._subs_tools(page=2, open_=True)
+        assert [pg.isVisibleTo(pp.s_tools_body) for pg in pp.s_tools_pages] == [False, False, True, False]
+        assert load_settings()["subs_tools_tab"] == 2
+        pp._subs_tools(open_=False)
+        assert not pp.s_tools_body.isVisibleTo(pp.s_tools_card) and load_settings()["subs_tools_open"] is False
+        assert pp.s_tools_btn.text() == "Mở công cụ"
+        # xoá dự án: việc nền của dự án bị huỷ, mất khỏi danh sách
+        cancelled = []
+        monkeypatch.setattr(manager, "list", lambda pid=None: [{"id": "j1", "project_id": p.id, "status": "queued"}])
+        monkeypatch.setattr(manager, "cancel", lambda jid: cancelled.append(jid))
+        monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+        pp._delete()
+        assert cancelled == ["j1"] and pp.p is None and not p.dir.exists()
+        assert all(x["id"] != p.id for x in Project.list_all())
+        assert win.pages.currentWidget() is win.home
+    finally:
+        save_settings({"subs_tools_tab": old.get("subs_tools_tab", 0), "subs_tools_open": old.get("subs_tools_open", True)})
+        win.close()
+        app.processEvents()

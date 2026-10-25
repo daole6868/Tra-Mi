@@ -978,14 +978,6 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
 
 # ------------------------------------------------------------------ các thao tác nhanh
 
-def quick_cut(src: str | Path, out: str | Path, start: float, end: float) -> Path:
-    """Cắt nhanh không encode lại (có thể lệch vài khung hình ở keyframe)."""
-    args = ["-ss", f"{start:.3f}", "-to", f"{end:.3f}", "-i", str(src), "-c", "copy", "-avoid_negative_ts", "1",
-            str(out)]
-    ff.run(args, end - start)
-    return Path(out)
-
-
 def split_parts(src: str | Path, out_dir: str | Path, part_minutes: float, settings: dict,
                 progress: ProgressCB | None = None, cancel=None) -> list[Path]:
     """Chia video dài thành nhiều phần (mỗi phần N phút) - encode lại để cắt chính xác."""
@@ -1033,12 +1025,4 @@ def extract_audio_file(src: str | Path, out: str | Path, progress=None, cancel=N
     ext = Path(out).suffix.lower()
     codec = ["-c:a", "libmp3lame", "-b:a", "192k"] if ext == ".mp3" else ["-c:a", "pcm_s16le"]
     ff.run(["-i", str(src), "-vn"] + codec + [str(out)], info.duration, progress, cancel, "Đang tách âm thanh")
-    return Path(out)
-
-
-def remove_vocals(src_audio: str | Path, out: str | Path, progress=None, cancel=None) -> Path:
-    """Giảm giọng nói, giữ nhạc nền (phương pháp khử kênh giữa - hiệu quả với nhạc stereo)."""
-    info = ff.probe(src_audio)
-    ff.run(["-i", str(src_audio), "-af", "pan=stereo|c0=c0-c1|c1=c1-c0,highpass=f=120,volume=1.4",
-            "-c:a", "pcm_s16le", str(out)], info.duration, progress, cancel, "Đang tách nhạc nền")
     return Path(out)

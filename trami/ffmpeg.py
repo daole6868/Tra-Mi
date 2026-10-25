@@ -9,7 +9,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable
 
 ProgressCB = Callable[[float, str], None]  # (0..1, thông điệp)
 
@@ -246,14 +246,6 @@ def snapshot(src: str | Path, t: float, dst: str | Path, width: int = 0) -> Path
     return Path(dst)
 
 
-def escape_filter_path(p: str | Path) -> str:
-    """Escape đường dẫn dùng trong filter (subtitles=, movie=...) - đặc biệt trên Windows."""
-    s = str(Path(p).resolve()).replace("\\", "/")
-    s = s.replace(":", r"\:").replace("'", r"\'")
-    s = s.replace("[", r"\[").replace("]", r"\]").replace(",", r"\,").replace(";", r"\;")
-    return s
-
-
 def video_encode_args(settings: dict, crf: int | None = None) -> list[str]:
     codec = settings.get("video_codec", "libx264")
     crf = settings.get("video_crf", 20) if crf is None else crf
@@ -270,7 +262,3 @@ def video_encode_args(settings: dict, crf: int | None = None) -> list[str]:
 
 def audio_encode_args(settings: dict) -> list[str]:
     return ["-c:a", "aac", "-b:a", settings.get("audio_bitrate", "192k")]
-
-
-def join_filters(parts: Iterable[str]) -> str:
-    return ",".join(p for p in parts if p)

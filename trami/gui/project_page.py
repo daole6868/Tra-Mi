@@ -6,10 +6,10 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QFont, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDoubleSpinBox, QFileDialog,
+from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
                                QHeaderView, QInputDialog, QLineEdit, QMessageBox, QPlainTextEdit,
                                QScrollArea, QSpinBox, QSplitter, QStackedWidget, QTableView, QTableWidget,
-                               QTableWidgetItem, QVBoxLayout, QWidget, QGridLayout)
+                               QTableWidgetItem, QVBoxLayout, QWidget, QGridLayout, QSizePolicy)
 
 from .. import langs, pipeline
 from ..config import _deep_merge, load_settings
@@ -49,6 +49,22 @@ def scroll(w: QWidget) -> QScrollArea:
     sa.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     return sa
 
+
+
+def _rowlbl(text: str) -> QWidget:
+    """Nhãn đầu hàng (bề rộng cố định -> các hàng nút thẳng cột)."""
+    lb = label(text, "muted")
+    lb.setFixedWidth(84)
+    return lb
+
+
+def _vsep() -> QWidget:
+    """Vạch dọc mảnh chia các nhóm nút trong 1 hàng."""
+    f = QFrame()
+    f.setFrameShape(QFrame.Shape.VLine)
+    f.setFixedSize(1, 26)
+    f.setStyleSheet(f"background: {theme.BORDER}; border: none;")
+    return f
 
 class ProjectPage(QWidget):
     def __init__(self, win):
@@ -460,37 +476,52 @@ class ProjectPage(QWidget):
         # cách dịch: cùng giá trị với tab Tự động / Cài đặt (đổi ở đây = đổi ở đó)
         self.s_engine, self.s_target = self._mirror(self.a_engine), self._mirror(self.a_target)
         self.s_style, self.s_skill = self._mirror(self.a_style), self._mirror(self.a_skill)
-        bar0 = flow(hbox(label("Dịch bằng", "muted"), self.s_engine), hbox(label("sang", "muted"), self.s_target),
-                    hbox(label("Văn phong", "muted"), self.s_style),
-                    hbox(label("Kỹ năng AI", "muted"), self.s_skill,
-                         button("", "wand", "Xem, thêm, sửa kỹ năng dịch AI của bạn", flat=True,
-                                on_click=self._edit_skills)))
-        bar1 = flow(button("Dịch câu chưa dịch", "globe", "Dịch mọi câu chưa có bản dịch (dịch lần đầu: dịch cả phim)",
-                           on_click=lambda: self.run_translate(True)),
-                    button("Dịch lại tất cả", "refresh", on_click=lambda: self.run_translate(False)),
-                    button("Dịch câu đã tích", "sparkle", "Dịch (lại) các câu đã tích ở cột Chọn – đã có bản lồng thì "
-                           "đọc lại giọng đúng các câu đó", on_click=self._translate_picked),
-                    button("Nhập SRT", "download", "Nhập file phụ đề SRT/ASS/VTT", on_click=self._import_subs),
-                    button("Lưu", "save", on_click=lambda: (self._save_segs_now(), self.win.toast("Đã lưu phụ đề", "ok"))))
-        bar2 = flow(button("Thêm", "plus", "Thêm câu tại vị trí đang phát", on_click=lambda: self._seg_op("insert")),
-                    button("Gộp", "merge", "Gộp các câu đã tích (liền nhau), không tích thì gộp câu đang chọn với câu sau",
-                           on_click=lambda: self._seg_op("merge")),
-                    button("Tách", "split", "Tách câu tại vị trí đang phát", on_click=lambda: self._seg_op("split")),
-                    button("Xoá", "trash", "Xoá câu đang chọn (hoặc các câu đã tích)", danger=True,
-                           on_click=lambda: self._seg_op("delete")),
-                    button("Bỏ tích", "x", "Bỏ tích mọi câu", flat=True,
-                           on_click=lambda: self.model.set_picked(range(len(self.model.segs)), False)),
-                    button("Nối câu bị cắt", "merge", "Tự nối các dòng bị cắt ngang câu (cắt giữa 1 từ như 真|的, mẩu "
-                           "cụt như 子。, câu chưa hết) rồi tách lại đúng chỗ – không cần AI, không nghe lại. Theo Kiểu "
-                           "tách câu ở tab Tự động. Câu đổi được tích sẵn để dịch lại", on_click=self.run_join),
-                    button("AI nối câu", "sparkle", "AI đọc cả kịch bản, gộp các dòng thực ra là 1 câu mà luật không "
-                           "đoán được (\"这笔账。\" | \"你自己算。\") – chỉ gộp, không đổi chữ. AI chọn ở tab Tự động / Cài đặt "
-                           "→ 'AI nối câu theo nghĩa'. Câu gộp được tích sẵn", on_click=self.run_ai_join),
-                    button("Hoàn tác nối", "refresh", flat=True, on_click=self.run_undo_join),
-                    button("Dời giờ", "clock", on_click=self._shift),
-                    button("Căn khớp thoại", "wand", "Căn mốc từng câu sát lời thoại thật, tách câu ở chỗ nghỉ "
-                           "(dùng cho phụ đề đã nhận dạng từ bản cũ)", on_click=self.run_realign),
-                    button("Tìm && thay", "search", on_click=self._replace))
+        # ---- khung "Dịch" (luôn hiện): cách dịch + 3 nút dịch
+        tr_card = SectionCard("Dịch", "globe")
+        tr_card.lay.setContentsMargins(14, 12, 14, 12)
+        b_tr = GradientButton("Dịch câu chưa dịch", "globe")
+        b_tr.setToolTip("Dịch mọi câu chưa có bản dịch (dịch lần đầu: dịch cả phim)")
+        b_tr.clicked.connect(lambda: self.run_translate(True))
+        tr_card.head.addWidget(flow(
+            b_tr, button("Dịch lại tất cả", "refresh", on_click=lambda: self.run_translate(False)),
+            button("Dịch câu đã tích", "sparkle", "Dịch (lại) các câu đã tích ở cột Chọn – đã có bản lồng thì "
+                   "đọc lại giọng đúng các câu đó", on_click=self._translate_picked)))
+        g = QGridLayout()   # 2 hàng × 2 ô chọn, giãn đều theo bề rộng khung (không cắt chữ trong ô)
+        g.setHorizontalSpacing(10)
+        g.setVerticalSpacing(8)
+        for i, (t, w) in enumerate((("Dịch bằng", self.s_engine), ("Dịch sang", self.s_target),
+                                    ("Văn phong", self.s_style),
+                                    ("Kỹ năng AI", hbox(self.s_skill, button(
+                                        "", "wand", "Xem, thêm, sửa kỹ năng dịch AI của bạn", flat=True,
+                                        on_click=self._edit_skills))))):
+            g.addWidget(_rowlbl(t), i // 2, (i % 2) * 2)
+            (g.addWidget if isinstance(w, QWidget) else g.addLayout)(w, i // 2, (i % 2) * 2 + 1)
+        for c in (1, 3):
+            g.setColumnStretch(c, 1)
+        for cb in (self.s_engine, self.s_target, self.s_style, self.s_skill):
+            cb.setMinimumWidth(150)
+        self.s_skill.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        tr_card.add(g)
+        self.s_tr_card = tr_card
+        # ---- các trang của khung "Công cụ" (mỗi lúc hiện 1 trang)
+        pg_edit = [
+            "Bấm đúp vào ô để sửa chữ · Ctrl / Shift chọn nhiều dòng · tích cột Chọn để làm nhiều câu cùng lúc",
+            flow(button("Thêm", "plus", "Thêm câu tại vị trí đang phát", on_click=lambda: self._seg_op("insert")),
+                 button("Tách", "split", "Tách câu tại vị trí đang phát", on_click=lambda: self._seg_op("split")),
+                 button("Gộp", "merge", "Gộp các câu đã tích (liền nhau), không tích thì gộp câu đang chọn với câu sau",
+                        on_click=lambda: self._seg_op("merge")),
+                 button("Xoá", "trash", "Xoá câu đang chọn (hoặc các câu đã tích)", danger=True,
+                        on_click=lambda: self._seg_op("delete")),
+                 _vsep(),
+                 button("Bỏ tích", "x", "Bỏ tích mọi câu", flat=True,
+                        on_click=lambda: self.model.set_picked(range(len(self.model.segs)), False)),
+                 button("Dời giờ", "clock", "Dời giờ mọi câu (hoặc các câu đã tích) sớm / muộn đi vài giây",
+                        on_click=self._shift),
+                 button("Tìm && thay", "search", on_click=self._replace),
+                 button("Căn khớp thoại", "wand", "Căn mốc từng câu sát lời thoại thật, tách câu ở chỗ nghỉ "
+                        "(dùng cho phụ đề đã nhận dạng từ bản cũ)", on_click=self.run_realign),
+                 _vsep(),
+                 button("Lưu", "save", on_click=lambda: (self._save_segs_now(), self.win.toast("Đã lưu phụ đề", "ok"))))]
         # câu dịch dài: tách ở chỗ hết câu (? ! .) / dấu phẩy thành nhiều dòng phụ đề + đoạn giọng, giữa 2 vế nghỉ 1 nhịp
         self.s_split = Switch(bool(self.settings.get("split_long_trans", True)))
         self.s_split.setToolTip("Sau khi dịch cả phim: câu dịch dài hơn mức đặt có dấu ? ! . hoặc dấu phẩy ở giữa câu (cả câu gốc lẫn "
@@ -514,13 +545,25 @@ class ProjectPage(QWidget):
             (w.toggledOn if w is self.s_split else w.valueChanged).connect(self._split_opts_changed)
         self.a_split_long.toggled.connect(
             lambda on: None if self.loading or self.s_split.isChecked() == on else self.s_split.setChecked(on))
-        self.bar_split = flow(
-            hbox(self.s_split, label("Tự tách câu dịch dài ở dấu câu (? ! . ,), câu dài hơn", "muted"), self.s_split_n),
-            hbox(label("nghỉ giữa 2 vế", "muted"), self.s_split_p),
-            button("Tách câu dài", "split", "Tách ngay các câu dịch dài hơn mức đặt ở dấu ? ! . hoặc dấu phẩy giữa câu "
-                   "(các câu đã tích, chưa tích thì cả phim). Chỗ tách phải có dấu câu ở cả câu gốc lẫn câu dịch, đúng "
-                   "vị trí tương ứng. Mốc đặt đúng chỗ ngắt hơi. Đã lồng tiếng thì đọc lại giọng các vế mới", on_click=self.run_split_long),
-            button("Hoàn tác tách", "refresh", flat=True, on_click=self.run_undo_split))
+        pg_join = [
+            "Nối dòng bị cắt ngang câu (máy nghe cắt sai chỗ) · tách câu dịch quá dài thành nhiều dòng, giữa 2 vế "
+            "giọng lồng nghỉ 1 nhịp",
+            flow(_rowlbl("Nối câu"),
+                 button("Nối câu bị cắt", "merge", "Tự nối các dòng bị cắt ngang câu (cắt giữa 1 từ như 真|的, mẩu "
+                        "cụt như 子。, câu chưa hết) rồi tách lại đúng chỗ – không cần AI, không nghe lại. Theo Kiểu "
+                        "tách câu ở tab Tự động. Câu đổi được tích sẵn để dịch lại", on_click=self.run_join),
+                 button("AI nối câu", "sparkle", "AI đọc cả kịch bản, gộp các dòng thực ra là 1 câu mà luật không "
+                        "đoán được (\"这笔账。\" | \"你自己算。\") – chỉ gộp, không đổi chữ. AI chọn ở tab Tự động / "
+                        "Cài đặt → 'AI nối câu theo nghĩa'. Câu gộp được tích sẵn", on_click=self.run_ai_join),
+                 button("Hoàn tác nối", "undo", flat=True, on_click=self.run_undo_join)),
+            flow(_rowlbl("Tách câu dài"),
+                 hbox(self.s_split, label("tự tách câu dịch dài hơn", "muted"), self.s_split_n),
+                 hbox(label("nghỉ giữa 2 vế", "muted"), self.s_split_p),
+                 button("Tách câu dài", "split", "Tách ngay các câu dịch dài hơn mức đặt ở dấu ? ! . hoặc dấu phẩy giữa "
+                        "câu (các câu đã tích, chưa tích thì cả phim). Chỗ tách phải có dấu câu ở cả câu gốc lẫn câu "
+                        "dịch, đúng vị trí tương ứng. Mốc đặt đúng chỗ ngắt hơi. Đã lồng tiếng thì đọc lại giọng các vế "
+                        "mới", on_click=self.run_split_long),
+                 button("Hoàn tác tách", "undo", flat=True, on_click=self.run_undo_split))]
         # câu nghe nhầm: nhạc / tiếng động bị chép thành lời -> lọc theo cao độ giọng thật của từng người nói
         self.s_ptol = QDoubleSpinBox()
         self.s_ptol.setRange(1.0, 12.0)
@@ -532,19 +575,21 @@ class ProjectPage(QWidget):
         self.s_ptol.setToolTip("Lệch cao độ cho phép ngoài khoảng giọng thường của người nói. Nhỏ = lọc chặt (dễ đánh "
                                "dấu nhầm câu kêu / hét), lớn = lọc lỏng (chỉ bắt nhạc cụ / giọng hát cao hẳn)")
         self.s_ptol.valueChanged.connect(self._ptol_changed)
-        self.bar_pitch = flow(
-            button("AI lọc lời bài hát", "wand", "Nhờ công cụ dịch AI đọc cả kịch bản: câu là lời bài hát (văn vần, điệp "
-                   "khúc, không ăn nhập lời thoại) -> đánh 🎵 (không lồng tiếng); câu máy tự bịa / chữ vô nghĩa lúc chỉ "
-                   "có nhạc -> bỏ; đoạn lời hát dính vào câu thoại -> xoá phần đó. Dựa vào nội dung, không dựa vào âm "
-                   "lượng. Không ưng: Hoàn tác sửa", on_click=self.run_ai_filter),
-            button("Lọc câu nghe nhầm", "wand", "Đo cao độ giọng thật của từng người nói (trên giọng đã tách) – câu nằm "
-                   "ngoài khoảng cao độ đó, gần như không có giọng nói, hoặc nhỏ hẳn so với lời thoại = nhạc / tiếng "
-                   "động bị nghe thành lời → đánh dấu + tích sẵn để nghe lại rồi xoá. Đồng thời thu đầu / cuối câu "
-                   "kéo sang nhạc cho khớp lúc nói", on_click=self.run_voice_check),
-            label("Lệch cao độ cho phép", "muted"), self.s_ptol,
-            button("Tích câu nghi nghe nhầm", "check", flat=True, on_click=lambda: self._pick_flag("noise")),
-            button("Không phải nhạc", "x", "Bỏ đánh dấu các câu đã tích (câu thoại thật) – lần lọc sau không đánh dấu "
-                   "lại", flat=True, on_click=self._voice_ok))
+        pg_song = [
+            "Nhạc / lời bài hát / tiếng động bị nghe thành lời thoại: đánh 🎵 (không lồng tiếng) hoặc đánh dấu để "
+            "nghe lại rồi xoá",
+            flow(button("AI lọc lời bài hát", "wand", "Nhờ công cụ dịch AI đọc cả kịch bản: câu là lời bài hát (văn vần, "
+                        "điệp khúc, không ăn nhập lời thoại) -> đánh 🎵 (không lồng tiếng); câu máy tự bịa / chữ vô nghĩa "
+                        "lúc chỉ có nhạc -> bỏ; đoạn lời hát dính vào câu thoại -> xoá phần đó. Dựa vào nội dung, không "
+                        "dựa vào âm lượng. Không ưng: Hoàn tác sửa", on_click=self.run_ai_filter),
+                 button("Lọc câu nghe nhầm", "music", "Đo cao độ giọng thật của từng người nói (trên giọng đã tách) – câu "
+                        "nằm ngoài khoảng cao độ đó, gần như không có giọng nói, hoặc nhỏ hẳn so với lời thoại = nhạc / "
+                        "tiếng động bị nghe thành lời → đánh dấu + tích sẵn để nghe lại rồi xoá. Đồng thời thu đầu / "
+                        "cuối câu kéo sang nhạc cho khớp lúc nói", on_click=self.run_voice_check),
+                 hbox(label("lệch cao độ cho phép", "muted"), self.s_ptol)),
+            flow(button("Tích câu nghi nghe nhầm", "check", flat=True, on_click=lambda: self._pick_flag("noise")),
+                 button("Không phải nhạc", "x", "Bỏ đánh dấu các câu đã tích (câu thoại thật) – lần lọc sau không đánh "
+                        "dấu lại", flat=True, on_click=self._voice_ok))]
         self.profile_edit = QPlainTextEdit()
         self.profile_edit.setPlaceholderText(
             "AI tự lập khi dịch lần đầu: thể loại, nhân vật, xưng hô, tên riêng / meme. Sửa được – AI dùng cho mọi lần "
@@ -592,25 +637,80 @@ class ProjectPage(QWidget):
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(8)
-        v.addWidget(bar0)
         # xuất / nạp phụ đề để dịch ở phần mềm khác (trước ở tab Lồng tiếng)
         self.s_srt_trans = button("Xuất SRT đã dịch", "upload", on_click=lambda: self._export_sub("srt", "trans"))
-        bar3 = flow(label("Phụ đề", "muted"),
-                    button("Xuất SRT gốc (chưa dịch)", "upload", "Lấy lời gốc đã tách câu để dịch ở phần mềm khác",
-                           on_click=lambda: self._export_sub("srt", "source")),
-                    self.s_srt_trans,
-                    button("Xuất SRT song ngữ", "upload", on_click=lambda: self._export_sub("srt", "both")),
-                    button("Nạp SRT đã dịch…", "download", "Nạp bản dịch làm ở phần mềm khác vào các câu hiện có "
-                           "(giữ nguyên lời gốc, thời gian, người nói). Câu có dấu ♪ tự đánh dấu là bài hát 🎵",
-                           on_click=self._import_translation))
-        v.addWidget(bar1)
-        v.addWidget(self.bar_split)
-        v.addWidget(bar2)
-        v.addWidget(self.bar_pitch)
-        v.addWidget(bar3)
+        pg_srt = [
+            "Dịch / sửa phụ đề ở phần mềm khác rồi nạp lại – giữ nguyên lời gốc, thời gian, người nói",
+            flow(_rowlbl("Nhập"),
+                 button("Nhập SRT…", "download", "Nhập file phụ đề SRT / ASS / VTT (thay phụ đề hiện có)",
+                        on_click=self._import_subs),
+                 button("Nạp SRT đã dịch…", "download", "Nạp bản dịch làm ở phần mềm khác vào các câu hiện có "
+                        "(giữ nguyên lời gốc, thời gian, người nói). Câu có dấu ♪ tự đánh dấu là bài hát 🎵",
+                        on_click=self._import_translation)),
+            flow(_rowlbl("Xuất"),
+                 button("Xuất SRT gốc (chưa dịch)", "upload", "Lấy lời gốc đã tách câu để dịch ở phần mềm khác",
+                        on_click=lambda: self._export_sub("srt", "source")),
+                 self.s_srt_trans,
+                 button("Xuất SRT song ngữ", "upload", on_click=lambda: self._export_sub("srt", "both")))]
+        tools = Card(padding=12)
+        self.s_tools = PillTabs([("Sửa câu", "text"), ("Nối / tách câu", "merge"), ("Lời hát & nghe nhầm", "music"),
+                                 ("Nhập / xuất SRT", "upload")])
+        self.s_tools_btn = button("Thu gọn", "chev_down", "Ẩn / hiện các nút công cụ (ẩn để bảng câu cao hơn)", flat=True,
+                                  on_click=lambda: self._subs_tools(open_=not self.s_tools_body.isVisible()))
+        tools.add(hbox(self.s_tools, None, self.s_tools_btn))
+        self.s_tools_body = QWidget()
+        body = QVBoxLayout(self.s_tools_body)
+        body.setContentsMargins(2, 0, 2, 0)
+        body.setSpacing(8)
+        self.s_tools_pages = []
+        for desc, *rows in (pg_edit, pg_join, pg_song, pg_srt):
+            pg = QWidget()
+            pl = QVBoxLayout(pg)
+            pl.setContentsMargins(0, 0, 0, 0)
+            pl.setSpacing(8)
+            pl.addWidget(label(desc, "muted", wrap=True))
+            for r in rows:
+                pl.addWidget(r)
+            body.addWidget(pg)
+            self.s_tools_pages.append(pg)
+        tools.add(self.s_tools_body)
+        self.s_tools_card = tools
+        self.s_tools.changed.connect(lambda i: self._subs_tools(page=i, open_=True))
+        opened = self.settings.get("subs_tools_open")
+        if opened is None:   # chưa chọn lần nào: màn thấp (laptop 768) mở đầu thu gọn để bảng câu đủ chỗ
+            from PySide6.QtGui import QGuiApplication
+
+            scr = QGuiApplication.primaryScreen()
+            opened = not scr or scr.availableGeometry().height() >= 900
+        self._subs_tools(page=int(self.settings.get("subs_tools_tab", 0) or 0), open_=bool(opened), save=False)
+        v.setSpacing(theme.GAP)
+        v.addWidget(tr_card)
+        v.addWidget(tools)
         v.addLayout(hbox(self.search, self.seg_count, label("Tự cuộn", "muted"), self.follow))
         v.addWidget(split, 1)
         return scroll(w)
+
+    def _subs_tools(self, page: int | None = None, open_: bool | None = None, save: bool = True):
+        """Khung Công cụ ở tab Phụ đề: mỗi lúc hiện 1 trang (Sửa câu / Nối – tách câu / Lời hát / Nhập – xuất SRT);
+        thu gọn = chỉ còn hàng chọn trang (bảng câu cao hơn). Nhớ trang + trạng thái ở Cài đặt."""
+        from ..config import save_settings
+
+        if page is not None:
+            page = max(0, min(page, len(self.s_tools_pages) - 1))
+            for i, pg in enumerate(self.s_tools_pages):
+                pg.setVisible(i == page)   # trang ẩn không chiếm chỗ (khung cao đúng theo trang đang mở)
+            self.s_tools.set_current(page, emit=False)
+        if open_ is not None:
+            self.s_tools_body.setVisible(open_)
+            self.s_tools_btn.setText("Thu gọn" if open_ else "Mở công cụ")
+        if save:
+            d = {}
+            if page is not None:
+                d["subs_tools_tab"] = page
+            if open_ is not None:
+                d["subs_tools_open"] = bool(open_)
+            if d:
+                self.settings = save_settings(d)
 
     # ================================================================== TAB: Xoá phụ đề cũ
     TAB_HARDSUB, TAB_STYLE, TAB_LAYERS, TAB_DUB, TAB_AUDIO, TAB_MODELS, TAB_EXPORT = 2, 4, 5, 6, 7, 8, 9
@@ -4860,12 +4960,26 @@ class ProjectPage(QWidget):
     def _delete(self):
         if not self.p:
             return
+        pid = self.p.id
+        busy = [j for j in manager.list(pid) if j["status"] in ("queued", "running")]
         if QMessageBox.question(self, "Xoá dự án", "Xoá dự án này?\n(File video gốc trên máy KHÔNG bị xoá; chỉ xoá dữ liệu dự án "
-                                "và các file đã xuất trong thư mục dự án.)") != QMessageBox.StandardButton.Yes:
+                                "và các file đã xuất trong thư mục dự án.)"
+                                + (f"\n\n{len(busy)} việc của dự án đang chạy / chờ sẽ bị huỷ." if busy else "")
+                                ) != QMessageBox.StandardButton.Yes:
             return
+        for j in busy:   # việc nền còn chạy từng ghi lại project.json -> dự án xoá rồi vẫn hiện tên
+            manager.cancel(j["id"])
+        for t in (self._save_segs_timer, self._save_edit_timer, self._relayout_timer, self._live_timer):
+            t.stop()     # không lưu nốt những gì đang chờ lưu
         self.player.mp.stop()
         self.player.mp.setSource(QUrl())
-        self.p.delete()
-        self.p = None
+        self.player.set_live_mix(None)   # nhả file nghe trực tiếp (Windows không xoá được file đang mở)
+        import gc
+
+        gc.collect()
+        p, self.p = self.p, None
+        gone = p.delete()
         self.win.refresh_projects()
         self.win.go_home()
+        if not gone:
+            self.win.toast("Đã xoá dự án – vài file đang bị giữ sẽ được dọn nốt khi mở lại tool", "ok")

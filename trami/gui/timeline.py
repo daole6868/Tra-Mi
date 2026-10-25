@@ -439,6 +439,8 @@ class _Canvas(QWidget):
                         tags.append("tắt tiếng gốc")
                     tip = (f"Đoạn {_tc(a, 0.5)} → {_tc(b, 0.5)}" + (f" ({', '.join(tags)})" if tags else "")
                            + "\nBấm để chọn · Ctrl/Shift chọn nhiều · công cụ ở thanh phía trên")
+                else:   # chưa biết độ dài video (đang tải / chưa nạp / mất file gốc)
+                    tip = "Đang nạp video…" if self.tl.duration <= 0 else ""
             elif key == "subs":
                 tip = "Chỗ trống – bấm để chọn khoảng này rồi bấm 'Thêm phụ đề'"
             else:
