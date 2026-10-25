@@ -3837,7 +3837,8 @@ def test_jobs_sequential_by_default_and_qwen_batches(monkeypatch):
         gate.wait(2)
         live[0] -= 1
     a = m.submit("translate", "A", fn, "p1")
-    b = m.submit("download", "B", fn, "p2")          # khác dự án, không dùng GPU – vẫn phải chờ
+    b = m.submit("update", "B", fn, "p2")            # khác dự án, không dùng GPU – vẫn phải chờ (tải video thì không:
+    #                                                   PREFETCH_KINDS, xem test_autoflow_links_preset_prefetch)
     _t.sleep(0.4)
     assert m.jobs[b.id].status == "queued" and "lần lượt" in m.jobs[b.id].message
     gate.set()
@@ -5648,3 +5649,153 @@ def test_auto_translate_then_split_then_dub(sample_video, monkeypatch):
         assert [x[0] for x in order] == ["translate", "dub"]
     finally:
         save_settings({"split_long_trans": True})
+
+
+def test_autoflow_links_preset_prefetch(sample_video, monkeypatch):
+    """Tải về & dịch tự động: nhận ra link trùng (nhiều dạng), mỗi link 1 dự án = việc tải + việc dịch theo thiết lập
+    tự động dùng chung (dừng trước bước xuất); link đã tải -> dự án cũ, không tải lại; tải video kế tiếp chạy trong lúc
+    việc dài khác đang chạy, việc dịch của cùng dự án chờ tải xong."""
+    import shutil
+
+    from trami import autoflow, jobs, pipeline
+    from trami.config import load_settings, save_settings
+    from trami.project import Project
+
+    lk = autoflow.link_key
+    assert lk("https://www.bilibili.com/video/BV1xx411c7mD?spm_id_from=333&p=2") == \
+        lk("https://m.bilibili.com/video/BV1xx411c7mD/?p=2") == "bili:BV1xx411c7mD:2"
+    assert lk("https://www.bilibili.com/video/BV1xx411c7mD") != lk("https://www.bilibili.com/video/BV1xx411c7mD?p=2")
+    assert lk("https://youtu.be/dQw4w9WgXcQ?si=a") == lk("https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=3") == \
+        lk("https://www.youtube.com/shorts/dQw4w9WgXcQ") == "yt:dQw4w9WgXcQ"
+    assert lk("https://www.douyin.com/video/7301234567890123456") == \
+        lk("https://www.douyin.com/jingxuan?modal_id=7301234567890123456") == "id:7301234567890123456"
+    assert lk("https://example.com/a/b/") == lk("https://www.example.com/a/b") and lk("") == ""
+
+    old = load_settings()
+    save_settings({"auto_preset": {"dub": True, "hardsub_mode": "blur"}, "translate_engine": "google",
+                   "dub_voice_all": "@auto", "split_long_trans": True})
+    try:
+        o = autoflow.preset()
+        assert o["dub"] and o["hardsub_mode"] == "blur" and o["method"] == "asr" and o["render"] is False
+        assert o["voice"] == "@auto" and o["engine"] == "google" and autoflow.preset(render=True)["render"]
+        sm = autoflow.summary()
+        assert "tách câu dài" in sm and "tự gán nam / nữ" in sm and "lồng tiếng" in sm
+
+        subs, seen = [], []
+        monkeypatch.setattr(jobs.manager, "submit", lambda kind, title, fn, pid="", gpu=None: subs.append(
+            (kind, fn, pid)))
+        monkeypatch.setattr(jobs.manager, "list", lambda project_id=None: [])
+
+        def fake_dl(url, dest, progress=None, cancel=None, notes=None, settings=None):
+            dest.mkdir(parents=True, exist_ok=True)
+            return Path(shutil.copy(sample_video, dest / "Phim hay.mp4"))
+
+        monkeypatch.setattr(pipeline, "download_video", fake_dl)
+        monkeypatch.setattr(pipeline, "auto", lambda p, op, *a, **k: seen.append((p.id, dict(op))) or {"message": "ok"})
+        J = type("J", (), {"update": staticmethod(lambda *a: None), "cancelled": staticmethod(lambda: False)})()
+        u1 = "https://www.bilibili.com/video/BV1aa411c7mD"
+        u2 = "https://www.douyin.com/video/7301234567890123499"
+        res = autoflow.queue_links([u1, u2, "https://m.bilibili.com/video/BV1aa411c7mD?share=1"])
+        assert [r["new"] for r in res] == [True, True] and [k for k, _, _ in subs] == ["download", "auto"] * 2
+        assert subs[0][2] == subs[1][2] == res[0]["pid"]
+        for _, fn, _ in subs:
+            fn(J)
+        p1 = Project(res[0]["pid"])
+        assert p1.data["source"] and p1.data["name"] == "Phim hay" and p1.data["link_key"] == "bili:BV1aa411c7mD:1"
+        assert [pid for pid, _ in seen] == [res[0]["pid"], res[1]["pid"]] and seen[0][1]["render"] is False
+        assert seen[0][1]["dub"] and seen[0][1]["voice"] == "@auto"
+        # dán lại link (dạng khác): không tạo dự án / không tải lại; chưa có phụ đề -> dịch tiếp, có rồi -> chỉ mở
+        subs.clear()
+        res2 = autoflow.queue_links(["https://www.bilibili.com/video/BV1aa411c7mD/?vd_source=x"])
+        assert res2[0]["pid"] == res[0]["pid"] and not res2[0]["new"] and [k for k, _, _ in subs] == ["auto"]
+        p1.segments = [Segment(0, 1, "你好", "", "S1")]
+        p1.save()
+        subs.clear()
+        res3 = autoflow.queue_links([u1], auto=True)
+        assert not res3[0]["new"] and not res3[0]["queued"] and subs == []
+        res4 = autoflow.queue_links(["https://www.youtube.com/watch?v=abcdefghijk"], auto=False)
+        assert [k for k, _, _ in subs] == ["download"] and res4[0]["new"]
+        # việc dịch tự động của dự án mà tải không được -> bỏ qua có lời giải thích
+        with pytest.raises(RuntimeError, match="tải video không được"):
+            autoflow._auto(res4[0]["pid"], o)(J)
+    finally:
+        save_settings({"auto_preset": old.get("auto_preset", {}), "translate_engine": old.get("translate_engine"),
+                       "dub_voice_all": old.get("dub_voice_all", "")})
+
+    # hàng đợi (chạy lần lượt): tải video không chờ việc dài, mỗi lúc 1 lượt tải, việc dịch cùng dự án chờ tải xong
+    m = jobs.JobManager.__new__(jobs.JobManager)
+    mk = lambda i, kind, pid: jobs.Job(id=i, kind=kind, title=i, project_id=pid, _fn=None,  # noqa: E731
+                                       gpu=kind in jobs.GPU_KINDS)
+    m.jobs = {"a1": mk("a1", "auto", "p1"), "d2": mk("d2", "download", "p2"), "a2": mk("a2", "auto", "p2"),
+              "d3": mk("d3", "download", "p3"), "r": mk("r", "render", "p9")}
+    m.running = {"a1"}
+    assert m._why_wait(m.jobs["d2"]) == "" and m._why_wait(m.jobs["a2"])
+    m.running = {"a1", "d2"}
+    assert "lượt tải" in m._why_wait(m.jobs["d3"]) and m._why_wait(m.jobs["a2"])
+    m.running = {"d2"}
+    assert "dự án" in m._why_wait(m.jobs["a2"])      # cùng dự án: dịch chờ tải xong
+    assert m._why_wait(m.jobs["r"]) == "" and m._why_wait(m.jobs["a1"]) == ""   # đang tải không chặn việc khác
+    # việc tải của dự án đang chờ lượt -> việc dịch của dự án đó không được chạy trước (giữ thứ tự trong dự án)
+    m.queue, m.running = ["d2", "a2", "d3"], {"d9"}
+    m.jobs["d9"] = mk("d9", "download", "p8")
+    assert "trước của dự án" in m._why_wait(m.jobs["a2"]) and "lượt tải" in m._why_wait(m.jobs["d2"])
+
+
+def test_gui_home_links_and_auto_settings(sample_video, monkeypatch):
+    """Trang chủ: dán nhiều link -> 'Tải về & dịch tự động' / 'Chỉ tải về'; hộp Thiết lập tự động lưu 1 bộ dùng chung,
+    tab Tự động của dự án đang mở + dòng tóm tắt theo luôn; thẻ dự án có trạng thái."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+
+    from trami import autoflow
+    from trami.config import load_settings, save_settings
+    from trami.gui import main as gm
+    from trami.gui.auto_settings import AutoSettingsDialog
+    from trami.jobs import manager
+
+    app = QApplication.instance() or QApplication([])
+    old = load_settings()
+    win = gm.MainWindow()
+    try:
+        subs = []
+        monkeypatch.setattr(manager, "submit", lambda kind, title, fn, pid="", gpu=None: subs.append((kind, pid)))
+        home = win.home
+        home.url.setPlainText("【phim】 https://www.bilibili.com/video/BV1bb411c7mD 复制链接\n"
+                              "https://www.douyin.com/video/7301234567890123477\n\nhttps://b23.tv/BV1bb411c7mD")
+        assert len(home._links()) == 3
+        home.download(True)
+        kinds = [k for k, _ in subs]
+        # link thứ 3 cùng video với link 1 -> 2 dự án
+        assert kinds.count("download") == 2 and kinds.count("auto") == 2 and home.url.toPlainText() == ""
+        subs.clear()
+        home.url.setPlainText("https://www.douyin.com/video/7301234567890123477")
+        home.download(False)
+        assert subs == []      # đã có dự án của link này -> mở dự án cũ, không tải lại
+        assert win.pages.currentWidget() is win.project_page
+
+        dlg = AutoSettingsDialog(win)
+        dlg.dub.setChecked(True)
+        set_ok = [i for i in range(dlg.hardsub.count()) if dlg.hardsub.itemData(i) == "blur"]
+        dlg.hardsub.setCurrentIndex(set_ok[0])
+        dlg._save()
+        st = load_settings()
+        assert st["auto_preset"]["dub"] is True and st["auto_preset"]["hardsub_mode"] == "blur"
+        win.preset_saved()
+        assert "lồng tiếng" in home.preset_lbl.text() and "không lồng tiếng" not in home.preset_lbl.text()
+        pg = win.project_page
+        assert pg.a_dub.isChecked() and pg.a_hardsub.currentData() == "blur"
+        pg.a_dub.setChecked(False)      # sửa ở tab Tự động -> cùng 1 bộ thiết lập
+        assert load_settings()["auto_preset"]["dub"] is False and autoflow.preset()["dub"] is False
+
+        pr = {"id": "x", "info": {"duration": 3}, "n_segments": 5, "n_translated": 5, "outputs": []}
+        assert gm.project_badge(pr, [{"project_id": "x", "status": "running", "kind": "download"}])[0] == "Đang tải…"
+        assert gm.project_badge(pr, [{"project_id": "x", "status": "queued", "kind": "auto"}])[0] == "Đang chờ"
+        assert gm.project_badge(pr, [{"project_id": "x", "status": "error", "kind": "auto", "finished": 1}])[0] == \
+            "⚠ Lỗi"
+        assert gm.project_badge(pr, [])[0] == "Chờ kiểm tra & xuất"
+        assert gm.project_badge({**pr, "outputs": [{"path": "a.mp4"}]}, [])[0] == "✓ Đã xuất"
+    finally:
+        save_settings({"auto_preset": old.get("auto_preset", {})})
+        win.close()
+        app.processEvents()

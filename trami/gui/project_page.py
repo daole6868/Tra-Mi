@@ -359,7 +359,14 @@ class ProjectPage(QWidget):
         # 1 công cụ dịch cho cả tool: đổi ở đây = đổi ở Cài đặt (nút Dịch, AI rút gọn, dịch lại đều dùng chung)
         self.a_engine.currentIndexChanged.connect(self._engine_changed)
         self.a_style.currentIndexChanged.connect(self._engine_changed)
+        # thiết lập tự động dùng chung (Trang chủ "Tải về & dịch tự động", Xử lý hàng loạt): các ô riêng của tab này
+        for w in (self.a_method, self.a_asr, self.a_ocrfps, self.a_lang, self.a_hardsub, self.a_which, self.a_tts):
+            w.currentIndexChanged.connect(self._preset_changed)
+        for w in (self.a_dub, self.a_denoise):
+            w.toggled.connect(self._preset_changed)
         card.add(f)
+        card.add(hbox(label("Cùng 1 bộ thiết lập với 'Tải về & dịch tự động' (Trang chủ) và Xử lý hàng loạt", "muted"),
+                      None))
         go = GradientButton("Bắt đầu dịch tự động", "bolt", big=True)
         go.setToolTip("Tự làm: nghe & tách câu → dịch → lồng tiếng (nếu bật) rồi DỪNG. Kiểm tra xong bấm 'Xuất video' "
                       "(nút trên cùng hoặc tab Xuất) để ghép video")
@@ -2231,6 +2238,19 @@ class ProjectPage(QWidget):
             self.s_split_p.setValue(float(st.get("split_pause", 0.25)))
             self.d_interj.setChecked(bool(st.get("dub_drop_interj", True)))
             self.a_parallel.setChecked(bool(st.get("auto_parallel", False)))
+            from .. import autoflow
+
+            pv = autoflow.preset_values(st)
+            set_combo(self.a_method, pv["method"])
+            set_combo(self.a_lang, pv["language"])
+            set_combo(self.a_hardsub, pv["hardsub_mode"])
+            set_combo(self.a_which, pv["which"])
+            self.a_dub.setChecked(bool(pv["dub"]))
+            self.a_denoise.setChecked(bool(pv["denoise"]))
+            set_combo(self.a_asr, st.get("asr_engine"))
+            set_combo(self.a_ocrfps, str(st.get("ocr_fps", "4")))
+            self.a_asr.setEnabled(pv["method"] == "asr")
+            self.a_ocrfps.setEnabled(pv["method"] == "ocr")
         finally:
             self.loading = was
         self._update_engine_label()
@@ -2260,6 +2280,19 @@ class ProjectPage(QWidget):
         from ..config import save_settings
 
         self.settings = save_settings({"translate_skill": self.a_skill.currentData() or ""})
+
+    def _preset_changed(self, *_):
+        """Ô của tab Tự động đổi -> lưu vào thiết lập tự động dùng chung (video tải từ link / hàng loạt làm y như vậy)."""
+        if getattr(self, "loading", True):
+            return
+        from ..config import save_settings
+
+        d = {"auto_preset": {"method": self.a_method.currentData(), "language": self.a_lang.currentData(),
+                             "hardsub_mode": self.a_hardsub.currentData(), "which": self.a_which.currentData(),
+                             "dub": self.a_dub.isChecked(), "denoise": self.a_denoise.isChecked()},
+             "asr_engine": self.a_asr.currentData(), "ocr_fps": self.a_ocrfps.currentData() or "4",
+             "tts_engine": self.a_tts.currentData()}
+        self.settings = save_settings(d)
 
     def _ai_switch_changed(self, *_):
         if getattr(self, "loading", True):

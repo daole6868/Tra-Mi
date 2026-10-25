@@ -196,6 +196,28 @@ class RecentItem(QWidget):
 
 # ====================================================================== Trang chủ
 
+def project_badge(pr: dict, jobs: list[dict]) -> tuple[str, str]:
+    """Trạng thái dự án trên thẻ Trang chủ: (chữ, màu)."""
+    mine = [j for j in jobs if j["project_id"] == pr["id"]]
+    if any(j["status"] == "running" for j in mine):
+        j = next(j for j in mine if j["status"] == "running")
+        return ("Đang tải…" if j["kind"] == "download" else "Đang làm…"), theme.ACCENT2
+    if any(j["status"] == "queued" for j in mine):
+        return "Đang chờ", theme.MUTED
+    done = sorted((j for j in mine if j.get("finished")), key=lambda j: j["finished"])
+    if done and done[-1]["status"] == "error":
+        return "⚠ Lỗi", theme.ERR
+    if pr.get("outputs"):
+        return "✓ Đã xuất", theme.OK
+    if pr.get("n_translated"):
+        return "Chờ kiểm tra & xuất", theme.WARN
+    if pr.get("n_segments"):
+        return "Đã nghe, chưa dịch", theme.MUTED
+    if not pr.get("info"):
+        return "Chưa có video", theme.MUTED
+    return "", ""
+
+
 class ProjectCard(QWidget):
     def __init__(self, pr: dict, win):
         super().__init__()
@@ -239,6 +261,16 @@ class ProjectCard(QWidget):
             p.fillRect(tr, QColor(theme.CARD3))
             icons.paint_icon(p, "film", QRectF(tr.center().x() - 20, tr.center().y() - 20, 40, 40), theme.MUTED)
         p.restore()
+        txt, col = self.pr.get("badge") or ("", "")
+        if txt:  # trạng thái: đang làm / chờ kiểm tra & xuất / đã xuất / lỗi
+            p.setFont(theme.font(8.5, QFont.Weight.Bold))
+            bw = p.fontMetrics().horizontalAdvance(txt) + 18
+            badge = QRectF(tr.left() + 8, tr.top() + 8, bw, 22)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, 170))
+            p.drawRoundedRect(badge, 11, 11)
+            p.setPen(QColor(col))
+            p.drawText(badge, Qt.AlignmentFlag.AlignCenter, txt)
         n, t = self.pr.get("n_segments", 0), self.pr.get("n_translated", 0)
         if n:  # nhãn tiến độ dịch
             badge = QRectF(tr.right() - 74, tr.top() + 8, 66, 22)
@@ -280,13 +312,24 @@ class HomePage(QWidget):
         dz.dropped.connect(self.open_paths)
         c1.add(dz)
         c2 = SectionCard("Tải video từ link", "link", "Douyin, Bilibili, YouTube, TikTok, Weibo, Xigua, Kuaishou…")
-        self.url = QLineEdit()
-        self.url.setPlaceholderText("Dán link hoặc cả dòng chia sẻ của app (【tên】 https://b23.tv/…)")
-        self.url.returnPressed.connect(self.download)
+        self.url = QPlainTextEdit()
+        self.url.setPlaceholderText("Dán link hoặc cả dòng chia sẻ của app (【tên】 https://b23.tv/…)\n"
+                                    "Nhiều video: mỗi dòng 1 link")
+        self.url.setFixedHeight(78)
         c2.add(self.url)
-        dl = GradientButton("Tải về & tạo dự án", "download")
-        dl.clicked.connect(self.download)
-        c2.add(dl)
+        # tải về rồi làm luôn như tab Tự động (nghe -> dịch -> tách câu dài -> lồng tiếng, dừng trước bước xuất)
+        self.preset_lbl = label("", "muted", wrap=True)
+        c2.add(hbox(self.preset_lbl, button("Thiết lập…", "settings", flat=True, on_click=self._edit_preset,
+                                            tip="Thiết lập tự động dùng chung – giống tab Tự động của dự án")))
+        go = GradientButton("Tải về & dịch tự động", "bolt")
+        go.setToolTip("Mỗi link 1 dự án: tải video -> nghe & tách câu -> dịch -> tách câu dài -> lồng tiếng (nếu bật) "
+                      "rồi DỪNG trước bước xuất. Nhiều link: video sau được tải trước trong lúc video trước đang làm")
+        go.clicked.connect(lambda: self.download(True))
+        only = button("Chỉ tải về", "download", flat=True, on_click=lambda: self.download(False),
+                      tip="Chỉ tải video và tạo dự án, chưa làm gì thêm")
+        row = hbox(go, only)
+        row.setStretch(0, 1)
+        c2.add(row)
         # Bilibili: khách chỉ được 480p -> đăng nhập bằng mã QR để tải 720p / 1080p
         self.bili_lbl = label("Bilibili: đang kiểm tra đăng nhập…", "muted", wrap=True)
         self.bili_btn = button("Đăng nhập Bilibili (quét mã QR)", "users", on_click=self._bili_login,
@@ -348,7 +391,9 @@ class HomePage(QWidget):
     def set_projects(self, items):
         _clear_layout(self.grid)
         cols = max(1, (self.width() - 60) // 252)
+        jobs = manager.list()
         for k, pr in enumerate(items[:24]):
+            pr = dict(pr, badge=project_badge(pr, jobs))
             self.grid.addWidget(ProjectCard(pr, self.win), k // cols, k % cols)
         if not items:
             self.grid.addWidget(label("Chưa có dự án nào – hãy chọn video ở trên.", "muted"), 0, 0)
@@ -368,6 +413,7 @@ class HomePage(QWidget):
 
     def showEvent(self, e):
         super().showEvent(e)
+        self.refresh_preset()
         v = pipeline.ytdlp_version()
         self.ytdlp_lbl.setText(f"Trình tải yt-dlp {v}" if v else "⚠ Chưa cài yt-dlp – bấm Cập nhật trình tải")
         from ..config import FROZEN
@@ -436,27 +482,53 @@ class HomePage(QWidget):
         self.win.jobs_changed()
         self.win.toast("Đang cập nhật trình tải – xem tiến độ bên dưới", "ok")
 
-    def download(self):
-        url = sitelogin.extract_url(self.url.text())
-        if not url:
-            return self.win.toast("Không thấy link trong ô – dán link video hoặc cả dòng chia sẻ của app", "err")
-        p = Project.create("Video từ link")
-        pid = p.id
+    def _links(self) -> list[str]:
+        out = []
+        for line in self.url.toPlainText().splitlines():
+            u = sitelogin.extract_url(line)
+            if u and u not in out:
+                out.append(u)
+        return out
 
-        def fn(j):
-            pr = Project(pid)
-            notes: list[str] = []
-            path = pipeline.download_video(url, pr.dir / "source", j.update, j.cancelled, notes=notes)
-            pipeline.attach_source(pr, path)
-            pr.data["name"] = path.stem[:80]
-            pr.data["dl_warning"] = " ".join(notes)
-            pr.save()
-            return {"message": "Đã tải xong video" + ("  ⚠ " + " ".join(notes) if notes else "")}
-        manager.submit("download", f"Tải video: {url[:50]}", fn, pid)
+    def refresh_preset(self):
+        from .. import autoflow
+
+        try:
+            self.preset_lbl.setText("Làm theo thiết lập tự động: " + autoflow.summary())
+        except Exception as e:  # noqa: BLE001
+            self.preset_lbl.setText(f"Thiết lập tự động: ({e})")
+
+    def _edit_preset(self):
+        from .auto_settings import AutoSettingsDialog
+
+        dlg = AutoSettingsDialog(self)
+        if dlg.exec():
+            self.win.preset_saved()
+        dlg.deleteLater()
+
+    def download(self, auto: bool = False):
+        from .. import autoflow
+
+        urls = self._links()
+        if not urls:
+            return self.win.toast("Không thấy link trong ô – dán link video hoặc cả dòng chia sẻ của app", "err")
+        res = autoflow.queue_links(urls, auto=auto)
         self.url.clear()
+        self.win.jobs_changed()
         self.win.refresh_projects()
-        self.win.open_project(pid)
-        self.win.toast("Đang tải video – xem tiến độ bên dưới", "ok")
+        old = [r for r in res if not r["new"]]
+        new = [r for r in res if r["new"]]
+        if len(res) == 1:
+            self.win.open_project(res[0]["pid"])
+        what = "tải + dịch tự động" if auto else "tải"
+        msg = f"Đã xếp hàng {what} {len(new)} video" if new else ""
+        if old:
+            again = sum(1 for r in old if r["queued"])
+            msg += ((" · " if msg else "") + f"{len(old)} link đã tải trước đó – mở dự án cũ, không tải lại"
+                    + (f" ({again} dự án chưa có phụ đề được dịch tiếp)" if again else ""))
+        if auto and new:
+            msg += " · dừng trước bước xuất – kiểm tra rồi bấm 'Xuất video'"
+        self.win.toast(msg, "ok")
 
 
 # ====================================================================== Hàng loạt & ghép
@@ -471,7 +543,8 @@ class BatchPage(QWidget):
         v.setContentsMargins(28, 24, 28, 24)
         v.setSpacing(16)
         v.addWidget(label("Xử lý hàng loạt", "h1"))
-        v.addWidget(label("Mỗi dòng 1 đường dẫn file hoặc 1 link. Tool tự tạo dự án và dịch lần lượt từng video.", "muted"))
+        v.addWidget(label("Mỗi dòng 1 đường dẫn file hoặc 1 link. Tool tự tạo dự án và dịch lần lượt từng video "
+                          "(video từ link được tải trước trong lúc video trước đang làm).", "muted", wrap=True))
         c = SectionCard("Danh sách video", "stack")
         self.items = QPlainTextEdit()
         self.items.setPlaceholderText("D:\\Phim\\tap1.mp4\nD:\\Phim\\tap2.mp4\nhttps://www.douyin.com/video/…")
@@ -479,24 +552,15 @@ class BatchPage(QWidget):
         c.add(hbox(button("Chọn nhiều file…", "folder", on_click=self.pick), None))
         c.add(self.items)
         o = SectionCard("Tuỳ chọn", "settings")
+        self.preset_lbl = label("", "muted", wrap=True)
+        o.add(hbox(self.preset_lbl, button("Thiết lập…", "settings", flat=True, on_click=self._edit_preset,
+                                           tip="Thiết lập tự động dùng chung – giống tab Tự động của dự án")))
         f = Form()
-        self.method = f.row("Nguồn phụ đề", combo(C.METHODS, "asr"))
-        self.asr = f.row("Bộ nhận dạng", combo(C.ASR_ENGINES, s.get("asr_engine")))
-        self.engine = f.row("Công cụ dịch", combo(C.ENGINES, s.get("translate_engine")))
-        self.target = f.row("Dịch sang", combo(C.TARGETS, s.get("target_lang", "vi")))
-        self.style = f.row("Văn phong", combo(C.STYLES, s.get("translate_style")))
-        self.hardsub = f.row("Phụ đề cũ", combo(C.HARDSUB, "none"))
-        self.which = f.row("Ghép phụ đề", combo(C.WHICH, "trans"))
         self.aspect = f.row("Khung hình", combo(C.ASPECTS, "original"))
-        self.dub = f.row("Lồng tiếng", Switch(False))
-        self.tts = f.row("Bộ đọc", combo(C.TTS_ENGINES, s.get("tts_engine", "edge")))
         self.do_render = f.row("Xuất video luôn", Switch(bool(s.get("batch_render", False))),
-                            "Tắt (mặc định): mỗi video làm tới lồng tiếng rồi DỪNG trước bước xuất – mở từng dự án kiểm "
-                            "tra rồi bấm 'Xuất video'. Bật: tự xoá phụ đề cũ + ghép video luôn như trước")
+                               "Tắt (mặc định): mỗi video làm tới lồng tiếng rồi DỪNG trước bước xuất – mở từng dự án kiểm "
+                               "tra rồi bấm 'Xuất video'. Bật: tự xoá phụ đề cũ + ghép video luôn như trước")
         self.do_render.toggled.connect(lambda on: save_settings({"batch_render": bool(on)}))
-        self.target.currentIndexChanged.connect(
-            lambda: C.relabel(self.which, C.which_choices(self.target.currentData())))
-        C.relabel(self.which, C.which_choices(self.target.currentData()))
         o.add(f)
         go = GradientButton("Bắt đầu xử lý hàng loạt", "bolt", big=True)
         go.clicked.connect(self.run)
@@ -508,6 +572,26 @@ class BatchPage(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(scroll(inner))
 
+    def refresh_preset(self):
+        from .. import autoflow
+
+        try:
+            self.preset_lbl.setText("Làm theo thiết lập tự động: " + autoflow.summary())
+        except Exception as e:  # noqa: BLE001
+            self.preset_lbl.setText(f"Thiết lập tự động: ({e})")
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self.refresh_preset()
+
+    def _edit_preset(self):
+        from .auto_settings import AutoSettingsDialog
+
+        dlg = AutoSettingsDialog(self)
+        if dlg.exec():
+            self.win.preset_saved()
+        dlg.deleteLater()
+
     def pick(self):
         paths, _ = QFileDialog.getOpenFileNames(self, "Chọn video", "", VIDEO_FILTER)
         if paths:
@@ -515,47 +599,45 @@ class BatchPage(QWidget):
             self.items.setPlainText((cur + "\n" if cur else "") + "\n".join(paths))
 
     def run(self):
+        from .. import autoflow
+
         items = [x.strip().strip('"') for x in self.items.toPlainText().splitlines() if x.strip()]
         if not items:
             return self.win.toast("Chưa có video nào", "err")
-        which = self.which.currentData()
-        opts = {"method": self.method.currentData(), "asr_engine": self.asr.currentData(),
-                "engine": self.engine.currentData(), "style": self.style.currentData(),
-                "target": self.target.currentData(),
-                "hardsub_mode": self.hardsub.currentData(), "burn": which != "none",
-                "which": which if which != "none" else "trans", "dub": self.dub.isChecked(),
-                "tts_engine": self.tts.currentData(), "separate": True, "render": self.do_render.isChecked(),
-                "parallel": bool(load_settings().get("auto_parallel", False))}
+        st = load_settings()
+        render = self.do_render.isChecked()
+        opts = autoflow.preset(st, render)
         aspect = self.aspect.currentData()
-        n = 0
+        n, links = 0, []
         for it in items:
-            url = "" if Path(it).exists() else sitelogin.extract_url(it)   # link / dòng chia sẻ của app
-            is_url = bool(url)
-            if not is_url and not Path(it).exists():
+            if not Path(it).exists():
+                url = sitelogin.extract_url(it)   # link / dòng chia sẻ của app
+                if url:
+                    links.append(url)
                 continue
-            p = Project.create(Path(it).stem if not is_url else "Video từ link")
-            if not is_url:
-                try:
-                    pipeline.attach_source(p, Path(it))
-                except Exception:
-                    p.delete()
-                    continue
+            p = Project.create(Path(it).stem)
+            try:
+                pipeline.attach_source(p, Path(it))
+            except Exception:
+                p.delete()
+                continue
             if aspect != "original":
                 e = p.edit
                 e["aspect"] = aspect
                 p.data["edit"] = e
                 p.save()
 
-            def fn(j, pid=p.id, url=url):
-                o = dict(opts)
-                if url:
-                    o["url"] = url
-                return pipeline.auto(Project(pid), o, j.update, j.cancelled)
-            manager.submit("auto", f"Hàng loạt: {Path(it).name if not is_url else url[-40:]}", fn, p.id)
+            def fn(j, pid=p.id):
+                return pipeline.auto(Project(pid), dict(opts), j.update, j.cancelled)
+            manager.submit("auto", f"Hàng loạt: {Path(it).name}", fn, p.id)
             n += 1
+        res = autoflow.queue_links(links, auto=True, settings=st, render=render, aspect=aspect) if links else []
+        n += sum(1 for r in res if r["new"])
+        old = sum(1 for r in res if not r["new"])
+        self.win.jobs_changed()
         self.win.refresh_projects()
-        self.win.toast(f"Đã xếp hàng {n} video" + ("" if opts["render"] else " – dừng trước bước xuất, kiểm tra từng dự án "
-                                                    "rồi bấm 'Xuất video'"), "ok")
+        self.win.toast(f"Đã xếp hàng {n} video" + (f" · {old} link đã tải trước đó (không tải lại)" if old else "")
+                       + ("" if render else " – dừng trước bước xuất, kiểm tra từng dự án rồi bấm 'Xuất video'"), "ok")
 
 
 class ConcatPage(QWidget):
@@ -1436,6 +1518,16 @@ class MainWindow(QMainWindow):
         Toast(self.centralWidget(), text, kind, 6000 if kind == "err" else 9000 if kind == "warn" and len(text) > 80
               else 3500)
 
+    def preset_saved(self):
+        """Lưu thiết lập tự động (hộp Thiết lập…): dòng tóm tắt + tab Tự động của dự án đang mở theo luôn."""
+        self.home.refresh_preset()
+        self.batch_page.refresh_preset()
+        pp = self.project_page
+        pp.settings = load_settings()
+        if pp.p is not None:
+            pp.sync_engine()
+        self.toast("Đã lưu thiết lập tự động", "ok")
+
     def jobs_changed(self):
         self.poll()
 
@@ -1462,9 +1554,11 @@ class MainWindow(QMainWindow):
         if self.pages.currentWidget() is self.jobs_page:
             self.jobs_page.update_jobs(jobs)
         self.project_page.update_job(jobs)
+        started = False
         for j in jobs:
             prev = self._seen.get(j["id"])
             self._seen[j["id"]] = j["status"]   # ghi trước khi báo xong: mỗi việc chỉ báo 1 lần
+            started |= prev == "queued" and j["status"] == "running"
             if prev and prev != j["status"] and j["status"] in ("done", "error", "cancelled"):
                 if j["status"] == "done":
                     msg = j["message"] or j["title"]
@@ -1472,9 +1566,17 @@ class MainWindow(QMainWindow):
                 elif j["status"] == "error":
                     self.toast(f"{j['title']}: {j['error'][:300]}", "err")
                 self.project_page.job_finished(j)
+                if j["kind"] == "download" and j["status"] in ("error", "cancelled"):
+                    # tải lỗi / huỷ -> việc "Dịch tự động" đang chờ của dự án đó không làm nữa
+                    for q in jobs:
+                        if q["project_id"] == j["project_id"] and q["status"] == "queued":
+                            manager.cancel(q["id"])
                 if j["kind"] in ("download", "auto") and j["status"] in ("error", "cancelled"):
                     self._drop_empty_project(j.get("project_id") or "")
                 self.refresh_projects()
+                started = False
+        if started:   # thẻ dự án ở Trang chủ: "Đang tải…" / "Đang làm…"
+            self.refresh_projects()
 
     def _drop_empty_project(self, pid: str):
         """Tải video từ link lỗi / huỷ -> xoá dự án trống "Video từ link" (chưa có video, chưa có câu nào)."""

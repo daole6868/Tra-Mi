@@ -72,6 +72,11 @@ Cài xong (kể cả AI nâng cao) thì chạy **`DongGoi_EXE.bat`** (15–40 ph
    - Bilibili chưa đăng nhập chỉ tải được 480p: bấm **Đăng nhập Bilibili (quét mã QR)** rồi quét bằng app Bilibili trên điện thoại để tải 720p / 1080p.
    - Douyin và trang cần đăng nhập: chọn trình duyệt ở **Trang khác lấy đăng nhập từ** (Firefox chạy ổn nhất) hoặc chọn file cookies.txt.
    - Tải báo lỗi (HTTP 412, Unable to extract…): bấm **Cập nhật trình tải** rồi mở lại tool.
+   - **Tải về & dịch tự động**: dán 1 hoặc nhiều link (mỗi dòng 1 link) rồi bấm nút này – mỗi link 1 dự án, tool tự tải →
+     nghe → dịch → tách câu dài → lồng tiếng (nếu bật) rồi dừng trước bước xuất. Video sau được tải trước trong lúc video
+     trước đang làm. Link đã tải rồi thì mở lại dự án cũ, không tải lại. Thẻ dự án ở Trang chủ ghi trạng thái
+     (Đang tải… / Đang làm… / Chờ kiểm tra & xuất / ✓ Đã xuất / ⚠ Lỗi). **Chỉ tải về** = chỉ tải, không dịch.
+   - **Thiết lập…**: 1 bộ thiết lập tự động dùng chung cho nút trên, tab Tự động và Xử lý hàng loạt (đổi ở đâu cũng là 1).
 2. Mở tab **Tự động** và chọn:
    - **Nguồn phụ đề**:
      - *Nhận dạng giọng nói*: dùng khi video chưa có chữ.
@@ -90,7 +95,7 @@ Cài xong (kể cả AI nâng cao) thì chạy **`DongGoi_EXE.bat`** (15–40 ph
    (thanh bên trái). Nhiều dự án chạy được cùng lúc, mỗi lúc 1 việc dùng card đồ hoạ.
 4. Soát phụ đề ở tab **Phụ đề**, rồi mở tab **Xuất** để lấy video MP4 và file SRT.
 
-Để dịch hàng loạt, chọn nhiều file cùng lúc ở Trang chủ, hoặc dùng trang **Xử lý hàng loạt**. Mặc định mỗi video dừng trước bước xuất (bật *Xuất video luôn* nếu muốn tự xuất).
+Để dịch hàng loạt, chọn nhiều file cùng lúc ở Trang chủ, hoặc dùng trang **Xử lý hàng loạt** (file + link lẫn nhau, cùng bộ thiết lập tự động). Mặc định mỗi video dừng trước bước xuất (bật *Xuất video luôn* nếu muốn tự xuất).
 Muốn dịch nhanh không cần mở giao diện, kéo thả video vào `DichNhanh_KeoTha.bat`.
 
 ---

@@ -48,7 +48,13 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - `trami/jobs.py` – hàng đợi: MẶC ĐỊNH LẦN LƯỢT từng việc (2.0.70, `max_running()` = 1); Cài đặt "Chạy nhiều việc cùng
   lúc" (`jobs_parallel`) -> tối đa `MAX_RUNNING` 4: cùng dự án lần lượt (trừ `READONLY_KINDS`; `LIGHT_KINDS` "relayout"
   không chờ việc của dự án khác), mỗi lúc 1 việc GPU
-  (`GPU_KINDS`, dịch Hy-MT2); `progress_hook` theo từng luồng; trang `main.JobsPage` "Việc đang làm".
+  (`GPU_KINDS`, dịch Hy-MT2); `PREFETCH_KINDS` "download" (2.0.87: tải video không chờ / không chặn việc khác, mỗi lúc 1
+  lượt tải); cùng dự án giữ đúng thứ tự xếp hàng (việc sau không chạy trước việc trước còn chờ); `progress_hook` theo từng
+  luồng; trang `main.JobsPage` "Việc đang làm".
+  `trami/autoflow.py` (2.0.87) – thiết lập tự động dùng chung (`preset_values` / `preset(render=)` / `summary`; Cài đặt
+  `auto_preset` = các ô riêng tab Tự động, còn lại là Cài đặt chung) + `queue_links` (mỗi link 1 dự án: việc "download"
+  rồi "auto"; `link_key` nhận ra cùng video dù khác dạng link, `find_by_url` -> dự án cũ, không tải lại); hộp
+  `gui/auto_settings.AutoSettingsDialog` ("Thiết lập…" ở Trang chủ / Hàng loạt); thẻ dự án `main.project_badge`.
   `trami/stream.py` – `LivePipeline` (tab Tự động "Vừa tách vừa dịch"); `trami/gpu.py` – trả bộ nhớ card giữa các
   việc (`before_job` / `after_job` trong `jobs._run`, `reap_idle` tắt VieNeu/Omni để không 10 phút); `trami/gui/*` –
   giao diện (QPainter), `common.run_async`,
@@ -140,7 +146,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (161 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (163 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1401,7 +1407,28 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     nhắc "Dịch lại tất cả" ở tab Phụ đề. Vừa tách vừa dịch: Edge không đọc trước câu sẽ bị tách (`stream._dub_loop`
     lọc bằng `split_clauses`) – trước đọc cả câu dài rồi bỏ.
 
+- 2.0.87: "tự động từ tải video luôn rồi làm các bước như tab Tự động" + "dán link tạo dự án tiếp có quá tải không" (không:
+  hàng đợi chạy lần lượt, chỉ việc tải video được chạy song song). Trang chủ ô link nhận NHIỀU link (mỗi dòng 1, cả dòng
+  chia sẻ) + 2 nút "Tải về & dịch tự động" / "Chỉ tải về" (`HomePage.download(auto)`, 1 link -> mở dự án); dòng tóm tắt
+  thiết lập + "Thiết lập…".
+  * 1 bộ thiết lập tự động dùng chung (`trami/autoflow.py`): tab Tự động của mọi dự án, Trang chủ, Xử lý hàng loạt. Đổi ô ở
+    tab Tự động -> `_preset_changed` lưu `auto_preset` {method, language, hardsub_mode, which, dub, denoise} + asr_engine /
+    ocr_fps / tts_engine; `sync_engine` nạp lại. Hộp `AutoSettingsDialog` sửa được khi chưa mở dự án (lưu Cài đặt ->
+    `MainWindow.preset_saved` cập nhật dòng tóm tắt + tab Tự động đang mở). Luôn dừng trước bước xuất (Hàng loạt vẫn có
+    "Xuất video luôn" + Khung hình).
+  * `queue_links`: link trùng (`link_key`: Bilibili BV + trang p, av, YouTube id (watch / youtu.be / shorts), Douyin id số /
+    modal_id, còn lại host + đường dẫn – không gọi mạng; link rút gọn chưa có BV thì không nhận ra) -> mở dự án cũ; dự án
+    cũ đã có video mà chưa có phụ đề -> xếp việc dịch tiếp. Dự án mới lưu `url` + `link_key`.
+  * Hàng đợi: tải video (`PREFETCH_KINDS`) chạy trong lúc video trước đang nghe / dịch / lồng (không dùng card), mỗi lúc
+    1 lượt tải. LỖI TÌM RA khi chạy thử hàng đợi thật: việc dịch của video 2 chạy TRƯỚC việc tải của nó (việc tải đang chờ
+    lượt tải của video 1, việc dịch thấy dự án không có việc nào đang chạy) -> thêm luật cùng dự án giữ thứ tự xếp hàng.
+    Tải lỗi / huỷ -> huỷ luôn việc đang chờ của dự án đó (`MainWindow._poll`), dự án trống bị xoá như cũ.
+  * Thẻ dự án Trang chủ có nhãn trạng thái: Đang tải… / Đang làm… / Đang chờ / ⚠ Lỗi / ✓ Đã xuất / Chờ kiểm tra & xuất /
+    Đã nghe, chưa dịch / Chưa có video (làm mới khi việc bắt đầu / xong).
+
 ## Vấn đề đang mở
+- 2.0.87: chờ người dùng dán 2–3 link Bilibili / Douyin thật vào Trang chủ -> "Tải về & dịch tự động": video 2 tải trong
+  lúc video 1 đang nghe, mỗi dự án dừng ở "Chờ kiểm tra & xuất"; dán lại link cũ -> mở dự án cũ.
 - 2.0.83: chờ người dùng mở lại tool (hết 97 việc trùng), tab Lồng tiếng "Tích câu chưa lồng" -> "Tạo lại giọng các câu đã
   tích" cho các vế đã tách; lần sau bấm "Tách câu dài" chỉ có 1 việc tạo lại giọng, giao diện không đơ.
 - 2.0.82: chờ người dùng bấm lại "Tách câu dài" trên dự án phim 999 câu (bảng phải hiện câu mới ngay, rồi việc "Tạo lại

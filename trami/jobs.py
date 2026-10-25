@@ -83,6 +83,10 @@ READONLY_KINDS = {"preview", "tool", "publish"}   # publish chỉ ghi posts.json
 LIGHT_KINDS = {"relayout"}
 # việc chỉ dùng mạng (đăng video): không chờ việc dài khác, không chặn việc khác dù đang chạy lần lượt
 NET_KINDS = {"publish"}
+# tải video từ link: chỉ dùng mạng + ổ đĩa -> tải TRƯỚC video kế tiếp trong lúc video trước đang dịch / lồng tiếng (không
+# chờ việc dài khác, không chặn việc khác); mỗi lúc 1 lượt tải (không chia băng thông); việc dịch tự động của CÙNG dự án
+# vẫn chờ tải xong (cùng dự án -> lần lượt)
+PREFETCH_KINDS = {"download"}
 
 
 def needs_gpu(kind: str, project_id: str = "") -> bool:
@@ -177,9 +181,12 @@ class JobManager:
     def _why_wait(self, job: Job) -> str:
         """Vì sao việc này chưa chạy được ('' = chạy được ngay)."""
         run = [self.jobs[r] for r in self.running]
-        busy = [r for r in run if r.kind not in NET_KINDS]   # đang đăng video (chỉ dùng mạng) -> không tính
+        # đang đăng video / tải video (chỉ dùng mạng) -> không tính
+        busy = [r for r in run if r.kind not in NET_KINDS and r.kind not in PREFETCH_KINDS]
         limit = max_running()
-        light = job.kind in LIGHT_KINDS or job.kind in NET_KINDS
+        light = job.kind in LIGHT_KINDS or job.kind in NET_KINDS or job.kind in PREFETCH_KINDS
+        if job.kind in PREFETCH_KINDS and any(r.kind in PREFETCH_KINDS for r in run):
+            return "chờ lượt tải video trước xong"
         if limit == 1 and busy and not light:
             return "chờ việc trước xong (chạy lần lượt từng việc)"
         if len(busy) >= limit and not light:
@@ -187,6 +194,15 @@ class JobManager:
         if job.project_id and job.kind not in READONLY_KINDS and any(
                 r.project_id == job.project_id and r.kind not in READONLY_KINDS for r in run):
             return "chờ việc khác của dự án này xong"
+        if job.project_id and job.kind not in READONLY_KINDS:
+            # cùng dự án giữ đúng thứ tự xếp hàng: việc dịch tự động không được chạy trước việc tải video của nó (việc
+            # tải đang chờ lượt tải khác)
+            for jid in getattr(self, "queue", ()):
+                if jid == job.id:
+                    break
+                q = self.jobs.get(jid)
+                if q and q.project_id == job.project_id and q.kind not in READONLY_KINDS:
+                    return "chờ việc trước của dự án này"
         if job.gpu and any(r.gpu for r in run):
             return "chờ việc dùng card đồ hoạ (GPU) khác xong"
         return ""
