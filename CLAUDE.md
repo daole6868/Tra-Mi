@@ -25,6 +25,13 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `%LOCALAPPDATA%\Subvideo` (còn `%LOCALAPPDATA%\TraMi` cũ thì dùng tiếp)), `DEFAULT_SETTINGS`, settings chỉ lưu phần khác mặc định,
   `installed()` dùng `find_spec` (không import – import funasr mất ~2 phút), `log_error()` ghi `data/logs/loi.txt`,
   `fix_std_streams()` (gọi đầu tiên khi mở tool: pythonw để sys.stdout/stderr = None -> ghi `data/logs/console.txt`).
+- Âm thanh THEO GIỜ CỦA HÌNH (2.0.92): mọi chỗ giải mã âm thanh của video gốc thêm `ff.audio_sync(src, sr)`
+  (`aresample=44101:async=1000:first_pts=0,aresample=<sr>` – qua 44101 Hz vì cùng tần số vào/ra bộ lấy mẫu lại không co
+  giãn mềm; file .wav do tool ghi -> ''), `ff.af_args`; `ff.audio_timeline` (ffprobe giờ + số mẫu từng khung, dự phòng
+  ashowinfo) / `timeline_drift`; dự án có `p.data["timeline"] = ff.TIMELINE`, bản tách có `stems/timeline.txt`. Dự án
+  cũ: `pipeline.timeline_check` (mở dự án, giao diện hỏi) -> `pipeline.retime` (`separate.retime_stems` / `retime_wav`
+  kéo giãn bản tách, dời mốc câu nếu `sub_source` asr + dub_at / kv / backup, xoá bản 16 kHz / sóng âm / âm lượng, xếp
+  lại bản lồng).
 - `trami/pipeline.py` – các bước: `attach_source`, `separate_audio`, `recognize` (tự chuyển Whisper nếu FunASR/torch lỗi),
   `diarize`, `translate`, `dub`, `render`, `auto`; `effective_style` (đặt phụ đề Việt vào đúng chỗ chữ Trung cũ).
 - `trami/video.py` – `build_and_render`: 1 lần encode, `filter_complex`; cắt giữa dùng `select/aselect`;
@@ -151,7 +158,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (167 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (170 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1493,7 +1500,33 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     hỏng -> None; chromium thật trên trang TikTok / Facebook / YouTube giả: TikTok gắn đúng file `phim.anh_bia.jpg` + Xác
     nhận, Facebook ghi chỗ đặt + mở thư mục; giao diện Tự tải lên có ảnh bìa. Chưa chạy trên trang thật.
 
+- 2.0.92: "dịch video 3 tiếng: phụ đề + giọng lồng càng về sau càng trễ so với khẩu hình, nhưng vẫn khớp với âm thanh đã
+  tách" (thấy khi phát trong tool). Nguyên nhân: FFmpeg giải mã âm thanh ra mẫu NỐI LIỀN, bỏ qua giờ (timestamp) của luồng
+  âm thanh; file dài (livestream, ghép nhiều phần, đồng hồ thu âm lệch) có số mẫu nhiều / ít hơn giờ ghi trong file ->
+  bản trộn tách giọng, bản 16 kHz cho bộ nghe, bộ trộn trực tiếp, sóng âm, đo âm lượng, tiếng gốc khi xuất đều theo "giờ
+  mẫu" còn trình phát xếp hình theo giờ file -> trôi dần. Đo trên file thử (giờ âm thanh co 0,5 %): bíp thật ở 1134,3 s
+  bị đặt ở 1140 s.
+  * `ff.audio_sync` + `af_args` áp cho: `separate` (mix44k), `recognize` / `realign` (16 kHz, cũ thì làm lại),
+    `asr_funasr.load_wav16k`, `audiomix.decode_track` (lớp tiếng gốc; mã đệm đổi theo bộ lọc), xuất video (`[0:a]` cả 2
+    nhánh có / không cắt), `extract_audio` / `extract_audio_file`, `silence.loudness` (`_sig` thêm `tl`), sóng âm timeline,
+    bản xem trước nhẹ, mẫu giọng nhái (`tts._decode(sync=True)` trong `build_reference*`). LỖI TÌM RA khi đo: cùng tần số
+    vào / ra (44,1 kHz) thì `async` chỉ bỏ / đệm từng 0,1 s (trễ 0,1–0,4 s) -> qua tần số trung gian 44101 Hz (khớp ±0,02 s).
+  * Dự án cũ: mở dự án -> `timeline_check` (ffprobe ~4 s / 3 giờ) -> lệch > `SYNC_MAX` 0,15 s thì hỏi "Căn lại giờ ngay?"
+    (mỗi phiên 1 lần) -> việc "retime": `retime_stems` kéo giãn vocals / instrumental (`timeline_maps`: chỗ âm thanh hụt
+    -> lặng; ~1 phút / bản / 3 giờ), dời mốc câu khi phụ đề lấy bằng nghe (OCR / SRT vốn theo hình), `dub_at` / `kv` /
+    các bản lưu hoàn tác, xoá bản 16 kHz / tl_wave / loud_50ms / voice_50ms, ghi `timeline`, xếp lại bản lồng (không đọc
+    lại); xong thì xoá ảnh chụp Ctrl+Z (mốc cũ). Không lệch -> chỉ ghi dấu. `separate()` dùng lại bản tách cũ chưa có
+    `timeline.txt` cũng tự căn.
+  * Xoá phụ đề sạch / gỡ logo (`inpaint_video`): giải mã khung `-vsync cfr -r <fps>` thay `passthrough` – video VFR trước
+    đây bị xếp lại thành khung đều -> bản đã xoá lệch giờ so với tiếng gốc (bản đã xoá cũ không tự làm lại).
+  * Thử: video 60 s giờ âm thanh co 2 % (`-itsscale 0.98`): đo lệch cuối −1,18 s; 16 kHz / bộ trộn trực tiếp / video xuất
+    đặt bíp đúng giờ hình (±0,06 s); dự án cũ (bản tách mẫu nối liền + câu nghe) -> căn lại: bản tách dài 58,8 s, bíp đúng
+    giờ, câu 10·k s -> 9,8·k s; OCR không dời; giao diện hỏi + việc nền chạy xong, bảng câu đúng giờ mới.
+
 ## Vấn đề đang mở
+- 2.0.92: chờ người dùng mở lại dự án phim 3 giờ -> bấm Yes ở hộp "Âm thanh lệch giờ so với hình" -> phát lại xem phụ đề
+  / giọng lồng còn lệch khẩu hình không (nhất là cuối phim). Nếu tool KHÔNG hỏi (đo không thấy lệch) mà vẫn lệch -> nguyên
+  nhân khác (VD bản đã xoá phụ đề của video VFR – chạy lại Xoá sạch, hoặc bản xem trước nhẹ), cần thêm thông tin.
 - 2.0.91: chờ người dùng thử lại ảnh bìa: Chrome điền sẵn (YouTube: ảnh có hiện ở mục Hình thu nhỏ không – kênh
   chưa xác minh số điện thoại thì không có nút; TikTok: tool có tự mở Sửa ảnh bìa không), Tự tải lên (file
   `<video>.anh_bia.jpg` cạnh video). Ô nào báo "điền tay" -> xin ảnh chụp trang để thêm bộ chọn.

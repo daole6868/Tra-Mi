@@ -47,7 +47,9 @@ def preset_of(opts: dict) -> str:
 # ------------------------------------------------------------------ đo âm lượng tiếng gốc (1 lần, nhớ trong dự án)
 def _sig(src: Path) -> dict:
     st = src.stat()
-    return {"path": str(src), "size": st.st_size, "mtime": int(st.st_mtime), "hop": HOP}
+    from .ffmpeg import TIMELINE
+
+    return {"path": str(src), "size": st.st_size, "mtime": int(st.st_mtime), "hop": HOP, "tl": TIMELINE}
 
 
 def loudness(src: str | Path, work: str | Path, progress=None, cancel=None, duration: float = 0.0,
@@ -66,8 +68,8 @@ def loudness(src: str | Path, work: str | Path, progress=None, cancel=None, dura
         except Exception:  # noqa: BLE001
             pass
     n = int(SR * HOP)
-    cmd = [ff.ffmpeg_bin(), "-hide_banner", "-nostdin", "-v", "error", "-i", str(src), "-vn", "-ac", "1",
-           "-ar", str(SR), "-f", "s16le", "-"]
+    cmd = [ff.ffmpeg_bin(), "-hide_banner", "-nostdin", "-v", "error", "-i", str(src), "-vn"] + \
+        ff.af_args(ff.audio_sync(src, SR)) + ["-ac", "1", "-ar", str(SR), "-f", "s16le", "-"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             creationflags=getattr(ff, "_NO_WINDOW", 0))
     out: list[np.ndarray] = []

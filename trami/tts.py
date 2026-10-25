@@ -235,8 +235,11 @@ def auto_assign(speakers: list[str], settings: dict | None = None, current: dict
 
 # ------------------------------------------------------------------ âm thanh
 
-def _decode(path: str | Path, speed: float = 1.0, sr: int = SR) -> np.ndarray:
-    af = []
+def _decode(path: str | Path, speed: float = 1.0, sr: int = SR, sync: bool = False) -> np.ndarray:
+    """sync: video gốc -> giải mã theo giờ của hình (cắt mẫu giọng theo mốc câu – 2.0.92)."""
+    from .ffmpeg import audio_sync
+
+    af = [audio_sync(path, sr)] if sync and audio_sync(path, sr) else []
     s = speed
     while s > 2.0:
         af.append("atempo=2.0")
@@ -309,7 +312,7 @@ def build_reference(ref_audio: str | Path, segs: list[Segment], speaker: str, ou
     if not cand:
         return None
     cand.sort(key=lambda s: -s.duration)
-    audio = _decode(ref_audio, sr=SR)
+    audio = _decode(ref_audio, sr=SR, sync=True)
     if len(audio) == 0:
         return None
     parts, total = [], 0.0
@@ -340,7 +343,7 @@ def build_reference_text(ref_audio: str | Path, segs: list[Segment], speaker: st
     if not cand:
         return None
     cand.sort(key=lambda s: -s.duration)
-    audio = _decode(ref_audio, sr=SR)
+    audio = _decode(ref_audio, sr=SR, sync=True)
     if len(audio) == 0:
         return None
     parts, texts, total = [], [], 0.0

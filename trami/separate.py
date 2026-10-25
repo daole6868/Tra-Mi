@@ -120,6 +120,91 @@ def _read_stem(path: Path, n: int) -> np.ndarray:
     return out
 
 
+def timeline_maps(c: np.ndarray, p: np.ndarray, d: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(xp, fp) để đổi GIỜ THẬT -> giây theo số mẫu (np.interp(t, xp, fp)): đầu mỗi khung âm thanh; chỗ giờ nhảy cóc
+    (âm thanh bị hụt) thêm điểm cuối khung -> trong khoảng hụt giây theo mẫu đứng yên = lặng (như FFmpeg async)."""
+    gap = p[1:] - (p[:-1] + d[:-1]) > 0.02
+    xp = np.concatenate([p, (p[:-1] + d[:-1])[gap]])
+    fp = np.concatenate([c, (c[:-1] + d[:-1])[gap]])
+    o = np.argsort(xp, kind="stable")
+    xp, fp = xp[o], fp[o]
+    ok = np.concatenate([[True], np.diff(xp) > 1e-6])
+    return xp[ok], np.maximum.accumulate(fp[ok])
+
+
+def retime_wav(src: Path, dst: Path, c: np.ndarray, p: np.ndarray, d: np.ndarray, progress=None,
+               block: float = 30.0) -> None:
+    """Bản tách giọng làm trước 2.0.92 (mẫu nối liền) -> đúng giờ thật của video: mỗi mẫu ra ở giờ t lấy mẫu vào ở giây
+    theo số mẫu c(t) (nội suy), chỗ âm thanh bị hụt thì lặng. Đọc / ghi từng khối (RAM thấp, phim 3 giờ ~1 phút)."""
+    xp, fp = timeline_maps(c, p, d)
+    total = float(p[-1] + d[-1])
+    n_out = int(round(total * SR44))
+    dec = subprocess.Popen([ff.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-i", str(src), "-ac", "2",
+                            "-ar", str(SR44), "-f", "s16le", "pipe:1"], stdout=subprocess.PIPE,
+                           creationflags=ff._NO_WINDOW)
+    buf = np.zeros((0, 2), np.float32)
+    b0 = 0                    # chỉ số mẫu vào của buf[0]
+    eof = False
+    bs = int(block * SR44)
+    try:
+        with wave.open(str(dst), "wb") as w:
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(SR44)
+            for j0 in range(0, n_out, bs):
+                j1 = min(n_out, j0 + bs)
+                t = np.arange(j0, j1 + 1, dtype=np.float64) / SR44
+                pos = np.interp(t, xp, fp) * SR44
+                lo, hi = int(pos[0]), int(np.ceil(pos[-1])) + 2
+                while not eof and b0 + len(buf) < hi:
+                    raw = dec.stdout.read(SR44 * 4 * 10)
+                    if not raw:
+                        eof = True
+                        break
+                    buf = np.concatenate([buf, np.frombuffer(raw, np.int16).reshape(-1, 2).astype(np.float32)])
+                if lo > b0:
+                    cut = min(lo - b0, len(buf))
+                    buf, b0 = buf[cut:], b0 + cut
+                rel = pos[:-1] - b0
+                i0 = np.clip(rel.astype(np.int64), 0, max(0, len(buf) - 2))
+                fr = np.clip(rel - i0, 0.0, 1.0)[:, None].astype(np.float32)
+                if len(buf) >= 2:
+                    y = buf[i0] * (1 - fr) + buf[i0 + 1] * fr
+                else:
+                    y = np.zeros((len(rel), 2), np.float32)
+                stall = np.diff(pos) < 0.5          # giây theo mẫu đứng yên: âm thanh bị hụt / ngoài phạm vi -> lặng
+                y[stall] = 0
+                w.writeframes(np.clip(y, -32768, 32767).astype(np.int16).tobytes())
+                if progress:
+                    progress(j1 / n_out, "Đang căn giờ bản tách giọng…")
+    finally:
+        if dec.poll() is None:
+            dec.kill()
+        dec.wait()
+
+
+def retime_stems(src: str | Path, out_dir: str | Path, progress=None, tl=None) -> dict | None:
+    """Bản tách giọng / nhạc nền làm trước 2.0.92: video có âm thanh lệch giờ -> kéo giãn cho đúng giờ của hình (không
+    tách lại). Ghi dấu timeline.txt. Trả độ lệch đã sửa (None = không lệch / không đọc được giờ)."""
+    out_dir = Path(out_dir)
+    tl = tl or ff.audio_timeline(src)
+    mark = out_dir / "timeline.txt"
+    if tl is None:
+        mark.write_text(str(ff.TIMELINE), "utf-8")
+        return None
+    c, p, d = tl
+    drift = float(np.max(np.abs(p - c)))
+    if drift > ff.SYNC_MAX:
+        names = [x for x in ("vocals.wav", "instrumental.wav") if (out_dir / x).exists()]
+        for k, name in enumerate(names):
+            tmp = out_dir / f"_retime_{name}"
+            retime_wav(out_dir / name, tmp, c, p, d,
+                       (lambda x, m, k=k: progress((k + x) / len(names), m)) if progress else None)
+            tmp.replace(out_dir / name)
+    mark.write_text(str(ff.TIMELINE), "utf-8")
+    return {"max": round(drift, 3), "end": round(float(np.median((p - c)[-50:])), 3)} if drift > ff.SYNC_MAX else None
+
+
 def _average(srcs: list[Path], out: Path, block: int = SR44 * 30) -> None:
     """Trung bình các bản tách của nhiều mô hình (= "avg_wave" của audio-separator), đọc / ghi từng khối 30 s."""
     ins = [wave.open(str(x), "rb") for x in srcs]
@@ -160,6 +245,8 @@ def separate(src: str | Path, out_dir: str | Path, model: str | None = None,
     model = model or SEP_MODELS[0][0]
     stamp = out_dir / "model.txt"
     if vocals.exists() and inst.exists() and stamp.exists() and stamp.read_text("utf-8") == model:
+        if not (out_dir / "timeline.txt").exists():   # bản tách trước 2.0.92: kéo giãn cho đúng giờ hình nếu lệch
+            retime_stems(src, out_dir, progress)
         return vocals, inst  # đã tách trước đó
 
     info = ff.probe(src)
@@ -168,8 +255,8 @@ def separate(src: str | Path, out_dir: str | Path, model: str | None = None,
     if progress:
         progress(0.02, "Đang chuẩn bị âm thanh để tách giọng…")
     mix = out_dir / "mix44k.wav"
-    ff.run(["-i", str(src), "-vn", "-ac", "2", "-ar", "44100", "-c:a", "pcm_s16le", str(mix)],
-           info.duration, None, cancel)
+    ff.run(["-i", str(src), "-vn"] + ff.af_args(ff.audio_sync(src, SR44)) + ["-ac", "2", "-ar", "44100", "-c:a",
+           "pcm_s16le", str(mix)], info.duration, None, cancel)
     if cancel and cancel():
         raise ff.Cancelled()
     with wave.open(str(mix), "rb") as w:
@@ -188,6 +275,7 @@ def separate(src: str | Path, out_dir: str | Path, model: str | None = None,
     shutil.rmtree(tmp, ignore_errors=True)
     mix.unlink(missing_ok=True)
     stamp.write_text(model, "utf-8")
+    (out_dir / "timeline.txt").write_text(str(ff.TIMELINE), "utf-8")
     if progress:
         progress(1.0, "Đã tách xong giọng nói và nhạc nền")
     return vocals, inst

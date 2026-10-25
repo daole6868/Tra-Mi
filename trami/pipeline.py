@@ -242,6 +242,7 @@ def attach_source(p: Project, path: Path):
         raise ValueError("File không phải video/âm thanh hợp lệ.")
     p.data["source"] = str(path)
     p.data["info"] = info.to_dict()
+    p.data["timeline"] = ff.TIMELINE       # dự án mới: mọi thứ giải mã theo giờ của hình (2.0.92)
     # trình duyệt chỉ phát được MP4/WebM với H.264/VP9/AV1 -> các loại khác cần bản xem trước
     p.data["needs_preview"] = bool(info.has_video and (
         path.suffix.lower() not in (".mp4", ".m4v", ".webm", ".mov") or info.vcodec not in ("h264", "vp8", "vp9", "av1")))
@@ -351,8 +352,9 @@ def make_preview(p: Project, progress: Prog | None = None, cancel=None) -> Path:
     fps = float(info.get("fps") or 0)
     vf = "scale=-2:'min(720,ih)'" + (",fps=30" if fps > 31 else "")    # 50/60 khung/s -> 30: phát nhẹ hơn hẳn
     ff.run(["-i", str(p.source), "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-tune", "fastdecode",
-            "-crf", "27", "-g", "30", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
-            str(tmp)], info.get("duration", 0), progress, cancel, "Đang tạo bản xem trước nhẹ (chỉ để xem trong tool)")
+            "-crf", "27", "-g", "30", "-pix_fmt", "yuv420p"] + ff.af_args(ff.audio_sync(p.source)) +
+           ["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(tmp)], info.get("duration", 0), progress,
+           cancel, "Đang tạo bản xem trước nhẹ (chỉ để xem trong tool)")
     tmp.replace(out)
     return out
 
@@ -369,6 +371,97 @@ def separate_audio(p: Project, settings: dict | None = None, progress: Prog | No
     p.data["stems"] = {"vocals": str(v), "instrumental": str(i)}
     p.save()
     return v, i
+
+
+# ------------------------------------------------------------------ căn lại giờ (âm thanh lệch giờ so với hình)
+# Trước 2.0.92 âm thanh được giải mã mẫu nối liền, bỏ qua giờ của luồng âm thanh: video có giờ âm thanh lệch dần
+# (livestream, ghép nhiều phần, phim dài) -> bản tách giọng, mốc câu (nghe), giọng lồng, tiếng gốc khi phát khớp nhau
+# nhưng trôi dần so với khẩu hình. Dự án cũ: đo lệch (ffprobe, vài giây) -> căn lại mà không phải nghe / dịch / đọc lại.
+
+def timeline_check(p: Project) -> dict:
+    """Dự án làm trước 2.0.92 có bị lệch giờ không: {"need": cần căn lại, "mark": không lệch -> ghi dấu đã đúng giờ,
+    "drift": {"max", "end", "start"}}. Không đổi dự án (giao diện tự ghi dấu)."""
+    if p.data.get("timeline") == ff.TIMELINE or not p.data.get("source") or source_missing(p):
+        return {"need": False, "mark": False}
+    if not p.data.get("segments") and not stems(p):
+        return {"need": False, "mark": True}
+    d = ff.timeline_drift(p.source)
+    if d is None:
+        return {"need": False, "mark": False}
+    return {"need": d["max"] > ff.SYNC_MAX, "mark": d["max"] <= ff.SYNC_MAX, "drift": d}
+
+
+def _retime_segs(segs: list[Segment], f) -> None:
+    """Dời mốc câu + đoạn giọng lồng / karaoke theo hàm đổi giờ f (mảng giây -> mảng giây)."""
+    import numpy as np
+
+    for s in segs:
+        a, b = f(np.array([s.start, s.end], np.float64))
+        s.start, s.end = round(float(a), 3), round(float(max(b, a + 0.05)), 3)
+        for k in ("dub_at", "kv", "ct"):
+            v = s.extra.get(k)
+            if not v:
+                continue
+            if k == "dub_at":
+                s.extra[k] = [round(float(x), 3) for x in f(np.array(v[:2], np.float64))] + list(v[2:])
+            else:
+                s.extra[k] = [[round(float(x), 3) for x in f(np.array(pair[:2], np.float64))] for pair in v]
+
+
+def retime(p: Project, settings: dict | None = None, progress: Prog | None = None, cancel=None) -> dict:
+    """Căn lại giờ dự án làm trước 2.0.92 cho khớp hình: kéo giãn bản tách giọng / nhạc nền theo giờ thật, dời mốc câu
+    (nếu lấy bằng nghe – OCR / SRT vốn theo hình) + đoạn giọng lồng, xoá các bản giải mã cũ, xếp lại bản lồng. Không
+    nghe / dịch / đọc lại câu nào. Trả {"drift", "moved": số câu dời, "dub": có xếp lại bản lồng}."""
+    import numpy as np
+
+    from .separate import retime_stems
+
+    settings = settings or load_settings()
+    if source_missing(p):
+        raise RuntimeError("Không tìm thấy video gốc – bấm 'Tìm lại video gốc…' trước.")
+    if progress:
+        progress(0.01, "Đang đọc giờ âm thanh của video…")
+    tl = ff.audio_timeline(p.source)
+    if tl is None:
+        raise RuntimeError("Không đọc được giờ âm thanh của video.")
+    c, pt, d = tl
+    drift = {"max": round(float(np.max(np.abs(pt - c))), 3), "end": round(float(np.median((pt - c)[-50:])), 3)}
+    st = stems(p)
+    if st and not (Path(st["vocals"]).parent / "timeline.txt").exists():   # bản tách lại sau 2.0.92 đã đúng giờ
+        retime_stems(p.source, Path(st["vocals"]).parent, _sub(progress, 0.03, 0.75), tl)
+    if cancel and cancel():
+        raise ff.Cancelled()
+
+    def to_real(t):    # giây theo số mẫu (cách cũ) -> giờ thật của hình; ngoài 2 đầu dời đều theo đầu / cuối
+        t = np.asarray(t, np.float64)
+        r = np.interp(t, c, pt)
+        r = np.where(t < c[0], pt[0] + (t - c[0]), r)
+        return np.where(t > c[-1], pt[-1] + (t - c[-1]), r)
+
+    moved = 0
+    if p.data.get("sub_source") == "asr":
+        segs = p.segments
+        _retime_segs(segs, to_real)
+        p.segments = segs
+        moved = len(segs)
+        for key in ("cleanup_backup", "join_backup", "split_backup", "interj_removed"):
+            old = p.data.get(key)
+            if isinstance(old, list) and old and isinstance(old[0], dict) and "start" in old[0]:
+                bk = [Segment.from_dict(x) for x in old]
+                _retime_segs(bk, to_real)
+                p.data[key] = [x.to_dict() for x in bk]
+    for name in ("asr16k_vocals.wav", "audio16k.wav", "tl_wave.npy", "loud_50ms.npy", "loud_50ms.json",
+                 "voice_50ms.npy", "voice_50ms.json"):
+        (p.work / name).unlink(missing_ok=True)
+    p.data["timeline"] = ff.TIMELINE
+    p.data["audio_drift"] = drift
+    p.save()
+    re_dub = bool(moved) and has_dub(p)
+    if re_dub:
+        relayout(p, settings, _sub(progress, 0.78, 1.0), cancel)
+    if progress:
+        progress(1.0, "Đã căn lại giờ cho khớp hình")
+    return {"drift": drift, "moved": moved, "dub": re_dub}
 
 
 def timeline_assets(p: Project) -> dict:
@@ -396,8 +489,9 @@ def timeline_assets(p: Project) -> dict:
     src = stems(p).get("vocals") or str(p.source)
     wave = p.work / "tl_wave.npy"
     if not wave.exists() or wave.stat().st_mtime < Path(src).stat().st_mtime:
-        raw = subprocess.run([ff.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-i", str(src), "-vn", "-ac", "1",
-                              "-ar", "4000", "-f", "s16le", "pipe:1"], capture_output=True,
+        raw = subprocess.run([ff.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-i", str(src), "-vn"]
+                             + ff.af_args(ff.audio_sync(src, 4000)) + ["-ac", "1", "-ar", "4000", "-f", "s16le", "pipe:1"],
+                             capture_output=True,
                              creationflags=ff._NO_WINDOW).stdout
         a = np.abs(np.frombuffer(raw, np.int16).astype(np.float32) / 32768.0)
         hop = 200   # 0,05 s
@@ -659,8 +753,9 @@ def realign(p: Project, settings: dict | None = None, progress: Prog | None = No
     src = st.get("vocals") or str(p.source)
     wav = p.work / ("asr16k_vocals.wav" if st else "audio16k.wav")
     if not wav.exists() or wav.stat().st_size < 1000:
-        ff.run(["-i", str(src), "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav)],
-               p.data.get("info", {}).get("duration", 0), _sub(progress, 0, 0.1), cancel, "Đang chuẩn bị âm thanh")
+        ff.run(["-i", str(src), "-vn"] + ff.af_args(ff.audio_sync(src, 16000)) + ["-ac", "1", "-ar", "16000", "-c:a",
+               "pcm_s16le", str(wav)], p.data.get("info", {}).get("duration", 0), _sub(progress, 0, 0.1), cancel,
+               "Đang chuẩn bị âm thanh")
     from .align import drop_char_times
 
     drop_char_times(segs)   # đo lại từ đầu theo lời hiện tại (người dùng có thể đã sửa chữ)
@@ -760,10 +855,11 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
                     progress(0.3, f"Bỏ qua tách giọng ({str(e)[:80]})")
         # 2) chuẩn hoá về wav 16k mono
         wav = p.work / ("asr16k_vocals.wav" if audio_in != Path(src) else "audio16k.wav")
-        if not wav.exists() or wav.stat().st_size < 1000 or denoise:
-            args = ["-i", str(audio_in), "-vn", "-ac", "1", "-ar", "16000"]
-            if denoise:
-                args += ["-af", "highpass=f=80,lowpass=f=8000,afftdn=nf=-25,dynaudnorm=f=200"]
+        if not wav.exists() or wav.stat().st_size < 1000 or denoise or p.data.get("timeline") != ff.TIMELINE:
+            # theo đúng giờ của hình (2.0.92); bản 16 kHz cũ (giải mã nối liền) thì làm lại
+            args = ["-i", str(audio_in), "-vn", "-ac", "1", "-ar", "16000"] + ff.af_args(
+                ff.audio_sync(audio_in, 16000),
+                "highpass=f=80,lowpass=f=8000,afftdn=nf=-25,dynaudnorm=f=200" if denoise else "")
             args += ["-c:a", "pcm_s16le", str(wav)]
             ff.run(args, info_dur, _sub(progress, 0.3, 0.33), cancel, "Đang chuẩn bị âm thanh")
         asr_end = 0.78 if want_spk else 0.92
@@ -908,6 +1004,7 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         drop_char_times(segs)
     p.segments = segs
     p.data["sub_source"] = method
+    p.data["timeline"] = ff.TIMELINE     # mốc câu tính trên âm thanh giải mã theo giờ của hình (2.0.92)
     for k in ("asr_cleaned", "ai_filtered", "ai_reviewed", "cleanup_backup"):   # câu mới -> các bước AI chạy lại
         p.data.pop(k, None)
     if method == "ocr":

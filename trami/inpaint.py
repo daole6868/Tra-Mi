@@ -309,10 +309,11 @@ def inpaint_video(src: str | Path, out: str | Path, regions: list[dict], setting
     job = _Job(W, H, fps, regions, models, BoxIndex(boxes_file), strength, use_lama, temporal, cover_box)
     bh = job.height
     decA = subprocess.Popen([ff.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-i", str(src), "-an",
-                             "-vf", job.crop_filter(), "-f", "rawvideo", "-pix_fmt", "bgr24", "-vsync", "passthrough",
-                             "pipe:1"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=ff._NO_WINDOW)
+                             "-vf", job.crop_filter(), "-f", "rawvideo", "-pix_fmt", "bgr24", "-vsync", "cfr",
+                             "-r", f"{fps:.5f}", "pipe:1"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            creationflags=ff._NO_WINDOW)
     decB = subprocess.Popen([ff.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-i", str(src), "-an",
-                             "-f", "rawvideo", "-pix_fmt", "bgr24", "-vsync", "passthrough", "pipe:1"],
+                             "-f", "rawvideo", "-pix_fmt", "bgr24", "-vsync", "cfr", "-r", f"{fps:.5f}", "pipe:1"],
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=ff._NO_WINDOW)
     enc_args = [ff.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-y",
                 "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{W}x{H}", "-r", f"{fps:.5f}", "-i", "pipe:0",

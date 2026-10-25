@@ -219,4 +219,5 @@ Cài tay: `.venv\Scripts\python -m pip install omnivoice -c torch-constraints.tx
   - Chọn mô hình tách giọng *MDX-Net*.
   - Chọn Whisper *medium*, hoặc dùng SenseVoice.
   - Chuyển xoá phụ đề sang *OpenCV*.
+- **Phụ đề / giọng lồng càng về sau càng lệch khẩu hình (video dài, livestream, video ghép nhiều phần):** do giờ âm thanh trong file lệch dần so với hình. Từ 2.0.92 tool giải mã âm thanh theo đúng giờ của hình. Dự án làm trước đó: mở dự án, tool tự đo và hỏi *"Căn lại giờ ngay?"* → bấm **Yes**. Tool kéo giãn bản tách giọng, dời mốc câu và xếp lại bản lồng cho khớp hình – không phải nghe, dịch hay đọc lại.
 - **Lỗi khi xuất video:** lệnh FFmpeg của lần xuất gần nhất nằm trong `data/projects/<dự án>/work/render/last_ffmpeg_cmd.txt`.

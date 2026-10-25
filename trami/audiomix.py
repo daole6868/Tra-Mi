@@ -114,6 +114,7 @@ def decode_track(src: str | Path, cache_dir: str | Path, name: str, pre: str = "
     src = Path(src)
     if not src.exists():
         return None
+    pre = ",".join(x for x in (ff.audio_sync(src, SR), pre) if x)   # video gốc: theo giờ của hình (2.0.92)
     st = src.stat()
     key = _track_key(src, st.st_size, st.st_mtime, pre)
     d = Path(cache_dir)

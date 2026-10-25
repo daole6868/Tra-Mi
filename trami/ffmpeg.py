@@ -220,12 +220,98 @@ def run(args: list[str], duration: float = 0.0, progress: ProgressCB | None = No
         progress(1.0, msg)
 
 
+# ------------------------------------------------------------------ âm thanh theo đúng giờ của video
+# FFmpeg mặc định ghi các mẫu âm thanh NỐI LIỀN, bỏ qua giờ (timestamp) của luồng âm thanh. Video dài có giờ âm thanh
+# lệch dần (livestream / ghép nhiều phần / đồng hồ thu âm lệch: số mẫu nhiều hoặc ít hơn giờ ghi trong file) thì mọi thứ
+# tính từ bản giải mã (tách giọng, nghe, giọng lồng, tiếng gốc khi phát trong tool) khớp nhau nhưng TRÔI DẦN so với hình
+# – trình phát xếp hình theo giờ. aresample async: đệm lặng / bỏ / co giãn nhẹ mẫu cho khớp giờ; first_pts=0: âm thanh
+# bắt đầu muộn hơn hình thì đệm lặng ở đầu. TIMELINE = phiên bản cách giải mã (dự án cũ hơn -> pipeline.retime).
+TIMELINE = 2
+SYNC_MAX = 0.15      # lệch ≤ 0,15 s coi như khớp (không cần căn lại giờ dự án cũ)
+
+
+def audio_sync(src: str | Path, sr: int | None = None) -> str:
+    """Bộ lọc giải mã âm thanh theo giờ của file (ra `sr` Hz, mặc định 44,1 kHz). File .wav (tool tự ghi, mẫu liền =
+    giờ) -> ''. Qua tần số trung gian 44101 Hz: tần số vào = ra thì bộ lấy mẫu lại không co giãn mềm được (đo: vẫn trễ
+    0,1–0,4 s), chỉ bỏ / đệm từng 0,1 s; khác tần số -> co giãn mềm, khớp giờ ±0,02 s."""
+    if Path(src).suffix.lower() == ".wav":
+        return ""
+    return f"aresample=44101:async=1000:first_pts=0,aresample={sr or 44100}"
+
+
+def af_args(*filters: str) -> list[str]:
+    """["-af", "a,b"] từ các bộ lọc khác rỗng (không có thì [])."""
+    fs = [x for x in filters if x]
+    return ["-af", ",".join(fs)] if fs else []
+
+
+def audio_timeline(src: str | Path):
+    """Giờ của âm thanh so với số mẫu: (c, p) – c = giây tính theo số mẫu đã giải mã (cách cũ, mẫu nối liền) ở đầu mỗi
+    khung âm thanh, p = giờ thật của khung đó trên dòng thời gian của video (0 = đầu file). None = không đọc được.
+    Phim 3 giờ ~4 s (ffprobe đọc giờ + số mẫu từng khung; không có ffprobe thì FFmpeg ashowinfo, chậm hơn)."""
+    import numpy as np
+
+    fp = ffprobe_bin()
+    pts: list[float] = []
+    ns: list[int] = []
+    sr = 0
+    if fp:
+        meta = subprocess.run([fp, "-v", "error", "-select_streams", "a:0", "-show_entries",
+                               "stream=sample_rate:format=start_time", "-of", "json", str(src)],
+                              capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              creationflags=_NO_WINDOW)
+        try:
+            d = json.loads(meta.stdout or "{}")
+            sr = int((d.get("streams") or [{}])[0].get("sample_rate") or 0)
+            t0 = float((d.get("format") or {}).get("start_time") or 0)
+        except (ValueError, IndexError):
+            sr, t0 = 0, 0.0
+        r = subprocess.run([fp, "-v", "error", "-select_streams", "a:0", "-show_entries", "frame=pts_time,nb_samples",
+                            "-of", "csv=p=0", str(src)], capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", creationflags=_NO_WINDOW)
+        for line in r.stdout.splitlines():
+            parts = line.split(",")
+            try:
+                pts.append(float(parts[0]) - t0)
+                ns.append(int(parts[1]))
+            except (ValueError, IndexError):
+                continue
+    if not pts or not sr:
+        pts, ns = [], []
+        r = subprocess.run([ffmpeg_bin(), "-hide_banner", "-nostdin", "-i", str(src), "-vn", "-map", "0:a:0",
+                            "-af", "ashowinfo", "-f", "null", "-"], capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", creationflags=_NO_WINDOW)
+        for m in re.finditer(r"pts_time:\s*(-?[\d.]+).*?rate:\s*(\d+).*?nb_samples:\s*(\d+)", r.stderr):
+            pts.append(float(m[1]))
+            sr = int(m[2])
+            ns.append(int(m[3]))
+    if len(pts) < 2 or not sr:
+        return None
+    n = np.asarray(ns, np.float64)
+    c = np.concatenate([[0.0], np.cumsum(n)[:-1]]) / sr
+    return c, np.asarray(pts, np.float64), n / sr
+
+
+def timeline_drift(src: str | Path) -> dict | None:
+    """Âm thanh lệch giờ bao nhiêu so với hình nếu giải mã nối liền (cách trước 2.0.92): {"max": lệch lớn nhất (s),
+    "end": lệch ở cuối (âm = mốc tính từ âm thanh bị TRỄ so với hình), "start": âm thanh bắt đầu muộn (s)}."""
+    import numpy as np
+
+    tl = audio_timeline(src)
+    if tl is None:
+        return None
+    c, p, _ = tl
+    d = p - c
+    return {"max": round(float(np.max(np.abs(d))), 3), "end": round(float(np.median(d[-50:])), 3),
+            "start": round(float(np.median(d[:50])), 3)}
+
+
 def extract_audio(src: str | Path, dst: str | Path, sr: int = 16000, mono: bool = True,
                   progress: ProgressCB | None = None, cancel=None) -> Path:
     info = probe(src)
     if not info.has_audio:
         raise FFmpegError("Video không có âm thanh.")
-    args = ["-i", str(src), "-vn", "-ar", str(sr)]
+    args = ["-i", str(src), "-vn"] + af_args(audio_sync(src, sr)) + ["-ar", str(sr)]
     if mono:
         args += ["-ac", "1"]
     args += ["-c:a", "pcm_s16le", str(dst)]

@@ -64,8 +64,9 @@ def load_wav16k(path: str | Path) -> np.ndarray:
 
     from . import ffmpeg as ff
 
-    raw = subprocess.run([ff.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-i", str(path), "-ac", "1",
-                          "-ar", str(SR), "-f", "s16le", "pipe:1"], capture_output=True,
+    raw = subprocess.run([ff.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-i", str(path), "-vn"]
+                         + ff.af_args(ff.audio_sync(path, SR)) + ["-ac", "1", "-ar", str(SR), "-f", "s16le", "pipe:1"],
+                         capture_output=True,
                          creationflags=ff._NO_WINDOW).stdout
     a = np.frombuffer(raw, np.int16).astype(np.float32)
     del raw

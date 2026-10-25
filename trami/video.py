@@ -607,10 +607,13 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
     elif do_video:
         fc.append(f"[0:v]fps={fps:.5f},select='{expr}',setpts=N/FRAME_RATE/TB[v0]")
     if do_audio and has_a:
+        # tiếng gốc theo đúng giờ của hình (2.0.92) – trước đây mẫu nối liền: video có giờ âm thanh lệch dần thì tiếng
+        # gốc (và mọi thứ tính từ nó) trôi so với khẩu hình
+        sync = ff.audio_sync(src, 44100) or "aresample=44100"
         if len(keep) == 1:
-            fc.append(f"[0:a]{mute_f}asetpts=PTS-STARTPTS[a0]")
+            fc.append(f"[0:a]{sync},{mute_f}asetpts=PTS-STARTPTS[a0]")
         else:
-            fc.append(f"[0:a]aresample=44100,{mute_f}aselect='{expr}',asetpts=N/SR/TB[a0]")
+            fc.append(f"[0:a]{sync},{mute_f}aselect='{expr}',asetpts=N/SR/TB[a0]")
     v = "v0"
     ins: list = []
     main_dur = final_dur
@@ -1024,5 +1027,6 @@ def extract_audio_file(src: str | Path, out: str | Path, progress=None, cancel=N
     info = ff.probe(src)
     ext = Path(out).suffix.lower()
     codec = ["-c:a", "libmp3lame", "-b:a", "192k"] if ext == ".mp3" else ["-c:a", "pcm_s16le"]
-    ff.run(["-i", str(src), "-vn"] + codec + [str(out)], info.duration, progress, cancel, "Đang tách âm thanh")
+    ff.run(["-i", str(src), "-vn"] + ff.af_args(ff.audio_sync(src)) + codec + [str(out)], info.duration, progress,
+           cancel, "Đang tách âm thanh")
     return Path(out)

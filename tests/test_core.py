@@ -5938,6 +5938,170 @@ def test_ai_steps_run_with_live_drafts(monkeypatch):
     assert "AI " not in autoflow.summary({**st_, "translate_engine": "google"})
 
 
+# ------------------------------------------------------------------ 2.0.92: âm thanh theo giờ của hình
+
+def _drift_video(folder, dur=60, scale=0.98, every=10):
+    """Video thử có ÂM THANH LỆCH GIỜ: tiếng bíp mỗi `every` giây theo số mẫu, nhưng giờ ghi trong file co lại theo
+    `scale` (số mẫu nhiều hơn giờ – như livestream / ghép nhiều phần) -> trình phát phát bíp thứ k ở k·every·scale giây."""
+    folder = Path(folder)
+    wav, out = folder / "beeps.wav", folder / "lech.mp4"
+    subprocess.run([ff.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    f"aevalsrc='if(lt(mod(t\\,{every})\\,0.3)*gte(t\\,1)\\,0.8*sin(2*PI*1000*t)\\,0)':s=44100:d={dur}",
+                    "-c:a", "pcm_s16le", str(wav)], check=True)
+    subprocess.run([ff.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    f"testsrc2=size=160x90:rate=25:duration={dur}", "-itsscale", str(scale), "-i", str(wav),
+                    "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", "-b:a",
+                    "96k", str(out)], check=True)
+    return out, wav
+
+
+def _beep_starts(a, sr):
+    """Giây bắt đầu các tiếng bíp trong mảng mẫu (mono hoặc stereo)."""
+    a = np.abs(a if a.ndim == 1 else a.mean(axis=1))
+    k = sr // 100
+    env = a[: len(a) // k * k].reshape(-1, k).mean(axis=1)
+    on = env > 0.1 * env.max()
+    st = np.flatnonzero(on[1:] & ~on[:-1]) + 1
+    return [round(x / 100, 2) for x in st]
+
+
+def test_audio_decoded_on_video_timeline(tmp_path):
+    """Video có giờ âm thanh lệch dần: đo được độ lệch; mọi chỗ giải mã (16 kHz cho bộ nghe, bộ trộn trực tiếp, xuất
+    video) đặt tiếng bíp đúng GIỜ CỦA HÌNH (trước 2.0.92 mẫu nối liền -> bíp cuối trễ 1 s, càng về sau càng trễ)."""
+    from trami import audiomix
+    from trami.asr_funasr import load_wav16k
+    from trami.config import load_settings
+    from trami.video import build_and_render
+
+    src, _wav = _drift_video(tmp_path)
+    d = ff.timeline_drift(src)
+    assert d and abs(d["end"] + 1.18) < 0.1 and d["max"] > ff.SYNC_MAX     # cuối phim mẫu nối liền trễ ~1,2 s
+    want = [round(10 * k * 0.98, 2) for k in range(1, 6)]               # giờ trình phát phát các tiếng bíp
+    near = lambda got: all(min(abs(g - w) for g in got) < 0.06 for w in want)   # noqa: E731
+    assert near(_beep_starts(load_wav16k(src), 16000))
+    raw = audiomix.decode_track(src, tmp_path / "live", "orig")
+    assert raw and near(_beep_starts(np.fromfile(raw, np.int16).reshape(-1, 2).astype(np.float32), 44100))
+    out = build_and_render(src, tmp_path / "o.mp4", {"subtitles": {"burn": False}}, load_settings(), tmp_path / "w")
+    pcm = subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-i", str(out), "-ac", "1", "-ar", "16000", "-f", "s16le",
+                          "-"], capture_output=True).stdout
+    assert near(_beep_starts(np.frombuffer(pcm, np.int16).astype(np.float32), 16000))
+    # file wav do tool ghi (bản tách giọng, bản lồng): không thêm bộ lọc
+    assert ff.audio_sync(tmp_path / "x.wav") == "" and "async" in ff.audio_sync(src, 16000)
+
+
+def test_retime_old_project_stems_and_lines(tmp_path, monkeypatch):
+    """Dự án làm trước 2.0.92 trên video lệch giờ: phát hiện lệch, căn lại -> bản tách giọng kéo giãn đúng giờ hình,
+    mốc câu (nghe) + đoạn giọng lồng dời theo, xoá bản 16 kHz cũ, ghi dấu; dự án OCR không dời câu."""
+    import wave as _wave
+
+    from trami import pipeline, separate
+    from trami.project import Project
+
+    src, wav = _drift_video(tmp_path)
+    p = Project.create("lech")
+    pipeline.attach_source(p, src)
+    p.data.pop("timeline")                                   # giả lập dự án cũ
+    st = p.work / "stems"
+    st.mkdir()
+    for name in ("vocals.wav", "instrumental.wav"):          # bản tách cũ = mẫu nối liền
+        shutil.copy(wav, st / name)
+    (st / "model.txt").write_text("x.ckpt", "utf-8")
+    p.data["stems"] = {"vocals": str(st / "vocals.wav"), "instrumental": str(st / "instrumental.wav")}
+    old = [Segment(10 * k + 0.0, 10 * k + 1.0, f"句{k}", f"Câu {k}") for k in range(1, 6)]
+    for s in old:
+        s.extra["dub_at"] = [s.start, s.end]
+    p.segments = old
+    p.data["sub_source"] = "asr"
+    p.data["join_backup"] = [s.to_dict() for s in old]
+    (p.work / "asr16k_vocals.wav").write_bytes(b"0" * 2000)
+    p.save()
+    chk = pipeline.timeline_check(Project(p.id))
+    assert chk["need"] and abs(chk["drift"]["end"] + 1.18) < 0.1
+    r = pipeline.retime(Project(p.id), {}, None)
+    assert r["moved"] == 5 and not r["dub"]
+    q = Project(p.id)
+    assert q.data["timeline"] == ff.TIMELINE and not (q.work / "asr16k_vocals.wav").exists()
+    assert [round(s.start, 1) for s in q.segments] == [round(10 * k * 0.98, 1) for k in range(1, 6)]
+    assert abs(q.segments[-1].extra["dub_at"][0] - 49.0) < 0.05
+    assert abs(q.data["join_backup"][-1]["start"] - 49.0) < 0.05
+    with _wave.open(str(st / "vocals.wav")) as w:
+        a = np.frombuffer(w.readframes(w.getnframes()), np.int16).reshape(-1, 2).astype(np.float32)
+        assert abs(w.getnframes() / 44100 - 58.8) < 0.1            # độ dài = giờ của hình
+    got = _beep_starts(a, 44100)
+    assert all(min(abs(g - 10 * k * 0.98) for g in got) < 0.05 for k in range(1, 6))
+    assert (st / "timeline.txt").read_text("utf-8") == str(ff.TIMELINE)
+    assert pipeline.timeline_check(q) == {"need": False, "mark": False}
+    # căn lại lần nữa (dự án cũ nhưng bản tách đã đúng giờ – có dấu): không kéo giãn bản tách thêm lần nữa
+    q.data.pop("timeline")
+    q.save()
+    pipeline.retime(Project(p.id), {}, None)
+    with _wave.open(str(st / "vocals.wav")) as w:
+        assert abs(w.getnframes() / 44100 - 58.8) < 0.1
+    # dự án OCR: mốc câu theo hình -> không dời; bản tách vẫn được căn
+    p2 = Project.create("ocr")
+    pipeline.attach_source(p2, src)
+    p2.data.pop("timeline")
+    p2.segments, p2.data["sub_source"] = [Segment(20, 21, "字", "Chữ")], "ocr"
+    p2.save()
+    assert pipeline.retime(Project(p2.id), {}, None)["moved"] == 0 and Project(p2.id).segments[0].start == 20
+    # dùng lại bản tách cũ không có dấu: separate() tự căn (giả lập đã cài bộ tách)
+    st3 = tmp_path / "st3"
+    st3.mkdir()
+    for name in ("vocals.wav", "instrumental.wav"):
+        shutil.copy(wav, st3 / name)
+    (st3 / "model.txt").write_text("m.ckpt", "utf-8")
+    monkeypatch.setattr(separate, "available", lambda: True)
+    separate.separate(src, st3, "m.ckpt")
+    assert (st3 / "timeline.txt").exists()
+    with _wave.open(str(st3 / "vocals.wav")) as w:
+        assert abs(w.getnframes() / 44100 - 58.8) < 0.1
+
+
+def test_gui_asks_to_retime_drifted_project(tmp_path, monkeypatch):
+    """Mở dự án cũ trên video lệch giờ -> hỏi "căn lại giờ" -> đồng ý -> việc nền căn xong, bảng câu đúng giờ mới."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    try:
+        from PySide6.QtWidgets import QApplication, QMessageBox
+    except ImportError as e:
+        pytest.skip(str(e))
+    import time as _t
+
+    from trami import pipeline
+    from trami.gui import project_page as pp_mod, theme
+    from trami.gui.main import MainWindow
+    from trami.jobs import manager
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    theme.load_fonts()
+    app.setStyleSheet(theme.stylesheet())
+    src, _wav = _drift_video(tmp_path)
+    p = Project.create("lechgui")
+    pipeline.attach_source(p, src)
+    p.data.pop("timeline")
+    p.segments, p.data["sub_source"] = [Segment(50, 51, "句", "Câu")], "asr"
+    p.save()
+    asked = []
+    monkeypatch.setattr(pp_mod.QMessageBox, "question",
+                        lambda *a, **k: asked.append(a[1]) or QMessageBox.StandardButton.Yes)
+    win = MainWindow()
+    win.show()
+    win.open_project(p.id)
+    page = win.project_page
+    for _ in range(200):
+        app.processEvents()
+        js = [j for j in manager.list(p.id) if j["kind"] == "retime"]
+        if js and js[0]["status"] in ("done", "error"):
+            break
+        _t.sleep(0.05)
+    assert asked == ["Âm thanh lệch giờ so với hình"], asked
+    assert js and js[0]["status"] == "done", js
+    page.job_finished(js[0])
+    assert abs(page.model.segs[0].start - 49.0) < 0.05 and page.p.data["timeline"] == ff.TIMELINE
+    win.close()
+
+
 def test_project_delete_cache_and_light_model_checks(tmp_path, monkeypatch):
     """Xoá dự án: mất khỏi danh sách ngay, việc nền còn giữ dự án cũ không ghi lại project.json (trước đây "xoá rồi mà
     tên vẫn còn"), file bị giữ -> dấu .deleted rồi dọn nốt; danh sách dự án chỉ đọc lại file vừa đổi; tab Tài liệu xem

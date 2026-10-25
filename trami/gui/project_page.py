@@ -84,6 +84,7 @@ class ProjectPage(QWidget):
         self._disk_sig: list | None = None
         self._loaded_at = 0.0
         self._chained: set[str] = set()   # việc đã gọi việc tiếp theo (không gửi 2 lần)
+        self._timeline_asked: set[str] = set()   # dự án đã hỏi "căn lại giờ" trong phiên này
 
         self._save_edit_timer = QTimer(self, singleShot=True, interval=500, timeout=self._save_edit_now)
         self._live_timer = QTimer(self, singleShot=True, interval=40, timeout=self._apply_live)
@@ -1576,6 +1577,48 @@ class ProjectPage(QWidget):
         self.populate(reload_media=not same)
         if not same:
             self._undo_reset()
+            self._check_timeline()
+
+    def _check_timeline(self):
+        """Dự án làm trước 2.0.92: âm thanh của video lệch giờ so với hình (phụ đề / giọng lồng / tiếng gốc khớp nhau
+        nhưng càng về sau càng lệch khẩu hình) -> hỏi căn lại – không phải nghe / dịch / đọc lại. Không lệch -> ghi dấu."""
+        from ..ffmpeg import TIMELINE
+
+        p = self.p
+        if not p or p.data.get("timeline") == TIMELINE or not p.data.get("source") or \
+                p.id in self._timeline_asked:
+            return
+        pid = p.id
+
+        def done(r):
+            if not r or not self.p or self.p.id != pid:
+                return
+            if r.get("mark"):
+                self.p.data["timeline"] = TIMELINE
+                self.p.save()
+            if not r.get("need"):
+                return
+            self._timeline_asked.add(pid)
+            d = r["drift"]
+            late = d["end"] < 0
+            if QMessageBox.question(
+                    self, "Âm thanh lệch giờ so với hình",
+                    f"Âm thanh của video này lệch giờ so với hình: cuối phim lệch {abs(d['end']):.1f} s (lớn nhất "
+                    f"{d['max']:.1f} s) – phụ đề, giọng lồng, bản tách giọng {'TRỄ' if late else 'SỚM'} hơn khẩu hình "
+                    "và càng về sau càng lệch.\n\nCăn lại giờ ngay? Tool kéo giãn bản tách giọng, dời mốc câu và xếp lại "
+                    "bản lồng cho khớp hình – không phải nghe, dịch hay đọc lại.") == QMessageBox.StandardButton.Yes:
+                self._retime()
+        run_async(lambda: pipeline.timeline_check(Project(pid)), done, lambda m: None)
+
+    def _retime(self):
+        def fn(j, p):
+            r = pipeline.retime(p, load_settings(), j.update, j.cancelled)
+            d = r["drift"]
+            msg = f"Đã căn lại giờ cho khớp hình (cuối phim lệch {abs(d['end']):.1f} s)"
+            if r["moved"]:
+                msg += f": dời {r['moved']} câu" + (", xếp lại bản lồng" if r["dub"] else "")
+            return {"message": msg}
+        self.submit("retime", "Căn lại giờ theo hình", fn)
 
     def reload(self):
         if self.p:
@@ -2205,6 +2248,9 @@ class ProjectPage(QWidget):
             self._replay_row = None if redub else getattr(self, "_replay_row", None)
             self.reload()
             self._update_player_audio()
+            if j["kind"] == "retime" and j.get("status") == "done":
+                self._undo_reset()          # ảnh chụp hoàn tác còn mốc giờ cũ
+                self._load_timeline_assets()
             pick = (j.get("result") or {}).get("pick") if isinstance(j.get("result"), dict) else None
             if pick:   # tích sẵn các câu vừa làm (AI rút gọn…) để thấy ngay / nghe / sửa tiếp
                 self.model.set_picked(range(len(self.model.segs)), False)
