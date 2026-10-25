@@ -7169,6 +7169,60 @@ def test_hybrid_ocr_listen(monkeypatch, tmp_path, sample_video):
         p.delete()
 
 
+def test_ms_location_new_modelscope_layout(monkeypatch, tmp_path):
+    """ModelScope ≥ 1.38 cất mô hình ở models/<tổ chức>--<tên>/snapshots/<bản> – tab Tài liệu phải thấy là đã tải
+    (2.0.89–2.1.0 báo nhầm "Chưa tải" SenseVoice / Paraformer / FA-zh) mà không hỏi thư viện modelscope."""
+    import types
+
+    from trami import models, packmodels
+
+    cache, home = tmp_path / "msc", tmp_path / "home"
+    monkeypatch.setenv("MODELSCOPE_CACHE", str(cache))
+    monkeypatch.setattr(models, "MODELS_DIR", tmp_path / "m")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    called = []
+    fake = types.ModuleType("modelscope.hub.snapshot_download")
+    fake.snapshot_download = lambda *a, **k: called.append(a) or ""
+    monkeypatch.setitem(sys.modules, "modelscope.hub.snapshot_download", fake)
+
+    def put(base, mid, rev, size=2_000_000):
+        org, name = mid.split("/")
+        d = base / "models" / f"{org}--{name}" / "snapshots" / rev
+        d.mkdir(parents=True)
+        (d / "model.pt").write_bytes(b"\0" * size)
+        (d / "config.yaml").write_text("x")
+        return d
+
+    assert not models.is_ready("sensevoice")
+    sv = put(cache, models.MS_IDS["sensevoice"], "master")
+    vad = put(cache, models.MS_IDS["fsmn-vad"], "v2.0.4")          # bản khác master: lấy bản duy nhất có
+    assert models.ms_location(models.MS_IDS["sensevoice"], probe=False) == sv
+    assert models.ms_location(models.MS_IDS["fsmn-vad"], probe=False) == vad
+    assert models.is_ready("sensevoice") and called == []
+    # nhiều bản: master trước; bản thiếu file trọng số (tải dở) không tính
+    put(cache, models.MS_IDS["fa-zh"], "aaa")
+    fa = put(cache, models.MS_IDS["fa-zh"], "master")
+    assert models.ms_location(models.MS_IDS["fa-zh"], probe=False) == fa
+    put(cache, models.MS_IDS["cam++"], "master", size=10)
+    assert models.ms_location(models.MS_IDS["cam++"], probe=False) is None and not models.is_ready("paraformer")
+    # nạp mô hình FunASR: đường dẫn thẳng tới bản đã tải, không hỏi mạng
+    assert models.ms_local_path("fsmn-vad") == str(vad)
+    # kho mặc định (~/.cache/modelscope/models/…) cũng tìm thấy; gói mô hình chép về models/<tổ chức>/<tên>
+    monkeypatch.delenv("MODELSCOPE_CACHE")
+    para = put(home / ".cache" / "modelscope", models.MS_IDS["paraformer-zh"], "master")
+    assert models.ms_location(models.MS_IDS["paraformer-zh"], probe=False) == para
+    src = tmp_path / "src"
+    src.mkdir()
+    monkeypatch.setattr(packmodels, "MODELS_DIR", src)
+    monkeypatch.setattr(packmodels, "hf_cache", lambda: tmp_path / "nohf")
+    monkeypatch.setattr(packmodels, "used_hf_repos", lambda: [])
+    out = tmp_path / "out" / "data"
+    packmodels.pack(out)
+    name = models.MS_IDS["paraformer-zh"].split("/")[1]
+    assert (out / "models" / "funasr" / "models" / "iic" / name / "model.pt").is_file()
+    assert called == []
+
+
 def test_firered_models_entry_and_worker_wiring(monkeypatch, tmp_path):
     """Tab Tài liệu có FireRedASR2 (đủ file mới báo đã tải), tải từ kho chính + bộ đặt dấu câu (ModelScope của tác giả
     là nguồn dự phòng); TraMi.py nhận --firered-worker; GPU: tiến trình FireRedASR2 tắt cùng Qwen3."""

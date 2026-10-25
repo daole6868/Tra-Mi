@@ -200,7 +200,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (191 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (192 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1657,7 +1657,18 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   * Thử: mô hình FireRed tí hon trọng số ngẫu nhiên qua tiến trình thật (asr / align / dấu câu, venv có torch), bộ nghe
     giả cho dual / name_pass / hybrid / fallback, giao diện offscreen. Mô hình thật chưa chạy (sandbox chặn HF / ModelScope).
 
+- 2.1.1: "bản cũ tôi tải hết rồi mà tab Tài liệu báo SenseVoice / Paraformer / FA-zh Chưa tải, vẫn dùng được tới giờ".
+  ModelScope ≥ 1.38 (thư viện con modelscope_hub) cất mô hình kiểu MỚI `<kho>/models/<tổ chức>--<tên>/snapshots/<bản>/`
+  (giống HuggingFace); `models.ms_location` chỉ tìm kiểu cũ (`models/<tổ chức>/<tên>`, `hub/<tổ chức>/<tên>`, rglob theo
+  tên) – trước 2.0.89 vẫn thấy nhờ hỏi thư viện modelscope (`snapshot_download(local_files_only=True)`), 2.0.89 bỏ bước
+  hỏi khi xem trạng thái (đỡ nạp PyTorch) -> 3 mục ModelScope báo "Chưa tải". Nạp mô hình khi nghe vẫn hỏi thư viện nên
+  vẫn chạy. Sửa: `_ms_snapshot` (master / main trước, không thì bản mới nhất có trọng số) cho `models/` + `hub/models/`
+  của mọi kho và trong lượt tìm sâu; `packmodels` chép bản snapshot về `funasr/models/<tổ chức>/<tên>`. Cũng sửa luôn:
+  `rescue_segments` của Paraformer (cần `is_ready("sensevoice")`) bị bỏ qua từ 2.0.89. Đã tái hiện bằng modelscope 1.40.2
+  thật (thư viện thấy, tool không thấy) -> sau sửa tool trả đúng thư mục thư viện trả.
+
 ## Vấn đề đang mở
+- 2.1.1: chờ người dùng mở tab Tài liệu xem SenseVoice / Paraformer / FA-zh đã về "✓ Đã có trên máy" chưa (không phải tải lại).
 - 2.1.0: chờ người dùng `pip install pypinyin`, tải FireRedASR2 (tab Tài liệu – xem có tải được qua HF / ModelScope, mô
   hình thật nạp được không: tên tham số trong model.pth.tar phải khớp mã đã chép), thử bộ nghe FireRedASR2 + "Nghe 2 bộ
   rồi so" trên phim thật (bao nhiêu câu khác nhau, AI chọn có đúng không, chậm thêm bao nhiêu), "OCR + nghe" trên video có

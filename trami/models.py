@@ -166,6 +166,10 @@ def ms_location(model_id: str, probe: bool = True) -> Path | None:
     bases += [MODELS_DIR / "funasr", Path.home() / ".cache" / "modelscope" / "hub", Path.home() / ".cache" / "modelscope"]
     bases = list(dict.fromkeys(bases))
     for base in bases:
+        for sub in ("models", "hub/models"):   # ModelScope ≥ 1.38: models/<tổ chức>--<tên>/snapshots/<bản>
+            d = _ms_snapshot(base / sub / f"{org}--{name}")
+            if d:
+                return d
         for sub in ("models/" + org, org, "hub/models/" + org, "hub/" + org):
             for n in names:
                 d = base / sub / n
@@ -182,11 +186,29 @@ def ms_location(model_id: str, probe: bool = True) -> Path | None:
             pass
     for base in bases:   # tìm sâu hơn (chậm hơn) nếu cấu trúc thư mục khác
         if base.is_dir():
+            for d in base.rglob(f"{org}--{name}"):
+                s = _ms_snapshot(d)
+                if s:
+                    return s
             for n in names:
                 for d in base.rglob(n):
                     if d.is_dir() and _has_weights(d):
                         return d
     return None
+
+
+def _ms_snapshot(repo: Path) -> Path | None:
+    """Thư mục mô hình trong kiểu lưu mới của ModelScope (<tổ chức>--<tên>/snapshots/<bản>): bản master / main trước
+    (như chính thư viện chọn), không thì bản mới nhất có file trọng số."""
+    snaps = repo / "snapshots"
+    if not snaps.is_dir():
+        return None
+    try:
+        dirs = sorted((d for d in snaps.iterdir() if d.is_dir()), key=lambda d: d.stat().st_mtime, reverse=True)
+    except OSError:
+        return None
+    dirs.sort(key=lambda d: d.name not in ("master", "main"))
+    return next((d for d in dirs if _has_weights(d)), None)
 
 
 def ms_local_path(name: str) -> str:

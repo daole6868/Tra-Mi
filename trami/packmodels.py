@@ -121,8 +121,11 @@ def pack(dest_data: str | Path, progress=None) -> dict:
             continue   # đã nằm trong data/models (vừa chép ở trên) hoặc chưa tải
         if progress:
             progress(f"Đang chép {mid}…")
-        org = mid.split("/", 1)[0]
-        n = _copy_tree(Path(d), dest / "funasr" / "models" / org / Path(d).name, report)
+        org, name = mid.split("/", 1)
+        # kiểu lưu mới (<tổ chức>--<tên>/snapshots/<bản>) -> chép ruột bản đó về models/<tổ chức>/<tên> (kiểu cũ, ModelScope
+        # và tool đều nhận)
+        sub = name.replace(".", "___") if Path(d).parent.name == "snapshots" else Path(d).name
+        n = _copy_tree(Path(d), dest / "funasr" / "models" / org / sub, report)
         done[0] += n
         res["local"].append((mid, round(_size(Path(d)) / 1e6)))
     for d in used_hf_repos():
