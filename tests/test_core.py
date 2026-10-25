@@ -5797,7 +5797,7 @@ def test_autoflow_links_preset_prefetch(sample_video, monkeypatch):
             (kind, fn, pid)))
         monkeypatch.setattr(jobs.manager, "list", lambda project_id=None: [])
 
-        def fake_dl(url, dest, progress=None, cancel=None, notes=None, settings=None):
+        def fake_dl(url, dest, progress=None, cancel=None, notes=None, settings=None, meta=None):
             dest.mkdir(parents=True, exist_ok=True)
             return Path(shutil.copy(sample_video, dest / "Phim hay.mp4"))
 
@@ -5881,7 +5881,7 @@ def test_autoflow_bili_parts_and_unfinished_download(sample_video, monkeypatch):
     J = type("J", (), {"update": staticmethod(lambda *a: None), "cancelled": staticmethod(lambda: False)})()
     got = []
 
-    def fake_dl(url, dest, progress=None, cancel=None, notes=None, settings=None):
+    def fake_dl(url, dest, progress=None, cancel=None, notes=None, settings=None, meta=None):
         got.append(url)
         dest.mkdir(parents=True, exist_ok=True)
         n = autoflow.link_key(url).rsplit(":", 1)[1]
