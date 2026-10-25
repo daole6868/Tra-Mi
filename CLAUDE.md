@@ -146,7 +146,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (163 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (164 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1426,7 +1426,23 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   * Thẻ dự án Trang chủ có nhãn trạng thái: Đang tải… / Đang làm… / Đang chờ / ⚠ Lỗi / ✓ Đã xuất / Chờ kiểm tra & xuất /
     Đã nghe, chưa dịch / Chưa có video (làm mới khi việc bắt đầu / xong).
 
+- 2.0.88: người dùng gửi ảnh tab Tự động (Gemini, AI sửa lỗi nghe + lọc lời hát + kiểm tra bản dịch + từ đệm + tách câu
+  dài bật, Vừa tách vừa dịch bật, Lồng tiếng tắt) hỏi "sao mấy cái như tách, AI kiểm tra không có". Nguyên nhân: với "Vừa
+  tách vừa dịch", câu đã được dịch nháp trong lúc nghe -> `translate` thấy đã có bản dịch (`first` False) -> BỎ QUA AI sửa
+  lỗi nghe & nối câu + AI lọc lời bài hát (chỉ chạy khi chưa câu nào có bản dịch); AI kiểm tra / tách câu dài có chạy nhưng
+  không đổi gì thì không ghi gì vào thông báo -> tưởng không chạy.
+  * `translate(fresh=)` (auto vừa tách vừa dịch có bước nghe): bản dịch có sẵn là bản nháp -> vẫn chạy sửa lỗi nghe / lọc;
+    câu AI đổi chữ gốc / nối lại (`stats["changed"]`) bị xoá bản dịch -> dịch lại (only_empty).
+  * `recognize` (nghe / OCR lại) xoá `asr_cleaned` / `ai_filtered` / `ai_reviewed` / `cleanup_backup` -> câu mới chạy lại
+    các bước AI (trước đây nghe lại dự án đã sửa lỗi nghe thì bước này không bao giờ chạy nữa).
+  * AI kiểm tra: lần đầu cả phim (`ai_reviewed`), sau đó chỉ các câu vừa có bản dịch mới (`new_rows`), không có câu mới thì
+    không gửi; thông báo luôn có kết quả ("AI kiểm tra N câu dịch: không có câu cần sửa" / "AI kiểm tra và sửa k/N câu dịch").
+    Sửa lỗi nghe / lọc không đổi gì -> "AI soát lời nghe: không có câu cần sửa" / "AI lọc lời bài hát: không thấy…". Tách câu
+    dài 0 câu -> "tách câu dài: không có câu dịch nào dài hơn N tiếng mà có dấu câu ở giữa".
+  * Dòng tóm tắt thiết lập (Trang chủ / Hàng loạt) ghi các bước AI đang bật ("AI sửa lỗi nghe, kiểm tra bản dịch").
+
 ## Vấn đề đang mở
+- 2.0.88: chờ người dùng chạy lại tự động (Vừa tách vừa dịch + Gemini) xem thông báo xong có đủ các bước AI / tách câu dài.
 - 2.0.87: chờ người dùng dán 2–3 link Bilibili / Douyin thật vào Trang chủ -> "Tải về & dịch tự động": video 2 tải trong
   lúc video 1 đang nghe, mỗi dự án dừng ở "Chờ kiểm tra & xuất"; dán lại link cũ -> mở dự án cũ.
 - 2.0.83: chờ người dùng mở lại tool (hết 97 việc trùng), tab Lồng tiếng "Tích câu chưa lồng" -> "Tạo lại giọng các câu đã

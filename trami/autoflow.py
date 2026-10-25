@@ -60,6 +60,16 @@ def summary(settings: dict | None = None) -> str:
         parts.append(f"{name(C.ENGINES, o['engine'])} → {langs.INFO[langs.norm(o['target'])]['name']}")
         if o["style"] and o["style"] != "auto":
             parts.append(name(C.STYLES, o["style"]))
+        from .translate import LOCAL_ENGINES
+
+        if o["engine"] not in LOCAL_ENGINES:   # các bước AI chỉ chạy với công cụ dịch AI (không với Google / Hy-MT2)
+            ai = [t for k, t, d in (("ai_clean_before_translate", "sửa lỗi nghe", False),
+                                    ("ai_song_filter", "lọc lời hát", True),
+                                    ("ai_review_after_translate", "kiểm tra bản dịch", False)) if st.get(k, d)]
+            if st.get("ai_clean_before_translate", False) and "lọc lời hát" in ai:
+                ai.remove("lọc lời hát")      # sửa lỗi nghe đã gồm lọc lời bài hát
+            if ai:
+                parts.append("AI " + ", ".join(ai))
         if st.get("split_long_trans", True):
             parts.append("tách câu dài")
     if o["hardsub_mode"] != "none":

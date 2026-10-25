@@ -908,6 +908,8 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         drop_char_times(segs)
     p.segments = segs
     p.data["sub_source"] = method
+    for k in ("asr_cleaned", "ai_filtered", "ai_reviewed", "cleanup_backup"):   # câu mới -> các bước AI chạy lại
+        p.data.pop(k, None)
     if method == "ocr":
         p.data.pop("asr_warning", None)
         p.data.pop("asr_joined", None)
@@ -1297,9 +1299,10 @@ def ai_review(p: Project, settings: dict | None = None, engine: str | None = Non
 
 def translate(p: Project, engine: str | None = None, style: str | None = None, only_empty: bool = False,
               settings: dict | None = None, progress: Prog | None = None, cancel=None,
-              rows: list[int] | None = None, split: bool = True) -> int:
+              rows: list[int] | None = None, split: bool = True, fresh: bool = False) -> int:
     """Dịch phụ đề. rows: chỉ các câu này (dịch LẠI: bỏ bản dịch nhớ sẵn của chúng để ra bản mới). split False: không
-    tự tách câu dài ở cuối (chạy tự động tách ở bước riêng `auto_split_long`)."""
+    tự tách câu dài ở cuối (chạy tự động tách ở bước riêng `auto_split_long`). fresh: bản dịch đang có chỉ là bản dịch
+    nháp lúc đang nghe (vừa tách vừa dịch) -> vẫn chạy AI sửa lỗi nghe / lọc lời bài hát như dịch cả phim lần đầu."""
     from .translate import BUDGET_RE, Translator, cache_line, glossary_text, parse_glossary, untranslated
 
     settings = settings or load_settings()
@@ -1329,7 +1332,8 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
     whole = rows is None
     # Kỹ năng dịch AI: 1) sửa lỗi nghe & nối câu (chỉ khi dịch cả phim lần đầu – chưa câu nào có bản dịch), 2) hồ sơ
     # phim (lập 1 lần, dùng lại), 3) kiểm tra bản dịch sau khi dịch cả phim. Kỹ năng riêng gắn vào mọi lời nhắc.
-    first = not any(x.trans.strip() for x in segs)
+    had_trans = any(x.trans.strip() for x in segs)
+    first = fresh or not had_trans
     do_clean = (is_ai and whole and settings.get("ai_clean_before_translate", True) and not p.data.get("asr_cleaned")
                 and first)
     # không bật sửa lỗi nghe thì vẫn nhờ AI lọc lời bài hát / chữ không phải lời thoại trước khi dịch cả phim lần đầu
@@ -1344,9 +1348,16 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
         try:
             st = ai_cleanup(p, settings, eng, _sub(progress, 0.0, 0.18), cancel, mode="full" if do_clean else "filter")
             segs = p.segments
-            note = cleanup_note(st)
-            if note:
-                p.data["skill_note"] = note
+            if had_trans and st["changed"]:
+                # câu đã dịch nháp lúc đang nghe mà AI vừa sửa chữ gốc / nối lại -> bản dịch cũ không còn đúng, dịch lại
+                for i in st["changed"]:
+                    if 0 <= i < len(segs) and not segs[i].extra.get("trans_user"):
+                        segs[i].trans = ""
+                p.segments = segs
+                p.save()
+            note = cleanup_note(st) or ("AI soát lời nghe: không có câu cần sửa" if do_clean
+                                        else "AI lọc lời bài hát: không thấy lời bài hát / chữ thừa")
+            p.data["skill_note"] = note
         except (ff.Cancelled, net.NetworkDown):
             raise
         except Exception as e:  # noqa: BLE001 – không chặn việc dịch
@@ -1378,8 +1389,10 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
             p.save()
             last_save[0] = time.time()
 
+    before = [x.trans for x in segs]
     tr.translate_segments(segs, prog, cancel, only_empty=only_empty, summary=profile, auto_terms=not profile,
                           rows=set(rows) if rows is not None else None)
+    new_rows = [i for i, x in enumerate(segs) if x.trans.strip() and x.trans != before[i]]   # câu vừa có bản dịch mới
     # AI nhận ra lời bài hát (bản dịch có ♪) -> đánh dấu 🎵: không lồng tiếng, giữ giọng hát gốc
     n_song = mark_song_lines(segs, rows)
     if n_song:
@@ -1405,13 +1418,19 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
     p.data["translate_warning"] = ". ".join(warn)
     p.segments = segs
     p.save()
+    # đã kiểm tra cả phim rồi (chạy lại / dịch nốt dòng trống) -> chỉ kiểm tra các câu vừa dịch, không gửi lại cả phim
+    rev_rows = new_rows if p.data.get("ai_reviewed") and not first else None
+    if do_review and rev_rows == []:
+        do_review = False
     if do_review:
         try:
-            fixed = ai_review(p, settings, eng, _sub(progress, 0.85, 1.0), cancel)
-            if fixed:
-                p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + \
-                    f"AI kiểm tra và sửa {len(fixed)} câu dịch"
-                p.save()
+            fixed = ai_review(p, settings, eng, _sub(progress, 0.85, 1.0), cancel, rows=rev_rows)
+            n_rev = len(rev_rows) if rev_rows is not None else sum(1 for x in p.segments if x.trans.strip())
+            p.data["ai_reviewed"] = True
+            p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + \
+                (f"AI kiểm tra và sửa {len(fixed)}/{n_rev} câu dịch" if fixed
+                 else f"AI kiểm tra {n_rev} câu dịch: không có câu cần sửa")
+            p.save()
         except (ff.Cancelled, net.NetworkDown):
             raise
         except Exception as e:  # noqa: BLE001
@@ -1436,6 +1455,10 @@ def auto_split_long(p: Project, settings: dict | None = None, voiced: bool = Fal
     rows = None if voiced else [k for k, x in enumerate(p.segments) if not x.extra.get("tts_file")]
     made = split_long(p, settings, rows, progress, cancel)
     if not made:
+        n_max = int(settings.get("split_long_units", 14) or 14)
+        p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + \
+            f"tách câu dài: không có câu dịch nào dài hơn {n_max} tiếng mà có dấu câu ở giữa"
+        p.save()
         return 0
     n = len(made) - (len(p.segments) - before)
     p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + \
@@ -2775,7 +2798,7 @@ def _auto_steps(p: Project, opts: dict, steps: list, weights: dict, total_w: flo
                      and trans_lang(p) == target_lang(p, settings))
             translate(p, opts.get("engine"), opts.get("style"),
                       bool(opts.get("only_empty")) or bool(opts.get("parallel")) or again, settings, pr, cancel,
-                      split=False)
+                      split=False, fresh=bool(opts.get("parallel")) and "recognize" in steps)
         elif st == "split":
             pr(0.0, "Đang tách câu dịch dài…")
             # có bước lồng tiếng ngay sau -> tách cả câu đã có giọng (các vế được đọc ở bước đó)

@@ -5620,7 +5620,7 @@ def test_auto_translate_then_split_then_dub(sample_video, monkeypatch):
     order = []
 
     def fake_translate(q, engine=None, style=None, only_empty=False, settings=None, progress=None, cancel=None,
-                       rows=None, split=True):
+                       rows=None, split=True, fresh=False):
         order.append(("translate", only_empty, split, len(q.segments)))
         segs = q.segments
         segs[0].trans = ("Hùng Đại, hắn nói giúp hắn quản lý tù nhân là ý gì? Ca, ca là quản sự trại lưu đày của "
@@ -5799,3 +5799,62 @@ def test_gui_home_links_and_auto_settings(sample_video, monkeypatch):
         save_settings({"auto_preset": old.get("auto_preset", {})})
         win.close()
         app.processEvents()
+
+
+def test_ai_steps_run_with_live_drafts(monkeypatch):
+    """Vừa tách vừa dịch: câu đã dịch nháp lúc đang nghe vẫn được AI sửa lỗi nghe (câu đổi chữ gốc -> dịch lại) + AI kiểm
+    tra cả phim; chạy lại chỉ kiểm tra câu vừa dịch; bước nào chạy mà không đổi gì cũng ghi vào thông báo."""
+    from trami import autoflow, pipeline, translate as tr
+    from trami.config import load_settings
+    from trami.project import Project
+
+    calls = []
+
+    def fake_chat(self, system, user, max_tokens=8000, temperature=0.3):
+        kind = ("clean" if "biên tập viên phụ đề tiếng Trung" in system else "review" if "kiểm tra bản dịch" in system
+                else "profile" if 'lập "HỒ SƠ PHIM"' in system else "translate")
+        payload = json.loads(user[user.index("{"):]) if "{" in user else {}
+        calls.append((kind, payload))
+        if kind == "clean":
+            return json.dumps({"fix": {"1": "真的假的"}, "merge": [], "unsure": {}}, ensure_ascii=False)
+        if kind == "profile":
+            return json.dumps({"the_loai": "hài"}, ensure_ascii=False)
+        if kind == "review":
+            return json.dumps({}, ensure_ascii=False)
+        return json.dumps({k: f"Câu {k}" for k in payload}, ensure_ascii=False)
+
+    monkeypatch.setattr(tr.LLMClient, "chat", fake_chat)
+    st_ = {**load_settings(), "translate_engine": "openai", "openai_api_key": "x",
+           "openai_base_url": "https://api.example.com/v1", "ai_clean_before_translate": True,
+           "ai_review_after_translate": True, "split_long_trans": True, "translate_skill": ""}
+    p = Project.create("live_ai")
+    p.segments = [Segment(0, 1.5, "真的加的", "Nháp 1"), Segment(2, 3.5, "你好", "Nháp 2"),
+                  Segment(4, 5.5, "走吧", "Nháp 3")]
+    p.save()
+    pipeline.translate(p, "openai", "auto", True, st_, split=True, fresh=True)
+    kinds = [k for k, _ in calls]
+    assert kinds[0] == "clean" and "review" in kinds          # trước đây bị bỏ qua vì câu đã có bản dịch nháp
+    segs = p.segments
+    assert segs[0].text == "真的假的" and segs[0].trans.startswith("Câu")   # đổi chữ gốc -> dịch lại
+    assert [s.trans for s in segs[1:]] == ["Nháp 2", "Nháp 3"]             # câu khác giữ bản dịch nháp
+    rev = [pl for k, pl in calls if k == "review"]
+    assert sum(len(pl) for pl in rev) == 3                                  # kiểm tra cả phim
+    note = p.data["skill_note"]
+    assert "AI kiểm tra 3 câu dịch: không có câu cần sửa" in note and "tách câu dài: không có câu" in note
+    # chạy lại (đã kiểm tra rồi, không có câu mới) -> không sửa lỗi nghe / không gửi lại cả phim
+    calls.clear()
+    pipeline.translate(p, "openai", "auto", True, st_, split=False)
+    assert "clean" not in [k for k, _ in calls] and "review" not in [k for k, _ in calls]
+    segs = p.segments
+    segs[2].trans = ""
+    p.segments = segs
+    p.save()
+    calls.clear()
+    pipeline.translate(p, "openai", "auto", True, st_, split=False)
+    rev = [pl for k, pl in calls if k == "review"]
+    assert len(rev) == 1 and len(rev[0]) == 1                               # chỉ câu vừa dịch
+    sm = autoflow.summary(st_)
+    assert "AI sửa lỗi nghe, kiểm tra bản dịch" in sm and "lọc lời hát" not in sm
+    sm = autoflow.summary({**st_, "ai_clean_before_translate": False})
+    assert "AI lọc lời hát, kiểm tra bản dịch" in sm
+    assert "AI " not in autoflow.summary({**st_, "translate_engine": "google"})
