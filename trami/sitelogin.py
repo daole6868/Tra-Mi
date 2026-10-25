@@ -53,6 +53,24 @@ def extract_url(text: str) -> str:
     return ""
 
 
+_GLUED = re.compile(r"(?<![=%/])(?=https?://)", re.I)
+
+
+def extract_urls(text: str) -> list[str]:
+    """Mọi link trong ô dán (nhiều link 1 dòng, cách nhau bằng dấu cách / dính liền nhau), không trùng, giữ thứ tự.
+    Dòng không có link mà có mã BV -> link video."""
+    out: list[str] = []
+    for line in (text or "").splitlines():
+        found = [u.rstrip(".,;:!?)]}>") for m in _URL.finditer(line) for u in _GLUED.split(m.group(0)) if u]
+        if not found:
+            u = extract_url(line)
+            found = [u] if u else []
+        for u in found:
+            if u and u not in out:
+                out.append(u)
+    return out
+
+
 def _host(url: str) -> str:
     return re.sub(r"^https?://", "", url or "", flags=re.I).split("/")[0].split("?")[0].lower()
 

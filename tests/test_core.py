@@ -5852,6 +5852,90 @@ def test_autoflow_links_preset_prefetch(sample_video, monkeypatch):
     assert "trước của dự án" in m._why_wait(m.jobs["a2"]) and "lượt tải" in m._why_wait(m.jobs["d2"])
 
 
+def test_autoflow_bili_parts_and_unfinished_download(sample_video, monkeypatch):
+    """3 phần của 1 video Bilibili (?p=1/2/3) = 3 dự án; lần trước tải không xong (tắt tool / lỗi) -> dán lại là tải
+    lại vào chính dự án đó (trước đây báo "đã tải trước đó" mãi, không tải); đang tải -> không xếp thêm."""
+    import shutil
+
+    from trami import autoflow, jobs, sitelogin
+    from trami.project import Project
+
+    base = ("https://www.bilibili.com/video/BV1yanH6pEgf/?spm_id_from=333.788.videopod.episodes"
+            "&vd_source=284149d65c03da869bb863e96cd86c34")
+    links = [base, base + "&p=2", base + "&p=3"]
+    assert sitelogin.extract_urls("\n".join(links)) == links
+    assert sitelogin.extract_urls(" ".join(links)) == links          # dán cả 3 trên 1 dòng
+    assert sitelogin.extract_urls("".join(links)) == links           # dính liền nhau
+    assert [autoflow.link_key(u) for u in links] == [f"bili:BV1yanH6pEgf:{i}" for i in (1, 2, 3)]
+    assert [sitelogin.normalize_url(u, resolve=lambda x: x) for u in links] == [
+        "https://www.bilibili.com/video/BV1yanH6pEgf", "https://www.bilibili.com/video/BV1yanH6pEgf?p=2",
+        "https://www.bilibili.com/video/BV1yanH6pEgf?p=3"]
+    assert autoflow.video_name(Path("x" * 80 + " [BV1yanH6pEgf_p2].mp4")).endswith(" (P2)")
+    assert autoflow.video_name(Path("Tên phim p03 Tập 3 [BV1yanH6pEgf_p3].mp4")) == "Tên phim p03 Tập 3"
+
+    subs, busy = [], []
+    monkeypatch.setattr(jobs.manager, "submit", lambda kind, title, fn, pid="", gpu=None: subs.append(
+        (kind, fn, pid)))
+    monkeypatch.setattr(jobs.manager, "list", lambda project_id=None: [
+        {"project_id": b, "status": "queued"} for b in busy])
+    J = type("J", (), {"update": staticmethod(lambda *a: None), "cancelled": staticmethod(lambda: False)})()
+    got = []
+
+    def fake_dl(url, dest, progress=None, cancel=None, notes=None, settings=None):
+        got.append(url)
+        dest.mkdir(parents=True, exist_ok=True)
+        n = autoflow.link_key(url).rsplit(":", 1)[1]
+        return Path(shutil.copy(sample_video, dest / f"Phim dài p0{n} Tập {n} [BV1yanH6pEgf_p{n}].mp4"))
+
+    from trami import pipeline
+
+    monkeypatch.setattr(pipeline, "download_video", fake_dl)
+    res = autoflow.queue_links(links, auto=True)
+    pids = [r["pid"] for r in res]
+    assert [r["state"] for r in res] == ["new"] * 3 and len(set(pids)) == 3
+    assert [k for k, _, _ in subs] == ["download", "auto"] * 3
+    # tắt tool giữa lúc tải (hàng đợi không lưu) -> dự án còn đó, chưa có video -> dán lại: tải lại, không tạo dự án mới
+    subs.clear()
+    res2 = autoflow.queue_links(links, auto=True)
+    assert [r["state"] for r in res2] == ["retry"] * 3 and [r["pid"] for r in res2] == pids
+    assert [k for k, _, _ in subs] == ["download", "auto"] * 3 and [p for _, _, p in subs][::2] == pids
+    assert "tải lại 3 video" in autoflow.queue_message(res2)
+    # đang chờ tải -> không xếp thêm việc
+    subs.clear()
+    busy[:] = pids
+    res3 = autoflow.queue_links(links)
+    assert [r["state"] for r in res3] == ["busy"] * 3 and subs == []
+    assert "đang tải" in autoflow.queue_message(res3)
+    busy.clear()
+    # tải xong phần 2 -> mỗi phần đúng link + tên riêng; dán lại: phần 2 dịch tiếp, phần 1 / 3 vẫn tải lại
+    autoflow._download(pids[1], links[1])(J)
+    assert got == [links[1]] and Project(pids[1]).data["name"] == "Phim dài p02 Tập 2"
+    subs.clear()
+    res4 = autoflow.queue_links(links, auto=True)
+    assert [r["state"] for r in res4] == ["retry", "again", "retry"]
+    assert [k for k, _, p in subs if p == pids[1]] == ["auto"]
+    p2 = Project(pids[1])
+    p2.segments = [Segment(0, 1, "你好", "", "S1")]
+    p2.save()
+    subs.clear()
+    res5 = autoflow.queue_links([links[1]], auto=False)
+    assert res5[0]["state"] == "have" and subs == []
+    msg = autoflow.queue_message(res5, auto=False)
+    assert "đã có dự án" in msg and "Phim dài p02" in msg
+    # file video của dự án bị mất (chưa có câu nào) -> tải lại; 2 dự án cùng link -> ưu tiên dự án đã có video
+    p2.segments = []
+    p2.save()
+    Path(p2.data["source"]).unlink()
+    assert autoflow.queue_links([links[1]], auto=False)[0]["state"] == "retry"
+    autoflow._download(pids[1], links[1])(J)
+    dup = Project.create("Video từ link")
+    dup.data["link_key"] = autoflow.link_key(links[1])
+    dup.save()
+    assert autoflow.find_by_url(links[1]) == pids[1]
+    for pid in pids + [dup.id]:
+        Project(pid).delete()
+
+
 def test_gui_home_links_and_auto_settings(sample_video, monkeypatch):
     """Trang chủ: dán nhiều link -> 'Tải về & dịch tự động' / 'Chỉ tải về'; hộp Thiết lập tự động lưu 1 bộ dùng chung,
     tab Tự động của dự án đang mở + dòng tóm tắt theo luôn; thẻ dự án có trạng thái."""
@@ -5879,10 +5963,12 @@ def test_gui_home_links_and_auto_settings(sample_video, monkeypatch):
         kinds = [k for k, _ in subs]
         # link thứ 3 cùng video với link 1 -> 2 dự án
         assert kinds.count("download") == 2 and kinds.count("auto") == 2 and home.url.toPlainText() == ""
+        queued = {pid for _, pid in subs}
+        monkeypatch.setattr(autoflow, "_busy", lambda pid: pid in queued)   # việc tải còn trong hàng đợi
         subs.clear()
         home.url.setPlainText("https://www.douyin.com/video/7301234567890123477")
         home.download(False)
-        assert subs == []      # đã có dự án của link này -> mở dự án cũ, không tải lại
+        assert subs == []      # dự án của link này đang chờ tải -> mở dự án đó, không xếp thêm
         assert win.pages.currentWidget() is win.project_page
 
         dlg = AutoSettingsDialog(win)

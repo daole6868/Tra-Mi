@@ -61,7 +61,9 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   luồng; trang `main.JobsPage` "Việc đang làm".
   `trami/autoflow.py` (2.0.87) – thiết lập tự động dùng chung (`preset_values` / `preset(render=)` / `summary`; Cài đặt
   `auto_preset` = các ô riêng tab Tự động, còn lại là Cài đặt chung) + `queue_links` (mỗi link 1 dự án: việc "download"
-  rồi "auto"; `link_key` nhận ra cùng video dù khác dạng link, `find_by_url` -> dự án cũ, không tải lại); hộp
+  rồi "auto"; `link_key` nhận ra cùng video dù khác dạng link, `find_by_url` -> dự án cũ (ưu tiên dự án có video):
+  chưa có video -> tải lại vào dự án đó, đang tải -> không xếp thêm, có rồi -> không tải lại; `state` new / retry /
+  busy / again / have -> `queue_message`; `video_name` tên dự án (phần ?p=N -> "(PN)"); `sitelogin.extract_urls`); hộp
   `gui/auto_settings.AutoSettingsDialog` ("Thiết lập…" ở Trang chủ / Hàng loạt); thẻ dự án `main.project_badge`.
   `trami/packmodels.py` (2.0.89) – `TraMi.py --pack-models <data>` (`DongGoi_MoHinh.bat` -> `dist\Subvideo_GuiBan`):
   chép data/models + các kho HuggingFace mà mã nguồn tool / vieneu / omnivoice / speechbrain có nhắc tên (`used_hf_repos`;
@@ -182,7 +184,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (180 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (181 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1610,7 +1612,19 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   "đoạn cắt / video / lớp phủ"; tooltip nút ↶ (`UNDO_TIP`) liệt kê mọi thao tác hoàn tác được + số bước. Lịch sử hoàn tác
   tính từ lúc mở dự án (đoạn cắt làm từ lần trước: bấm "Bỏ" ở danh sách).
 
+- 2.0.99: "dán 3 link 3 phần của 1 video Bilibili (…BV1yanH6pEgf/?spm_id_from=…&vd_source=…, &p=2, &p=3) mà tool cứ báo đã có,
+  không tải". Mã link 3 phần vốn khác nhau (bili:BV…:1/2/3) và yt-dlp `noplaylist` tải đúng 1 phần; lỗi ở `queue_links`:
+  dự án cũ cùng link mà CHƯA CÓ VIDEO (lần trước tải lỗi mạng / tắt tool khi đang tải hoặc đang chờ lượt tải – hàng đợi
+  không lưu xuống đĩa) vẫn bị coi là "đã tải trước đó – mở dự án cũ, không tải lại" -> không bao giờ tải lại. Giờ: chưa có
+  video (hoặc file video đã mất) và chưa có câu -> tải lại vào chính dự án đó (+ dịch tự động); việc của dự án đang chờ /
+  chạy -> báo "đang tải / đang làm", không xếp thêm; `find_by_url` bỏ dự án đã xoá (`.deleted`), nhiều dự án cùng link ->
+  ưu tiên dự án có video. Thông báo `queue_message` nói rõ từng loại (tải mới / tải lại / đang tải / dịch tiếp / đã có dự án
+  "<tên>"). `sitelogin.extract_urls`: nhiều link trên 1 dòng / dính liền nhau cũng nhận (Trang chủ, Hàng loạt). Tên dự án
+  `autoflow.video_name` bỏ " [mã]", tiêu đề dài bị cắt mất "p02" -> thêm "(P2)" (3 phần không trùng tên).
+
 ## Vấn đề đang mở
+- 2.0.99: chờ người dùng dán lại 3 link phần 1/2/3 ở Trang chủ -> "Tải về & dịch tự động": thông báo "tải lại 3 video lần
+  trước chưa tải xong", 3 dự án tên có p01 / p02 / p03 (hoặc "(P2)"), mỗi dự án đúng phần của nó.
 - 2.0.96: chờ người dùng chạy lại "1. Nghe & tách câu" (hoặc dự án cũ: tab Phụ đề → Công cụ → Căn mép theo giọng, bật đo
   lại mốc từng chữ) rồi xem timeline: khối phụ đề có khớp sóng âm Tiếng gốc không, bao nhiêu câu viền nét đứt; nghe câu dài
   có chỗ ngắt hơi xem giọng lồng có nghỉ đúng chỗ không; chỉnh Giờ hiện (0,1 / 0,3 / 1 / 0,3 s) có dễ đọc không; điền danh

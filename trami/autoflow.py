@@ -4,6 +4,7 @@ dự án cũ)."""
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .config import PROJECTS_DIR, load_settings
@@ -117,23 +118,30 @@ def link_key(url: str) -> str:
 
 
 def find_by_url(url: str) -> str:
-    """Dự án đã tải link này (cùng video) – '' nếu chưa có."""
+    """Dự án đã tải link này (cùng video) – '' nếu chưa có. Nhiều dự án cùng link -> ưu tiên dự án đã có video."""
     import json
+
+    from .project import TOMB
 
     key = link_key(url)
     if not key or not PROJECTS_DIR.exists():
         return ""
+    found = []
     for d in sorted(PROJECTS_DIR.iterdir(), reverse=True):
         f = d / "project.json"
-        if not f.is_file():
+        if not f.is_file() or (d / TOMB).exists():
             continue
         try:
             j = json.loads(f.read_text("utf-8"))
         except Exception:  # noqa: BLE001
             continue
-        if j.get("link_key") == key:
-            return j.get("id", "")
-    return ""
+        if j.get("link_key") == key and j.get("id"):
+            found.append((not _has_video(j.get("source")), j["id"]))
+    return min(found, key=lambda x: x[0])[1] if found else ""
+
+
+def _has_video(src) -> bool:
+    return bool(src) and Path(src).is_file()
 
 
 # ------------------------------------------------------------------ xếp hàng
@@ -146,11 +154,25 @@ def _download(pid: str, url: str):
         notes: list[str] = []
         path = pipeline.download_video(url, pr.dir / "source", j.update, j.cancelled, notes=notes)
         pipeline.attach_source(pr, path)
-        pr.data["name"] = path.stem[:80]
+        pr.data["name"] = video_name(path)
         pr.data["dl_warning"] = " ".join(notes)
         pr.save()
         return {"message": "Đã tải xong video" + ("  ⚠ " + " ".join(notes) if notes else "")}
     return fn
+
+
+def video_name(path: Path) -> str:
+    """Tên dự án từ file tải về "<tiêu đề ≤ 80> [<mã>].mp4": bỏ mã; video nhiều phần (Bilibili ?p=N, mã "…_p2") mà
+    tiêu đề dài bị cắt mất "p02" -> thêm "(P2)" để 3 phần không trùng tên."""
+    stem = Path(path).stem
+    m = re.match(r"(.*\S)\s*\[([^\[\]]+)\]$", stem)
+    base, vid = (m.group(1), m.group(2)) if m else (stem, "")
+    part = re.search(r"_p(\d+)$", vid)
+    if part:
+        n = int(part.group(1))
+        if not re.search(rf"\bp0*{n}\b", base, re.I):
+            base = base[:72].rstrip() + f" (P{n})"
+    return base[:80] or stem[:80]
 
 
 def _auto(pid: str, opts: dict):
@@ -171,7 +193,10 @@ def queue_links(urls: list[str], auto: bool = True, settings: dict | None = None
                 aspect: str = "original") -> list[dict]:
     """Mỗi link: dự án mới + việc "Tải video" (chạy trước, không chờ việc dài) + (auto) việc "Dịch tự động" theo
     thiết lập tự động (chờ tải xong). Link đã tải trước đó -> không tải lại (auto: dự án cũ chưa có phụ đề thì dịch tiếp).
-    Trả [{url, pid, new, queued}] theo thứ tự."""
+    Dự án cũ chưa có video (lần trước tải lỗi / tắt tool giữa lúc tải / file video đã mất) -> tải lại vào chính dự án
+    đó; đang tải / chờ tải -> không xếp thêm.
+    Trả [{url, pid, new, queued, state, name}] theo thứ tự; state: new / retry (tải lại) / busy (đang tải, đang làm) /
+    again (đã có video, dịch tiếp) / have (đã có, không làm gì)."""
     from .jobs import manager
     from .project import Project
 
@@ -186,12 +211,27 @@ def queue_links(urls: list[str], auto: bool = True, settings: dict | None = None
         seen.add(key)
         old = find_by_url(url)
         if old:
-            queued = False
             p = Project(old)
-            if auto and p.data.get("source") and not p.segments and not _busy(old):
-                manager.submit("auto", f"Dịch tự động: {p.data.get('name', '')[:50]}", _auto(old, opts), old)
-                queued = True
-            out.append({"url": url, "pid": old, "new": False, "queued": queued})
+            name = p.data.get("name", "")
+            r = {"url": url, "pid": old, "new": False, "queued": False, "name": name}
+            if _busy(old):
+                out.append({**r, "state": "busy"})
+                continue
+            if not _has_video(p.data.get("source")) and not p.segments:
+                # lần trước tải không xong (lỗi mạng, tắt tool khi đang tải / đang chờ lượt tải) -> trước đây báo "đã
+                # tải trước đó" mãi mà không bao giờ tải lại
+                p.data["url"] = url
+                p.save()
+                manager.submit("download", f"Tải video: {url[:50]}", _download(old, url), old)
+                if auto:
+                    manager.submit("auto", f"Dịch tự động: {url[-40:]}", _auto(old, opts), old)
+                out.append({**r, "queued": True, "state": "retry"})
+                continue
+            if auto and _has_video(p.data.get("source")) and not p.segments:
+                manager.submit("auto", f"Dịch tự động: {name[:50]}", _auto(old, opts), old)
+                out.append({**r, "queued": True, "state": "again"})
+                continue
+            out.append({**r, "state": "have"})
             continue
         p = Project.create("Video từ link")
         p.data["url"], p.data["link_key"] = url, key
@@ -203,8 +243,32 @@ def queue_links(urls: list[str], auto: bool = True, settings: dict | None = None
         manager.submit("download", f"Tải video: {url[:50]}", _download(p.id, url), p.id)
         if auto:
             manager.submit("auto", f"Dịch tự động: {url[-40:]}", _auto(p.id, opts), p.id)
-        out.append({"url": url, "pid": p.id, "new": True, "queued": True})
+        out.append({"url": url, "pid": p.id, "new": True, "queued": True, "state": "new", "name": ""})
     return out
+
+
+def queue_message(res: list[dict], auto: bool = True, render: bool = False) -> str:
+    """Thông báo sau khi xếp hàng link (Trang chủ / Hàng loạt): nói rõ link nào tải mới, tải lại, đang tải, đã có."""
+    def names(rs):
+        nm = [f"“{r['name'][:30]}”" for r in rs if r.get("name")][:2]
+        return f" ({', '.join(nm)}{'…' if len(rs) > len(nm) and nm else ''})" if nm else ""
+
+    by = {k: [r for r in res if r.get("state") == k] for k in ("new", "retry", "busy", "again", "have")}
+    what = "tải + dịch tự động" if auto else "tải"
+    parts = []
+    if by["new"]:
+        parts.append(f"Đã xếp hàng {what} {len(by['new'])} video")
+    if by["retry"]:
+        parts.append(f"tải lại {len(by['retry'])} video lần trước chưa tải xong")
+    if by["busy"]:
+        parts.append(f"{len(by['busy'])} link đang tải / đang làm – xem 'Việc đang làm'")
+    if by["again"]:
+        parts.append(f"{len(by['again'])} link đã tải trước đó, chưa có phụ đề -> dịch tiếp{names(by['again'])}")
+    if by["have"]:
+        parts.append(f"{len(by['have'])} link đã có dự án{names(by['have'])} – mở ở Trang chủ, không tải lại")
+    if auto and not render and (by["new"] or by["retry"] or by["again"]):
+        parts.append("dừng trước bước xuất – kiểm tra rồi bấm 'Xuất video'")
+    return " · ".join(parts)
 
 
 def _busy(pid: str) -> bool:

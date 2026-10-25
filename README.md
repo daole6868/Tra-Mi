@@ -78,7 +78,8 @@ Cài xong (kể cả AI nâng cao) thì chạy **`DongGoi_EXE.bat`** (15–40 ph
    - Tải báo lỗi (HTTP 412, Unable to extract…): bấm **Cập nhật trình tải** rồi mở lại tool.
    - **Tải về & dịch tự động**: dán 1 hoặc nhiều link (mỗi dòng 1 link) rồi bấm nút này – mỗi link 1 dự án, tool tự tải →
      nghe → dịch → tách câu dài → lồng tiếng (nếu bật) rồi dừng trước bước xuất. Video sau được tải trước trong lúc video
-     trước đang làm. Link đã tải rồi thì mở lại dự án cũ, không tải lại. Thẻ dự án ở Trang chủ ghi trạng thái
+     trước đang làm. Link đã tải rồi thì mở lại dự án cũ, không tải lại (lần trước tải chưa xong thì tự tải lại vào
+     dự án đó; video nhiều phần `?p=2`, `?p=3` = mỗi phần 1 dự án). Thẻ dự án ở Trang chủ ghi trạng thái
      (Đang tải… / Đang làm… / Chờ kiểm tra & xuất / ✓ Đã xuất / ⚠ Lỗi). **Chỉ tải về** = chỉ tải, không dịch.
    - **Thiết lập…**: 1 bộ thiết lập tự động dùng chung cho nút trên, tab Tự động và Xử lý hàng loạt (đổi ở đâu cũng là 1).
 2. Mở tab **Tự động** và chọn:

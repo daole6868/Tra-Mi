@@ -484,12 +484,7 @@ class HomePage(QWidget):
         self.win.toast("Đang cập nhật trình tải – xem tiến độ bên dưới", "ok")
 
     def _links(self) -> list[str]:
-        out = []
-        for line in self.url.toPlainText().splitlines():
-            u = sitelogin.extract_url(line)
-            if u and u not in out:
-                out.append(u)
-        return out
+        return sitelogin.extract_urls(self.url.toPlainText())   # mỗi dòng 1 link, nhiều link 1 dòng cũng nhận
 
     def refresh_preset(self):
         from .. import autoflow
@@ -517,19 +512,10 @@ class HomePage(QWidget):
         self.url.clear()
         self.win.jobs_changed()
         self.win.refresh_projects()
-        old = [r for r in res if not r["new"]]
-        new = [r for r in res if r["new"]]
         if len(res) == 1:
             self.win.open_project(res[0]["pid"])
-        what = "tải + dịch tự động" if auto else "tải"
-        msg = f"Đã xếp hàng {what} {len(new)} video" if new else ""
-        if old:
-            again = sum(1 for r in old if r["queued"])
-            msg += ((" · " if msg else "") + f"{len(old)} link đã tải trước đó – mở dự án cũ, không tải lại"
-                    + (f" ({again} dự án chưa có phụ đề được dịch tiếp)" if again else ""))
-        if auto and new:
-            msg += " · dừng trước bước xuất – kiểm tra rồi bấm 'Xuất video'"
-        self.win.toast(msg, "ok")
+        have = all(r.get("state") == "have" for r in res)
+        self.win.toast(autoflow.queue_message(res, auto), "warn" if have else "ok")
 
 
 # ====================================================================== Hàng loạt & ghép
@@ -612,9 +598,7 @@ class BatchPage(QWidget):
         n, links = 0, []
         for it in items:
             if not Path(it).exists():
-                url = sitelogin.extract_url(it)   # link / dòng chia sẻ của app
-                if url:
-                    links.append(url)
+                links += [u for u in sitelogin.extract_urls(it) if u not in links]   # link / dòng chia sẻ của app
                 continue
             p = Project.create(Path(it).stem)
             try:
@@ -633,12 +617,15 @@ class BatchPage(QWidget):
             manager.submit("auto", f"Hàng loạt: {Path(it).name}", fn, p.id)
             n += 1
         res = autoflow.queue_links(links, auto=True, settings=st, render=render, aspect=aspect) if links else []
-        n += sum(1 for r in res if r["new"])
-        old = sum(1 for r in res if not r["new"])
         self.win.jobs_changed()
         self.win.refresh_projects()
-        self.win.toast(f"Đã xếp hàng {n} video" + (f" · {old} link đã tải trước đó (không tải lại)" if old else "")
-                       + ("" if render else " – dừng trước bước xuất, kiểm tra từng dự án rồi bấm 'Xuất video'"), "ok")
+        parts = [f"Đã xếp hàng {n} file video"] if n else []
+        if res:
+            parts.append(autoflow.queue_message(res, True, render=True))   # render=True: không nhắc 2 lần
+        work = n or any(r.get("state") in ("new", "retry", "again") for r in res)
+        if work and not render:
+            parts.append("dừng trước bước xuất, kiểm tra từng dự án rồi bấm 'Xuất video'")
+        self.win.toast(" · ".join(x for x in parts if x) or "Không có video nào được xếp hàng", "ok")
 
 
 class ConcatPage(QWidget):
