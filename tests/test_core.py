@@ -5930,8 +5930,13 @@ def test_project_delete_cache_and_light_model_checks(tmp_path, monkeypatch):
             (hf / repo / "snapshots" / "abc" / "model.safetensors").symlink_to(hf / repo / "blobs" / "123")
         except OSError:
             shutil.copyfile(hf / repo / "blobs" / "123", hf / repo / "snapshots" / "abc" / "model.safetensors")
+    old_ms = tmp_path / "home" / ".cache" / "modelscope" / "hub" / "iic" / "SenseVoiceSmall"   # tải trước 2.0.22
+    old_ms.mkdir(parents=True)
+    (old_ms / "model.pt").write_bytes(b"s" * 10)
     monkeypatch.setattr(packmodels, "MODELS_DIR", src)
     monkeypatch.setattr(packmodels, "hf_cache", lambda: hf)
+    monkeypatch.setattr(models, "ms_location",
+                        lambda mid, probe=True: old_ms if mid == "iic/SenseVoiceSmall" else None)
     out = tmp_path / "out" / "data"
     res = packmodels.pack(out)
     assert [r for r, _ in res["hf"]] == ["Qwen/Qwen3-ASR-1.7B-hf"]
@@ -5939,6 +5944,7 @@ def test_project_delete_cache_and_light_model_checks(tmp_path, monkeypatch):
     assert got.is_file() and not got.is_symlink() and got.read_bytes() == b"trong-so"
     assert not (out / "models" / "hf" / "models--Qwen--Qwen3-ASR-1.7B-hf" / "blobs").exists()
     assert (out / "models" / "separator" / "m.ckpt").is_file() and not (out / "models" / "separator" / "x.incomplete").exists()
+    assert (out / "models" / "funasr" / "models" / "iic" / "SenseVoiceSmall" / "model.pt").is_file()
     # máy nhận: thư mục data có models/hf -> kho HuggingFace của tool là chỗ đó
     env = {k: v for k, v in os.environ.items() if k not in ("HF_HUB_CACHE", "HF_HOME")}
     env["TRAMI_DATA"] = str(out)

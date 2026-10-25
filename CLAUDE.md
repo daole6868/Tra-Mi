@@ -1466,6 +1466,10 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Người dùng hỏi thêm (làm sau): chức năng phải chạy Python (cài Playwright, Cập nhật trình tải yt-dlp bằng pip) trong
   bản exe thế nào.
 
+- 2.0.90: người dùng hỏi `DongGoi_MoHinh.bat` có gồm các mô hình ở tab Tài liệu không -> có (mọi mô hình đã tải), nhưng
+  rà ra thiếu: mô hình ModelScope tải trước 2.0.22 nằm ở `%USERPROFILE%\.cache\modelscope` (không trong data/models) ->
+  `packmodels.pack` chép thêm các `MS_IDS` tìm thấy ngoài data/models vào `data/models/funasr/models/<tổ chức>/<tên>`.
+
 ## Vấn đề đang mở
 - 2.0.89: chờ người dùng thử xoá dự án trên Windows (tên mất ngay, mở lại tool không còn thư mục), xem tab Phụ đề mới;
   chạy `DongGoi_MoHinh.bat` (kiểm tra máy nhận dùng được mô hình, nhất là VieNeu: kho phụ của VieNeu chỉ được chép nếu mã

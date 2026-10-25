@@ -110,6 +110,21 @@ def pack(dest_data: str | Path, progress=None) -> dict:
                 n = d.stat().st_size
             done[0] += n
             res["local"].append((d.name, round(_size(d) / 1e6)))
+    # mô hình ModelScope (SenseVoice, VAD, Paraformer, FA-zh…) tải trước 2.0.22 nằm ở %USERPROFILE%\.cache\modelscope –
+    # chép vào data/models/funasr/models/<tổ chức>/<tên> (chỗ models.ms_location tìm trên máy nhận)
+    from . import models as mdl
+
+    root = MODELS_DIR.resolve()
+    for mid in dict.fromkeys(mdl.MS_IDS.values()):
+        d = mdl.ms_location(mid, probe=False)
+        if not d or Path(d).resolve().is_relative_to(root):
+            continue   # đã nằm trong data/models (vừa chép ở trên) hoặc chưa tải
+        if progress:
+            progress(f"Đang chép {mid}…")
+        org = mid.split("/", 1)[0]
+        n = _copy_tree(Path(d), dest / "funasr" / "models" / org / Path(d).name, report)
+        done[0] += n
+        res["local"].append((mid, round(_size(Path(d)) / 1e6)))
     for d in used_hf_repos():
         repo = d.name[len("models--"):].replace("--", "/", 1)
         if progress:
