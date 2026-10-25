@@ -111,8 +111,15 @@ class AudioTab(QWidget):
         self.src_status = label("", "muted", wrap=True)
         self.sep_btn = button("Tách giọng / nhạc nền", "layers", "Tách giọng nói gốc khỏi nhạc nền + hiệu ứng",
                               on_click=lambda: page.run_separate())
+        self.retime_btn = button("Căn giờ theo hình", "clock",
+                                 "Phụ đề / giọng lồng càng về sau càng lệch khẩu hình (video dài, livestream, video ghép) "
+                                 "-> đo giờ âm thanh của video và căn bản tách giọng, mốc câu, bản lồng cho khớp hình. "
+                                 "Không phải nghe, dịch hay đọc lại. Đã khớp thì không đổi gì.",
+                                 on_click=lambda: page.run_retime())
+        self.sync_status = label("", "muted", wrap=True)
         src.add(self.src_status)
-        src.add(hbox(self.sep_btn, None))
+        src.add(flow(self.sep_btn, self.retime_btn))
+        src.add(self.sync_status)
         v.addWidget(src)
 
         # ---- 2. các lớp

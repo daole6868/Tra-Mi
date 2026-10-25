@@ -200,7 +200,7 @@ def retime_stems(src: str | Path, out_dir: str | Path, progress=None, tl=None) -
             tmp = out_dir / f"_retime_{name}"
             retime_wav(out_dir / name, tmp, c, p, d,
                        (lambda x, m, k=k: progress((k + x) / len(names), m)) if progress else None)
-            tmp.replace(out_dir / name)
+            ff.replace_file(tmp, out_dir / name, wait=120)   # trình phát đang giải mã bản cũ -> chờ
     mark.write_text(str(ff.TIMELINE), "utf-8")
     return {"max": round(drift, 3), "end": round(float(np.median((p - c)[-50:])), 3)} if drift > ff.SYNC_MAX else None
 

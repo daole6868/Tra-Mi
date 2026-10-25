@@ -6031,12 +6031,26 @@ def test_retime_old_project_stems_and_lines(tmp_path, monkeypatch):
     assert all(min(abs(g - 10 * k * 0.98) for g in got) < 0.05 for k in range(1, 6))
     assert (st / "timeline.txt").read_text("utf-8") == str(ff.TIMELINE)
     assert pipeline.timeline_check(q) == {"need": False, "mark": False}
-    # căn lại lần nữa (dự án cũ nhưng bản tách đã đúng giờ – có dấu): không kéo giãn bản tách thêm lần nữa
-    q.data.pop("timeline")
-    q.save()
-    pipeline.retime(Project(p.id), {}, None)
+    assert r["state"] == "done"
+    # bấm "Căn giờ theo hình" lần nữa: đã căn -> không kéo giãn bản tách, không dời câu thêm lần nữa
+    r2 = pipeline.retime(Project(p.id), {}, None)
+    assert r2["state"] == "already" and r2["moved"] == 0
+    assert [round(s.start, 1) for s in Project(p.id).segments] == [round(10 * k * 0.98, 1) for k in range(1, 6)]
     with _wave.open(str(st / "vocals.wav")) as w:
         assert abs(w.getnframes() / 44100 - 58.8) < 0.1
+    # video không lệch: chỉ ghi dấu, không đổi gì
+    src_ok = tmp_path / "khop.mp4"
+    subprocess.run([ff.ffmpeg_bin(), "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=gray:s=64x36:r=25:d=8",
+                    "-f", "lavfi", "-i", "sine=f=500:d=8", "-shortest", "-c:v", "libx264", "-c:a", "aac", str(src_ok)],
+                   check=True)
+    p0 = Project.create("khop")
+    pipeline.attach_source(p0, src_ok)
+    p0.data.pop("timeline")
+    p0.segments, p0.data["sub_source"] = [Segment(3, 4, "句", "Câu")], "asr"
+    p0.save()
+    r0 = pipeline.retime(Project(p0.id), {}, None)
+    assert r0["state"] == "ok" and r0["moved"] == 0 and Project(p0.id).segments[0].start == 3
+    assert Project(p0.id).data["timeline"] == ff.TIMELINE
     # dự án OCR: mốc câu theo hình -> không dời; bản tách vẫn được căn
     p2 = Project.create("ocr")
     pipeline.attach_source(p2, src)
@@ -6057,12 +6071,13 @@ def test_retime_old_project_stems_and_lines(tmp_path, monkeypatch):
         assert abs(w.getnframes() / 44100 - 58.8) < 0.1
 
 
-def test_gui_asks_to_retime_drifted_project(tmp_path, monkeypatch):
-    """Mở dự án cũ trên video lệch giờ -> hỏi "căn lại giờ" -> đồng ý -> việc nền căn xong, bảng câu đúng giờ mới."""
+def test_gui_retime_button_drifted_project(tmp_path, monkeypatch):
+    """Mở dự án cũ trên video lệch giờ -> KHÔNG hỏi, hiện nút "Căn giờ theo hình" (thanh đầu) + nhắc -> bấm -> việc nền
+    căn xong, bảng câu đúng giờ mới, nút ẩn; bấm lại nút ở tab Âm thanh -> báo đã đúng giờ, không dời thêm."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     pytest.importorskip("PySide6")
     try:
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication
     except ImportError as e:
         pytest.skip(str(e))
     import time as _t
@@ -6082,24 +6097,108 @@ def test_gui_asks_to_retime_drifted_project(tmp_path, monkeypatch):
     p.data.pop("timeline")
     p.segments, p.data["sub_source"] = [Segment(50, 51, "句", "Câu")], "asr"
     p.save()
-    asked = []
-    monkeypatch.setattr(pp_mod.QMessageBox, "question",
-                        lambda *a, **k: asked.append(a[1]) or QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(pp_mod.QMessageBox, "question", lambda *a, **k: pytest.fail("không được hỏi"))
     win = MainWindow()
     win.show()
+    toasts = []
+    monkeypatch.setattr(win, "toast", lambda text, kind="info": toasts.append((kind, text)))
     win.open_project(p.id)
     page = win.project_page
-    for _ in range(200):
-        app.processEvents()
-        js = [j for j in manager.list(p.id) if j["kind"] == "retime"]
-        if js and js[0]["status"] in ("done", "error"):
-            break
-        _t.sleep(0.05)
-    assert asked == ["Âm thanh lệch giờ so với hình"], asked
-    assert js and js[0]["status"] == "done", js
-    page.job_finished(js[0])
+
+    def wait(cond):
+        for _ in range(300):
+            app.processEvents()
+            if cond():
+                return True
+            _t.sleep(0.05)
+        return False
+
+    assert wait(lambda: page.retime_btn.isVisibleTo(page))
+    assert any(k == "warn" and "Căn giờ theo hình" in t for k, t in toasts), toasts
+    assert page.audio_tab.sync_status.text().startswith("⚠")
+    assert page.model.segs[0].start == 50                     # chưa bấm thì chưa đổi gì
+
+    def run_and_wait(btn):
+        before = {j["id"] for j in manager.list(p.id)}
+        btn.click()
+        js = []
+
+        def ended():
+            js[:] = [j for j in manager.list(p.id) if j["kind"] == "retime" and j["id"] not in before]
+            return bool(js) and js[0]["status"] in ("done", "error")
+        assert wait(ended)
+        assert js[0]["status"] == "done", js
+        page.job_finished(js[0])
+        return js[0]
+
+    j = run_and_wait(page.retime_btn)
     assert abs(page.model.segs[0].start - 49.0) < 0.05 and page.p.data["timeline"] == ff.TIMELINE
+    assert not page.retime_btn.isVisibleTo(page) and page.audio_tab.sync_status.text().startswith("✓")
+    assert "Đã căn lại giờ" in j["message"]
+    j = run_and_wait(page.audio_tab.retime_btn)
+    assert "đã theo đúng giờ" in j["message"] and abs(page.model.segs[0].start - 49.0) < 0.05
     win.close()
+
+
+def test_decode_track_concurrent_same_layer(tmp_path, monkeypatch):
+    """2 lần chuẩn bị âm thanh nghe thử cùng lúc (mở dự án + vừa xong việc) cùng 1 lớp: giải mã đúng 1 lần, không 2
+    luồng cùng ghi 1 file .tmp (trước 2.0.93 -> WinError 32); .tmp cũ bị bỏ dở được dọn; đổi tên file bị khoá thì chờ."""
+    import threading
+    import time
+    import wave as _wave
+
+    from trami import audiomix
+
+    src = tmp_path / "a.wav"
+    with _wave.open(str(src), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes((np.sin(np.arange(16000 * 3) / 10) * 8000).astype(np.int16).tobytes())
+    d = tmp_path / "live"
+    d.mkdir()
+    stale = d / "orig_old.123_456.tmp"
+    stale.write_bytes(b"x")
+    os.utime(stale, (time.time() - 7200, time.time() - 7200))
+    fresh = d / "orig_other.123_789.tmp"
+    fresh.write_bytes(b"x")
+    real_run = audiomix.subprocess.run
+    runs = []
+
+    def slow_run(cmd, **k):
+        runs.append(cmd[-1])
+        time.sleep(0.3)
+        return real_run(cmd, **k)
+    monkeypatch.setattr(audiomix.subprocess, "run", slow_run)
+    out = []
+    ts = [threading.Thread(target=lambda: out.append(audiomix.decode_track(src, d, "orig"))) for _ in range(3)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert len(runs) == 1 and len(set(out)) == 1 and out[0].exists(), (runs, out)
+    assert out[0].stat().st_size == 3 * 44100 * 4
+    assert not stale.exists() and fresh.exists()
+    assert not list(d.glob(f"{out[0].stem}*.tmp"))
+    # file đích đang bị trình phát mở (Windows): os.replace báo PermissionError vài lần -> chờ rồi đổi tên được
+    calls = []
+    real_replace = os.replace
+
+    def busy(a, b):
+        calls.append(1)
+        if len(calls) < 3:
+            raise PermissionError(32, "The process cannot access the file")
+        return real_replace(a, b)
+    monkeypatch.setattr(ff.os, "replace", busy)
+    a, b = tmp_path / "x.tmp", tmp_path / "x.raw"
+    a.write_bytes(b"1")
+    ff.replace_file(a, b, wait=5)
+    assert b.read_bytes() == b"1" and len(calls) == 3
+    calls.clear()
+    a.write_bytes(b"2")
+    monkeypatch.setattr(ff.os, "replace", lambda a, b: (_ for _ in ()).throw(PermissionError(32, "busy")))
+    with pytest.raises(PermissionError):
+        ff.replace_file(a, b, wait=0.3)
 
 
 def test_project_delete_cache_and_light_model_checks(tmp_path, monkeypatch):

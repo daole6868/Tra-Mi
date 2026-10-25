@@ -409,9 +409,10 @@ def _retime_segs(segs: list[Segment], f) -> None:
 
 
 def retime(p: Project, settings: dict | None = None, progress: Prog | None = None, cancel=None) -> dict:
-    """Căn lại giờ dự án làm trước 2.0.92 cho khớp hình: kéo giãn bản tách giọng / nhạc nền theo giờ thật, dời mốc câu
-    (nếu lấy bằng nghe – OCR / SRT vốn theo hình) + đoạn giọng lồng, xoá các bản giải mã cũ, xếp lại bản lồng. Không
-    nghe / dịch / đọc lại câu nào. Trả {"drift", "moved": số câu dời, "dub": có xếp lại bản lồng}."""
+    """Căn giờ âm thanh theo hình (nút "Căn giờ theo hình"; dự án làm trước 2.0.92): kéo giãn bản tách giọng / nhạc nền
+    theo giờ thật, dời mốc câu (nếu lấy bằng nghe – OCR / SRT vốn theo hình) + đoạn giọng lồng, xoá các bản giải mã cũ,
+    xếp lại bản lồng. Không nghe / dịch / đọc lại câu nào. Bấm lại khi đã căn / video không lệch -> không dời gì.
+    Trả {"state": "done" | "ok" (không lệch) | "already" (đã căn trước đó), "drift", "moved": số câu dời, "dub"}."""
     import numpy as np
 
     from .separate import retime_stems
@@ -431,6 +432,14 @@ def retime(p: Project, settings: dict | None = None, progress: Prog | None = Non
         retime_stems(p.source, Path(st["vocals"]).parent, _sub(progress, 0.03, 0.75), tl)
     if cancel and cancel():
         raise ff.Cancelled()
+    already = p.data.get("timeline") == ff.TIMELINE     # câu / bản lồng đã theo giờ hình (nghe sau 2.0.92 / đã căn)
+    if already or drift["max"] <= ff.SYNC_MAX:
+        if not already:
+            p.data["timeline"] = ff.TIMELINE
+            p.save()
+        if progress:
+            progress(1.0, "Âm thanh đã khớp giờ hình")
+        return {"state": "already" if already else "ok", "drift": drift, "moved": 0, "dub": False}
 
     def to_real(t):    # giây theo số mẫu (cách cũ) -> giờ thật của hình; ngoài 2 đầu dời đều theo đầu / cuối
         t = np.asarray(t, np.float64)
@@ -452,7 +461,10 @@ def retime(p: Project, settings: dict | None = None, progress: Prog | None = Non
                 p.data[key] = [x.to_dict() for x in bk]
     for name in ("asr16k_vocals.wav", "audio16k.wav", "tl_wave.npy", "loud_50ms.npy", "loud_50ms.json",
                  "voice_50ms.npy", "voice_50ms.json"):
-        (p.work / name).unlink(missing_ok=True)
+        try:       # đang mở ở chỗ khác (Windows) -> để đó, các bản này tự làm lại theo dấu giờ / ngày sửa
+            (p.work / name).unlink(missing_ok=True)
+        except OSError:
+            pass
     p.data["timeline"] = ff.TIMELINE
     p.data["audio_drift"] = drift
     p.save()
@@ -461,7 +473,7 @@ def retime(p: Project, settings: dict | None = None, progress: Prog | None = Non
         relayout(p, settings, _sub(progress, 0.78, 1.0), cancel)
     if progress:
         progress(1.0, "Đã căn lại giờ cho khớp hình")
-    return {"drift": drift, "moved": moved, "dub": re_dub}
+    return {"state": "done", "drift": drift, "moved": moved, "dub": re_dub}
 
 
 def timeline_assets(p: Project) -> dict:

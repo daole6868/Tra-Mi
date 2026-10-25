@@ -29,7 +29,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (`aresample=44101:async=1000:first_pts=0,aresample=<sr>` – qua 44101 Hz vì cùng tần số vào/ra bộ lấy mẫu lại không co
   giãn mềm; file .wav do tool ghi -> ''), `ff.af_args`; `ff.audio_timeline` (ffprobe giờ + số mẫu từng khung, dự phòng
   ashowinfo) / `timeline_drift`; dự án có `p.data["timeline"] = ff.TIMELINE`, bản tách có `stems/timeline.txt`. Dự án
-  cũ: `pipeline.timeline_check` (mở dự án, giao diện hỏi) -> `pipeline.retime` (`separate.retime_stems` / `retime_wav`
+  cũ: nút "Căn giờ theo hình" (tab Âm thanh mục 1; mở dự án đo nền `pipeline.timeline_check`, lệch -> nút hiện cả trên
+  thanh đầu `retime_btn`, KHÔNG hỏi – 2.0.93) -> `pipeline.retime` (bấm lại khi đã căn / không lệch -> state already / ok) (`separate.retime_stems` / `retime_wav`
   kéo giãn bản tách, dời mốc câu nếu `sub_source` asr + dub_at / kv / backup, xoá bản 16 kHz / sóng âm / âm lượng, xếp
   lại bản lồng).
 - `trami/pipeline.py` – các bước: `attach_source`, `separate_audio`, `recognize` (tự chuyển Whisper nếu FunASR/torch lỗi),
@@ -158,7 +159,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (170 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (171 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1523,9 +1524,22 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     đặt bíp đúng giờ hình (±0,06 s); dự án cũ (bản tách mẫu nối liền + câu nghe) -> căn lại: bản tách dài 58,8 s, bíp đúng
     giờ, câu 10·k s -> 9,8·k s; OCR không dời; giao diện hỏi + việc nền chạy xong, bảng câu đúng giờ mới.
 
+- 2.0.93: "Không chuẩn bị được âm thanh để nghe thử: PermissionError [WinError 32] … work\live\orig_<mã>.tmp -> .raw" +
+  "sao cứ phải hỏi, thêm nút căn chỉnh". (1) `audiomix.decode_track`: 2 lần chuẩn bị bộ trộn trực tiếp chạy cùng lúc (mở
+  dự án + việc "retime" xong / đổi file lớp) cùng giải mã 1 lớp vào CHUNG 1 file `<lớp>_<mã>.tmp` – 2.0.92 đổi mã giải mã
+  lớp tiếng gốc (thêm `audio_sync`) nên phim 3 giờ giải mã lại lâu, dễ chồng nhau -> Windows báo file đang bị mở khi đổi
+  tên. Giờ khoá theo file đích (`_decode_lock`), file tạm riêng mỗi luồng `<lớp>_<mã>.<pid>_<luồng>.tmp`, vào khoá rồi
+  xem lại bản có sẵn (lần sau dùng luôn bản vừa giải mã), `.tmp` bỏ dở > 1 giờ (`STALE_TMP`) bị dọn. `ff.replace_file`
+  (đổi tên, Windows báo đang mở -> thử lại tới 30 s) cho decode_track + `retime_stems` (120 s – trình phát có thể đang giải
+  mã bản tách cũ). (2) Bỏ hộp hỏi "Căn lại giờ ngay?": nút **Căn giờ theo hình** ở tab Âm thanh mục 1 (luôn có, dòng
+  trạng thái `sync_status`: ⚠ lệch / ✓ đúng giờ / dự án trước 2.0.92) + nút cùng tên trên thanh đầu (chỉ khi mở dự án đo
+  thấy lệch, nhắc 1 lần bằng toast). `pipeline.retime` trả `state`: done / ok (không lệch – chỉ ghi dấu) / already (đã
+  căn hoặc nghe sau 2.0.92 – không dời câu thêm lần nữa; thông báo nhắc bản đã xoá phụ đề cũ của video VFR). Xoá các bản
+  đệm (16 kHz, sóng âm, âm lượng) bị khoá không làm hỏng việc căn.
+
 ## Vấn đề đang mở
-- 2.0.92: chờ người dùng mở lại dự án phim 3 giờ -> bấm Yes ở hộp "Âm thanh lệch giờ so với hình" -> phát lại xem phụ đề
-  / giọng lồng còn lệch khẩu hình không (nhất là cuối phim). Nếu tool KHÔNG hỏi (đo không thấy lệch) mà vẫn lệch -> nguyên
+- 2.0.92/93: chờ người dùng mở lại dự án phim 3 giờ -> bấm "Căn giờ theo hình" (thanh trên cùng / tab Âm thanh) -> phát lại xem phụ đề
+  / giọng lồng còn lệch khẩu hình không (nhất là cuối phim). Nếu bấm nút mà tool báo "đã khớp" (đo không thấy lệch) mà vẫn lệch -> nguyên
   nhân khác (VD bản đã xoá phụ đề của video VFR – chạy lại Xoá sạch, hoặc bản xem trước nhẹ), cần thêm thông tin.
 - 2.0.91: chờ người dùng thử lại ảnh bìa: Chrome điền sẵn (YouTube: ảnh có hiện ở mục Hình thu nhỏ không – kênh
   chưa xác minh số điện thoại thì không có nút; TikTok: tool có tự mở Sửa ảnh bìa không), Tự tải lên (file

@@ -12,7 +12,10 @@ Các lớp âm thanh (edit["audio"]):
 from __future__ import annotations
 
 import hashlib
+import os
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -106,9 +109,20 @@ def _decode_cmd(src: str | Path, pre: str, dst: str) -> list[str]:
             "-ar", str(SR)] + (["-af", pre] if pre else []) + ["-f", "s16le", dst]
 
 
+_DECODE_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+STALE_TMP = 3600      # file .tmp của lần giải mã bị ngắt (tắt tool giữa chừng) cũ hơn 1 giờ -> xoá
+
+
+def _decode_lock(path: Path) -> threading.Lock:
+    with _LOCKS_GUARD:
+        return _DECODE_LOCKS.setdefault(str(path), threading.Lock())
+
+
 def decode_track(src: str | Path, cache_dir: str | Path, name: str, pre: str = "") -> Path | None:
     """Giải mã 1 file âm thanh / video thành PCM 16-bit stereo 44,1 kHz (đọc lại bằng memmap, không chiếm RAM).
-    Có sẵn bản giải mã đúng file + đúng bộ lọc thì dùng lại."""
+    Có sẵn bản giải mã đúng file + đúng bộ lọc thì dùng lại. 2 lần nạp cùng lúc (mở dự án + vừa xong 1 việc) cùng 1
+    bản -> lần sau chờ lần trước giải mã xong rồi dùng luôn (trước 2.0.93 cả 2 cùng ghi 1 file .tmp -> WinError 32)."""
     from . import ffmpeg as ff
 
     src = Path(src)
@@ -119,22 +133,29 @@ def decode_track(src: str | Path, cache_dir: str | Path, name: str, pre: str = "
     key = _track_key(src, st.st_size, st.st_mtime, pre)
     d = Path(cache_dir)
     d.mkdir(parents=True, exist_ok=True)
-    hit = _cached_track(d, name, key)
-    if hit:
-        return hit
     out = d / f"{name}_{key}.raw"
-    tmp = out.with_suffix(".tmp")
-    r = subprocess.run(_decode_cmd(src, pre, str(tmp)), capture_output=True, creationflags=ff._NO_WINDOW)
-    if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
-        tmp.unlink(missing_ok=True)
-        return None
-    tmp.replace(out)
-    for old in list(d.glob(f"{name}_*.raw")) + list(d.glob(f"{name}_*.ref")):   # bản cũ của lớp này (file / bộ lọc đã đổi)
-        if old != out:
-            try:
-                old.unlink()
-            except OSError:
-                pass
+    with _decode_lock(out):
+        hit = _cached_track(d, name, key)
+        if hit:
+            return hit
+        tmp = d / f"{name}_{key}.{os.getpid()}_{threading.get_ident()}.tmp"
+        r = subprocess.run(_decode_cmd(src, pre, str(tmp)), capture_output=True, creationflags=ff._NO_WINDOW)
+        if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+            tmp.unlink(missing_ok=True)
+            return None
+        try:
+            ff.replace_file(tmp, out)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            if not (out.exists() and out.stat().st_size > 0):
+                raise
+    now = time.time()
+    for old in list(d.glob(f"{name}_*.raw")) + list(d.glob(f"{name}_*.ref")) + list(d.glob(f"{name}_*.tmp")):
+        try:            # bản cũ của lớp này (file / bộ lọc đã đổi); đang được phát (memmap) thì để lần sau
+            if old != out and not (old.suffix == ".tmp" and now - old.stat().st_mtime < STALE_TMP):
+                old.unlink()    # .tmp mới = lần giải mã khác đang chạy -> để nguyên
+        except OSError:
+            pass
     return out
 
 

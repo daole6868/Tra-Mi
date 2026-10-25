@@ -226,6 +226,22 @@ def run(args: list[str], duration: float = 0.0, progress: ProgressCB | None = No
 # tính từ bản giải mã (tách giọng, nghe, giọng lồng, tiếng gốc khi phát trong tool) khớp nhau nhưng TRÔI DẦN so với hình
 # – trình phát xếp hình theo giờ. aresample async: đệm lặng / bỏ / co giãn nhẹ mẫu cho khớp giờ; first_pts=0: âm thanh
 # bắt đầu muộn hơn hình thì đệm lặng ở đầu. TIMELINE = phiên bản cách giải mã (dự án cũ hơn -> pipeline.retime).
+def replace_file(src: str | Path, dst: str | Path, wait: float = 30.0) -> None:
+    """os.replace, chịu được Windows báo file đang bị tiến trình khác mở (WinError 32 – trình phát / FFmpeg đang đọc):
+    thử lại tới `wait` giây rồi mới báo lỗi."""
+    import time
+
+    end = time.monotonic() + wait
+    while True:
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if time.monotonic() >= end:
+                raise
+            time.sleep(0.25)
+
+
 TIMELINE = 2
 SYNC_MAX = 0.15      # lệch ≤ 0,15 s coi như khớp (không cần căn lại giờ dự án cũ)
 
