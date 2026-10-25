@@ -260,7 +260,7 @@ def apply_cleanup(segs: list[Segment], res: dict) -> tuple[list[Segment], dict]:
     """Áp dụng kết quả AI (đã kiểm tra an toàn). Trả về (danh sách câu mới, thống kê {"fixed", "merged", "changed"
     (số thứ tự mới của câu đổi), "unsure" (số thứ tự mới), "songs" (số thứ tự mới của câu đánh 🎵), "removed"
     [(giờ, chữ, lý do)] câu không phải lời thoại đã bỏ})."""
-    from .align import JOIN_CHARS, JOIN_DUR, _cjk_count, soft_join
+    from .align import JOIN_CHARS, JOIN_DUR, _cjk_count, soft_join, split_mates
 
     n = len(segs)
     trim_only = res.get("mode") == "filter"
@@ -277,6 +277,8 @@ def apply_cleanup(segs: list[Segment], res: dict) -> tuple[list[Segment], dict]:
         if len(g) < 2 or len(g) > (3 if join_only else 4) or g != list(range(g[0], g[0] + len(g))) or used & set(g):
             continue
         if any(x in noise or x in song for x in g):      # không gộp lời bài hát / chữ rác với lời thoại
+            continue
+        if any(split_mates(segs[x - 1], segs[x]) for x in g[:-1]):   # vế của câu dịch dài đã tách có chủ ý
             continue
         ss = [segs[x - 1] for x in g]
         if any(ss[k + 1].start - ss[k].end > MAX_GAP for k in range(len(ss) - 1)) or ss[-1].end - ss[0].start > MAX_MERGED:

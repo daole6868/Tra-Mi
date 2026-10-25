@@ -733,6 +733,8 @@ def shift_tails(segs: list[Segment], q: dict, punctuated: bool) -> int:
             continue
         if a.extra.get("song") or b.extra.get("song") or (a.speaker and b.speaker and a.speaker != b.speaker):
             continue
+        if split_mates(a, b):
+            continue
         if not a.text.strip() or _last_mark(a.text) in STRONG + WEAK or a.text.rstrip() != a.text.rstrip(CLOSERS):
             continue
         gap = b.start - a.end
@@ -817,6 +819,8 @@ def heard_junction(t1: str, t2: str, heard: str, near: int = 6) -> dict | None:
 def _should_join(grp: list[Segment], nxt: Segment, q: dict, punctuated: bool) -> bool:
     last = grp[-1]
     if not (CJK.search(last.text or "") and CJK.search(nxt.text or "")):
+        return False
+    if split_mates(last, nxt):
         return False
     if last.extra.get("song") or nxt.extra.get("song"):
         return False
@@ -1117,24 +1121,80 @@ def draft_lines(segs: list[Segment], settings: dict | None = None, total: float 
 # thời gian đặt ở chỗ ngắt hơi thật (chỗ lặng nhất của giọng quanh vị trí ước theo số chữ), vế sau có "pause_before"
 # -> giọng lồng nghỉ 1 nhịp giữa 2 vế.
 CLAUSE_ZH = "，,；;：:"
+END_ZH = "。！？!?"
 CLAUSE_TR = {"ja": "、，,；;：:", "zh": "，,；;：:"}
 CLAUSE_TR_DEFAULT = ",;:，；："
+END_TR = "。！？!?."
 _TAIL_JUNK = " \t\"'”’)）」』】…。！？!?.,，;；:："
+_AFTER_MARK = "”’\"')）」』】"
 SPLIT_KEEP = ("voice", "speed", "overflow", "nodub", "trans_user", "song", "not_song")
+PAIR_TOL = 0.12          # số dấu câu 2 bên khác nhau: vế dịch ứng với vế gốc khi vị trí (tỉ lệ độ dài) lệch ≤ 12 %
+END_PAUSE = 1.6          # tách ở chỗ hết câu (? ! .) nghỉ dài hơn tách ở dấu phẩy
+
+
+def _bounds(text: str, ends: str, clauses: str) -> list[tuple[int, str]]:
+    """Chỗ ngắt BÊN TRONG câu: [(chỉ số ngay sau dấu + ngoặc đóng, "end" | "clause")]. "end" = ? ! . 。, "clause" =
+    phẩy / chấm phẩy / hai chấm / ba chấm. Bỏ dấu ở cuối câu, dấu trong số ("1,5", "3.5", "10:30")."""
+    out = []
+    i, n = 0, len(text)
+    marks = ends + clauses + "…"
+    while i < n:
+        if text[i] not in marks:
+            i += 1
+            continue
+        j = i
+        while j < n and text[j] in marks:
+            j += 1
+        run = text[i:j]
+        if len(run) == 1 and run in ",.:" and 0 < i and j < n and text[i - 1].isdigit() and text[j].isdigit():
+            i = j
+            continue
+        if run == "." and j < n and not text[j].isspace() and text[j] not in _AFTER_MARK:
+            i = j                          # "TP.HCM", "v.v" – không phải hết câu
+            continue
+        while j < n and text[j] in _AFTER_MARK:
+            j += 1
+        kind = "clause" if ("…" in run or ".." in run or not any(c in ends for c in run)) else "end"
+        if text[j:].strip(_TAIL_JUNK):
+            out.append((j, kind))
+        i = j
+    return out
 
 
 def _clause_cuts(text: str, marks: str) -> list[int]:
     """Chỉ số ngay sau từng dấu ngắt vế BÊN TRONG câu (dấu ở cuối câu không tính)."""
-    out = []
-    for i, c in enumerate(text):
-        if c in marks and text[i + 1:].strip(_TAIL_JUNK):
-            out.append(i + 1)
-    return out
+    return [p for p, _ in _bounds(text, "", marks)]
 
 
 def _vis(text: str) -> int:
     """Số chữ có nghĩa (Hán, chữ cái, số) – ước vị trí thời gian theo câu gốc."""
     return sum(1 for c in text if c.isalnum())
+
+
+def _pair_cuts(zh: str, tr: str, lang: str) -> list[tuple[int, int, str]]:
+    """Cặp chỗ tách (vị trí trong câu gốc, vị trí trong câu dịch, loại). Cùng số chỗ ngắt -> ghép theo thứ tự (vế i ứng
+    vế i, lệch tỉ lệ ≤ 30 %); khác số -> mỗi chỗ ngắt của câu dịch lấy chỗ ngắt câu gốc gần nhất theo tỉ lệ độ dài
+    (lệch ≤ PAIR_TOL, khác loại dấu thì chặt hơn)."""
+    from . import langs
+
+    bz = _bounds(zh, END_ZH, CLAUSE_ZH)
+    bt = _bounds(tr, END_TR, CLAUSE_TR.get(lang, CLAUSE_TR_DEFAULT))
+    nz, nt = max(1, _vis(zh)), max(1, langs.units(tr, lang))
+    sz = [(_vis(zh[:p]) / nz, p, k) for p, k in bz]
+    st = [(langs.units(tr[:p], lang) / nt, p, k) for p, k in bt]
+    if not sz or not st:
+        return []
+    out = []
+    if len(sz) == len(st):
+        for (fz, pz, kz), (ft, pt, kt) in zip(sz, st):
+            if abs(fz - ft) <= 0.3:
+                out.append((pz, pt, "end" if "end" in (kz, kt) else "clause"))
+        return out
+    for ft, pt, kt in st:
+        fz, pz, kz = min(sz, key=lambda x: abs(x[0] - ft) + (0.04 if x[2] != kt else 0))
+        if abs(fz - ft) <= (PAIR_TOL if kz == kt else PAIR_TOL * 0.6):
+            out.append((pz, pt, "end" if "end" in (kz, kt) else "clause"))
+    return out
 
 
 def _quiet_cut(env: np.ndarray | None, hop: float, a: float, b: float, est: float) -> tuple[float, float]:
@@ -1176,9 +1236,10 @@ def _quiet_cut(env: np.ndarray | None, hop: float, a: float, b: float, est: floa
 
 def split_clauses(seg: Segment, lang: str = "vi", max_units: float = 14, min_units: float = 4,
                   env: np.ndarray | None = None, hop: float = 0.05, pause: float = 0.25) -> list[Segment]:
-    """Tách 1 câu đã dịch quá dài (> max_units tiếng – quy đổi theo tốc độ nói của tiếng đích) thành các vế ở dấu
-    ngắt vế, chỉ khi câu gốc và câu dịch có CÙNG số dấu ngắt vế (vế i của bản dịch ứng với vế i của câu gốc). Mỗi vế
-    ≥ min_units tiếng. Không tách được -> [seg] (đúng đối tượng cũ)."""
+    """Tách 1 câu đã dịch quá dài (> max_units tiếng – quy đổi theo tốc độ nói của tiếng đích) thành các vế ở chỗ hết
+    câu (? ! .) hoặc dấu phẩy BÊN TRONG câu, chỗ đó phải có ở cả câu gốc lẫn câu dịch (`_pair_cuts`). Ưu tiên chỗ hết
+    câu, rồi chia đều số tiếng; mỗi vế ≥ min_units tiếng. Các vế cùng mã `split` (lệnh nối câu không nối lại), vế sau
+    nghỉ `pause` giây (hết câu × END_PAUSE). Không tách được -> [seg] (đúng đối tượng cũ)."""
     from . import langs
 
     tr, zh = (seg.trans or "").strip(), (seg.text or "").strip()
@@ -1189,32 +1250,40 @@ def split_clauses(seg: Segment, lang: str = "vi", max_units: float = 14, min_uni
     lim, mn = max_units * k, max(1.0, min_units * k)
     if langs.units(tr, lang) <= lim:
         return [seg]
-    cz = _clause_cuts(zh, CLAUSE_ZH)
-    ct = _clause_cuts(tr, CLAUSE_TR.get(lang, CLAUSE_TR_DEFAULT))
-    if not cz or len(cz) != len(ct):
-        return [seg]
     best = None
-    for i, (pz, pt) in enumerate(zip(cz, ct)):
+    for pz, pt, kind in _pair_cuts(zh, tr, lang):
         u1, u2 = langs.units(tr[:pt], lang), langs.units(tr[pt:], lang)
         if u1 < mn or u2 < mn or _vis(zh[:pz]) < 2 or _vis(zh[pz:]) < 2:
             continue
-        sc = abs(u1 - u2)
+        sc = (kind != "end", abs(u1 - u2))
         if best is None or sc < best[0]:
-            best = (sc, pz, pt)
+            best = (sc, pz, pt, kind)
     if best is None:
         return [seg]
-    _, pz, pt = best
+    _, pz, pt, kind = best
     n1, n2 = _vis(zh[:pz]), _vis(zh[pz:])
     est = seg.start + (seg.end - seg.start) * n1 / max(1, n1 + n2)
     e1, s2 = _quiet_cut(env, hop, seg.start, seg.end, est)
     e1 = min(max(e1, seg.start + 0.3), seg.end - 0.3)
     s2 = min(max(s2, e1), seg.end - 0.3)
+    sid = seg.extra.get("split") or f"{seg.start:.3f}"
     ex = {k2: v for k2, v in seg.extra.items() if k2 in SPLIT_KEEP}
-    a = Segment(round(seg.start, 3), round(e1, 3), zh[:pz].strip(), tr[:pt].strip(), seg.speaker, dict(ex, clause=1))
-    b = Segment(round(s2, 3), round(seg.end, 3), zh[pz:].strip(), tr[pt:].strip(), seg.speaker,
-                dict(ex, clause=2, pause_before=round(float(pause), 3)) if pause > 0 else dict(ex, clause=2))
+    ex["split"] = sid
+    ea = dict(ex)
+    if seg.extra.get("pause_before"):     # vế đầu giữ khoảng nghỉ với vế đứng trước nó (tách nhiều lần)
+        ea["pause_before"] = seg.extra["pause_before"]
+    gap = round(float(pause) * (END_PAUSE if kind == "end" else 1.0), 3)
+    eb = dict(ex, pause_before=gap) if gap > 0 else dict(ex)
+    a = Segment(round(seg.start, 3), round(e1, 3), zh[:pz].strip(), tr[:pt].strip(), seg.speaker, ea)
+    b = Segment(round(s2, 3), round(seg.end, 3), zh[pz:].strip(), tr[pt:].strip(), seg.speaker, eb)
     return split_clauses(a, lang, max_units, min_units, env, hop, pause) + \
         split_clauses(b, lang, max_units, min_units, env, hop, pause)
+
+
+def split_mates(a: Segment, b: Segment) -> bool:
+    """2 dòng liền nhau là các vế của 1 câu dịch dài đã tách có chủ ý -> lệnh nối câu (luật / AI) không nối lại."""
+    sid = a.extra.get("split")
+    return bool(sid) and sid == b.extra.get("split")
 
 
 def split_long_lines(segs: list[Segment], lang: str = "vi", max_units: float = 14, min_units: float = 4,

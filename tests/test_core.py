@@ -5448,3 +5448,32 @@ def test_split_long_translations_at_commas(sample_video):
     rows = pipeline.split_long(p)
     assert rows == [1, 2] and len(Project(p.id).segments) == 3
     assert pipeline.undo_split(Project(p.id)) == 2 and len(Project(p.id).segments) == 2
+
+
+def test_split_long_at_sentence_ends_and_keep_split():
+    from trami import align, skills
+
+    a = Segment(100.0, 108.5, "就是，要不说这祸害能一千年呢得了，既然没死，那就还是帮本武长，接着管好这帮贱犯啊。",
+                "Đúng vậy, người ta vẫn bảo tai họa để đời ngàn năm, đã không chết thì mau giúp Mã Vũ Trưởng ta, "
+                "tiếp tục quản lý đám tù nhân hèn mọn này đi.", "S1")
+    b = Segment(109.0, 114.6, "熊大，他说的帮他管犯人是什么意思？哥，你是咱流放营第三五的管事儿啊，",
+                "Hùng Đại, hắn nói giúp hắn quản lý tù nhân là ý gì? Ca, ca là quản sự trại lưu đày của chúng ta mà,", "S2")
+    out, made = align.split_long_lines([a, b])
+    assert [s.trans for s in out] == [
+        "Đúng vậy, người ta vẫn bảo tai họa để đời ngàn năm,",       # 4 dấu phẩy gốc / 3 dấu phẩy dịch: khớp theo vị trí
+        "đã không chết thì mau giúp Mã Vũ Trưởng ta,",
+        "tiếp tục quản lý đám tù nhân hèn mọn này đi.",
+        "Hùng Đại, hắn nói giúp hắn quản lý tù nhân là ý gì?",       # ưu tiên chỗ hết câu (?) thay vì dấu phẩy
+        "Ca, ca là quản sự trại lưu đày của chúng ta mà,"]
+    assert [s.text for s in out[:3]] == ["就是，要不说这祸害能一千年呢得了，", "既然没死，那就还是帮本武长，", "接着管好这帮贱犯啊。"]
+    assert out[3].text == "熊大，他说的帮他管犯人是什么意思？" and made == [0, 1, 2, 3, 4]
+    assert [s.extra.get("pause_before", 0) for s in out] == [0, 0.25, 0.25, 0, 0.4]   # hết câu nghỉ lâu hơn
+    assert all(out[k].end <= out[k + 1].start for k in range(4))
+    # dấu trong số / chữ viết tắt không phải chỗ tách
+    assert align._bounds("Giá 1,5 vạn, lúc 10:30 ở TP.HCM nhé", align.END_TR, ",;:") == [(12, "clause")]
+    # lệnh nối câu (luật / AI) không nối lại các vế đã tách có chủ ý
+    assert align.split_mates(out[0], out[1]) and not align.split_mates(out[2], out[3])
+    joined, n = align.join_broken(out)
+    assert n == 0 and len(joined) == 5
+    new, st = skills.apply_cleanup(out, {"mode": "join", "merge": [[1, 2], [4, 5]]})
+    assert len(new) == 5 and st["merged"] == 0

@@ -140,11 +140,12 @@ hạn một chút, *Số câu mỗi lần gửi* 30–60; key hết lượt hôm
   1 câu trọn nghĩa: chỉ tách ở cuối câu (。！？) hoặc chỗ nghỉ thật, không bao giờ cắt giữa 1 từ; dòng bị cắt ngang câu
   được tự nối lại. **Kiểu tách câu** (tab Tự động / Cài đặt): *Câu trọn ý – hợp lồng tiếng* (mặc định) hoặc *Câu ngắn –
   hợp phụ đề đọc nhanh*. Dự án cũ: tab Phụ đề → **Nối câu bị cắt** (có *Hoàn tác nối*; dự án đã dịch thì câu mới được dịch luôn).
-- Câu dịch quá dài (vd. "Vì món nợ khiến Thiên Kiếm Tông nghèo rớt, vì những đạo sét đại sư huynh phải chịu,"): sau
-  khi dịch cả phim, tool **tự tách ở dấu phẩy** thành 2 dòng (chỉ khi câu gốc và câu dịch có cùng số dấu phẩy, mốc thời gian
-  đặt đúng chỗ nhân vật ngắt hơi) và giọng lồng **nghỉ 0,25 s** giữa 2 vế. Chỉnh ở tab Phụ đề: *Tự tách câu dịch dài ở dấu
-  phẩy, câu dài hơn 14 tiếng*, *nghỉ giữa 2 vế*; dự án cũ bấm **Tách câu dài** (câu đã lồng tiếng được đọc lại), có
-  *Hoàn tác tách* / Ctrl+Z.
+- Câu dịch quá dài (vd. "Hùng Đại, hắn nói giúp hắn quản lý tù nhân là ý gì? Ca, ca là quản sự trại lưu đày của
+  chúng ta mà,"): sau khi dịch cả phim, tool **tự tách ở dấu câu giữa câu** – ưu tiên chỗ hết câu (? ! .), rồi dấu phẩy –
+  thành nhiều dòng (chỗ tách phải có dấu câu ở cả câu gốc lẫn câu dịch, đúng vị trí tương ứng; mốc thời gian đặt đúng chỗ
+  nhân vật ngắt hơi). Giọng lồng **nghỉ 0,25 s** giữa 2 vế (hết câu 0,4 s). Chỉnh ở tab Phụ đề: *Tự tách câu dịch dài ở
+  dấu câu, câu dài hơn 14 tiếng*, *nghỉ giữa 2 vế*; dự án cũ bấm **Tách câu dài** (câu đã lồng tiếng được đọc lại), có
+  *Hoàn tác tách* / Ctrl+Z. Các nút nối câu (*Nối câu bị cắt*, *AI nối câu*) không nối lại các vế đã tách.
 - Dịch ở phần mềm khác rồi **Nạp SRT đã dịch**: file dịch có ít câu hơn (gộp câu) thì tool gộp các câu gốc tương ứng,
   nhiều câu hơn (tách câu) thì nối các câu dịch vào câu gốc – không còn câu bị trống. Có tách giọng thì tool còn **nghe lại các đoạn có tiếng bị bộ chia đoạn bỏ sót**, nên không còn câu bị bỏ không dịch.
 - Dùng **AI dịch** và chọn đúng **thể loại**. Sau lần dịch đầu, sửa bảng tên riêng nếu cần rồi bấm **Dịch lại tất cả**. Bản dịch cũ được lưu sẵn, nên dịch lại không tốn thêm tiền cho những câu không đổi.

@@ -1198,7 +1198,7 @@ def speech_env(p: Project, progress: Prog | None = None, cancel=None) -> tuple:
 
 def split_long(p: Project, settings: dict | None = None, rows: list[int] | None = None, progress: Prog | None = None,
                cancel=None) -> list[int]:
-    """Tách câu DỊCH dài ở dấu phẩy (align.split_clauses): mỗi vế 1 dòng phụ đề + 1 đoạn giọng, giữa 2 vế nghỉ 1 nhịp.
+    """Tách câu DỊCH dài ở dấu ? ! . / dấu phẩy (align.split_clauses): mỗi vế 1 dòng phụ đề + 1 đoạn giọng, giữa 2 vế nghỉ 1 nhịp.
     rows: chỉ các câu này. Giọng lồng của câu cũ bị bỏ (đọc lại 2 vế). Trả về số thứ tự các câu mới."""
     from . import align
 
@@ -1418,14 +1418,14 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
             p.data["skill_warning"] = f"Bỏ qua bước AI kiểm tra bản dịch ({err_text(e)[:120]})"
             p.save()
     if whole and settings.get("split_long_trans", True):
-        # câu dịch quá dài (> N tiếng) có dấu phẩy ở cả câu gốc lẫn câu dịch -> tách thành các vế, giữa 2 vế nghỉ 1 nhịp
+        # câu dịch quá dài (> N tiếng) có dấu ? ! . / dấu phẩy ở cả câu gốc lẫn câu dịch -> tách thành các vế, nghỉ 1 nhịp
         before = len(p.segments)
         # câu đã có giọng lồng giữ nguyên (tách thì mất giọng) – muốn tách thì bấm "Tách câu dài" ở tab Phụ đề
         made = split_long(p, settings, [k for k, x in enumerate(p.segments) if not x.extra.get("tts_file")], None,
                           cancel)
         if made:
             p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + \
-                f"tách {len(p.segments) - before} câu dịch dài ở dấu phẩy thành {len(made)} câu ngắn"
+                f"tách {len(made) - (len(p.segments) - before)} câu dịch dài ở dấu câu thành {len(made)} câu ngắn"
             p.save()
     return sum(1 for s in p.segments if s.trans)
 

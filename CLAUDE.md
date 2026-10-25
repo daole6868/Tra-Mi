@@ -67,9 +67,12 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `shift_tails` (nối quá dài -> chuyển mẩu sau dấu phẩy cuối sang dòng sau), `heard_junction` (so lời nghe lại quanh chỗ
   cắt khúc); `asr_qwen.relisten_cuts` (nghe lại ±6 s quanh chỗ cắt khúc giữa lúc đang nói, Cài đặt `asr_relisten`);
   AI nối câu theo nghĩa `pipeline.join_engine` / `ai_join_lines` / `ai_join` (`skills.clean_lines(mode="join")`, Cài đặt
-  `ai_join_engine`: auto / off / tên AI). Tách câu DỊCH dài ở dấu phẩy (2.0.80): `align.split_clauses` /
-  `split_long_lines` (chỉ khi câu gốc + câu dịch cùng số dấu phẩy giữa câu; mốc theo tỉ lệ chữ Trung, dời tới chỗ lặng
-  nhất của giọng `_quiet_cut`; vế sau `extra["pause_before"]` -> `tts.plan_layout` item "pause" = khoảng nghỉ tối thiểu)
+  `ai_join_engine`: auto / off / tên AI). Tách câu DỊCH dài ở dấu câu (2.0.80–81): `align.split_clauses` /
+  `split_long_lines` (`_bounds` chỗ ngắt giữa câu "end" ? ! . / "clause" , ; : …; `_pair_cuts` ghép chỗ ngắt câu gốc ↔
+  câu dịch: cùng số -> theo thứ tự, khác số -> gần nhất theo tỉ lệ độ dài ≤ `PAIR_TOL`; ưu tiên "end" rồi chia đều; mốc
+  theo tỉ lệ chữ Trung, dời tới chỗ lặng nhất của giọng `_quiet_cut`; vế sau `extra["pause_before"]` (hết câu ×
+  `END_PAUSE`) -> `tts.plan_layout` item "pause" = khoảng nghỉ tối thiểu; các vế cùng `extra["split"]` -> `split_mates`:
+  `_should_join` / `shift_tails` / `skills.apply_cleanup` không nối lại)
   -> `pipeline.split_long` / `undo_split` (`split_backup`) / `speech_env` (độ to 50 ms của giọng đã tách `voice_50ms`,
   không thì tiếng gốc); tự chạy cuối `translate` khi dịch cả phim (Cài đặt `split_long_trans`, `split_long_units` 14,
   `split_pause` 0,25), bỏ qua câu đã có giọng.
@@ -137,7 +140,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (157 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (158 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1336,10 +1339,22 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     lệch giữ nguyên; có chỗ ngắt hơi trong giọng -> mốc đúng chỗ lặng; giọng vế sau cách vế trước ≥ khoảng nghỉ đặt.
   * Sửa test giao diện chập chờn (trình phát báo vị trí 0 giữa lúc kiểm tra vùng an toàn -> lớp 1–3 s bị ẩn).
 
+- 2.0.81: "không chỉ dấu phẩy, câu có dấu ? cũng tách" ("Hùng Đại, hắn nói … là ý gì? Ca, ca là quản sự … mà," – cách
+  2.0.80 sẽ tách nhầm ở "Ca," vì không coi "?" là chỗ tách) + câu dài số dấu phẩy gốc / dịch khác nhau (4 / 3) không tách.
+  * `align._bounds`: chỗ ngắt giữa câu gồm cả hết câu (。！？ / ? ! . – "." chỉ khi sau là khoảng trắng; bỏ "1,5", "3.5",
+    "10:30", "TP.HCM"; "…" / "..." tính là dấu phẩy), ngoặc đóng đi theo vế trước. `_pair_cuts`: khác số chỗ ngắt -> ghép
+    theo tỉ lệ độ dài (chữ Trung / số tiếng), lệch ≤ 12 % (khác loại dấu ≤ 7 %). `split_clauses` ưu tiên chỗ hết câu, rồi
+    chia đều; tách ở ? ! . nghỉ × 1,6 (0,25 -> 0,4 s). Sửa: vế đầu của phần sau khi tách tiếp mất `pause_before`.
+  * Các vế mang `extra["split"]` (mã chung) -> "Nối câu bị cắt" / tự nối khi nghe (`_should_join`, `shift_tails`), "AI nối
+    câu" / "AI sửa lỗi nghe & nối câu" (`apply_cleanup`) không nối lại; Gộp tay vẫn được.
+  * Thông báo sau khi dịch đếm đúng số câu gốc đã tách. Chữ giao diện / tooltip: "dấu câu (? ! . ,)".
+  * Thử trên 2 câu người dùng gửi: câu 1 -> 3 dòng ("Đúng vậy, … ngàn năm," | "đã không chết … Mã Vũ Trưởng ta," | "tiếp
+    tục … này đi."), câu 2 -> "… là ý gì?" | "Ca, ca là … mà,".
+
 ## Vấn đề đang mở
-- 2.0.80: chờ người dùng thử "Tách câu dài" trên phim thật (dự án cũ đã lồng: đọc lại các vế mới) – mức 14 tiếng có hợp
-  không, mốc tách có đúng chỗ nhân vật ngắt hơi không (cần đã tách giọng), câu có số dấu phẩy khác nhau giữa bản Trung /
-  Việt thì không tách (có thể làm thêm: AI tách theo nghĩa).
+- 2.0.80/81: chờ người dùng thử "Tách câu dài" trên phim thật (dự án cũ đã lồng: đọc lại các vế mới) – mức 14 tiếng có
+  hợp không, mốc tách có đúng chỗ nhân vật ngắt hơi không (cần đã tách giọng), ghép vế theo tỉ lệ (số dấu câu 2 bên khác
+  nhau) có ghép sai vế không. Người dùng đã bỏ ý "nới chỗ nghỉ ở dấu phẩy trong câu" (VieNeu tự nghỉ ~0,3–0,45 s).
 - 2.0.79: chờ người dùng thử trên máy thật: xuất 9:16 + 16:9 cùng lúc, kéo chữ / logo khi xem thử từng tỉ lệ, GIF logo
   động, font riêng, nét cọ vàng có đẹp không; "Rút khoảng lặng" trên phim dài (theo âm lượng đo 1 lần ~ vài chục giây) và
   "Tìm / cắt đoạn bài hát" (bài hát có được cắt trọn kể cả nhạc dạo không, có cắt nhầm lời thoại không). Chưa làm: hiệu
