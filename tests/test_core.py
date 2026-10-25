@@ -6700,3 +6700,82 @@ def test_dub_wave_10ms_and_old_env_rebuilt(tmp_path):
     assert hop == 0.01 and len(env) == 300 and not old.exists() and f.endswith(".env10.npy")
     assert env[103] < 0.05 and env[95] > 0.9 and env[115] > 0.9   # thấy rõ chỗ nghỉ 0,1 s
     assert np.allclose(env, tts.wave_envelope(tts.read_wav(wav)[0], sr).astype(np.float32), atol=0.01)
+
+
+def test_gui_cut_card_and_undo_buttons(monkeypatch):
+    """Thẻ Cắt video (2.0.98): đánh dấu đầu / cuối -> đoạn cắt (gộp đoạn chồng nhau), trình phát bỏ qua NGAY; Bỏ 1 đoạn /
+    Bỏ hết -> trình phát phát lại ngay (trước đây vẫn nhảy qua chỗ cũ); MỌI thao tác này + cắt đầu / cuối + xoá / tắt tiếng
+    đoạn trên timeline hoàn tác / làm lại được bằng 2 nút ↶ ↷ trên thanh đầu (không cần Ctrl+Z)."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    p = Project.create("cắt video hoàn tác")
+    p.data["info"] = {"duration": 120, "width": 640, "height": 360}
+    p.segments = [Segment(10 * i, 10 * i + 4, f"句{i}", f"Câu {i}") for i in range(10)]
+    p.save()
+    win = MainWindow()
+    try:
+        win.open_project(p.id)
+        app.processEvents()
+        pp = win.project_page
+        pos = [0.0]
+        monkeypatch.setattr(pp.player, "position", lambda: pos[0])
+        assert not pp.undo_btn.isEnabled()
+
+        def cut(a, b):
+            pos[0] = a
+            pp._mark_cut("a")
+            pos[0] = b
+            pp._mark_cut("b")
+
+        def cuts():
+            return Project(p.id).edit.get("cuts")
+        cut(30.0, 40.0)
+        assert cuts() == [[30.0, 40.0]] and pp.undo_btn.isEnabled()
+        assert (30.0, 40.0) not in [tuple(r) for r in pp.player.keep] and any(r[1] == 30.0 for r in pp.player.keep)
+        cut(38.0, 45.0)                       # chồng đoạn cũ -> gộp
+        assert cuts() == [[30.0, 45.0]]
+        assert pp.cuts_rows_l.count() == 1 and "1 đoạn cắt" in pp.cuts_list.text()
+        pp.undo_btn.click()                   # nút ↶ trên thanh đầu
+        assert cuts() == [[30.0, 40.0]]
+        pp.redo_btn.click()                   # nút ↷
+        assert cuts() == [[30.0, 45.0]]
+        pp._clear_cuts()
+        assert cuts() == [] and pp.player.keep == []      # không còn đoạn bỏ qua: trình phát phát lại đoạn đó ngay
+        pp.undo_btn.click()
+        assert cuts() == [[30.0, 45.0]] and len(pp.player.keep) == 2
+        cut(60.0, 61.0)
+        pp._drop_cut(0)                       # nút Bỏ 1 đoạn
+        assert cuts() == [[60.0, 61.0]]
+        pp.undo_btn.click()
+        assert cuts() == [[30.0, 45.0], [60.0, 61.0]]
+        # cắt đầu / cuối
+        pp.e_start.setValue(5.0)
+        pp.e_end.setValue(100.0)
+        pp.undo_btn.click()
+        assert (pp.e_start.value(), pp.e_end.value()) == (0.0, 0.0) and Project(p.id).edit["trim"]["start"] == 0
+        pp.redo_btn.click()
+        assert (pp.e_start.value(), pp.e_end.value()) == (5.0, 100.0)
+        # timeline: tắt tiếng gốc 1 đoạn -> hoàn tác
+        pos[0] = 80.0
+        pp._video_op("v_split")
+        pos[0] = 90.0
+        pp._video_op("v_split")
+        pcs = pp.tracks.pieces()
+        k = next(i for i, (a, b) in enumerate(pcs) if abs(a - 80) < 0.01)
+        pp.tracks.sel_pieces = {k}
+        pp._video_op("a_mute")
+        assert Project(p.id).edit["mute_spans"] == [[80.0, 90.0]]
+        pp.undo_btn.click()
+        assert not Project(p.id).edit.get("mute_spans")
+        pp.undo_btn.click()                   # bỏ điểm tách 90 s
+        assert Project(p.id).edit["vsplits"] == [80.0]
+        assert len(pp.segs if hasattr(pp, "segs") else pp.model.segs) == 10   # câu không bị đụng
+    finally:
+        win.close()
+        app.processEvents()

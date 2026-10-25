@@ -139,7 +139,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - `trami/voicecheck.py` – lọc câu nghe nhầm theo cao độ giọng (hồ sơ p10–p90 từng người nói từ câu chắc là lời thoại, ± `pitch_tol` nửa cung) -> `extra["noise"]` + thu đầu / cuối câu thừa; `pipeline.check_voices` / bước 2e của `recognize`.
 - Xuất chia đoạn (`video._render_chunked`, `export_chunks`): phim ≥ 10 phút, đoạn 60 s theo lưới khung xuất, mã đoạn = lệnh +
   file nguồn + dòng ASS trong đoạn -> `work/render/chunks/c_<mã>.mp4`, âm thanh trộn 1 lần `a_<mã>.m4a`, concat `-c copy`.
-  `gpu.wait_for_vram` (nvidia-smi) trước việc GPU; hoàn tác `project_page._undo/_redo` (ảnh chụp JSON danh sách câu).
+  `gpu.wait_for_vram` (nvidia-smi) trước việc GPU; hoàn tác `project_page.undo/redo` = nút ↶ ↷ thanh đầu = Ctrl+Z / Ctrl+Y
+  (`_snap`: câu + `cuts` + `layers` + "e" {trim (ô đang hiện), vsplits, inserts, mute_spans}; mọi chỗ sửa gọi `_undo_mark`).
 - `trami/publish.py` – đăng video YouTube / Facebook (Trang): `Zernio` (zernio.com/api/v1: profiles, connect/<nền tảng>,
   accounts, media/presign -> PUT, posts, posts/<id>), API riêng `yt_login` / `yt_upload` (OAuth máy tính + PKCE qua
   `_Catcher` 127.0.0.1, tải lên nối tiếp 308/Range, thumbnails.set) và `fb_login` / `fb_use_token` / `fb_upload` (Graph
@@ -181,7 +182,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (179 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (180 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1597,6 +1598,17 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (`_patch_dub_env`), karaoke (`karaoke_spans` theo bước thật của file) dùng cùng bước mới. Người dùng xác nhận 2.0.96 khớp
   (ảnh: phụ đề + giọng lồng bắt đầu 4,06 s đúng lúc nhân vật nói, giọng lồng nghỉ sau "Lâm Bắc," 4,40 → 4,70 s, nhân vật
   4,40 → 4,76 s); cuối khối phụ đề trễ ~0,1 s so với lúc thôi nói (tiếng vang / hơi thở trong giọng đã tách).
+- 2.0.98: "phần Cắt video đã đúng chưa + mọi chỗ hoàn tác dùng được nút ↶ ↷ trên cùng, không cần Ctrl+Z". Xuất video có
+  đoạn cắt vốn đúng (đã có test xuất 1 lần / từng đoạn). Lỗi ở thẻ Cắt video (tab Chỉnh sửa): "Đánh dấu cuối" / "Bỏ hết đoạn
+  cắt" không ghi lịch sử hoàn tác (nút ↶ mờ / Ctrl+Z gộp lần cắt vào thao tác sau); "Bỏ hết đoạn cắt" không làm mới trình
+  phát (vẫn nhảy qua chỗ cũ tới khi đổi ô khác); đoạn mới chồng đoạn cũ bị cộng dồn; cắt đầu / cuối (Bắt đầu từ / Kết thúc),
+  tách / xoá / khôi phục / chèn đoạn video và tắt tiếng gốc trên timeline không hoàn tác được. Sửa: `_mark_cut` gộp đoạn
+  chồng (`merge_spans`), `_clear_cuts` / `_drop_cut` / `_set_cuts` / `_cuts_changed` (làm mới danh sách, 2 thanh thời gian,
+  tóm tắt, trình phát ngay), danh sách đoạn cắt có nút "Xem chỗ nối" (`_play_cut` -> `_play_junction`) + "Bỏ" từng đoạn
+  (tối đa `CUT_ROWS` 30 hàng); `_snap` thêm "e" (trim, vsplits, inserts, mute_spans), `_undo_step` khôi phục cả các mục đó
+  (ô Bắt đầu / Kết thúc, trình phát, tiếng gốc), `_video_op` + ô cắt đầu / cuối gọi `_undo_mark`; thông báo hoàn tác ghi
+  "đoạn cắt / video / lớp phủ"; tooltip nút ↶ (`UNDO_TIP`) liệt kê mọi thao tác hoàn tác được + số bước. Lịch sử hoàn tác
+  tính từ lúc mở dự án (đoạn cắt làm từ lần trước: bấm "Bỏ" ở danh sách).
 
 ## Vấn đề đang mở
 - 2.0.96: chờ người dùng chạy lại "1. Nghe & tách câu" (hoặc dự án cũ: tab Phụ đề → Công cụ → Căn mép theo giọng, bật đo

@@ -17,6 +17,7 @@ from ..jobs import manager
 from ..karaoke import DEFAULT_COLOR as KARA_COLOR, MODES as KARA_MODES
 from ..project import Project
 from ..subtitle import Segment, load_subtitles, normalize, save_subtitles, shift_ct
+
 from . import common as C
 from . import icons, theme
 from .common import run_async
@@ -27,6 +28,9 @@ from .subs_model import (C_END, C_FIT, C_NODUB, C_SEL, C_SONG, C_SPK, C_START, C
                          SubsFilter, SubsModel, VoiceDelegate)
 from .widgets import (Card, ColorButton, Form, GradientButton, IconButton, IconTabs, PillTabs, ProgressBar,
                       SectionCard, SliderRow, Switch, button, combo, flow, hbox, label, set_combo, wrap)
+
+UNDO_TIP = ("Hoàn tác (Ctrl+Z): xoá / gộp / tách / kéo câu, sửa chữ, dịch, tạo giọng, tách / nối câu, căn mép, lọc cảm "
+            "thán, cắt video (đầu / cuối, đoạn giữa, Rút khoảng lặng), tách / xoá / chèn đoạn video, tắt tiếng gốc, chữ & logo")
 
 
 def safe_stem(p: Project) -> str:
@@ -120,7 +124,7 @@ class ProjectPage(QWidget):
                                  "lồng càng về sau càng lệch khẩu hình. Bấm để căn bản tách giọng, mốc câu, bản lồng cho "
                                  "khớp hình (không phải nghe, dịch hay đọc lại).", on_click=lambda: self.run_retime())
         self.retime_btn.hide()
-        self.undo_btn = IconButton("undo", "Hoàn tác (Ctrl+Z) – xoá / gộp / tách / kéo câu, sửa chữ, dịch lại, đổi giọng…", 34)
+        self.undo_btn = IconButton("undo", UNDO_TIP, 34)
         self.undo_btn.clicked.connect(self.undo)
         self.redo_btn = IconButton("redo", "Làm lại (Ctrl+Y)", 34)
         self.redo_btn.clicked.connect(self.redo)
@@ -982,6 +986,7 @@ class ProjectPage(QWidget):
             sp.setDecimals(2)
             sp.setSuffix(" giây")
             sp.valueChanged.connect(sv)
+            sp.valueChanged.connect(lambda *_: None if self.loading else self._undo_mark(join=True))
         f = Form()
         f.row("Bắt đầu từ", hbox(self.e_start, button("Lấy vị trí đang phát", "clock",
                                                      on_click=lambda: self.e_start.setValue(self.player.position()))))
@@ -998,6 +1003,11 @@ class ProjectPage(QWidget):
         cut.add(self.cut_label)
         self.cuts_list = label("", "muted", wrap=True)
         cut.add(self.cuts_list)
+        self.cuts_rows = QWidget()          # mỗi đoạn cắt 1 hàng: ▶ Xem chỗ nối · × Bỏ đoạn này
+        self.cuts_rows_l = QVBoxLayout(self.cuts_rows)
+        self.cuts_rows_l.setContentsMargins(0, 0, 0, 0)
+        self.cuts_rows_l.setSpacing(4)
+        cut.add(self.cuts_rows)
         # --- rút khoảng lặng / cắt bài hát
         from .silence_ui import SilenceCard
 
@@ -2160,10 +2170,16 @@ class ProjectPage(QWidget):
 
         # không dùng to_dict (asdict chép sâu từng câu – 2.600 câu ~55 ms); json tự chép phần extra.
         # Kèm đoạn cắt + lớp phủ -> Ctrl+Z hoàn tác được cả "Áp dụng cắt" và sửa chữ / logo
-        cuts = ((self.p.data.get("edit") or {}).get("cuts") or []) if self.p else []
+        ed = (self.p.data.get("edit") or {}) if self.p else {}
+        cuts = ed.get("cuts") or []
+        # + cắt đầu / cuối (ô đang hiện), điểm tách, video chèn, đoạn tắt tiếng gốc (2.0.98 – cắt / sửa ở tab Chỉnh sửa
+        # và dòng Video / Tiếng gốc của timeline cũng hoàn tác được bằng nút ↶)
+        ex = {"trim": {"start": round(self.e_start.value(), 3), "end": round(self.e_end.value(), 3)},
+              "vsplits": ed.get("vsplits") or [], "inserts": ed.get("inserts") or [],
+              "mute_spans": ed.get("mute_spans") or []}
         return json.dumps({"s": [{"start": s.start, "end": s.end, "text": s.text, "trans": s.trans,
                                   "speaker": s.speaker, "extra": s.extra} for s in self.model.segs],
-                           "c": cuts, "l": self._layers})
+                           "c": cuts, "l": self._layers, "e": ex})
 
     def _undo_reset(self):
         """Mở dự án: bắt đầu lịch sử hoàn tác mới."""
@@ -2192,8 +2208,10 @@ class ProjectPage(QWidget):
     def _update_undo_btns(self):
         self.undo_btn.setEnabled(bool(self._undo))
         self.redo_btn.setEnabled(bool(self._redo))
-        self.undo_btn.setToolTip(f"Hoàn tác (Ctrl+Z) – còn {len(self._undo)} bước" if self._undo else
-                                 "Hoàn tác (Ctrl+Z) – chưa có thao tác nào")
+        self.undo_btn.setToolTip(f"{UNDO_TIP}\nCòn {len(self._undo)} bước" if self._undo else
+                                 f"{UNDO_TIP}\nChưa có thao tác nào để hoàn tác (lịch sử tính từ lúc mở dự án)")
+        self.redo_btn.setToolTip(f"Làm lại (Ctrl+Y) – còn {len(self._redo)} bước" if self._redo else
+                                 "Làm lại (Ctrl+Y) – chưa có bước nào vừa hoàn tác")
 
     def undo(self):
         self._undo_step(self._undo, self._redo, "Đã hoàn tác")
@@ -2222,8 +2240,13 @@ class ProjectPage(QWidget):
             snap_d = {"s": snap_d, "c": None, "l": None}
         segs = [Segment.from_dict(d) for d in snap_d["s"]]
         e = self.p.edit
+        ex = snap_d.get("e") or {}
+        cur_ex = {"trim": {"start": round(self.e_start.value(), 3), "end": round(self.e_end.value(), 3)},
+                  "vsplits": e.get("vsplits") or [], "inserts": e.get("inserts") or [],
+                  "mute_spans": e.get("mute_spans") or []}
         edit_changed = (snap_d.get("c") is not None and snap_d["c"] != (e.get("cuts") or [])) or \
-            (snap_d.get("l") is not None and snap_d["l"] != self._layers)
+            (snap_d.get("l") is not None and snap_d["l"] != self._layers) or \
+            any(k in ex and ex[k] != cur_ex[k] for k in cur_ex)
         self._undo_busy = True
         try:
             self.model.set_segments(segs)
@@ -2240,21 +2263,37 @@ class ProjectPage(QWidget):
                 e["cuts"] = snap_d["c"]
             if snap_d.get("l") is not None:
                 e["layers"] = snap_d["l"]
+            for k in ("vsplits", "inserts", "mute_spans"):
+                if k in ex:
+                    e[k] = ex[k]
+            if "trim" in ex:
+                e["trim"] = dict(e.get("trim") or {}, **ex["trim"])
             self.p.data["edit"] = e
             self.p.save()
             self._undo_busy = True
+            was, self.loading = self.loading, True
             try:
                 self.layers_tab.set_layers(e.get("layers") or [])
+                if "trim" in ex:
+                    self.e_start.setValue(float(ex["trim"].get("start") or 0))
+                    self.e_end.setValue(float(ex["trim"].get("end") or 0))
             finally:
+                self.loading = was
                 self._undo_busy = False
             self._update_cuts_label()
+            self._update_summary()
             self._apply_live()
+            self._apply_audio_now()       # đoạn tắt tiếng gốc nghe ngay
         self._sel_row = -1
         self._update_timeline()
         self._update_undo_btns()
         changed = sum(1 for s in segs if (round(s.start, 3), round(s.end, 3), s.text, s.trans,
                                           json.dumps(s.extra, sort_keys=True)) not in old)
-        self.win.toast(f"{what} ({len(segs)} câu, {changed} câu đổi) · còn {len(self._undo)} bước hoàn tác", "ok")
+        parts = [f"{changed} câu đổi"] if changed or not edit_changed else []
+        if edit_changed:
+            parts.append("đoạn cắt / video / lớp phủ")
+        self.win.toast(f"{what}: {', '.join(parts)} · còn {len(self._undo)} bước hoàn tác, "
+                       f"{len(self._redo)} bước làm lại", "ok")
         if any(x.extra.get("tts_file") for x in segs) and (self.p.edit.get("dub") or {}).get("wav"):
             self._relayout(what)       # giọng lồng theo đúng các câu sau khi hoàn tác (chỉ vá đoạn đổi)
 
@@ -2968,7 +3007,7 @@ class ProjectPage(QWidget):
 
     def run_snap(self):
         """Căn mép câu theo giọng (2.0.96): đầu / cuối câu đã tích (không tích -> cả phim) về đúng lúc nhân vật bắt
-        đầu / thôi nói. Ctrl+Z hoàn tác."""
+        đầu / thôi nói. Nút ↶ / Ctrl+Z hoàn tác."""
         if not self.model.segs:
             return self.win.toast("Chưa có phụ đề", "warn")
         self.flush()
@@ -3506,13 +3545,14 @@ class ProjectPage(QWidget):
             tl.sel_insert = None
         self.p.data["edit"] = e
         self.p.save()
+        self._undo_mark()                 # xoá / khôi phục / tách / chèn / tắt tiếng đoạn: nút ↶ hoàn tác được
         self._update_timeline()
         self._update_cuts_label()
         self._update_summary()
         self._live_timer.start()          # trình phát bỏ qua đoạn xoá ngay
         self._apply_audio_now()           # tắt / bật tiếng gốc nghe ngay
         if msg:
-            self.win.toast(msg, "ok")
+            self.win.toast(msg + " · bấm ↶ trên cùng (hoặc Ctrl+Z) để hoàn tác", "ok")
 
     def _fit_rows(self):
         """Chiều cao dòng theo chữ (xuống dòng): chỉ đo các dòng đang hiện + 1 đoạn quanh đó, dòng khác đo khi cuộn tới.
@@ -3790,6 +3830,8 @@ class ProjectPage(QWidget):
 
     # ================================================================== chỉnh sửa
     def _mark_cut(self, which: str):
+        from ..audiomix import merge_spans
+
         t = self.player.position()
         if which == "a":
             self.cut_a = t
@@ -3802,26 +3844,55 @@ class ProjectPage(QWidget):
         a, b = sorted((self.cut_a, t))
         if b - a < 0.05:
             return self.win.toast("Đoạn cắt quá ngắn", "warn")
+        self.flush()
         self.p.reload()
         e = self.p.edit
-        e["cuts"] = e.get("cuts", []) + [[round(a, 3), round(b, 3)]]
+        # đoạn mới chồng / sát đoạn cũ -> gộp thành 1 (trước đây cộng dồn, danh sách có đoạn trùng nhau)
+        e["cuts"] = merge_spans([list(map(float, x)) for x in e.get("cuts", [])] + [[round(a, 3), round(b, 3)]])
         self.p.data["edit"] = e
         self.p.save()
+        self._undo_mark()
         self.cut_a = None
         self.timeline.mark = None
-        self.cut_label.setText("Đã thêm đoạn cắt")
+        self.cut_label.setText(f"Đã thêm đoạn cắt {fmt(a)} → {fmt(b)} – bấm ↶ trên cùng (hoặc Ctrl+Z) để hoàn tác")
+        self._cuts_changed()
+
+    def _clear_cuts(self):
+        n = len(self.p.edit.get("cuts") or []) if self.p else 0
+        if not n:
+            return self.win.toast("Chưa có đoạn cắt nào", "info")
+        self._set_cuts([], f"Đã bỏ {n} đoạn cắt – bấm ↶ trên cùng (hoặc Ctrl+Z) để lấy lại")
+
+    def _drop_cut(self, k: int):
+        """Bỏ 1 đoạn cắt (nút × ở danh sách đoạn cắt)."""
+        cuts = list(self.p.edit.get("cuts") or []) if self.p else []
+        if 0 <= k < len(cuts):
+            a, b = cuts.pop(k)
+            self._set_cuts(cuts, f"Đã bỏ đoạn cắt {fmt(a)} → {fmt(b)} – bấm ↶ trên cùng (hoặc Ctrl+Z) để lấy lại")
+
+    def _set_cuts(self, cuts: list, msg: str):
+        self.flush()
+        self.p.reload()
+        e = self.p.edit
+        e["cuts"] = cuts
+        self.p.data["edit"] = e
+        self.p.save()
+        self._undo_mark()
+        self._cuts_changed()
+        self.win.toast(msg, "ok")
+
+    def _cuts_changed(self):
+        """Đoạn cắt vừa đổi: danh sách, 2 thanh thời gian, tóm tắt và trình phát (bỏ qua / phát lại đoạn đó NGAY –
+        trước đây "Bỏ hết đoạn cắt" xong trình phát vẫn nhảy qua chỗ cũ tới khi đổi ô khác)."""
         self._update_cuts_label()
         self._update_timeline()
         self._update_summary()
+        self._apply_live()
 
-    def _clear_cuts(self):
-        self.p.reload()
-        e = self.p.edit
-        e["cuts"] = []
-        self.p.data["edit"] = e
-        self.p.save()
-        self._update_cuts_label()
-        self._update_timeline()
+    def _play_cut(self, k: int):
+        cuts = (self.p.edit.get("cuts") or []) if self.p else []
+        if 0 <= k < len(cuts):
+            self._play_junction({"cut": [float(cuts[k][0]), float(cuts[k][1])]})
 
     # ================================================================== TAB: Chữ & Logo
     def _tab_layers(self):
@@ -4098,12 +4169,32 @@ class ProjectPage(QWidget):
         self._update_timeline()
         self._update_summary()
         self._apply_live()
-        self.win.toast(f"Đã cắt {len(items)} đoạn, bớt {fmt(before - after, False)} – Ctrl+Z để hoàn tác; lấy lại 1 "
-                       "đoạn: chọn đoạn đó trên dòng Video của timeline → Khôi phục", "ok")
+        self.win.toast(f"Đã cắt {len(items)} đoạn, bớt {fmt(before - after, False)} – bấm ↶ trên cùng (hoặc Ctrl+Z) để "
+                       "hoàn tác; lấy lại 1 đoạn: bấm Bỏ ở danh sách đoạn cắt (thẻ Cắt video)", "ok")
+
+    CUT_ROWS = 30    # hiện tối đa 30 đoạn cắt có nút (Rút khoảng lặng có thể tạo hàng trăm đoạn)
 
     def _update_cuts_label(self):
         cuts = self.p.edit.get("cuts", []) if self.p else []
-        self.cuts_list.setText("\n".join(f"✂ Xoá {fmt(a)} → {fmt(b)}" for a, b in cuts) or "Chưa có đoạn cắt nào")
+        lay = self.cuts_rows_l
+        while lay.count():
+            w = lay.takeAt(0).widget()
+            if w is not None:
+                w.hide()
+                w.setParent(None)
+                w.deleteLater()
+        if not cuts:
+            self.cuts_list.setText("Chưa có đoạn cắt nào")
+            return
+        total = sum(float(b) - float(a) for a, b in cuts)
+        self.cuts_list.setText(f"{len(cuts)} đoạn cắt, bỏ {fmt(total, False)}" +
+                               (f" – hiện {self.CUT_ROWS} đoạn đầu" if len(cuts) > self.CUT_ROWS else ""))
+        for k, (a, b) in enumerate(cuts[:self.CUT_ROWS]):
+            lay.addWidget(wrap(hbox(label(f"✂ Xoá {fmt(a)} → {fmt(b)}  ({float(b) - float(a):.1f} s)", "muted"),
+                               button("Xem chỗ nối", "play", "Phát từ 2 giây trước đoạn cắt, nhảy qua đoạn cắt, dừng 2 giây sau",
+                                      flat=True, on_click=lambda _=False, k=k: self._play_cut(k)),
+                               button("Bỏ", "x", "Bỏ đoạn cắt này (giữ lại phần video đó)", flat=True,
+                                      on_click=lambda _=False, k=k: self._drop_cut(k)), None)))
 
     def _update_timeline(self):
         if not self.p:
