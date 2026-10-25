@@ -85,7 +85,7 @@ Cài xong (kể cả AI nâng cao) thì chạy **`DongGoi_EXE.bat`** (15–40 ph
    - **Giọng lồng**: 1 giọng cho mọi nhân vật, *Tự gán giọng nam / nữ*, hoặc để mặc định = giọng chọn ở tab Lồng tiếng mục 2.
    - **Vừa tách vừa dịch**: nghe tới đâu dịch tới đó (đủ "Số câu mỗi lần gửi" của công cụ dịch là gửi), câu dịch hiện
      ngay ở tab Phụ đề, Edge đọc trước giọng các câu đã dịch – nhanh hơn chạy lần lượt từng bước.
-3. Bấm **Bắt đầu dịch tự động**: tool làm trọn nghe → dịch → lồng tiếng (nếu bật) → xoá phụ đề cũ → xuất video.
+3. Bấm **Bắt đầu dịch tự động**: tool làm nghe → dịch → lồng tiếng (nếu bật) rồi **dừng** (không tự xuất). Kiểm tra phụ đề / giọng xong bấm **Xuất video** (nút trên cùng hoặc tab Xuất) để xoá phụ đề cũ và ghép video.
    Thanh tiến độ ở cuối cửa sổ hiện % hoàn thành và thời gian còn lại; mọi việc đang chạy xem ở mục **Việc đang làm**
    (thanh bên trái). Nhiều dự án chạy được cùng lúc, mỗi lúc 1 việc dùng card đồ hoạ.
 4. Soát phụ đề ở tab **Phụ đề**, rồi mở tab **Xuất** để lấy video MP4 và file SRT.

@@ -1377,6 +1377,12 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   * Hàng đợi không lưu xuống đĩa -> tắt mở lại tool là hết các việc trùng; việc "Tạo lại giọng" đọc dở thì bấm lại dùng
     tiếp các câu đã đọc (`take_pending`).
 
+- 2.0.84: "tab Tự động không tự xuất nữa, dừng trước bước xuất, chỉ xuất thủ công". `project_page.run_auto` đặt
+  `opts["render"] = False` -> `pipeline.auto` vẫn chạy bước "export" để lưu cách xuất (xoá phụ đề cũ, ghép phụ đề nào, bật
+  lồng tiếng) + ghi SRT, nhưng KHÔNG `render` (trọng số tiến độ 0,2); thông báo "Xong (chưa xuất video): nghe & tách câu →
+  dịch → lồng tiếng. Kiểm tra rồi bấm 'Xuất video'". Nút có tooltip + dòng ghi chú dưới nút. Xử lý hàng loạt / dòng lệnh vẫn
+  xuất như cũ (`render` mặc định True).
+
 ## Vấn đề đang mở
 - 2.0.83: chờ người dùng mở lại tool (hết 97 việc trùng), tab Lồng tiếng "Tích câu chưa lồng" -> "Tạo lại giọng các câu đã
   tích" cho các vế đã tách; lần sau bấm "Tách câu dài" chỉ có 1 việc tạo lại giọng, giao diện không đơ.

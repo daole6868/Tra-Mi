@@ -356,8 +356,11 @@ class ProjectPage(QWidget):
         self.a_style.currentIndexChanged.connect(self._engine_changed)
         card.add(f)
         go = GradientButton("Bắt đầu dịch tự động", "bolt", big=True)
+        go.setToolTip("Tự làm: nghe & tách câu → dịch → lồng tiếng (nếu bật) rồi DỪNG. Kiểm tra xong bấm 'Xuất video' "
+                      "(nút trên cùng hoặc tab Xuất) để ghép video")
         go.clicked.connect(self.run_auto)
         card.add(go)
+        card.add(label("Dừng trước bước xuất – kiểm tra xong bấm 'Xuất video' để ghép video.", "muted"))
         steps = SectionCard("Làm từng bước", "list",
                             "Đi lần lượt 4 bước, soát kết quả từng bước trước khi sang bước sau (bước nào xong có dấu ✓).")
         grid = QGridLayout()
@@ -2129,6 +2132,7 @@ class ProjectPage(QWidget):
             opts["region"] = self._hs_regions[0]
         if self.p.segments and not opts["force_recognize"]:
             self.win.toast("Dự án đã có phụ đề → dùng lại (bật 'Nhận dạng lại từ đầu' nếu muốn làm lại)", "warn")
+        opts["render"] = False   # dừng trước bước xuất: kiểm tra xong tự bấm "Xuất video"
         self.submit("auto", "Dịch tự động", lambda j, p: pipeline.auto(p, opts, j.update, j.cancelled))
 
     def run_recognize(self):

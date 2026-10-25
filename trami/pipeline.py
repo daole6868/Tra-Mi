@@ -2646,7 +2646,9 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
     if opts.get("dub") and not no_tr:
         steps.append("dub")
     steps.append("export")
-    weights = {"download": 1, "recognize": 4, "translate": 2, "dub": 2, "export": 3}
+    # render False (tab Tự động): dừng trước bước ghép video – chỉ lưu cách xuất + SRT, xuất video bấm tay
+    weights = {"download": 1, "recognize": 4, "translate": 2, "dub": 2,
+               "export": 3 if opts.get("render", True) else 0.2}
     total_w = sum(weights[s] for s in steps)
     result: dict = {}
     if opts.get("target"):   # "Dịch sang" (tiếng Việt / Anh / Thái / Nhật / Hàn)
@@ -2661,7 +2663,11 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
         if live:
             live.stop()
             live.cleanup()
-    if not no_tr:
+    if not no_tr and not opts.get("render", True):
+        result["message"] = ("Xong (chưa xuất video): " + " → ".join(
+            {"download": "tải video", "recognize": "nghe & tách câu", "translate": "dịch", "dub": "lồng tiếng"}[x]
+            for x in steps if x != "export") + ". Kiểm tra rồi bấm 'Xuất video' để ghép video")
+    elif not no_tr:
         result["message"] = "Hoàn tất! " + (f"Video: {Path(result['video']).name}" if result.get("video") else "")
     if opts.get("parallel") and p.data.get("live_reused"):
         result["message"] += f"  · vừa tách vừa dịch: dùng lại {p.data['live_reused']} câu dịch sẵn lúc đang nghe"

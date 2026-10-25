@@ -982,6 +982,12 @@ def test_auto_no_translate_exports_source_srt(monkeypatch):
     res = pipeline.auto(p, {"engine": pipeline.NO_TRANSLATE, "dub": True})
     assert res["srt"].endswith(".zh.srt") and "你好" in Path(res["srt"]).read_text("utf-8")
     assert "không dịch" in res["message"]
+    # tab Tự động (render False): dịch xong DỪNG trước bước ghép video, vẫn lưu cách xuất + SRT
+    monkeypatch.setattr(pipeline, "translate", lambda q, *a, **k: setattr(q, "segments", [
+        Segment(0.5, 2.0, "你好", "Xin chào")]) or q.save())
+    res = pipeline.auto(p, {"engine": "google", "render": False, "hardsub_mode": "none", "burn": True})
+    assert "video" not in res and res["srt"].endswith(".srt") and "chưa xuất video" in res["message"]
+    assert Project(p.id).edit["subtitles"]["burn"] is True
 
 
 def test_omnivoice_samples_and_dub(monkeypatch, tmp_path):
