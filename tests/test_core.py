@@ -5537,11 +5537,20 @@ def test_gui_split_long_not_overwritten(sample_video, monkeypatch):
     assert len(Project(p.id).segments) == 2
     # đã lồng tiếng: bước 1 tách (bảng có câu mới + tích sẵn), bước 2 mới đọc lại giọng các vế mới
     calls = []
-    monkeypatch.setattr(pp, "_redub_rows", lambda rows, play=True: calls.append((rows, play)))
     monkeypatch.setattr(pipeline, "has_dub", lambda q: True)
+    real_submit = pp.submit
+
+    def chained(rows, play=True):    # như _redub_rows thật: gửi việc mới ngay trong job_finished (poll lồng nhau)
+        calls.append((rows, play))
+        real_submit("redub", "Tạo lại giọng", lambda j, q: {"message": "ok"}, quiet=True)
+
+    monkeypatch.setattr(pp, "_redub_rows", chained)
     pp.run_split_long()
     assert pump(lambda: calls)
+    assert pump(idle)
+    pump(lambda: False, 1.5)
     assert calls == [([0, 1], False)] and len(pp.model.segs) == 3 and len(Project(p.id).segments) == 3
+    assert sum(1 for j in manager.list() if j["project_id"] == p.id and j["kind"] == "redub") == 1
     assert sorted(pp.model.selected) == [0, 1]
     assert pp.model.segs[0].trans.endswith("ý gì?")
     win.close()

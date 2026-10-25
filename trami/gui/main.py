@@ -1278,6 +1278,8 @@ class JobsPage(QWidget):
             c.add(e)
             if key == "finished":
                 c.head.addWidget(button("Xoá danh sách đã xong", "trash", flat=True, on_click=self._clear))
+            elif key == "queued":
+                c.head.addWidget(button("Huỷ hết việc đang chờ", "x", flat=True, on_click=self._cancel_queued))
             self.cards[key], self.boxes[key], self.empty[key] = c, box, e
             v.addWidget(c)
         v.addStretch(1)
@@ -1290,6 +1292,14 @@ class JobsPage(QWidget):
     def _clear(self):
         manager.clear_finished()
         self.update_jobs(manager.list())
+
+    def _cancel_queued(self):
+        n = 0
+        for j in manager.list():
+            if j["status"] == "queued" and manager.cancel(j["id"]):
+                n += 1
+        self.win.toast(f"Đã huỷ {n} việc đang chờ" if n else "Không có việc nào đang chờ", "ok" if n else "info")
+        self.win.poll()
 
     def update_jobs(self, jobs: list[dict]):
         want: dict[str, list[dict]] = {"running": [], "queued": [], "finished": []}
@@ -1354,6 +1364,7 @@ class MainWindow(QMainWindow):
         lay.addLayout(right, 1)
 
         self._seen: dict[str, str] = {}
+        self._polling = self._poll_again = False
         self.timer = QTimer(self, interval=600, timeout=self.poll)
         self.timer.start()
         self.refresh_projects()
@@ -1424,6 +1435,22 @@ class MainWindow(QMainWindow):
         self.poll()
 
     def poll(self):
+        # job_finished có thể gửi việc mới (tách câu dài -> tạo lại giọng) -> submit -> jobs_changed -> poll: trước đây
+        # poll lồng trong poll thấy lại việc vừa xong là "mới xong" (_seen chưa kịp ghi) -> gọi job_finished lần nữa ->
+        # gửi thêm việc -> … ~100 việc "Tạo lại giọng" giống hệt nhau + giao diện đơ (mỗi lần nạp lại cả dự án)
+        if self._polling:
+            self._poll_again = True
+            return
+        self._polling = True
+        try:
+            self._poll()
+        finally:
+            self._polling = False
+        if self._poll_again:
+            self._poll_again = False
+            QTimer.singleShot(0, self.poll)
+
+    def _poll(self):
         jobs = manager.list()
         self.jobsbar.update_jobs(jobs)
         self.sidebar.nav["jobs"].set_badge(sum(j["status"] in ("running", "queued") for j in jobs))
@@ -1432,6 +1459,7 @@ class MainWindow(QMainWindow):
         self.project_page.update_job(jobs)
         for j in jobs:
             prev = self._seen.get(j["id"])
+            self._seen[j["id"]] = j["status"]   # ghi trước khi báo xong: mỗi việc chỉ báo 1 lần
             if prev and prev != j["status"] and j["status"] in ("done", "error", "cancelled"):
                 if j["status"] == "done":
                     msg = j["message"] or j["title"]
@@ -1442,7 +1470,6 @@ class MainWindow(QMainWindow):
                 if j["kind"] in ("download", "auto") and j["status"] in ("error", "cancelled"):
                     self._drop_empty_project(j.get("project_id") or "")
                 self.refresh_projects()
-            self._seen[j["id"]] = j["status"]
 
     def _drop_empty_project(self, pid: str):
         """Tải video từ link lỗi / huỷ -> xoá dự án trống "Video từ link" (chưa có video, chưa có câu nào)."""

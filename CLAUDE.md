@@ -1365,7 +1365,21 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
     câu ngắn". Bấm lại trên dự án bị lỗi: các vế giống hệt lần trước -> dùng lại file giọng đã đọc (mã hash có `take`=1).
   * Test giao diện: việc nền ghi câu đã tách, giao diện gọi lưu với danh sách cũ -> đĩa vẫn 3 câu (bỏ bản sửa -> 2 câu).
 
+- 2.0.83: "tách được rồi nhưng tool đơ, phải tắt mở lại, không thấy lỗi" + ảnh "Việc đang làm": 97 việc "Tạo lại giọng 1191
+  câu" giống hệt nhau. Nguyên nhân: `main.poll` gọi `project_page.job_finished(j)` TRƯỚC khi ghi `_seen[id] = "done"`; 2.0.82
+  cho job_finished gửi việc thứ 2 (`_redub_rows` -> `submit` -> `win.jobs_changed` -> `poll` lồng trong `poll`) -> poll trong
+  thấy lại việc tách vừa xong là "mới xong" -> job_finished lần nữa -> gửi thêm việc -> lồng tiếp (~100 tầng tới khi Python
+  báo đệ quy quá sâu, lỗi nuốt trong slot Qt) -> mỗi tầng nạp lại cả dự án 3600 câu trên luồng giao diện = đơ vài phút + ~100
+  việc đọc lại cùng 1191 câu nối đuôi nhau. Tái hiện trên máy thử: phim 2 giờ 47, 2610 câu, đã lồng (Edge giả) -> 80 việc.
+  * `MainWindow.poll`: chặn gọi lồng (`_polling` / `_poll_again` -> `QTimer.singleShot(0, poll)`), ghi `_seen` trước khi
+    báo xong (mỗi việc báo đúng 1 lần). `project_page._chained`: việc tách chỉ gọi việc tạo lại giọng 1 lần.
+  * Trang Việc đang làm: nút "Huỷ hết việc đang chờ" (`JobsPage._cancel_queued`).
+  * Hàng đợi không lưu xuống đĩa -> tắt mở lại tool là hết các việc trùng; việc "Tạo lại giọng" đọc dở thì bấm lại dùng
+    tiếp các câu đã đọc (`take_pending`).
+
 ## Vấn đề đang mở
+- 2.0.83: chờ người dùng mở lại tool (hết 97 việc trùng), tab Lồng tiếng "Tích câu chưa lồng" -> "Tạo lại giọng các câu đã
+  tích" cho các vế đã tách; lần sau bấm "Tách câu dài" chỉ có 1 việc tạo lại giọng, giao diện không đơ.
 - 2.0.82: chờ người dùng bấm lại "Tách câu dài" trên dự án phim 999 câu (bảng phải hiện câu mới ngay, rồi việc "Tạo lại
   giọng" chạy riêng) và báo có còn thấy toast "Phụ đề vừa được việc đang chạy cập nhật" khi thao tác lúc đang chạy.
 - 2.0.80/81: chờ người dùng thử "Tách câu dài" trên phim thật (dự án cũ đã lồng: đọc lại các vế mới) – mức 14 tiếng có

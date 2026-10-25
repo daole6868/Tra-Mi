@@ -67,6 +67,7 @@ class ProjectPage(QWidget):
         # bảng còn hiện danh sách cũ -> không ghi đè (xem _save_segs_now)
         self._disk_sig: list | None = None
         self._loaded_at = 0.0
+        self._chained: set[str] = set()   # việc đã gọi việc tiếp theo (không gửi 2 lần)
 
         self._save_edit_timer = QTimer(self, singleShot=True, interval=500, timeout=self._save_edit_now)
         self._live_timer = QTimer(self, singleShot=True, interval=40, timeout=self._apply_live)
@@ -2092,7 +2093,8 @@ class ProjectPage(QWidget):
                 self.model.set_picked(range(len(self.model.segs)), False)
                 self.model.set_picked([r for r in pick if 0 <= r < len(self.model.segs)])
             again = (j.get("result") or {}).get("redub") if isinstance(j.get("result"), dict) else None
-            if again and j.get("status") == "done":   # tách câu dài xong -> đọc lại giọng các vế mới (việc thứ 2)
+            if again and j.get("status") == "done" and j["id"] not in self._chained:
+                self._chained.add(j["id"])   # tách câu dài xong -> đọc lại giọng các vế mới (việc thứ 2), đúng 1 lần
                 self._redub_rows(again, play=False)
             if j["kind"] == "render" and j.get("status") == "done":
                 self.pub._use_latest()          # mục Đăng video dùng ngay bản vừa xuất
