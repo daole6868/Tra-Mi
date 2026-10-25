@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QDateTime, Qt, QUrl
-from PySide6.QtGui import QDesktopServices, QGuiApplication
+from PySide6.QtGui import QDesktopServices, QGuiApplication, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QDateTimeEdit, QFileDialog, QHeaderView, QInputDialog, QLineEdit,
                                QMessageBox, QPlainTextEdit, QTableWidget, QTableWidgetItem, QVBoxLayout)
 
@@ -349,7 +349,11 @@ class PublishCard(SectionCard):
         self.sched.toggled.connect(self.when.setEnabled)
         g.row("Hẹn giờ đăng", flow(self.sched, self.when))
         self.thumb_lb = label("(mặc định của nền tảng)", "muted")
-        g.row("Ảnh bìa", flow(self.thumb_lb, button("Chọn ảnh…", "image", flat=True, on_click=self._pick_thumb),
+        self.thumb_pv = label("")
+        self.thumb_pv.setFixedHeight(64)
+        self.thumb_pv.hide()
+        g.row("Ảnh bìa", flow(self.thumb_pv, self.thumb_lb,
+                              button("Chọn ảnh…", "image", flat=True, on_click=self._pick_thumb),
                               button("Lấy khung đang xem", "film", "Chụp khung hình ở vị trí đang phát của video đăng",
                                      flat=True, on_click=self._grab_thumb),
                               button("Bỏ", "x", flat=True, on_click=lambda: self._set_thumb(""))))
@@ -447,10 +451,19 @@ class PublishCard(SectionCard):
     def _set_thumb(self, path: str):
         self.thumb = path
         self.thumb_lb.setText(Path(path).name if path else "(mặc định của nền tảng)")
+        self.thumb_lb.setToolTip(path)
+        pm = QPixmap(path) if path else QPixmap()
+        if pm.isNull():
+            self.thumb_pv.hide()
+        else:                                   # ảnh nhỏ để thấy đúng ảnh sẽ đăng
+            self.thumb_pv.setPixmap(pm.scaledToHeight(64, Qt.TransformationMode.SmoothTransformation))
+            self.thumb_pv.setToolTip(path)
+            self.thumb_pv.show()
         self._save_draft()
 
     def _pick_thumb(self):
-        f, _ = QFileDialog.getOpenFileName(self, "Ảnh bìa (JPG / PNG, ≤ 2 MB)", "", "Ảnh (*.jpg *.jpeg *.png)")
+        f, _ = QFileDialog.getOpenFileName(self, "Ảnh bìa (tool tự đổi sang JPG ≤ 2 MB khi đăng)", "",
+                                           f"Ảnh ({publish.THUMB_EXTS})")
         if f:
             self._set_thumb(f)
 
@@ -460,9 +473,22 @@ class PublishCard(SectionCard):
         from .. import ffmpeg as ff
 
         out = self.page.p.dir / "work" / f"thumb_{int(time.time())}.jpg"
-        t = self.page.player.position()
+        t = self._out_time(self.page.player.position())
         run_async(lambda: ff.snapshot(self.file, t, out, 1280), lambda pth: self._set_thumb(str(pth)),
                   lambda m: self.page.win.toast("Không chụp được: " + m, "err"))
+
+    def _out_time(self, t: float) -> float:
+        """Vị trí trình phát (giây video gốc) -> giây trên video xuất (đã cắt đoạn / đổi tốc độ) – trước đây "Lấy khung
+        đang xem" chụp sai khung khi video có đoạn cắt."""
+        p = self.page.p
+        if not p or not any(Path(o.get("path", "")) == self.file for o in p.data.get("outputs", [])):
+            return t                          # file chọn tay: không biết đã cắt gì
+        from ..video import keep_ranges, out_time
+
+        ed = p.edit
+        dur = float((p.data.get("info") or {}).get("duration") or 0)
+        keep = keep_ranges(dur, ed.get("trim"), ed.get("cuts")) if dur else []
+        return out_time(t, keep, float(ed.get("speed") or 1.0)) if keep else t
 
     def _check(self):
         """Cảnh báo theo nền tảng (Reels 3–90 s dọc, Shorts ≤ 3 phút; YouTube API riêng bị khoá Riêng tư)."""
@@ -561,8 +587,11 @@ class PublishCard(SectionCard):
             self.page.submit("publish", f"Đăng {publish.PLATFORMS[plat]}", fn)
 
     def _manual(self, item: dict):
-        """Tự tải lên: chép nội dung vào bộ nhớ tạm, ghi file .txt cạnh video, mở trang tải lên + thư mục video."""
+        """Tự tải lên: chép nội dung vào bộ nhớ tạm, ghi file .txt cạnh video, mở trang tải lên + thư mục video. Ảnh bìa
+        -> <video>.anh_bia.jpg cạnh video (JPG ≤ 2 MB) + chỉ chỗ đặt trên trang (trước đây ảnh bìa bị bỏ qua)."""
         vf = Path(item.get("file") or self.file)
+        th = publish.prepare_thumb(item.get("thumbnail"), vf) if item.get("thumbnail") else None
+        item = dict(item, thumbnail=str(th) if th else "")
         text, txt, url = publish.prepare_manual(vf, item, item["platform"], item["kind"])
         QGuiApplication.clipboard().setText(text)
         QDesktopServices.openUrl(QUrl(url))
@@ -572,9 +601,11 @@ class PublishCard(SectionCard):
                                         "account": "Tự tải lên", "title": item["title"], "file": str(vf),
                                         "url": "", "status": "prepared", "warn": ""})
         self.fill_history()
+        tip = (f" Ảnh bìa {th.name} (cùng thư mục): {publish.THUMB_HOWTO[(item['platform'], item['kind'])]}."
+               if th else (" ⚠ Không đọc được ảnh bìa – chọn ảnh JPG / PNG khác." if self.thumb else ""))
         self.page.win.toast(f"Đã chép nội dung + mở trang đăng {publish.PLATFORMS[item['platform']]} – kéo file "
-                            f"{vf.name} vào trang đó, dán nội dung (Ctrl+V). Nội dung cũng lưu ở {txt.name}",
-                            "ok")
+                            f"{vf.name} vào trang đó, dán nội dung (Ctrl+V).{tip} Nội dung cũng lưu ở {txt.name}",
+                            "warn" if self.thumb and not th else "ok")
 
     # ---------------- lịch sử
     def fill_history(self):

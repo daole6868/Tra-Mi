@@ -688,8 +688,10 @@ def _fb_reel(acc: dict, path: Path, meta: dict, progress: Prog | None) -> dict:
     d = _http("POST", _fb(f"{page}/video_reels"), what="Đăng Reels", params=params).json()
     if d.get("success") is False:
         raise PublishError("Facebook không nhận Reels: " + json.dumps(d, ensure_ascii=False)[:300])
+    warn = ("Reels đăng qua API riêng chưa gắn được ảnh bìa – đổi ảnh bìa trên Facebook (hoặc đăng qua Zernio)"
+            if meta.get("thumbnail") else "")
     return {"remote_id": vid, "url": f"https://www.facebook.com/reel/{vid}",
-            "status": "scheduled" if when else "processing", "warn": ""}
+            "status": "scheduled" if when else "processing", "warn": warn}
 
 
 # ------------------------------------------------------------------ Zernio
@@ -862,14 +864,16 @@ def _zernio_publish(settings: dict, target: dict, path: Path, meta: dict, progre
     zn = Zernio(settings.get("zernio_api_key", ""))
     platform = target["platform"]
     media = zn.upload(path, progress, 0.03, 0.82)
-    thumb_url = ""
+    thumb_url, warn = "", []
     thumb = meta.get("thumbnail")
     if thumb and Path(thumb).exists():
         try:
             thumb_url = zn.upload(Path(thumb), None, content_type="image/png" if thumb.lower().endswith(".png")
                                   else "image/jpeg")
-        except PublishError:
-            thumb_url = ""
+        except PublishError as e:
+            warn.append(f"chưa gắn được ảnh bìa ({e})")
+        if thumb_url and platform == "youtube" and meta.get("kind") == "short":
+            warn.append("Zernio chỉ đặt ảnh bìa cho video YouTube thường – ảnh bìa Shorts đổi trong YouTube Studio")
     if progress:
         progress(0.85, f"Zernio đang đăng lên {PLATFORMS[platform]}…")
     post = zn.create_post(platform, target["account"]["id"], meta, media, thumb_url)
@@ -889,7 +893,7 @@ def _zernio_publish(settings: dict, target: dict, path: Path, meta: dict, progre
     if res["status"] in ZN_FAIL:
         raise PublishError(f"{PLATFORMS[platform]} báo lỗi khi đăng qua Zernio: {res['error'] or res['status']}")
     status = "scheduled" if scheduled else ("published" if res["status"] in ZN_DONE else "processing")
-    return {"remote_id": pid, "post_id": pid, "url": res["url"], "status": status, "warn": ""}
+    return {"remote_id": pid, "post_id": pid, "url": res["url"], "status": status, "warn": "; ".join(warn)}
 
 
 def refresh_status(settings: dict, rec: dict) -> dict:
@@ -1110,12 +1114,126 @@ def ai_metadata(p, settings: dict, platform: str, kind: str, engine: str | None 
             "hashtags": norm_tags(d.get("hashtags") or [])[:ntag + 3]}
 
 
+# ------------------------------------------------------------------ ảnh bìa
+THUMB_MAX_BYTES = 2_000_000      # YouTube: ảnh bìa ≤ 2 MB (Facebook / TikTok nhận lớn hơn – dùng chung mức chặt nhất)
+THUMB_LONG = 1280                # cạnh dài (YouTube khuyên 1280×720)
+THUMB_MIN_W = 640                # YouTube: rộng tối thiểu 640 px
+THUMB_EXTS = "*.jpg *.jpeg *.png *.webp *.bmp"
+# chỗ đặt ảnh bìa trên trang tải lên (cách Tự tải lên / Chrome không gắn được thì chỉ cho bạn)
+THUMB_HOWTO = {
+    ("youtube", "video"): "YouTube: mục Hình thu nhỏ (Thumbnail) → Tải tệp lên. Không có nút này: kênh phải xác minh số "
+                          "điện thoại ở youtube.com/verify",
+    ("youtube", "short"): "YouTube Shorts: mục Hình thu nhỏ (Thumbnail) → Tải tệp lên. Nút này mới có ở kênh trong Chương "
+                          "trình Đối tác; không có thì chỉ chọn được 1 khung trong video",
+    ("facebook", "video"): "Facebook: mục Ảnh thu nhỏ (Thumbnail) của video → Tải ảnh lên",
+    ("facebook", "reel"): "Facebook Reels: mục Ảnh bìa (Cover) → Tải ảnh lên",
+    ("tiktok", "video"): "TikTok: mục Ảnh bìa (Cover) → Sửa ảnh bìa (Edit cover) → Tải ảnh bìa lên (Upload cover)",
+}
+
+
+def _thumb_jpeg(src: Path) -> bytes | None:
+    """Ảnh bất kỳ (JPG / PNG trong suốt / WebP / BMP, xoay theo EXIF) -> JPG cạnh dài ≤ 1280, rộng ≥ 640, ≤ 2 MB."""
+    def size(w: int, h: int) -> tuple[int, int]:
+        s = min(1.0, THUMB_LONG / max(w, h))
+        if w * s < THUMB_MIN_W:
+            s = THUMB_MIN_W / w
+        return max(1, round(w * s)), max(1, round(h * s))
+    try:
+        import io
+
+        from PIL import Image, ImageOps
+    except ImportError:
+        Image = None
+    if Image is not None:
+        try:
+            with Image.open(src) as im:
+                im = ImageOps.exif_transpose(im)
+                if im.mode in ("RGBA", "LA", "P", "PA"):
+                    im = im.convert("RGBA")
+                    bg = Image.new("RGB", im.size, (0, 0, 0))
+                    bg.paste(im, mask=im.getchannel("A"))
+                    im = bg
+                im = im.convert("RGB")
+                wh = size(*im.size)
+                if wh != im.size:
+                    im = im.resize(wh, Image.LANCZOS)
+                for q in (92, 85, 78, 70, 60, 50, 40):
+                    buf = io.BytesIO()
+                    im.save(buf, "JPEG", quality=q, optimize=True)
+                    if buf.tell() <= THUMB_MAX_BYTES:
+                        break
+                return buf.getvalue()
+        except Exception:  # noqa: BLE001
+            return None
+    try:                                              # không có Pillow -> Qt (luôn có trong bản giao diện)
+        from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
+        from PySide6.QtGui import QImage
+    except ImportError:
+        return None
+    img = QImage(str(src))
+    if img.isNull():
+        return None
+    img = img.convertToFormat(QImage.Format.Format_RGB888)
+    w, h = size(img.width(), img.height())
+    if (w, h) != (img.width(), img.height()):
+        img = img.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    for q in (92, 85, 78, 70, 60, 50, 40):
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        img.save(buf, "JPG", q)
+        buf.close()
+        if ba.size() <= THUMB_MAX_BYTES:
+            break
+    return bytes(ba.data())
+
+
+def prepare_thumb(src, video: Path | None = None) -> Path | None:
+    """Ảnh bìa bạn chọn (cỡ / định dạng bất kỳ) -> <video>.anh_bia.jpg cạnh video (đúng yêu cầu của YouTube, dùng được cả
+    Facebook / TikTok – trước đây ảnh > 2 MB hoặc WebP bị trang tải lên bỏ qua mà không báo). Ghi cạnh video không được
+    thì để ở thư mục tạm. Ảnh không đọc được -> None."""
+    if not src or not Path(src).is_file():
+        return None
+    src = Path(src)
+    data = _thumb_jpeg(src)
+    if not data:
+        return None
+    import tempfile
+
+    outs = [video.with_name(f"{video.stem}.anh_bia.jpg")] if video else []
+    outs.append(Path(tempfile.gettempdir()) / "subvideo_thumbs" / f"{hashlib.md5(str(src).encode()).hexdigest()[:10]}.jpg")
+    for out in outs:
+        try:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(data)
+            return out
+        except OSError:
+            continue
+    return None
+
+
+def reveal(path: Path) -> None:
+    """Mở thư mục chứa file và chọn sẵn file đó (Windows Explorer) – dùng được từ việc nền."""
+    import subprocess
+    import sys
+
+    if sys.platform.startswith("win"):
+        try:
+            subprocess.Popen(["explorer", "/select,", str(path)])
+        except OSError:
+            pass
+
+
 # ------------------------------------------------------------------ chuẩn bị đăng (tự tải lên)
 def prepare_manual(path: Path, meta: dict, platform: str, kind: str) -> tuple[str, Path, str]:
-    """Ghi <video>.<nền tảng>.txt (tiêu đề / mô tả / hashtag) cạnh video -> (nội dung để chép, file txt, trang tải lên)."""
+    """Ghi <video>.<nền tảng>.txt (tiêu đề / mô tả / hashtag, file ảnh bìa + chỗ đặt) cạnh video -> (nội dung để chép,
+    file txt, trang tải lên)."""
     body = compose_text(meta, platform, kind, with_title=False)
     title = (meta.get("title") or "").strip()
     text = (f"TIÊU ĐỀ:\n{title}\n\nMÔ TẢ:\n{body}\n" if title else body + "\n")
+    th = meta.get("thumbnail")
+    if th and Path(th).exists():
+        text += f"\nẢNH BÌA:\n{th}\n{THUMB_HOWTO[(platform, kind)]}\n"
     txt = path.with_name(f"{path.stem}.{platform}{'_' + kind if kind != 'video' else ''}.txt")
     txt.write_text(text, encoding="utf-8")
     return (title + "\n\n" + body if title else body), txt, UPLOAD_PAGES[(platform, kind)]
@@ -1178,6 +1296,12 @@ def publish(p, settings: dict, item: dict, progress: Prog | None = None) -> dict
     if err:
         raise PublishError(err)
     meta = dict(item, hashtags=norm_tags(item.get("hashtags")), request_id=uuid.uuid4().hex)
+    if item.get("thumbnail"):
+        th = prepare_thumb(item["thumbnail"], path)
+        meta["thumbnail"] = str(th) if th else ""
+        if not th:
+            warn = "; ".join(x for x in (warn, f"không đọc được ảnh bìa {Path(item['thumbnail']).name} – chọn ảnh "
+                                               "JPG / PNG khác") if x)
     if progress:
         progress(0.01, f"Đăng lên {PLATFORMS[platform]} · {target_label(target)}…")
     if target["via"] == "zernio":

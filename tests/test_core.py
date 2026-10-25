@@ -1,4 +1,5 @@
 """Kiểm thử tự động: chạy bằng `python -m pytest -q tests`."""
+import importlib.util
 import json
 import re
 import os
@@ -4898,6 +4899,49 @@ def test_publish_text_manual_and_job_rules(tmp_path):
     assert m_._why_wait(m_.jobs["r"]) == "" and m_._why_wait(m_.jobs["d"]) == ""
 
 
+def _noisy_image(path, w, h, mode="RGB"):
+    from PIL import Image
+
+    rng = np.random.default_rng(0)
+    arr = rng.integers(0, 256, (h, w, 4 if mode == "RGBA" else 3), dtype=np.uint8)
+    if mode == "RGBA":
+        arr[: h // 2, :, 3] = 0                     # nửa trên trong suốt
+    Image.fromarray(arr, mode).save(path)
+    return path
+
+
+def test_publish_thumbnail_prepared_and_manual_howto(tmp_path):
+    """Ảnh bìa (2.0.91): PNG lớn có nền trong suốt / WebP / ảnh nhỏ -> JPG ≤ 2 MB, cạnh dài ≤ 1280, rộng ≥ 640, cạnh
+    video; ảnh hỏng -> None; Tự tải lên ghi file ảnh bìa + chỗ đặt vào file .txt."""
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    from trami import publish
+
+    vid = tmp_path / "phim.mp4"
+    vid.write_bytes(b"0")
+    big = _noisy_image(tmp_path / "bia.png", 3000, 2000, "RGBA")
+    assert big.stat().st_size > publish.THUMB_MAX_BYTES
+    out = publish.prepare_thumb(big, vid)
+    assert out == tmp_path / "phim.anh_bia.jpg" and out.stat().st_size <= publish.THUMB_MAX_BYTES
+    with Image.open(out) as im:
+        assert im.format == "JPEG" and im.size == (1280, 853)
+        assert max(im.getpixel((640, 10))) < 8          # phần trong suốt -> nền đen
+    small = _noisy_image(tmp_path / "nho.webp", 300, 200)
+    with Image.open(publish.prepare_thumb(small, vid)) as im:
+        assert im.size == (640, 427)
+    tall = _noisy_image(tmp_path / "doc.jpg", 1080, 1920)
+    with Image.open(publish.prepare_thumb(tall)) as im:   # không có video -> thư mục tạm
+        assert im.size == (720, 1280)
+    bad = tmp_path / "hong.jpg"
+    bad.write_bytes(b"\xff\xd8 khong phai anh")
+    assert publish.prepare_thumb(bad, vid) is None and publish.prepare_thumb("", vid) is None
+    m = {"title": "T", "description": "D", "hashtags": [], "thumbnail": str(out)}
+    _, txt, _ = publish.prepare_manual(vid, m, "tiktok", "video")
+    body = txt.read_text(encoding="utf-8")
+    assert "ẢNH BÌA:" in body and str(out) in body and "Tải ảnh bìa lên" in body
+
+
 def test_publish_gui_manual_and_job(sample_video, monkeypatch):
     """Tab Xuất → Đăng video: nạp bản xuất mới nhất, Tự tải lên (chép nội dung, mở trang đăng, ghi lịch sử), đăng qua
     API = việc nền "publish" (không chờ việc khác), xong thì bảng Đã đăng cập nhật."""
@@ -4940,9 +4984,23 @@ def test_publish_gui_manual_and_job(sample_video, monkeypatch):
     pub.desc.setPlainText("Mô tả")
     pub.tags.setText("#a b")
     set_combo(pub.plat["youtube"]["target"], "manual:youtube")
+    if importlib.util.find_spec("PIL"):
+        bia = _noisy_image(Path(sample_video).with_name("bia_goc.png"), 2400, 1350)
+        pub._set_thumb(str(bia))
+        assert not pub.thumb_pv.isHidden() and publish.load_draft(p)["thumbnail"] == str(bia)
     pub._go()
     assert opened == ["https://www.youtube.com/upload"]
     assert QApplication.clipboard().text() == "Tiêu đề thử\n\nMô tả\n\n#a #b"
+    if pub.thumb:   # Tự tải lên: ảnh bìa JPG cạnh video + chỗ đặt trong file .txt
+        ab = Path(sample_video).with_name("sample.anh_bia.jpg")
+        assert ab.exists() and ab.stat().st_size <= publish.THUMB_MAX_BYTES
+        assert "Hình thu nhỏ" in Path(sample_video).with_name("sample.youtube.txt").read_text(encoding="utf-8")
+        pub._set_thumb("")
+    # "Lấy khung đang xem": vị trí trình phát (giây gốc) -> giây trên bản xuất đã cắt đoạn
+    ed = pub.page.p.data.setdefault("edit", {})
+    ed["cuts"] = [[1.0, 2.0]]
+    assert abs(pub._out_time(3.0) - 2.0) < 1e-6 and abs(pub._out_time(0.5) - 0.5) < 1e-6
+    ed["cuts"] = []
     assert publish.load_posts(p)[-1]["status"] == "prepared" and pub.hist.rowCount() == 1
     assert publish.load_draft(p)["youtube_target"] == "manual:youtube"
     # đăng qua API riêng -> việc nền
@@ -4992,8 +5050,15 @@ _FAKE_YT = """<html><body>
 
 _FAKE_TT = """<html><body><input type="file" accept="video/*" id="f">
 <div id="ed" style="display:none" class="DraftEditor-root"><div class="public-DraftEditor-content" contenteditable="true">x.mp4</div></div>
+<div id="cov" style="display:none"><div onclick="document.getElementById('dlg').style.display='block'">Sửa ảnh bìa</div></div>
+<div id="dlg" role="dialog" style="display:none">
+ <div onclick="document.getElementById('upl').style.display='block'">Tải ảnh bìa lên</div>
+ <div id="upl" style="display:none"><input type="file" accept="image/png, image/jpeg" id="ci"></div>
+ <button onclick="window.cover_ok=1;document.getElementById('dlg').style.display='none'">Xác nhận</button></div>
 <button data-e2e="post_video_button" onclick="window.posted=1">Đăng</button>
-<script>document.getElementById('f').onchange=()=>{document.getElementById('ed').style.display='block'};</script>
+<script>document.getElementById('f').onchange=()=>{document.getElementById('ed').style.display='block';
+ document.getElementById('cov').style.display='block'};
+ document.getElementById('ci').onchange=()=>{window.cover=document.getElementById('ci').files[0].name};</script>
 </body></html>"""
 
 _FAKE_FB = """<html><body><button id="add" onclick="const i=document.createElement('input');i.type='file';
@@ -5043,7 +5108,12 @@ def test_browser_post_fills_and_stops_before_post(monkeypatch, tmp_path):
     vid = tmp_path / "phim.mp4"
     vid.write_bytes(b"0" * 1000)
     thumb = tmp_path / "bia.jpg"
-    thumb.write_bytes(b"\xff\xd8")
+    if importlib.util.find_spec("PIL"):
+        _noisy_image(thumb, 800, 450)
+    else:
+        thumb.write_bytes(b"\xff\xd8")
+    revealed = []
+    monkeypatch.setattr(bp, "reveal", lambda path: revealed.append(Path(path).name))
     eng = bp.engine()
     js = lambda tok, expr: eng.call(lambda e: e.pages[tok][0].evaluate(expr))  # noqa: E731
     try:
@@ -5071,7 +5141,8 @@ def test_browser_post_fills_and_stops_before_post(monkeypatch, tmp_path):
         box = {}
         th = threading.Thread(target=lambda: box.update(r=publish.publish(
             p, s, {"platform": "tiktok", "kind": "video", "target": t, "file": str(vid), "title": "T",
-                   "description": "Hay quá", "hashtags": "#a #b"}, lambda f, m: box.update(msg=m))))
+                   "description": "Hay quá", "hashtags": "#a #b", "thumbnail": str(thumb)},
+            lambda f, m: box.update(msg=m))))
         th.start()
         for _ in range(100):
             if eng.pages and "Đã điền sẵn" in box.get("msg", ""):
@@ -5081,14 +5152,21 @@ def test_browser_post_fills_and_stops_before_post(monkeypatch, tmp_path):
         cap = eng.call(lambda e: page_tt.evaluate("document.querySelector('.public-DraftEditor-content').innerText"))
         assert cap.replace("\n\n", "\n").split("\n") == ["Hay quá", "#a #b"] or "Hay quá" in cap and "#a #b" in cap
         assert eng.call(lambda e: page_tt.evaluate("window.posted || 0")) == 0
+        if importlib.util.find_spec("PIL"):      # ảnh bìa: Sửa ảnh bìa -> Tải ảnh bìa lên -> file JPG đã chuẩn hoá -> Xác nhận
+            assert eng.call(lambda e: page_tt.evaluate("[window.cover, window.cover_ok]")) == ["phim.anh_bia.jpg", 1]
+            assert "ảnh bìa" in _r.done
         eng.call(lambda e: page_tt.close())
         th.join(10)
         assert box["r"]["status"] == "browser" and box["r"]["via"] == "browser"
         assert publish.load_posts(p)[-1]["platform"] == "tiktok"
         # Facebook: không có ô chọn file -> bấm "Thêm video" và đưa file vào hộp chọn file
         tok, rep = eng.call(bp._do_fill, s, "main", {"platform": "facebook", "kind": "video", "file": str(vid),
-                                                     "title": "", "description": "Mô tả FB", "hashtags": ["x"]})
+                                                     "title": "", "description": "Mô tả FB", "hashtags": ["x"],
+                                                     "thumbnail": str(thumb)})
         assert "gắn file video" in rep["done"] and "nội dung bài đăng" in rep["done"], rep
+        # ảnh bìa Facebook: không tự gắn (ô file nhận cả ảnh) -> chỉ chỗ đặt + mở thư mục chứa ảnh
+        assert "ảnh bìa" in rep["miss"] and "Ảnh thu nhỏ" in rep["note"] and revealed == ["bia.jpg"]
+        assert "bia.jpg" in js(tok, "document.getElementById('subvideo-note').textContent")
         assert js(tok, "window.fbfile") == "phim.mp4" and js(tok, "window.posted || 0") == 0
         assert "Mô tả FB" in js(tok, "document.getElementById('cap').innerText")
     finally:

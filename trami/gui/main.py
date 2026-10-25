@@ -1522,8 +1522,8 @@ class MainWindow(QMainWindow):
         self.home.set_projects(items)
 
     def toast(self, text: str, kind: str = "info"):
-        Toast(self.centralWidget(), text, kind, 6000 if kind == "err" else 9000 if kind == "warn" and len(text) > 80
-              else 3500)
+        Toast(self.centralWidget(), text, kind, 6000 if kind == "err" else 9000 if len(text) > 140 or kind == "warn"
+              and len(text) > 80 else 3500)
 
     def preset_saved(self):
         """Lưu thiết lập tự động (hộp Thiết lập…): dòng tóm tắt + tab Tự động của dự án đang mở theo luôn."""

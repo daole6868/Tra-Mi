@@ -115,7 +115,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `_Catcher` 127.0.0.1, tải lên nối tiếp 308/Range, thumbnails.set) và `fb_login` / `fb_use_token` / `fb_upload` (Graph
   `FB_VER`, Resumable Upload API + `fbuploader_video_file_chunk`; Reels `video_reels` start → rupload → finish), Tự tải lên
   `prepare_manual`, `ai_metadata` (AI viết tiêu đề / mô tả / hashtag), tài khoản `data/accounts/{youtube,facebook,zernio}.json`,
-  lịch sử `<dự án>/posts.json`, nháp `publish_draft.json` (không đụng project.json). Việc "publish" = `jobs.NET_KINDS` +
+  lịch sử `<dự án>/posts.json`, nháp `publish_draft.json` (không đụng project.json). Ảnh bìa: `prepare_thumb` (mọi cách đăng
+  -> `<video>.anh_bia.jpg` JPG ≤ 2 MB, cạnh dài ≤ 1280, rộng ≥ 640), `THUMB_HOWTO` (chỗ đặt trên từng trang), `reveal`. Việc "publish" = `jobs.NET_KINDS` +
   READONLY (không chờ / không chặn việc khác). GUI `gui/publish_ui.py`: `AccountCards` (Cài đặt) + `PublishCard` (tab Xuất).
   `trami/browser_post.py` – "Mở Chrome & điền sẵn" (YouTube / Facebook Business Suite / TikTok Studio): Playwright
   điều khiển Chrome / Edge đã cài (`find_browser`, Cài đặt `browser_exe`) với hồ sơ riêng `data/browser/<hồ sơ>`
@@ -150,7 +151,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (166 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (167 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1470,7 +1471,32 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   rà ra thiếu: mô hình ModelScope tải trước 2.0.22 nằm ở `%USERPROFILE%\.cache\modelscope` (không trong data/models) ->
   `packmodels.pack` chép thêm các `MS_IDS` tìm thấy ngoài data/models vào `data/models/funasr/models/<tổ chức>/<tên>`.
 
+- 2.0.91: "thêm ảnh bìa mà đăng lên không thấy đâu" (người dùng đăng bằng Chrome điền sẵn + Tự tải lên). Rà 4 cách đăng:
+  Tự tải lên bỏ qua hẳn ảnh bìa; Chrome điền sẵn chỉ thử gắn ở YouTube (Facebook không làm gì, TikTok chỉ ghi chú "chọn
+  tay"); ảnh > 2 MB / WebP bị YouTube từ chối mà tool vẫn báo đã gắn; Reels qua API riêng không gửi ảnh bìa, Zernio tải
+  ảnh lỗi thì im lặng; "Lấy khung đang xem" chụp sai khung khi video có đoạn cắt (vị trí trình phát là giây gốc).
+  * `publish.prepare_thumb` (Pillow, không có thì Qt): ảnh bất kỳ (PNG trong suốt -> nền đen, xoay theo EXIF) ->
+    `<video>.anh_bia.jpg` cạnh video (không ghi được -> thư mục tạm); `publish.publish` dùng bản này cho mọi cách đăng,
+    ảnh hỏng -> cảnh báo. `THUMB_HOWTO` chỗ đặt ảnh bìa từng trang (YouTube Hình thu nhỏ – kênh phải xác minh số điện
+    thoại; Shorts – từ 7/2026 chỉ kênh trong Chương trình Đối tác có nút tải ảnh bìa trên máy tính; Facebook Ảnh thu nhỏ /
+    Reels Ảnh bìa; TikTok Sửa ảnh bìa → Tải ảnh bìa lên).
+  * Tự tải lên: ảnh bìa JPG cạnh video + dòng "ẢNH BÌA" (file + chỗ đặt) trong `<video>.<nền tảng>.txt` + toast.
+  * Chrome điền sẵn: YouTube thêm bộ chọn ô ảnh bìa (`ytcp-thumbnail-uploader`, ô ảnh trong hộp tải lên), chờ 15 s;
+    TikTok `_tiktok_cover` (Sửa ảnh bìa → Tải ảnh bìa lên → ô file ảnh trong hộp → Xác nhận; bước nào không thấy -> Esc +
+    "điền tay"); Facebook KHÔNG tự gắn (ô chọn file của trang nhận cả ảnh -> dễ thành ảnh của bài đăng). Không gắn được ->
+    `_thumb_left`: ghi chỗ đặt + tên file vào dòng nhắc trên trang (giữ 60 s) + thông báo, mở Explorer chọn sẵn file ảnh
+    (`publish.reveal`).
+  * Reels API riêng / Zernio (lỗi tải ảnh, Shorts – Zernio chỉ đặt ảnh bìa video thường) -> cảnh báo trong kết quả đăng.
+  * Giao diện: ảnh bìa xem trước nhỏ (`thumb_pv`), chọn được WebP / BMP; "Lấy khung đang xem" đổi giây gốc -> giây trên
+    bản xuất (`PublishCard._out_time`, `video.keep_ranges` + `out_time`). Toast > 140 ký tự hiện 9 s.
+  * Thử: ảnh PNG 3000×2000 trong suốt (> 2 MB) -> JPG 1280×853 ≤ 2 MB; WebP 300×200 -> 640×427; ảnh dọc -> 720×1280; ảnh
+    hỏng -> None; chromium thật trên trang TikTok / Facebook / YouTube giả: TikTok gắn đúng file `phim.anh_bia.jpg` + Xác
+    nhận, Facebook ghi chỗ đặt + mở thư mục; giao diện Tự tải lên có ảnh bìa. Chưa chạy trên trang thật.
+
 ## Vấn đề đang mở
+- 2.0.91: chờ người dùng thử lại ảnh bìa: Chrome điền sẵn (YouTube: ảnh có hiện ở mục Hình thu nhỏ không – kênh
+  chưa xác minh số điện thoại thì không có nút; TikTok: tool có tự mở Sửa ảnh bìa không), Tự tải lên (file
+  `<video>.anh_bia.jpg` cạnh video). Ô nào báo "điền tay" -> xin ảnh chụp trang để thêm bộ chọn.
 - 2.0.89: chờ người dùng thử xoá dự án trên Windows (tên mất ngay, mở lại tool không còn thư mục), xem tab Phụ đề mới;
   chạy `DongGoi_MoHinh.bat` (kiểm tra máy nhận dùng được mô hình, nhất là VieNeu: kho phụ của VieNeu chỉ được chép nếu mã
   gói vieneu có ghi tên kho). Còn chờ trả lời: bản exe với các nút cần pip (Playwright, Cập nhật trình tải).

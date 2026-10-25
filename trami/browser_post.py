@@ -25,7 +25,7 @@ from pathlib import Path
 
 from . import net
 from .config import DATA_DIR
-from .publish import PublishError, compose_text, load_accounts, save_accounts
+from .publish import THUMB_HOWTO, PublishError, compose_text, load_accounts, reveal, save_accounts
 
 YT_URL = "https://www.youtube.com/upload"
 FB_URLS = {"video": "https://business.facebook.com/latest/composer",
@@ -44,7 +44,9 @@ YT = {
              'input[type="file"]'],
     "title": ['#title-textarea #textbox', '#title-textarea [contenteditable="true"]'],
     "desc": ['#description-textarea #textbox', '#description-textarea [contenteditable="true"]'],
-    "thumb": ['ytcp-thumbnails-compact-editor-uploader input[type="file"]', 'input#file-loader'],
+    "thumb": ['ytcp-thumbnails-compact-editor-uploader input[type="file"]', 'input#file-loader',
+              'ytcp-thumbnail-uploader input[type="file"]', 'ytcp-video-thumbnail-editor input[type="file"]',
+              'ytcp-uploads-dialog input[type="file"][accept*="image"]'],
     "kids_no": ['[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"]'],
     "kids_yes": ['[name="VIDEO_MADE_FOR_KIDS_MFK"]'],
     "ai_yes": ['[name="VIDEO_HAS_ALTERED_CONTENT_YES"]'],
@@ -70,6 +72,10 @@ FB = {
 }
 TT = {
     "file": ['input[type="file"][accept*="video"]', 'input[type="file"]'],
+    "cover_edit": [r"Edit cover", r"Sửa ảnh bìa", r"Chỉnh sửa ảnh bìa", r"Chọn ảnh bìa", r"Select cover"],
+    "cover_upload": [r"Upload cover", r"Tải ảnh bìa lên", r"Tải lên ảnh bìa", r"^Tải lên$", r"^Upload$"],
+    "cover_file": ['[role="dialog"] input[type="file"][accept*="image"]', 'input[type="file"][accept*="image"]'],
+    "cover_ok": [r"^Confirm$", r"^Xác nhận$", r"^Lưu$", r"^Save$", r"^Done$", r"^Xong$"],
     "caption": ['.public-DraftEditor-content[contenteditable="true"]', '.DraftEditor-root [contenteditable="true"]',
                 'div[contenteditable="true"]'],
     "post": ['button[data-e2e="post_video_button"]'],
@@ -295,6 +301,14 @@ def _type(page, loc, text: str):
             page.keyboard.insert_text(line)
 
 
+def _thumb_left(item: dict, rep: "_Report") -> str:
+    """Ảnh bìa tool không gắn được -> chỗ đặt trên trang + tên file (thư mục chứa ảnh sẽ được mở sẵn)."""
+    th = item.get("thumbnail")
+    if not th or "ảnh bìa" not in rep.miss:
+        return ""
+    return f"Ảnh bìa: {THUMB_HOWTO[(item['platform'], item.get('kind', 'video'))]} – kéo file {Path(th).name} vào."
+
+
 def _mark(page, loc, note: str):
     """Viền cam nút Đăng + dòng nhắc nhỏ ở góc trang (không bấm hộ)."""
     try:
@@ -308,7 +322,7 @@ def _mark(page, loc, note: str):
             d.textContent = m; d.style.cssText = 'position:fixed;left:16px;bottom:16px;z-index:2147483647;max-width:460px;' +
             'background:#ff6a3d;color:#fff;font:600 14px/1.4 sans-serif;padding:10px 14px;border-radius:10px;' +
             'box-shadow:0 4px 18px rgba(0,0,0,.35);pointer-events:none';
-            setTimeout(() => d.remove(), 20000); }""", note)
+            setTimeout(() => d.remove(), 60000); }""", note)
     except Exception:  # noqa: BLE001
         pass
 
@@ -358,7 +372,7 @@ def _fill_youtube(page, item: dict, rep: _Report):
         rep.step("mô tả", lambda: write("desc", desc, 20))
     th = item.get("thumbnail")
     if th and Path(th).exists():
-        rep.step("ảnh bìa", lambda: _set_file(page, YT["thumb"], th))
+        rep.step("ảnh bìa", lambda: _set_file(page, YT["thumb"], th, 15))
     rep.step("khán giả (trẻ em)", lambda: _click(page, YT["kids_yes" if item.get("made_for_kids") else "kids_no"]))
     if item.get("synthetic"):
         rep.step("nội dung AI", lambda: _click(page, YT["ai_yes"], 4))
@@ -379,7 +393,8 @@ def _fill_youtube(page, item: dict, rep: _Report):
             pass
     done = _first(page, YT["done"], 8)
     if done is not None:
-        _mark(page, done, "Subvideo đã điền sẵn – kiểm tra lại rồi bấm nút viền cam (Xuất bản / Lên lịch).")
+        _mark(page, done, " ".join(x for x in ("Subvideo đã điền sẵn – kiểm tra lại rồi bấm nút viền cam (Xuất bản / "
+                                               "Lên lịch).", _thumb_left(item, rep)) if x))
 
 
 def _fill_facebook(page, item: dict, rep: _Report):
@@ -402,12 +417,15 @@ def _fill_facebook(page, item: dict, rep: _Report):
             text = compose_text(item, "facebook", kind)
     if text:
         rep.step("nội dung bài đăng", lambda: _write_box(page, FB["text"], text, WAIT_FORM))
+    if item.get("thumbnail"):
+        rep.miss.append("ảnh bìa")    # không tự gắn: ô chọn file của trang nhận cả ảnh -> dễ thành ảnh của bài đăng
     if item.get("publish_at"):
         rep.note = f"chọn Lên lịch {_when_text(item['publish_at'])}"
     rep.note = "; ".join(x for x in (rep.note, "chọn đúng Trang ở góc trên nếu tool mở nhầm Trang") if x)
     post = _button(page, FB["post"], 6)
     if post is not None:
-        _mark(page, post, "Subvideo đã điền sẵn – kiểm tra Trang + nội dung rồi bấm nút viền cam.")
+        _mark(page, post, " ".join(x for x in ("Subvideo đã điền sẵn – kiểm tra Trang + nội dung rồi bấm nút viền cam.",
+                                               _thumb_left(item, rep)) if x))
 
 
 def _fill_tiktok(page, item: dict, rep: _Report):
@@ -422,17 +440,65 @@ def _fill_tiktok(page, item: dict, rep: _Report):
     text = compose_text(item, "tiktok", "video", with_title=not (item.get("description") or "").strip())[:2200]
     if text:
         rep.step("chú thích + hashtag", lambda: _write_box(page, TT["caption"], text, WAIT_FORM))
-    if item.get("thumbnail"):
-        rep.note = "ảnh bìa TikTok chọn tay ở mục Ảnh bìa (Cover)"
+    th = item.get("thumbnail")
+    if th and Path(th).exists():
+        rep.step("ảnh bìa", lambda: _tiktok_cover(page, th))
     if item.get("publish_at"):
         rep.note = "; ".join(x for x in (rep.note, f"bật Lên lịch và chọn {_when_text(item['publish_at'])}") if x)
     post = _first(page, TT["post"], 8) or _button(page, TT["post_text"], 3)
     if post is not None:
-        _mark(page, post, "Subvideo đã điền sẵn – kiểm tra rồi bấm nút viền cam (Đăng).")
+        _mark(page, post, " ".join(x for x in ("Subvideo đã điền sẵn – kiểm tra rồi bấm nút viền cam (Đăng).",
+                                               _thumb_left(item, rep)) if x))
 
 
-def _set_file(page, sels, path) -> bool:
-    loc = _first(page, sels, 8, attached=True)
+def _tiktok_cover(page, path) -> bool:
+    """Ảnh bìa TikTok: Sửa ảnh bìa -> Tải ảnh bìa lên -> chọn file -> Xác nhận. Bước nào không thấy -> đóng hộp, báo
+    "điền tay"."""
+    edit = _text_target(page, TT["cover_edit"], 20)
+    if edit is None:
+        return False
+    edit.click()
+    try:
+        up = _text_target(page, TT["cover_upload"], 8)
+        if up is not None:
+            up.click()
+        if not _set_file(page, TT["cover_file"], path, 8):
+            raise LookupError("không thấy ô chọn ảnh bìa")
+        page.wait_for_timeout(1500)                # TikTok mở khung cắt 3:4 – giữ nguyên, bấm Xác nhận
+        ok = _button(page, TT["cover_ok"], 10)
+        if ok is None:
+            raise LookupError("không thấy nút Xác nhận")
+        ok.click()
+        return True
+    except Exception:  # noqa: BLE001
+        try:
+            page.keyboard.press("Escape")
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+
+def _text_target(page, names: list[str], timeout: float):
+    """Nút hoặc chữ bấm được khớp 1 trong các mẫu (TikTok hay dùng div thay cho nút)."""
+    loc = _button(page, names, min(timeout, 3))
+    if loc is not None:
+        return loc
+    end = time.time() + max(0.0, timeout - 3)
+    while True:
+        for n in names:
+            try:
+                cand = page.get_by_text(re.compile(n, re.I)).first
+                if cand.count() and cand.is_visible():
+                    return cand
+            except Exception:  # noqa: BLE001
+                continue
+        if time.time() >= end:
+            return None
+        page.wait_for_timeout(300)
+
+
+def _set_file(page, sels, path, timeout: float = 8) -> bool:
+    loc = _first(page, sels, timeout, attached=True)
     if loc is None:
         return False
     loc.set_input_files(str(path))
@@ -501,6 +567,10 @@ def _do_fill(eng: _Engine, settings: dict, pid: str, item: dict) -> tuple[str, d
         FILLERS[item["platform"]](page, item, rep)
     except Exception as e:  # noqa: BLE001
         rep.miss.append(f"(dừng giữa chừng: {type(e).__name__})")
+    left = _thumb_left(item, rep)
+    if left:
+        reveal(Path(item["thumbnail"]))
+        rep.note = "; ".join(x for x in (rep.note, left + " (đã mở thư mục chứa ảnh)") if x)
     tok = uuid.uuid4().hex[:8]
     eng.pages[tok] = (page, item["platform"], rep)
     return tok, {"done": rep.done, "miss": rep.miss, "url": rep.url, "need_login": rep.need_login, "note": rep.note}
