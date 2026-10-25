@@ -1297,8 +1297,9 @@ def ai_review(p: Project, settings: dict | None = None, engine: str | None = Non
 
 def translate(p: Project, engine: str | None = None, style: str | None = None, only_empty: bool = False,
               settings: dict | None = None, progress: Prog | None = None, cancel=None,
-              rows: list[int] | None = None) -> int:
-    """Dịch phụ đề. rows: chỉ các câu này (dịch LẠI: bỏ bản dịch nhớ sẵn của chúng để ra bản mới)."""
+              rows: list[int] | None = None, split: bool = True) -> int:
+    """Dịch phụ đề. rows: chỉ các câu này (dịch LẠI: bỏ bản dịch nhớ sẵn của chúng để ra bản mới). split False: không
+    tự tách câu dài ở cuối (chạy tự động tách ở bước riêng `auto_split_long`)."""
     from .translate import BUDGET_RE, Translator, cache_line, glossary_text, parse_glossary, untranslated
 
     settings = settings or load_settings()
@@ -1417,17 +1418,30 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
             log_error("AI kiểm tra bản dịch")
             p.data["skill_warning"] = f"Bỏ qua bước AI kiểm tra bản dịch ({err_text(e)[:120]})"
             p.save()
-    if whole and settings.get("split_long_trans", True):
-        # câu dịch quá dài (> N tiếng) có dấu ? ! . / dấu phẩy ở cả câu gốc lẫn câu dịch -> tách thành các vế, nghỉ 1 nhịp
-        before = len(p.segments)
+    if whole and split:
         # câu đã có giọng lồng giữ nguyên (tách thì mất giọng) – muốn tách thì bấm "Tách câu dài" ở tab Phụ đề
-        made = split_long(p, settings, [k for k, x in enumerate(p.segments) if not x.extra.get("tts_file")], None,
-                          cancel)
-        if made:
-            p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + \
-                f"tách {len(made) - (len(p.segments) - before)} câu dịch dài ở dấu câu thành {len(made)} câu ngắn"
-            p.save()
+        auto_split_long(p, settings, voiced=False, cancel=cancel)
     return sum(1 for s in p.segments if s.trans)
+
+
+def auto_split_long(p: Project, settings: dict | None = None, voiced: bool = False, progress: Prog | None = None,
+                    cancel=None) -> int:
+    """Tự tách câu dịch quá dài (> N tiếng, có dấu ? ! . / dấu phẩy ở cả câu gốc lẫn câu dịch) theo Cài đặt
+    split_long_trans. voiced False: bỏ qua câu đã có giọng lồng (tách thì mất giọng); True: tách cả câu đó (chạy tự động
+    – bước lồng tiếng ngay sau đọc lại các vế). Ghi skill_note, trả số câu dài đã tách."""
+    settings = settings or load_settings()
+    if not settings.get("split_long_trans", True) or not any(s.trans.strip() for s in p.segments):
+        return 0
+    before = len(p.segments)
+    rows = None if voiced else [k for k, x in enumerate(p.segments) if not x.extra.get("tts_file")]
+    made = split_long(p, settings, rows, progress, cancel)
+    if not made:
+        return 0
+    n = len(made) - (len(p.segments) - before)
+    p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + \
+        f"tách {n} câu dịch dài ở dấu câu thành {len(made)} câu ngắn"
+    p.save()
+    return n
 
 
 # ------------------------------------------------------------------ lồng tiếng
@@ -2643,11 +2657,13 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
         steps.append("recognize")
     if not no_tr:
         steps.append("translate")
+        if settings.get("split_long_trans", True):
+            steps.append("split")      # dịch XONG hết mới tách câu dài, tách xong hết mới lồng tiếng
     if opts.get("dub") and not no_tr:
         steps.append("dub")
     steps.append("export")
     # render False (tab Tự động): dừng trước bước ghép video – chỉ lưu cách xuất + SRT, xuất video bấm tay
-    weights = {"download": 1, "recognize": 4, "translate": 2, "dub": 2,
+    weights = {"download": 1, "recognize": 4, "translate": 2, "split": 0.2, "dub": 2,
                "export": 3 if opts.get("render", True) else 0.2}
     total_w = sum(weights[s] for s in steps)
     result: dict = {}
@@ -2665,7 +2681,8 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
             live.cleanup()
     if not no_tr and not opts.get("render", True):
         result["message"] = ("Xong (chưa xuất video): " + " → ".join(
-            {"download": "tải video", "recognize": "nghe & tách câu", "translate": "dịch", "dub": "lồng tiếng"}[x]
+            {"download": "tải video", "recognize": "nghe & tách câu", "translate": "dịch", "split": "tách câu dài",
+             "dub": "lồng tiếng"}[x]
             for x in steps if x != "export") + ". Kiểm tra rồi bấm 'Xuất video' để ghép video")
     elif not no_tr:
         result["message"] = "Hoàn tất! " + (f"Video: {Path(result['video']).name}" if result.get("video") else "")
@@ -2751,9 +2768,18 @@ def _auto_steps(p: Project, opts: dict, steps: list, weights: dict, total_w: flo
                 p.data["live_reused"] = n
                 p.save()
         elif st == "translate":
-            # vừa tách vừa dịch: chỉ dịch các câu chưa có bản dịch (câu bị đổi sau khi nghe lại / căn / tách người nói)
-            translate(p, opts.get("engine"), opts.get("style"), bool(opts.get("only_empty")) or bool(opts.get("parallel")),
-                      settings, pr, cancel)
+            # vừa tách vừa dịch: chỉ dịch các câu chưa có bản dịch (câu bị đổi sau khi nghe lại / căn / tách người nói).
+            # Chạy lại trên dự án đã dịch (cùng tiếng đích, không nhận dạng lại): chỉ dịch câu còn trống – trước đây dịch
+            # lại cả phim -> tốn API + mất các câu đã sửa tay
+            again = ("recognize" not in steps and any(x.trans.strip() for x in p.segments)
+                     and trans_lang(p) == target_lang(p, settings))
+            translate(p, opts.get("engine"), opts.get("style"),
+                      bool(opts.get("only_empty")) or bool(opts.get("parallel")) or again, settings, pr, cancel,
+                      split=False)
+        elif st == "split":
+            pr(0.0, "Đang tách câu dịch dài…")
+            # có bước lồng tiếng ngay sau -> tách cả câu đã có giọng (các vế được đọc ở bước đó)
+            auto_split_long(p, settings, voiced="dub" in steps, progress=pr, cancel=cancel)
         elif st == "dub":
             _auto_voices(p, opts, settings)
             if opts.get("separate") and not stems(p):

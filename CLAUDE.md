@@ -140,7 +140,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (160 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (161 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1387,6 +1387,19 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Cài đặt `batch_render`, mặc định tắt) -> `opts["render"]`; toast nhắc kiểm tra từng dự án rồi bấm Xuất video. Dòng lệnh
   `dich`: mặc định `render` False, `--xuat-video` = xuất luôn (`--chi-phude` giữ như cũ), in "Chưa xuất video: mở tool ->
   dự án …"; `-o` chép cả SRT khi không có video.
+
+- 2.0.86: "bật tách câu dài ở tab Phụ đề mà tab Tự động không tự tách; thêm nút vào tab Tự động (2 nút như 1); chưa có
+  phụ đề thì đợi dịch xong rồi tách, tách xong hết mới tạo giọng". Nguyên nhân không tách: tự tách ở cuối `translate` bỏ qua
+  câu ĐÃ có giọng lồng (dự án chạy lại tự động sau khi đã lồng -> không câu nào được tách).
+  * `pipeline.auto_split_long(p, settings, voiced)` (dùng chung); `translate(split=)`; `auto` có bước riêng "split" ngay
+    sau "translate" (khi `split_long_trans` bật), trước "dub" – có bước lồng tiếng thì tách cả câu đã có giọng (bước lồng
+    đọc các vế, câu khác dùng lại file giọng). Thông báo xong có "tách câu dài".
+  * Tab Tự động công tắc "Tách câu dịch dài" (`a_split_long`) = gương của "Tự tách câu dịch dài" tab Phụ đề (`s_split`),
+    1 cài đặt `split_long_trans`; `sync_engine` đặt lại cả 2 + mức tiếng / khoảng nghỉ theo Cài đặt.
+  * Lỗi tìm ra khi rà các bước: chạy lại tự động trên dự án đã dịch (không nhận dạng lại, cùng tiếng đích) dịch lại CẢ
+    phim (tốn API, mất câu đã sửa tay – `translate_segments` bỏ cờ `trans_user`) -> giờ chỉ dịch câu còn trống + toast
+    nhắc "Dịch lại tất cả" ở tab Phụ đề. Vừa tách vừa dịch: Edge không đọc trước câu sẽ bị tách (`stream._dub_loop`
+    lọc bằng `split_clauses`) – trước đọc cả câu dài rồi bỏ.
 
 ## Vấn đề đang mở
 - 2.0.83: chờ người dùng mở lại tool (hết 97 việc trùng), tab Lồng tiếng "Tích câu chưa lồng" -> "Tạo lại giọng các câu đã

@@ -1968,7 +1968,7 @@ def test_target_language_detect_and_translate(monkeypatch):
     monkeypatch.setattr(pipeline, "export_subs", lambda *a, **k: Path("x.srt"))
     p2.segments = [Segment(0, 1, "你好", "")]
     p2.save()
-    pipeline.auto(p2, {"target": "th", "render": False}, {"translate_engine": "google"})
+    pipeline.auto(p2, {"target": "th", "render": False})
     assert p2.data["target_lang"] == "th"
     p.delete()
     p2.delete()
@@ -5559,6 +5559,13 @@ def test_gui_split_long_not_overwritten(sample_video, monkeypatch):
     assert sum(1 for j in manager.list() if j["project_id"] == p.id and j["kind"] == "redub") == 1
     assert sorted(pp.model.selected) == [0, 1]
     assert pp.model.segs[0].trans.endswith("ý gì?")
+    # công tắc "Tách câu dịch dài" ở tab Tự động = công tắc ở tab Phụ đề (1 cài đặt chung)
+    from trami.config import load_settings
+
+    pp.a_split_long.setChecked(False)
+    assert not pp.s_split.isChecked() and load_settings()["split_long_trans"] is False
+    pp.s_split.setChecked(True)
+    assert pp.a_split_long.isChecked() and load_settings()["split_long_trans"] is True
     win.close()
 
 
@@ -5598,3 +5605,46 @@ def test_cli_and_batch_stop_before_export(sample_video, monkeypatch, capsys):
     page.do_render.setChecked(False)
     win.close()
     app.processEvents()
+
+
+def test_auto_translate_then_split_then_dub(sample_video, monkeypatch):
+    """Chạy tự động: dịch XONG -> tách câu dịch dài -> lồng tiếng các vế; chạy lại trên dự án đã dịch chỉ dịch câu trống."""
+    from trami import pipeline
+    from trami.project import Project
+
+    p = Project.create("autosplit")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [Segment(0.3, 5.5, "熊大，他说的帮他管犯人是什么意思？哥，你是咱流放营第三五的管事儿啊，", "", "S1")]
+    p.save()
+    order = []
+
+    def fake_translate(q, engine=None, style=None, only_empty=False, settings=None, progress=None, cancel=None,
+                       rows=None, split=True):
+        order.append(("translate", only_empty, split, len(q.segments)))
+        segs = q.segments
+        segs[0].trans = ("Hùng Đại, hắn nói giúp hắn quản lý tù nhân là ý gì? Ca, ca là quản sự trại lưu đày của "
+                         "chúng ta mà,")
+        q.segments = segs
+        q.data["trans_lang"] = "vi"
+        q.save()
+        return 1
+
+    monkeypatch.setattr(pipeline, "translate", fake_translate)
+    monkeypatch.setattr(pipeline, "dub", lambda q, *a, **k: order.append(("dub", len(q.segments))))
+    res = pipeline.auto(p, {"engine": "google", "dub": True, "render": False})
+    assert order == [("translate", False, False, 1), ("dub", 2)]
+    assert [s.trans for s in Project(p.id).segments] == [
+        "Hùng Đại, hắn nói giúp hắn quản lý tù nhân là ý gì?", "Ca, ca là quản sự trại lưu đày của chúng ta mà,"]
+    assert "tách câu dài" in res["message"]
+    order.clear()
+    pipeline.auto(Project(p.id), {"engine": "google", "dub": False, "render": False})
+    assert order[0][:2] == ("translate", True)     # đã dịch -> chỉ dịch câu còn trống, không dịch đè câu đã sửa
+    from trami.config import save_settings
+
+    save_settings({"split_long_trans": False})
+    try:
+        order.clear()
+        pipeline.auto(Project(p.id), {"engine": "google", "dub": True, "render": False})
+        assert [x[0] for x in order] == ["translate", "dub"]
+    finally:
+        save_settings({"split_long_trans": True})

@@ -317,6 +317,11 @@ class ProjectPage(QWidget):
                             "Dịch bằng AI: câu dịch ngắn hơn hẳn thời gian nhân vật nói thì nói đầy đủ hơn – thêm từ "
                             "đệm / phụ từ (à, nhé, đấy, cơ, mà, thế…), xưng hô – không thêm ý, không dài quá → giọng "
                             "lồng không hụt so với miệng nhân vật. Tắt = chỉ giới hạn độ dài tối đa")
+        # = công tắc "Tự tách câu dịch dài" ở tab Phụ đề (1 cài đặt chung split_long_trans, 2 công tắc luôn giống nhau)
+        self.a_split_long = f.row("Tách câu dịch dài", Switch(bool(s.get("split_long_trans", True))),
+                                  "Dịch xong cả phim -> câu dịch dài hơn mức đặt ở tab Phụ đề (mặc định 14 tiếng) được "
+                                  "tách ở dấu ? ! . / dấu phẩy thành nhiều dòng, giọng lồng nghỉ 1 nhịp giữa 2 vế. Tách "
+                                  "xong hết mới lồng tiếng. Cùng 1 công tắc với 'Tự tách câu dịch dài' ở tab Phụ đề")
         self.a_clean.toggled.connect(self._ai_switch_changed)
         self.a_review.toggled.connect(self._ai_switch_changed)
         self.a_songai.toggled.connect(self._ai_switch_changed)
@@ -500,6 +505,8 @@ class ProjectPage(QWidget):
                                 "gấp 1,6 lần)")
         for w in (self.s_split, self.s_split_n, self.s_split_p):
             (w.toggledOn if w is self.s_split else w.valueChanged).connect(self._split_opts_changed)
+        self.a_split_long.toggled.connect(
+            lambda on: None if self.loading or self.s_split.isChecked() == on else self.s_split.setChecked(on))
         self.bar_split = flow(
             hbox(self.s_split, label("Tự tách câu dịch dài ở dấu câu (? ! . ,), câu dài hơn", "muted"), self.s_split_n),
             hbox(label("nghỉ giữa 2 vế", "muted"), self.s_split_p),
@@ -2131,7 +2138,11 @@ class ProjectPage(QWidget):
         if opts["method"] == "ocr" and self._hs_regions:   # vùng chữ bạn đã khoanh (như nút "1. Nghe & tách câu")
             opts["region"] = self._hs_regions[0]
         if self.p.segments and not opts["force_recognize"]:
-            self.win.toast("Dự án đã có phụ đề → dùng lại (bật 'Nhận dạng lại từ đầu' nếu muốn làm lại)", "warn")
+            done = (any(x.trans.strip() for x in self.p.segments)
+                    and pipeline.trans_lang(self.p) == (opts.get("target") or pipeline.target_lang(self.p, self.settings)))
+            self.win.toast("Dự án đã có phụ đề → dùng lại (bật 'Nhận dạng lại từ đầu' nếu muốn làm lại)" +
+                           (" · đã có bản dịch → giữ nguyên, chỉ dịch câu còn trống (dịch lại cả phim: tab Phụ đề → "
+                            "Dịch lại tất cả)" if done else ""), "warn")
         opts["render"] = False   # dừng trước bước xuất: kiểm tra xong tự bấm "Xuất video"
         self.submit("auto", "Dịch tự động", lambda j, p: pipeline.auto(p, opts, j.update, j.cancelled))
 
@@ -2213,6 +2224,11 @@ class ProjectPage(QWidget):
             self.a_review.setChecked(bool(st.get("ai_review_after_translate", False)))
             self.a_songai.setChecked(bool(st.get("ai_song_filter", True)))
             self.a_fill.setChecked(bool(st.get("translate_fill", True)))
+            on = bool(st.get("split_long_trans", True))
+            self.a_split_long.setChecked(on)
+            self.s_split.setChecked(on)
+            self.s_split_n.setValue(int(st.get("split_long_units", 14) or 14))
+            self.s_split_p.setValue(float(st.get("split_pause", 0.25)))
             self.d_interj.setChecked(bool(st.get("dub_drop_interj", True)))
             self.a_parallel.setChecked(bool(st.get("auto_parallel", False)))
         finally:
@@ -2379,6 +2395,12 @@ class ProjectPage(QWidget):
              "split_pause": round(self.s_split_p.value(), 2)}
         save_settings(d)
         self.settings.update(d)
+        if self.a_split_long.isChecked() != self.s_split.isChecked():   # công tắc gương ở tab Tự động
+            was, self.loading = self.loading, True
+            try:
+                self.a_split_long.setChecked(self.s_split.isChecked())
+            finally:
+                self.loading = was
 
     def run_split_long(self):
         """Tách câu dịch dài ở dấu ? ! . / dấu phẩy (câu đã tích, chưa tích thì cả phim). 2 bước: tách (nhanh) -> bảng

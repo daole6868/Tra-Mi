@@ -146,6 +146,8 @@ hạn một chút, *Số câu mỗi lần gửi* 30–60; key hết lượt hôm
   nhân vật ngắt hơi). Giọng lồng **nghỉ 0,25 s** giữa 2 vế (hết câu 0,4 s). Chỉnh ở tab Phụ đề: *Tự tách câu dịch dài ở
   dấu câu, câu dài hơn 14 tiếng*, *nghỉ giữa 2 vế*; dự án cũ bấm **Tách câu dài** (câu đã lồng tiếng được đọc lại), có
   *Hoàn tác tách* / Ctrl+Z. Các nút nối câu (*Nối câu bị cắt*, *AI nối câu*) không nối lại các vế đã tách.
+  Tab Tự động có công tắc *Tách câu dịch dài* (cùng 1 công tắc với tab Phụ đề): dịch xong hết mới tách, tách xong
+  hết mới lồng tiếng.
 - Dịch ở phần mềm khác rồi **Nạp SRT đã dịch**: file dịch có ít câu hơn (gộp câu) thì tool gộp các câu gốc tương ứng,
   nhiều câu hơn (tách câu) thì nối các câu dịch vào câu gốc – không còn câu bị trống. Có tách giọng thì tool còn **nghe lại các đoạn có tiếng bị bộ chia đoạn bỏ sót**, nên không còn câu bị bỏ không dịch.
 - Dùng **AI dịch** và chọn đúng **thể loại**. Sau lần dịch đầu, sửa bảng tên riêng nếu cần rồi bấm **Dịch lại tất cả**. Bản dịch cũ được lưu sẵn, nên dịch lại không tốn thêm tiền cho những câu không đổi.

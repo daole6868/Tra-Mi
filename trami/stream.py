@@ -179,6 +179,12 @@ class LivePipeline:
                     part, self.to_read = self.to_read[:TTS_GROUP], self.to_read[TTS_GROUP:]
                 if d.get("drop_interj"):   # câu chỉ có "A!", "Ừm." sẽ bị xoá trước khi lồng -> không đọc
                     part = [x for x in part if not lone_interjection(x.trans)]
+                st0 = d["settings"]
+                if st0.get("split_long_trans", True):   # câu dài sẽ bị tách thành nhiều vế sau khi dịch -> không đọc cả câu
+                    from .align import split_clauses
+
+                    mu = float(st0.get("split_long_units", 14) or 14)
+                    part = [x for x in part if len(split_clauses(x, d["lang"], mu)) == 1]
                 if not part:
                     continue
                 st: dict = {}
