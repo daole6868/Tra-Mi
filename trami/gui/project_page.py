@@ -63,6 +63,10 @@ class ProjectPage(QWidget):
         self._ratio_over: dict = {}    # chỉnh riêng từng tỉ lệ xuất thêm (edit["ratio_over"])
         self._junction_cut = None      # ▶ xem chỗ nối 1 đoạn chờ cắt
         self._after_job: dict = {}     # việc nền xong -> gọi tiếp (mã việc -> hàm)
+        # danh sách câu trên đĩa lúc giao diện nạp / lưu lần cuối: việc nền (tách câu, nối câu, dịch…) ghi câu mới trong lúc
+        # bảng còn hiện danh sách cũ -> không ghi đè (xem _save_segs_now)
+        self._disk_sig: list | None = None
+        self._loaded_at = 0.0
 
         self._save_edit_timer = QTimer(self, singleShot=True, interval=500, timeout=self._save_edit_now)
         self._live_timer = QTimer(self, singleShot=True, interval=40, timeout=self._apply_live)
@@ -1481,6 +1485,7 @@ class ProjectPage(QWidget):
                 self.tracks.set_thumbs(None, 0, 0)
                 self.tracks.set_wave(None, 0.05)
             self.model.set_segments(p.segments)
+            self._disk_sig, self._loaded_at = pipeline.seg_sigs(p.segments), time.time()
             self._fit_rows()
             self._update_count()
             self._apply_target(pipeline.target_lang(p, self.settings))
@@ -1980,9 +1985,25 @@ class ProjectPage(QWidget):
             return
         self._undo_mark()
         self.p.reload()
+        if self._disk_sig is not None and pipeline.seg_sigs(self.p.segments) != self._disk_sig and self._job_touched():
+            # việc nền vừa ghi danh sách câu mới (tách câu dài, nối câu, dịch…) trong lúc bảng còn hiện danh sách cũ:
+            # trước đây ghi đè lại bằng danh sách cũ -> mất hết câu vừa tách, giọng lồng lệch câu
+            self.reload()
+            self.win.toast("Phụ đề vừa được việc đang chạy cập nhật – đã nạp bản mới, thao tác vừa rồi chưa được lưu "
+                           "(làm lại nếu cần)", "warn")
+            return
         self.p.segments = self.model.segs
         self.p.save()
+        self._disk_sig = pipeline.seg_sigs(self.model.segs)
         self.saved.setText("✓ đã lưu " + time.strftime("%H:%M"))
+
+    def _job_touched(self) -> bool:
+        """Có việc nền của dự án này đang chạy / đang chờ, hoặc vừa xong mà giao diện chưa nạp lại."""
+        for j in manager.list():
+            if j["project_id"] == self.p.id and (j["status"] in ("queued", "running")
+                                                 or (j.get("finished") or 0) >= self._loaded_at - 1):
+                return True
+        return False
 
     def flush(self):
         if self._save_segs_timer.isActive():
@@ -2070,6 +2091,9 @@ class ProjectPage(QWidget):
             if pick:   # tích sẵn các câu vừa làm (AI rút gọn…) để thấy ngay / nghe / sửa tiếp
                 self.model.set_picked(range(len(self.model.segs)), False)
                 self.model.set_picked([r for r in pick if 0 <= r < len(self.model.segs)])
+            again = (j.get("result") or {}).get("redub") if isinstance(j.get("result"), dict) else None
+            if again and j.get("status") == "done":   # tách câu dài xong -> đọc lại giọng các vế mới (việc thứ 2)
+                self._redub_rows(again, play=False)
             if j["kind"] == "render" and j.get("status") == "done":
                 self.pub._use_latest()          # mục Đăng video dùng ngay bản vừa xuất
             elif j["kind"] == "publish":
@@ -2351,27 +2375,29 @@ class ProjectPage(QWidget):
         self.settings.update(d)
 
     def run_split_long(self):
-        """Tách câu dịch dài ở dấu ? ! . / dấu phẩy (câu đã tích, chưa tích thì cả phim). Đã lồng tiếng: đọc lại giọng các vế."""
+        """Tách câu dịch dài ở dấu ? ! . / dấu phẩy (câu đã tích, chưa tích thì cả phim). 2 bước: tách (nhanh) -> bảng
+        hiện ngay các câu mới; đã lồng tiếng thì việc thứ 2 đọc lại giọng các vế (bảng đã là danh sách mới nên thao tác
+        trong lúc đọc không ghi đè mất câu đã tách)."""
         if not self.model.segs or not any(x.trans.strip() for x in self.model.segs):
             return self.win.toast("Chưa có bản dịch – dịch trước rồi mới tách câu dài", "warn")
         self.flush()
         picked = sorted(self.model.selected)
-        tts_eng, rate = self.d_engine.currentData(), self.d_rate.currentData()
         st = dict(load_settings())
-        st["dub_skip_songs"] = self.d_skipsong.isChecked()
 
         def fn(j, p):
             j.update(0.05, "Đang tìm câu dịch dài có dấu câu ở giữa…")
-            rows = pipeline.split_long(p, st, picked or None, lambda x, m="": j.update(0.05 + 0.3 * x, m), j.cancelled)
+            dubbed = pipeline.has_dub(p) or any(x.extra.get("tts_file") for x in p.segments)
+            rows = pipeline.split_long(p, st, picked or None, lambda x, m="": j.update(0.05 + 0.9 * x, m), j.cancelled)
             if not rows:
                 return {"message": f"Không có câu dịch nào dài hơn {st.get('split_long_units', 14)} tiếng mà tách được "
                                    "(cần dấu ? ! . hoặc dấu phẩy ở giữa câu, có ở cả câu gốc lẫn câu dịch)"}
-            msg = f"Đã tách thành {len(rows)} câu ngắn (được tích sẵn)"
-            if pipeline.has_dub(p) or any(x.extra.get("tts_file") for x in p.segments):
-                pipeline.redub(p, rows, rate, st, lambda x, m="": j.update(0.4 + 0.6 * x, m), j.cancelled, tts_eng)
-                msg += " và đọc lại giọng các vế"
-            return {"message": msg + " · bấm 'Hoàn tác tách' nếu không ưng", "pick": rows}
-        self.submit("redub" if pipeline.has_dub(self.p) else "join", "Tách câu dài", fn)
+            n0 = len(rows) - (len(p.segments) - len(p.data.get("split_backup") or p.segments))
+            msg = f"Đã tách {n0} câu dài thành {len(rows)} câu ngắn (được tích sẵn)"
+            if dubbed:
+                msg += " · đang đọc lại giọng các vế mới (việc tiếp theo)"
+            return {"message": msg + " · bấm 'Hoàn tác tách' nếu không ưng", "pick": rows,
+                    "redub": rows if dubbed else []}
+        self.submit("join", "Tách câu dài", fn)
 
     def run_undo_split(self):
         if not self.p or not self.p.data.get("split_backup"):
@@ -4387,7 +4413,7 @@ class ProjectPage(QWidget):
             self._save_segs_now()
         self._redub_rows(rows)
 
-    def _redub_rows(self, rows: list[int]):
+    def _redub_rows(self, rows: list[int], play: bool = True):
         self.inspector._flush()
         rows = [r for r in rows if 0 <= r < len(self.model.segs)]
         if not rows:
@@ -4399,7 +4425,7 @@ class ProjectPage(QWidget):
         rate = self.d_rate.currentData()
         st = dict(load_settings())
         st["dub_skip_songs"] = self.d_skipsong.isChecked()
-        self._replay_row = rows[0]
+        self._replay_row = rows[0] if play else None
 
         def fn(j, p):
             pipeline.redub(p, rows, rate, st, j.update, j.cancelled, eng)

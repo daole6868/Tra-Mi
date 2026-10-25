@@ -1661,6 +1661,11 @@ def _seg_sig(s) -> tuple:
     return round(s.start, 3), round(s.end, 3), s.text, s.trans
 
 
+def seg_sigs(segs) -> list[tuple]:
+    """Dấu nhận ra danh sách câu (giờ, chữ gốc, bản dịch) – giao diện so với đĩa để không ghi đè câu việc nền vừa sửa."""
+    return [_seg_sig(s) for s in segs]
+
+
 def _keep_user_edits(p: Project, sig0: list) -> None:
     """Xếp lại / đọc lại vài câu chạy ở nền trong lúc người dùng vẫn sửa (xoá tiếp câu khác, kéo câu, đổi kiểu chữ…)
     và giao diện đã lưu dự án: giữ mọi sửa đổi đó (lấy dự án mới nhất trên đĩa), chỉ ghép phần của việc lồng tiếng vào

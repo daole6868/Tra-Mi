@@ -140,7 +140,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (158 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (159 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1351,7 +1351,23 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   * Thử trên 2 câu người dùng gửi: câu 1 -> 3 dòng ("Đúng vậy, … ngàn năm," | "đã không chết … Mã Vũ Trưởng ta," | "tiếp
     tục … này đi."), câu 2 -> "… là ý gì?" | "Ca, ca là … mà,".
 
+- 2.0.82: "câu dài mà vẫn không tách" – việc báo "Đã tách thành 999 câu ngắn… và đọc lại giọng các vế" (6:20) nhưng bảng
+  vẫn câu cũ, dấu tích rơi đúng chỗ các vế mới (51–53) trên câu cũ. Nguyên nhân: tách + đọc lại giọng chạy CHUNG 1 việc;
+  trong 6 phút đọc giọng, giao diện vẫn giữ danh sách câu cũ -> thao tác bất kỳ gọi `_save_segs_now` (xoá / kéo / đổi giọng /
+  Ctrl+S / sửa chữ…) ghi đè danh sách cũ lên đĩa -> cuối việc `_keep_user_edits` thấy đĩa đổi -> lấy bản trên đĩa (cũ) ->
+  mất hết câu đã tách, bản lồng lại theo câu mới (giọng lệch câu). Cùng nguy cơ ở mọi việc "sửa câu rồi đọc lại giọng"
+  (Nối câu bị cắt / dịch câu đã tích / AI rút gọn / AI kiểm tra khi đã lồng).
+  * `project_page._save_segs_now`: so `pipeline.seg_sigs` (giờ + chữ + bản dịch) trên đĩa với `_disk_sig` (lúc giao diện
+    nạp / lưu lần cuối); khác mà có việc của dự án đang chạy / chờ / vừa xong (`_job_touched`) -> KHÔNG ghi, nạp lại bản
+    mới + báo. Thay đổi trong giao diện không qua việc nền không bị chặn.
+  * "Tách câu dài" 2 bước: việc "join" chỉ tách (bảng hiện câu mới ngay, tích sẵn) -> `job_finished` thấy `result["redub"]`
+    -> `_redub_rows(rows, play=False)` (việc "redub" thứ 2, bảng đã là danh sách mới). Thông báo "Đã tách N câu dài thành M
+    câu ngắn". Bấm lại trên dự án bị lỗi: các vế giống hệt lần trước -> dùng lại file giọng đã đọc (mã hash có `take`=1).
+  * Test giao diện: việc nền ghi câu đã tách, giao diện gọi lưu với danh sách cũ -> đĩa vẫn 3 câu (bỏ bản sửa -> 2 câu).
+
 ## Vấn đề đang mở
+- 2.0.82: chờ người dùng bấm lại "Tách câu dài" trên dự án phim 999 câu (bảng phải hiện câu mới ngay, rồi việc "Tạo lại
+  giọng" chạy riêng) và báo có còn thấy toast "Phụ đề vừa được việc đang chạy cập nhật" khi thao tác lúc đang chạy.
 - 2.0.80/81: chờ người dùng thử "Tách câu dài" trên phim thật (dự án cũ đã lồng: đọc lại các vế mới) – mức 14 tiếng có
   hợp không, mốc tách có đúng chỗ nhân vật ngắt hơi không (cần đã tách giọng), ghép vế theo tỉ lệ (số dấu câu 2 bên khác
   nhau) có ghép sai vế không. Người dùng đã bỏ ý "nới chỗ nghỉ ở dấu phẩy trong câu" (VieNeu tự nghỉ ~0,3–0,45 s).

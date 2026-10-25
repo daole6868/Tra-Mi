@@ -5477,3 +5477,71 @@ def test_split_long_at_sentence_ends_and_keep_split():
     assert n == 0 and len(joined) == 5
     new, st = skills.apply_cleanup(out, {"mode": "join", "merge": [[1, 2], [4, 5]]})
     assert len(new) == 5 and st["merged"] == 0
+
+
+def test_gui_split_long_not_overwritten(sample_video, monkeypatch):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    import threading
+    import time as _t
+
+    from PySide6.QtWidgets import QApplication
+
+    from trami import pipeline
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.jobs import manager
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    theme.load_fonts()
+    app.setStyleSheet(theme.stylesheet())
+    p = Project.create("splitgui")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [Segment(0.3, 4.5, "熊大，他说的帮他管犯人是什么意思？哥，你是咱流放营第三五的管事儿啊，",
+                          "Hùng Đại, hắn nói giúp hắn quản lý tù nhân là ý gì? Ca, ca là quản sự trại lưu đày của chúng "
+                          "ta mà,", "S1"), Segment(5.0, 5.8, "好", "Được", "S1")]
+    p.save()
+    win = MainWindow()
+    win.resize(1600, 1000)
+    win.show()
+    win.open_project(p.id)
+    pp = win.project_page
+
+    def pump(cond, t=15):
+        t0 = _t.time()
+        while not cond() and _t.time() - t0 < t:
+            app.processEvents()
+            _t.sleep(0.02)
+        return cond()
+
+    def idle():
+        return not any(j["status"] in ("queued", "running") for j in manager.list() if j["project_id"] == p.id)
+
+    # việc nền ghi danh sách câu mới (đã tách) trong lúc bảng còn hiện danh sách cũ -> giao diện không ghi đè lại
+    gate, wrote = threading.Event(), threading.Event()
+
+    def fn(j, q):
+        pipeline.split_long(q)
+        wrote.set()
+        gate.wait(10)
+        return {"message": "ok"}
+
+    pp.submit("join", "Tách", fn)
+    assert wrote.wait(10)
+    pp._save_segs_now()
+    assert len(Project(p.id).segments) == 3 and len(pp.model.segs) == 3
+    gate.set()
+    assert pump(idle)
+    pp.run_undo_split()
+    assert len(Project(p.id).segments) == 2
+    # đã lồng tiếng: bước 1 tách (bảng có câu mới + tích sẵn), bước 2 mới đọc lại giọng các vế mới
+    calls = []
+    monkeypatch.setattr(pp, "_redub_rows", lambda rows, play=True: calls.append((rows, play)))
+    monkeypatch.setattr(pipeline, "has_dub", lambda q: True)
+    pp.run_split_long()
+    assert pump(lambda: calls)
+    assert calls == [([0, 1], False)] and len(pp.model.segs) == 3 and len(Project(p.id).segments) == 3
+    assert sorted(pp.model.selected) == [0, 1]
+    assert pp.model.segs[0].trans.endswith("ý gì?")
+    win.close()
