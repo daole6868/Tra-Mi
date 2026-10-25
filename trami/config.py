@@ -147,6 +147,7 @@ DEFAULT_SETTINGS: dict = {
     "dub_skip_songs": True,           # không lồng tiếng các câu đang hát -> giữ nguyên bài hát gốc
     "dub_drop_interj": True,          # lồng tiếng Việt: xoá câu chỉ có 1–2 tiếng cảm thán (A!, Ừm., Ái!) trước khi đọc
     "dub_voice_all": "",              # 1 giọng cho MỌI người nói (tab Tự động / Lồng tiếng mục 2), "@auto" = tự gán nam / nữ
+    "batch_render": False,            # Xử lý hàng loạt: tự xuất video luôn (mặc định dừng trước bước xuất)
     "auto_parallel": False,           # tab Tự động: vừa tách vừa dịch (nghe tới đâu dịch tới đó, Edge đọc trước giọng)
     "proxy_mode": "auto",             # bản xem trước nhẹ ≤ 720p cho trình phát: auto (video nặng) / always / off
     "vram_check": True,               # trước việc GPU: card bị chương trình khác chiếm -> báo + chờ (tối đa 3 phút)

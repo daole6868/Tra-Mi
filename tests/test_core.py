@@ -5560,3 +5560,41 @@ def test_gui_split_long_not_overwritten(sample_video, monkeypatch):
     assert sorted(pp.model.selected) == [0, 1]
     assert pp.model.segs[0].trans.endswith("ý gì?")
     win.close()
+
+
+def test_cli_and_batch_stop_before_export(sample_video, monkeypatch, capsys):
+    """Dòng lệnh + Xử lý hàng loạt: mặc định dừng trước bước xuất video; --xuat-video / công tắc thì xuất luôn."""
+    from trami import __main__ as cli, pipeline
+
+    seen = []
+    monkeypatch.setattr(pipeline, "auto", lambda p, o, *a, **k: seen.append(dict(o)) or {"srt": "", "message": "ok"})
+    cli.main(["dich", str(sample_video)])
+    cli.main(["dich", str(sample_video), "--xuat-video"])
+    assert [o["render"] for o in seen] == [False, True]
+    assert "Chưa xuất video" in capsys.readouterr().out
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+
+    from trami.gui.main import MainWindow
+    from trami.jobs import manager
+
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow()
+    from trami.gui import main as gm
+
+    page = next(w for w in win.findChildren(gm.BatchPage))
+    subs = []
+    monkeypatch.setattr(manager, "submit", lambda kind, title, fn, pid=None: subs.append(fn))
+    page.items.setPlainText(str(sample_video))
+    page.run()
+    assert not page.do_render.isChecked()
+    subs[0](type("J", (), {"update": staticmethod(lambda *a: None), "cancelled": staticmethod(lambda: False)})())
+    assert seen[-1]["render"] is False
+    page.do_render.setChecked(True)
+    page.run()
+    subs[-1](type("J", (), {"update": staticmethod(lambda *a: None), "cancelled": staticmethod(lambda: False)})())
+    assert seen[-1]["render"] is True
+    page.do_render.setChecked(False)
+    win.close()
+    app.processEvents()

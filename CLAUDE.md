@@ -140,7 +140,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (159 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (160 test; 1 test cần gói AI; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1382,6 +1382,11 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   lồng tiếng) + ghi SRT, nhưng KHÔNG `render` (trọng số tiến độ 0,2); thông báo "Xong (chưa xuất video): nghe & tách câu →
   dịch → lồng tiếng. Kiểm tra rồi bấm 'Xuất video'". Nút có tooltip + dòng ghi chú dưới nút. Xử lý hàng loạt / dòng lệnh vẫn
   xuất như cũ (`render` mặc định True).
+
+- 2.0.85: Xử lý hàng loạt + dòng lệnh cũng dừng trước bước xuất. Hàng loạt: công tắc "Xuất video luôn" (`BatchPage.do_render`,
+  Cài đặt `batch_render`, mặc định tắt) -> `opts["render"]`; toast nhắc kiểm tra từng dự án rồi bấm Xuất video. Dòng lệnh
+  `dich`: mặc định `render` False, `--xuat-video` = xuất luôn (`--chi-phude` giữ như cũ), in "Chưa xuất video: mở tool ->
+  dự án …"; `-o` chép cả SRT khi không có video.
 
 ## Vấn đề đang mở
 - 2.0.83: chờ người dùng mở lại tool (hết 97 việc trùng), tab Lồng tiếng "Tích câu chưa lồng" -> "Tạo lại giọng các câu đã

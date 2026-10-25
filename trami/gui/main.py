@@ -490,6 +490,10 @@ class BatchPage(QWidget):
         self.aspect = f.row("Khung hình", combo(C.ASPECTS, "original"))
         self.dub = f.row("Lồng tiếng", Switch(False))
         self.tts = f.row("Bộ đọc", combo(C.TTS_ENGINES, s.get("tts_engine", "edge")))
+        self.do_render = f.row("Xuất video luôn", Switch(bool(s.get("batch_render", False))),
+                            "Tắt (mặc định): mỗi video làm tới lồng tiếng rồi DỪNG trước bước xuất – mở từng dự án kiểm "
+                            "tra rồi bấm 'Xuất video'. Bật: tự xoá phụ đề cũ + ghép video luôn như trước")
+        self.do_render.toggled.connect(lambda on: save_settings({"batch_render": bool(on)}))
         self.target.currentIndexChanged.connect(
             lambda: C.relabel(self.which, C.which_choices(self.target.currentData())))
         C.relabel(self.which, C.which_choices(self.target.currentData()))
@@ -520,7 +524,7 @@ class BatchPage(QWidget):
                 "target": self.target.currentData(),
                 "hardsub_mode": self.hardsub.currentData(), "burn": which != "none",
                 "which": which if which != "none" else "trans", "dub": self.dub.isChecked(),
-                "tts_engine": self.tts.currentData(), "separate": True,
+                "tts_engine": self.tts.currentData(), "separate": True, "render": self.do_render.isChecked(),
                 "parallel": bool(load_settings().get("auto_parallel", False))}
         aspect = self.aspect.currentData()
         n = 0
@@ -550,7 +554,8 @@ class BatchPage(QWidget):
             manager.submit("auto", f"Hàng loạt: {Path(it).name if not is_url else url[-40:]}", fn, p.id)
             n += 1
         self.win.refresh_projects()
-        self.win.toast(f"Đã xếp hàng {n} video", "ok")
+        self.win.toast(f"Đã xếp hàng {n} video" + ("" if opts["render"] else " – dừng trước bước xuất, kiểm tra từng dự án "
+                                                    "rồi bấm 'Xuất video'"), "ok")
 
 
 class ConcatPage(QWidget):

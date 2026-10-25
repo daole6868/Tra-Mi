@@ -90,7 +90,7 @@ Cài xong (kể cả AI nâng cao) thì chạy **`DongGoi_EXE.bat`** (15–40 ph
    (thanh bên trái). Nhiều dự án chạy được cùng lúc, mỗi lúc 1 việc dùng card đồ hoạ.
 4. Soát phụ đề ở tab **Phụ đề**, rồi mở tab **Xuất** để lấy video MP4 và file SRT.
 
-Để dịch hàng loạt, chọn nhiều file cùng lúc ở Trang chủ, hoặc dùng trang **Xử lý hàng loạt**.
+Để dịch hàng loạt, chọn nhiều file cùng lúc ở Trang chủ, hoặc dùng trang **Xử lý hàng loạt**. Mặc định mỗi video dừng trước bước xuất (bật *Xuất video luôn* nếu muốn tự xuất).
 Muốn dịch nhanh không cần mở giao diện, kéo thả video vào `DichNhanh_KeoTha.bat`.
 
 ---
@@ -167,6 +167,7 @@ python TraMi.py                                   # mở giao diện
 python TraMi.py dich phim.mp4 --engine deepseek --style co_trang
 python TraMi.py dich phim.mp4 --ocr --xoa-phude inpaint --long-tieng -o D:\KetQua
 python TraMi.py dich phim.mp4 --dich-sang en --long-tieng      # dịch + lồng tiếng Anh (th / ja / ko: Thái / Nhật / Hàn)
+python TraMi.py dich phim.mp4 --long-tieng --xuat-video      # mặc định dừng trước bước xuất; --xuat-video = xuất luôn
 ```
 
 ## 6. Cấu trúc

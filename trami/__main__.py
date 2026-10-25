@@ -3,6 +3,7 @@
   python -m trami   (hoặc python TraMi.py)   -> mở giao diện
   python -m trami dich video.mp4       -> dịch tự động 1 video (hoặc link)
   python -m trami dich a.mp4 b.mp4 --engine deepseek --ocr --xoa-phude inpaint --long-tieng
+  Mặc định dừng trước bước xuất video (mở tool kiểm tra rồi bấm Xuất video); thêm --xuat-video để xuất luôn.
 """
 from __future__ import annotations
 
@@ -46,7 +47,7 @@ def cli_translate(args):
         "hardsub_mode": args.xoa_phude,
         "burn": not args.khong_ghep,
         "which": args.hien_thi,
-        "render": not args.chi_phude,
+        "render": bool(args.xuat_video) and not args.chi_phude,   # mặc định dừng trước bước xuất
         "denoise": args.loc_nhieu,
         "parallel": bool(load_settings().get("auto_parallel", False)),
     }
@@ -75,13 +76,16 @@ def cli_translate(args):
             print("  Phụ đề :", res["srt"])
         if res.get("video"):
             print("  Video  :", res["video"])
-        if args.output and res.get("video"):
+        elif opts["render"] is False and not args.chi_phude:
+            print(f"  Chưa xuất video: mở tool -> dự án \"{p.data.get('name', '')}\" -> kiểm tra rồi bấm Xuất video "
+                  "(hoặc chạy lại với --xuat-video)")
+        if args.output and (res.get("video") or res.get("srt")):
             import shutil
 
             Path(args.output).mkdir(parents=True, exist_ok=True)
-            shutil.copy2(res["video"], args.output)
-            if res.get("srt"):
-                shutil.copy2(res["srt"], args.output)
+            for k in ("video", "srt"):
+                if res.get(k):
+                    shutil.copy2(res[k], args.output)
 
 
 def main(argv=None):
@@ -105,6 +109,8 @@ def main(argv=None):
     d.add_argument("--khong-ghep", action="store_true", help="Không ghép phụ đề vào video")
     d.add_argument("--hien-thi", default="trans", choices=["trans", "both", "source"])
     d.add_argument("--chi-phude", action="store_true", help="Chỉ xuất file phụ đề, không xuất video")
+    d.add_argument("--xuat-video", action="store_true",
+                   help="Xuất video luôn (mặc định dừng trước bước xuất để kiểm tra rồi bấm Xuất video trong tool)")
     d.add_argument("--loc-nhieu", action="store_true", help="Lọc nhiễu âm thanh trước khi nhận dạng")
     d.add_argument("-o", "--output", default=None, help="Thư mục chép kết quả ra")
 
