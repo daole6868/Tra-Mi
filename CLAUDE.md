@@ -176,8 +176,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   và ≤ 1,25 × dài; `extra["trans_before_clause"]`; Cài đặt `trans_clause_match`). G – `tts.pause_points` (thêm vị trí câu
   gốc / câu dịch; `orig_pauses` dựa trên nó), `breath_points`, `clause_texts`, `join_parts` (ghép vế, lặng `JOIN_GAP`
   0,15 s, `<file>.joins.json` -> `_ClipMeta.gaps` trả đúng chỗ nối); `synthesize_dub` (Cài đặt `dub_by_clause`, cần
-  `dub_pauses`): câu có pause_points -> mỗi vế 1 file `tts_<mã>` (cùng công thức mã) + file ghép `tts_<mã>_v.wav`, bộ đọc
-  AI không đọc vế < 2 tiếng riêng; `plan_pauses(part_speed=PART_SPEED 1,25, max_speed)` vế trước dài hơn vế gốc -> đọc
+  `dub_pauses`): câu có pause_points -> mỗi vế 1 file `tts_<mã>` (cùng công thức mã) + file ghép `tts_<mã>_v.wav` – từ
+  2.1.12 CHỈ Edge (VieNeu / OmniVoice luôn đọc cả câu như 2.0.90, nghỉ bằng `plan_pauses` ở chỗ bộ đọc tự ngắt); `plan_pauses(part_speed=PART_SPEED 1,25, max_speed)` vế trước dài hơn vế gốc -> đọc
   nhanh riêng vế đó (WSOLA `voicefx.stretch`), mục khoảng nghỉ [cắt, lặng, tốc độ×1000] (`insert_pauses`, `_gk` so cả
   tốc độ); `stats["clauses"]` / `["part_fast"]` -> `dub_summary`. GUI: tab Lồng tiếng mục 3 "… đọc từng vế"
   (`d_by_clause`), Cài đặt → Dịch thuật "Dấu phẩy ở chỗ ngắt hơi" / "AI sửa câu dịch cho đủ vế"; `listen_note` báo các bước.
@@ -266,7 +266,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (208 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (209 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1843,7 +1843,25 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   dấu phẩy chen giữa cụm từ, luật 10 / 12 mới (xem Cấu trúc "Dấu câu bản dịch"). Kỹ năng "câu ngắn" không còn bảo lược từ
   đệm (ngược luật 8). Tab Tự động 4 nhóm có tiêu đề.
 
+- 2.1.12: "lồng tiếng đã chính xác theo câu chưa, ngắt nghỉ đúng chưa, còn lặp không – bản 2.0.90 không câu nào đọc lỗi".
+  Mỗi câu phụ đề vẫn 1 đoạn giọng đặt đúng giờ câu đó (từ 2.0.29). Khác 2.0.90 ở chỗ đọc: 2.1.3 cho bộ đọc AI đọc RIÊNG
+  từng vế (chia ở dấu phẩy) rồi ghép -> nhiều mẩu ngắn; VieNeu tự quyết lúc dừng, mẩu càng ngắn càng hay trượt chỗ dừng ->
+  đọc lặp (2.1.5–2.1.7 chỉ vá: vế < 5 tiếng đọc cả câu, trần thấp, cắt lặp). Đo trên p03: 325 câu vẫn bị đọc từng vế (650
+  mẩu, 387 mẩu 5–6 tiếng). Đã kiểm sea-g2p 0.10 (bộ chuẩn hoá của VieNeu): dấu câu cuối (?, !, ",") luôn đổi thành "." ->
+  không phải nguyên nhân. Sửa (`tts`): (1) chỉ Edge đọc từng vế; VieNeu / OmniVoice LUÔN đọc cả câu 1 lần như 2.0.90,
+  chỗ nghỉ vẫn đúng lúc nhân vật nói tiếp nhờ chèn lặng ở chỗ bộ đọc tự ngắt (`plan_pauses`, 2.0.96) + đọc nhanh riêng
+  vế trước khi vế đó dài hơn vế gốc (`PART_SPEED` giờ áp cả câu đọc 1 lần); (2) `plan_pauses` chọn chỗ lặng theo
+  `d − 4·độ dài lặng` (ưu tiên chỗ ngắt ở dấu phẩy ≥ 0,1 s hơn chỗ khép âm vài chục ms giữa 2 tiếng gần hơn – không chèn
+  nghỉ vào giữa cụm từ); (3) `RateWatch` + `_loop_guard` (trong `synth_checked`, mọi giọng VieNeu trừ Nano): câu > 4 tiếng
+  dài hơn `LOOP_RATIO` 1,5 × tốc độ đọc thường của chính giọng đó (trung vị giây / tiếng các câu trước, chưa đủ 8 câu ->
+  0,24 s / tiếng) + 0,5 s -> đọc lại 1 lần (thông số mặc định, hạt khác), giữ bản ngắn hơn (≥ 60 % độ dài thường);
+  `stats["long_fixed"]` / `["long_left"]` -> `dub_summary`. Tab Lồng tiếng: "… Edge đọc từng vế". Câu đã đọc từng vế
+  trước đây: bấm "Tạo bản lồng tiếng" là đọc lại cả câu (mã file khác). Chưa chạy VieNeu thật (sandbox chặn HF).
+
 ## Vấn đề đang mở
+- 2.1.12: chờ người dùng bấm "Tạo bản lồng tiếng" (đầy đủ) trên dự án đã lồng bằng VieNeu: các câu trước đây đọc từng vế
+  được đọc lại cả câu; nghe các câu có dấu phẩy xem còn lặp không, chỗ nghỉ giữa câu có đúng lúc nhân vật nói tiếp không;
+  thông báo xong có "N câu VieNeu đọc dài bất thường – đã tự đọc lại" (nhiều quá -> ngưỡng 1,5 × cần nới).
 - 2.1.11: chờ người dùng (1) dự án p03: tab Phụ đề → Công cụ → Lời hát & nghe nhầm → "Dọn câu bịa / câu lặp" (phải bỏ
   hết câu "p03 3"), rồi Công cụ → Sửa câu → "Sửa dấu câu" (thêm dấu câu cuối cho bản dịch cũ) + Tạo lại giọng các câu đã
   tích; (2) xem phụ đề 2 dòng có còn ngắt giữa cụm từ / tên riêng không (danh sách từ ghép `_VI_PAIRS` còn ngắn – gặp chỗ

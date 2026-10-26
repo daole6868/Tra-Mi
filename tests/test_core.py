@@ -1198,11 +1198,68 @@ def test_vieneu_short_lines_repeat_guard(monkeypatch, tmp_path):
                        max_speedup=1.3, settings={"dub_level_match": False})
     read = [t for t, _ in fake.calls]
     assert "Được thôi, nhanh lên nào các bạn ơi." in read and "Được thôi," not in read    # vế 2 tiếng: đọc cả câu
-    assert "Chúng ta đi thôi nào các bạn," in read and st["clauses"] == 1                 # vế đủ dài: đọc từng vế
+    # 2.1.12: VieNeu LUÔN đọc cả câu (vế dài cũng không đọc riêng – như 2.0.90), chỉ Edge đọc từng vế
+    assert "Chúng ta đi thôi nào các bạn, nhanh lên nào các bạn ơi." in read and "Chúng ta đi thôi nào các bạn," not in read
+    assert not st.get("clauses")
     assert read.count("Mất điện rồi.") == 1 and st["babble_fixed"] == 1 and not st.get("babble_left")
     proj = types.SimpleNamespace(data={"dub_stats": dict(st, babble_left=[7, 3])})
     msg = pipeline.dub_summary(proj)
     assert "1 câu ngắn VieNeu đọc lặp lời – đã tự cắt phần lặp" in msg and "⚠ câu 3, 7 vẫn đọc lặp" in msg
+
+
+def test_long_line_loop_guard_and_pause_pick_2112(tmp_path):
+    """2.1.12: (1) câu > 4 tiếng dài bất thường so với tốc độ đọc thường của chính giọng đó (đọc lặp 1 cụm) -> đọc lại 1
+    lần với thông số mặc định, giữ bản ngắn hơn; câu đọc bình thường không đọc lại; (2) chèn khoảng nghỉ ưu tiên chỗ
+    bộ đọc ngắt ở dấu phẩy (lặng dài) hơn chỗ khép âm ngắn giữa 2 tiếng dù gần hơn."""
+    from trami import tts
+
+    sr = 48000
+
+    def voiced(sec):
+        t = np.arange(int(sec * sr)) / sr
+        return (0.3 * np.sin(2 * np.pi * 180 * t) * (0.6 + 0.4 * np.sin(2 * np.pi * 4 * t))).astype(np.float32)
+
+    class Fake:
+        def __init__(self, durs):
+            self.durs, self.calls = list(durs), []
+
+        def synth(self, text, out, seed=None, params=None, **kw):
+            self.calls.append(params)
+            tts.write_wav(out, voiced(self.durs.pop(0) if self.durs else 2.0), sr)
+
+    w = tts.RateWatch()
+    line = "Chúng ta đi thôi nào các bạn ơi nhanh lên"            # 10 tiếng: thường ~2,4 s
+    assert not w.too_long("v", 3.0, 10) and w.too_long("v", 4.2, 10) and not w.too_long("v", 9.0, 4)
+    for k in range(8):                                             # giọng này đọc chậm 0,3 s / tiếng
+        w.add("v", 3.0, 10)
+    assert not w.too_long("v", 4.4, 10) and w.too_long("v", 5.2, 10)
+    f, rep = Fake([7.0, 3.1]), {}
+    tts.synth_checked(f, line, tmp_path / "a.wav", report=rep, watch=w, wkey="v", params={"temperature": 0.6})
+    a, _ = tts.read_wav(tmp_path / "a.wav")
+    assert rep == {"long": 1} and len(f.calls) == 2 and f.calls[1] == {} and abs(len(a) / sr - 3.1) < 0.05
+    assert not (tmp_path / "a.first.wav").exists()
+    f, rep = Fake([7.0, 8.0]), {}                                  # đọc lại còn dài hơn: giữ bản đầu + báo
+    tts.synth_checked(f, line, tmp_path / "b.wav", report=rep, watch=w, wkey="v")
+    assert rep == {"long": 2} and abs(len(tts.read_wav(tmp_path / "b.wav")[0]) / sr - 7.0) < 0.05
+    f, rep = Fake([3.2]), {}                                       # đọc bình thường: không đọc lại
+    tts.synth_checked(f, line, tmp_path / "c.wav", report=rep, watch=w, wkey="v")
+    assert rep == {} and len(f.calls) == 1
+    import types
+
+    from trami import pipeline
+    msg = pipeline.dub_summary(types.SimpleNamespace(data={"dub_stats": {"long_fixed": 2, "long_left": [9, 4]}}))
+    assert "2 câu VieNeu đọc dài bất thường" in msg and "⚠ câu 4, 9 vẫn đọc dài" in msg
+
+    # chỗ nghỉ: chỗ lặng 0,07 s (khép âm) gần chỗ dự kiến hơn, chỗ lặng 0,3 s (dấu phẩy) xa hơn 0,25 s -> chọn 0,3 s
+    SR = tts.SR
+    ct = [[1.0 + 0.2 * k, 1.18 + 0.2 * k] for k in range(4)] + [[3.2 + 0.2 * k, 3.38 + 0.2 * k] for k in range(4)]
+    seg = Segment(1.0, 4.0, "我们走吧，快点走吧。", "Chúng ta đi thôi, mau lên nào.", "S1", {"ct": ct})
+    n1 = int(2.0 * SR)
+    exp = int(n1 * 4 / 7)
+    runs = [[exp - int(0.05 * SR), exp + int(0.02 * SR)], [exp + int(0.2 * SR), exp + int(0.5 * SR)]]
+    x = {"start": 1.0}
+    g = tts.plan_pauses(seg, x, runs, n1, 1.0, 1.5, "vi", 0.3)
+    assert g and abs(g[0][0] - (runs[1][0] + runs[1][1]) // 2) < 2 and g[0][1] > 0.4 * SR   # nghỉ tới lúc nói tiếp
 
 
 def test_repeat_cut_only_cuts_real_repeats():

@@ -1604,12 +1604,11 @@ class ProjectPage(QWidget):
         self.d_pause_min = g.row("… khi nhân vật ngừng từ", dspin(
             0.15, 2.0, 0.05, st.get("dub_pause_min", 0.3), "", " s", "Chỉ tái hiện chỗ nhân vật ngừng ít nhất bấy nhiêu "
             "giây (ngắn hơn thì để bộ đọc tự ngắt như thường)"))
-        self.d_by_clause = g.row("… đọc từng vế", Switch(bool(st.get("dub_by_clause", True))))
-        self.d_by_clause.setToolTip("Câu có chỗ nhân vật ngắt hơi: mỗi vế (chia ở dấu phẩy tương ứng) đọc riêng rồi ghép "
-                                    "lại – chỗ nghỉ luôn đúng chỗ, vế sau vào đúng lúc nhân vật nói tiếp, vế nào dài hơn "
-                                    "vế gốc thì chỉ đọc nhanh riêng vế đó. Có tác dụng khi bấm 'Tạo bản lồng tiếng' / "
-                                    "'Tạo lại giọng các câu đã tích' (đọc lại các câu đó). Tắt: đọc cả câu 1 lần, nghỉ ở "
-                                    "chỗ bộ đọc tự ngắt như bản 2.0.96")
+        self.d_by_clause = g.row("… Edge đọc từng vế", Switch(bool(st.get("dub_by_clause", True))))
+        self.d_by_clause.setToolTip("CHỈ với Edge: câu có chỗ nhân vật ngắt hơi thì mỗi vế (chia ở dấu phẩy tương ứng) "
+                                    "đọc riêng rồi ghép lại. VieNeu / OmniVoice LUÔN đọc cả câu 1 lần (đọc vế ngắn riêng "
+                                    "hay bị lặp lời) – chỗ nghỉ vẫn đúng lúc nhân vật nói tiếp nhờ chèn lặng vào đúng chỗ "
+                                    "bộ đọc tự ngắt ở dấu phẩy")
         self.d_autoshort = g.row("AI tự rút gọn câu quá dài", Switch(bool(st.get("dub_auto_shorten", True))))
         self.d_autoshort.setToolTip("Khi bấm Tạo bản lồng tiếng: câu vẫn quá dài sau khi tăng tốc được AI viết lại ngắn "
                                     "hơn rồi đọc lại (cần công cụ dịch AI; câu bạn tự sửa lời không bị đổi)")

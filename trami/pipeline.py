@@ -3650,6 +3650,12 @@ def dub_summary(p: Project) -> str:
         rows = sorted(set(st["babble_left"]))
         extra.append(f"⚠ câu {', '.join(map(str, rows[:12]))}{'…' if len(rows) > 12 else ''} vẫn đọc lặp / kéo dài sau 3 lần "
                      "đọc – sửa lời (thêm 1–2 tiếng) hoặc đổi giọng rồi bấm Tạo lại giọng")
+    if st.get("long_fixed"):
+        extra.append(f"{st['long_fixed']} câu VieNeu đọc dài bất thường (lặp / kéo dài) – đã tự đọc lại")
+    if st.get("long_left"):
+        rows = sorted(set(st["long_left"]))
+        extra.append(f"⚠ câu {', '.join(map(str, rows[:12]))}{'…' if len(rows) > 12 else ''} vẫn đọc dài bất thường sau "
+                     "khi đọc lại – nghe thử, lặp lời thì sửa lời hoặc đổi giọng rồi bấm Tạo lại giọng")
     if st.get("lang_edge"):
         extra.append(f"{st['lang_edge']} câu không phải tiếng Việt đọc bằng Edge (VieNeu chỉ đọc tiếng Việt)")
     if st.get("auto_voiced"):

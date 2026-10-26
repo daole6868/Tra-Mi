@@ -778,7 +778,40 @@ VN_CAP_SYL = 4
 VN_SHORT_CAP = (0, 11, 14, 19, 22)   # trần số khung theo số tiếng (1–4)
 # chạm trần mà không thấy lặp để cắt -> đọc lại: thông số lấy mẫu mặc định của VieNeu, rồi "nóng" hơn
 VN_RETRY_PARAMS = ({}, {"temperature": 0.9, "top_k": 40, "top_p": 0.97})
-AI_PART_MIN = 5         # bộ đọc AI không đọc riêng vế < 5 tiếng (câu rất ngắn hay bị đọc lặp / bịa tiếng) -> đọc cả câu
+
+
+# 2.1.12: câu dài hơn 4 tiếng cũng có thể đọc lặp 1 cụm / kéo dài – nhận ra theo TỐC ĐỘ ĐỌC THƯỜNG của chính giọng đó
+# trong lần lồng tiếng này (giây / tiếng, trung vị các câu trước): dài hơn LOOP_RATIO lần + LOOP_SLACK giây -> đọc lại
+# 1 lần (thông số lấy mẫu mặc định, hạt khác), giữ bản ngắn hơn.
+LOOP_RATIO = 1.5
+LOOP_SLACK = 0.5
+LOOP_DEFAULT_SPS = 0.24      # chưa đủ mẫu: ~4,2 tiếng / giây (VieNeu đọc thường 4,5–5 tiếng / giây)
+LOOP_MIN_SAMPLES = 8
+
+
+def syllables(text: str) -> int:
+    return len(re.findall(r"\w+", text or ""))
+
+
+class RateWatch:
+    """Tốc độ đọc thường (giây / tiếng) của từng giọng trong 1 lần lồng tiếng – nhận ra câu dài bất thường (đọc lặp)."""
+
+    def __init__(self):
+        self.d: dict[str, list[float]] = {}
+
+    def expect(self, key: str, syl: int) -> float:
+        xs = self.d.get(key) or []
+        per = float(np.median(xs)) if len(xs) >= LOOP_MIN_SAMPLES else LOOP_DEFAULT_SPS
+        return per * syl
+
+    def too_long(self, key: str, dur: float, syl: int) -> bool:
+        return syl > VN_CAP_SYL and dur > LOOP_RATIO * self.expect(key, syl) + LOOP_SLACK
+
+    def add(self, key: str, dur: float, syl: int) -> None:
+        if syl >= 3 and dur > 0:
+            xs = self.d.setdefault(key, [])
+            xs.append(dur / syl)
+            del xs[:-200]
 
 
 def vn_short(text: str) -> bool:
@@ -800,12 +833,13 @@ def omni_short(text: str) -> bool:
 
 
 def synth_checked(worker: VieneuWorker, text: str, out: Path, cap_check: bool = False, report: dict | None = None,
-                  **kw) -> Path:  # kw: voice, ref_audio, params, on_wait…
+                  watch: RateWatch | None = None, wkey: str = "", **kw) -> Path:  # kw: voice, ref_audio, params, on_wait…
     """Đọc 1 câu rồi kiểm tra file giọng: im lặng / tiếng bíp / tiếng ù -> đọc lại 1 lần (hạt ngẫu nhiên khác).
     Vẫn hỏng thì báo lỗi (câu đó không được ghép vào bản lồng tiếng). cap_check (VieNeu v3 Turbo, câu ≤ 4 tiếng): đọc
     lặp lời -> cắt phần lặp (`voicefix.repeat_cut`, không đọc lại); chạm trần số khung mà không thấy chỗ cắt -> đọc lại
     tối đa 2 lần với thông số lấy mẫu khác (`VN_RETRY_PARAMS`). report["babble"] = 1 (đã cắt / đọc lại được) / 2 (vẫn
-    lặp – giữ bản cuối)."""
+    lặp – giữ bản cuối). watch (2.1.12, câu > 4 tiếng): dài bất thường so với tốc độ đọc thường của giọng `wkey` -> đọc
+    lại 1 lần, giữ bản ngắn hơn; report["long"] = 1 (bản đọc lại hết dài) / 2 (vẫn dài – giữ bản ngắn hơn)."""
     from .voicefix import repeat_cut
 
     why, babble = None, 0
@@ -840,6 +874,8 @@ def synth_checked(worker: VieneuWorker, text: str, out: Path, cap_check: bool = 
         if not why:
             if babble and report is not None:
                 report["babble"] = 1
+            if watch is not None:
+                _loop_guard(worker, text, Path(out), a, sr, watch, wkey, report, kw)
             return Path(out)
         if attempt >= 1 + babble:
             break
@@ -847,9 +883,40 @@ def synth_checked(worker: VieneuWorker, text: str, out: Path, cap_check: bool = 
     raise RuntimeError(f"giọng đọc hỏng ({why}) cả 2 lần đọc – sửa lời câu này rồi bấm Tạo lại giọng")
 
 
+def _loop_guard(worker, text: str, out: Path, a: np.ndarray, sr: int, watch: RateWatch, wkey: str,
+                report: dict | None, kw: dict) -> None:
+    """Câu > 4 tiếng dài bất thường (đọc lặp 1 cụm / kéo dài): đọc lại 1 lần với thông số mặc định + hạt khác, giữ bản
+    ngắn hơn (bản đọc lại phải ≥ 60 % độ dài thường – không lấy bản bị cụt)."""
+    syl = syllables(text)
+    dur = len(a) / sr if sr else 0.0
+    if not watch.too_long(wkey, dur, syl):
+        watch.add(wkey, dur, syl)
+        return
+    first = out.with_name(out.stem + ".first" + out.suffix)
+    os.replace(out, first)
+    try:
+        worker.synth(text, out, seed=int.from_bytes(os.urandom(3), "big"),
+                     **dict(kw, params=dict(VN_RETRY_PARAMS[0])))
+        b, sr2 = read_wav(out)
+        d2 = len(b) / sr2 if sr2 else 0.0
+        ok2 = not voice_problem(b, sr2) and d2 >= 0.6 * watch.expect(wkey, syl)
+    except Exception:  # noqa: BLE001 – đọc lại lỗi: giữ bản đầu
+        ok2, d2 = False, dur
+    if ok2 and d2 < dur:
+        first.unlink(missing_ok=True)
+        dur = d2
+    else:
+        os.replace(first, out)
+    still = watch.too_long(wkey, dur, syl)
+    if not still:
+        watch.add(wkey, dur, syl)
+    if report is not None:
+        report["long"] = 2 if still else 1
+
+
 def trend_synth(worker: VieneuWorker, spec: str, text: str, out: Path, params: dict,
                 presets: list[dict] | None = None, on_wait=None, cap_check: bool = False,
-                report: dict | None = None) -> Path:
+                report: dict | None = None, watch: RateWatch | None = None, wkey: str = "") -> Path:
     """Giọng VieNeu theo trend: đọc bằng giọng gốc + kiểu đọc của nó (đã qua kiểm tra giọng hỏng) rồi áp hiệu ứng.
     Ghi 24 kHz (bản lồng tiếng trộn ở 24 kHz; hiệu ứng chạy nhanh gấp đôi so với 48 kHz của VieNeu)."""
     from . import trend_voices
@@ -857,7 +924,7 @@ def trend_synth(worker: VieneuWorker, spec: str, text: str, out: Path, params: d
 
     if not trend_voices.get(spec):
         raise ValueError("Giọng trend này không còn trong bản Subvideo đang dùng")
-    synth_checked(worker, text, out, cap_check=cap_check, report=report,
+    synth_checked(worker, text, out, cap_check=cap_check, report=report, watch=watch, wkey=wkey,
                   voice=trend_voices.base_voice(spec, presets) or None,
                   params=trend_voices.params(spec, params), on_wait=on_wait)
     try:
@@ -1461,8 +1528,13 @@ def plan_pauses(s: Segment, x: dict, runs: list, n1: int, speed: float, room: fl
             if j in used:
                 continue
             d = abs((a + b) / 2 - exp)
-            if d <= max(0.25 * n1, 0.4 * SR) and (best is None or d < best[0]):
-                best = (d, j, a, b)
+            if d > max(0.25 * n1, 0.4 * SR):
+                continue
+            # 2.1.12: chỗ bộ đọc ngắt ở dấu phẩy thường lặng ≥ 0,1 s, chỗ khép âm giữa 2 tiếng chỉ vài chục ms – lặng
+            # dài hơn 0,1 s được ưu tiên như gần hơn 0,4 s (không chèn nghỉ vào giữa 1 cụm từ)
+            score = d - 4.0 * (b - a)
+            if best is None or score < best[0]:
+                best = (score, j, a, b)
         if best is None:
             continue
         _d, j, a, b = best
@@ -1710,16 +1782,15 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                 vn_items.append((i, text, path, spec))
 
         parts: list[str] = []
-        if by_clause and not keep and "ct" in s.extra:
+        # 2.1.12: CHỈ Edge đọc từng vế. Bộ đọc AI (VieNeu / OmniVoice) tự quyết lúc dừng -> vế càng ngắn càng hay trượt
+        # chỗ dừng rồi đọc lặp lời (2.1.5–2.1.7) -> đọc CẢ CÂU 1 lần như bản 2.0.90; chỗ nghỉ vẫn đúng lúc nhân vật nói
+        # tiếp nhờ chèn lặng vào đúng chỗ bộ đọc tự ngắt ở dấu phẩy (plan_pauses, như 2.0.96).
+        if by_clause and spec.startswith("edge:") and not keep and "ct" in s.extra:
             cuts = [pt for _a, _b, _pz, pt in pause_points(s, lg, min_gap)]
             if cuts:
                 parts = [clean_tts_text(x, lg) for x in clause_texts(s.trans or "", cuts)]
-                if not spec.startswith("edge:") and lg == "vi":
-                    parts = [spoken_vi(x) for x in parts]
                 if len(parts) < 2 or not all(re.search(r"\w", x) for x in parts):
                     parts = []
-                elif not spec.startswith("edge:") and any(langs.units(x, lg) < AI_PART_MIN for x in parts):
-                    parts = []   # bộ đọc AI đọc vế rất ngắn dễ đọc lặp / bịa tiếng -> đọc cả câu như cũ
         if parts:
             pfiles = [tts_path(x) for x in parts]
             for x, pf in zip(parts, pfiles):
@@ -1753,6 +1824,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         tts = _vieneu(mode)
         tts.ensure_started((lambda x, m: progress(0.01 * x, m)) if progress else None, cancel)
         refs: dict[str, Path | None] = {}
+        watch = RateWatch() if mode != "v3nano" else None
         speed = _speed_tag(rate)
         for n, (i, text, p, spec) in enumerate(vn_items):
             if cancel and cancel():
@@ -1767,7 +1839,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                     progress(base_p, f"VieNeu đang đọc {n + 1}/{total_items} – câu này đã {sec:.0f} s "
                                      "(thường chỉ vài giây)")
             rep: dict = {}
-            chk = {"cap_check": mode != "v3nano", "report": rep}   # Nano không sinh theo khung -> không có trần
+            chk = {"cap_check": mode != "v3nano", "report": rep,   # Nano không sinh theo khung -> không có trần
+                   "watch": watch, "wkey": spec}
             try:
                 tmp = p.with_suffix(".raw.wav")
                 if spec.startswith("clone:"):
@@ -1787,6 +1860,10 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                     stats["babble_fixed"] = stats.get("babble_fixed", 0) + 1
                 elif rep.get("babble") == 2:
                     stats.setdefault("babble_left", []).append(i + 1)
+                if rep.get("long") == 1:
+                    stats["long_fixed"] = stats.get("long_fixed", 0) + 1
+                elif rep.get("long") == 2:
+                    stats.setdefault("long_left", []).append(i + 1)
                 sr = read_wav_rate(tmp) or tts.sr
                 if abs(speed - 1) > 0.01:
                     a = _decode(tmp, speed, sr)
@@ -1979,12 +2056,11 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             if x["keep"] is not None or "ct" not in s.extra:
                 continue
             room = min(nxt.get(k, total), total) - GAP - x["end"]
-            if room < 0.05 and not files[k].endswith("_v.wav"):
-                continue
             spd = _clip_speed(x["speed"])
+            # 2.1.12: cả câu đọc 1 lần (bộ đọc AI) cũng được đọc nhanh riêng vế trước khi vế đó dài hơn vế gốc (cắt ở
+            # đúng chỗ bộ đọc tự ngắt) – như đọc từng vế mà không phải đọc riêng từng mẩu ngắn
             g = plan_pauses(s, x, meta.gaps(files[k]), meta.n(files[k]), spd, room,
-                            langs.detect(s.trans or "", lang), min_gap,
-                            PART_SPEED if files[k].endswith("_v.wav") else 1.0, max_speedup)
+                            langs.detect(s.trans or "", lang), min_gap, PART_SPEED, max_speedup)
             if g:
                 pauses[k] = g
     stats["pauses"] = sum(1 for v in pauses.values() for q in v if q[1] > 0)
