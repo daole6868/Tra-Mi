@@ -127,10 +127,14 @@ DEFAULT_SETTINGS: dict = {
     "snap_edges": True,               # bám mép câu theo giọng đã tách sau khi nghe (2.0.96)
     "dub_pauses": True,               # giọng lồng nghỉ đúng chỗ nhân vật ngắt hơi giữa câu (cần mốc từng chữ)
     "dub_pause_min": 0.3,             # ... khi nhân vật ngừng ít nhất (giây)
+    "dub_by_clause": True,            # ... đọc TỪNG VẾ rồi ghép theo giờ gốc (chỗ nghỉ chắc chắn, vế dài đọc nhanh riêng)
+    "breath_marks": True,             # chỗ nhân vật ngắt hơi mà câu gốc chưa có dấu câu -> thêm "，" (sau khi nghe / dịch)
+    "trans_clause_match": True,       # AI dịch: câu dịch thiếu vế so với chỗ ngắt hơi -> AI sửa cho đủ vế
     "dub_fit": True,                  # AI dịch vừa thời lượng câu (giới hạn số tiếng)
     "dub_auto_shorten": True,         # câu đọc vẫn quá dài -> AI rút gọn rồi đọc lại
     "align_words": True,              # căn thời gian từng chữ sau khi nhận dạng
     "asr_rescue": True,               # nghe lại đoạn có tiếng mà bộ chia đoạn bỏ sót (cần tách giọng trước)
+    "asr_rescue_conf": 0.5,           # ... bỏ câu nghe lại có độ tin cậy (xác suất trung bình mỗi chữ) dưới mức này
     "split_speaker_changes": True,    # tách câu có 2 người nói liền nhau
     "vieneu_mode": "v3turbo",         # v3turbo (đẹp) / v3nano (máy yếu)
     "vieneu_style": "clear",          # clear: đọc rõ, ổn định / natural: mặc định VieNeu (nhiều ngữ điệu hơn)
@@ -145,6 +149,7 @@ DEFAULT_SETTINGS: dict = {
     "ai_song_filter": True,                   # trước khi dịch cả phim lần đầu: AI lọc lời bài hát (🎵) + chữ không phải thoại
     "ai_join_engine": "auto",                 # AI nối câu theo nghĩa sau khi tách câu: auto (công cụ dịch nếu là AI) / off / tên AI
     "asr_relisten": True,                     # nghe lại chỗ cắt khúc giữa lúc đang nói (bỏ dấu "。" giả bộ nghe tự đặt)
+    "asr_lang_check": True,                   # khúc nghe chưa chắc -> nghe lại không ép tiếng (câu tiếng Anh trong phim Trung)
     # đăng video (publish.py): Zernio / API riêng YouTube (dự án Google Cloud) / API riêng Facebook (app Meta)
     "zernio_api_key": "", "zernio_profile_id": "",
     "yt_client_id": "", "yt_client_secret": "", "fb_app_id": "", "fb_app_secret": "",

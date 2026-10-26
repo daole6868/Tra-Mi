@@ -705,6 +705,111 @@ def align_segments(segs, wav: Path, language: str, settings: dict, progress: Pro
         return split_lines(segs, max_chars)
 
 
+def verify_char_times(p: Project, segs: list, wav: Path, language: str, settings: dict, engine: str = "qwen3",
+                      progress: Prog | None = None, cancel=None) -> dict:
+    """Kiểm tra mốc từng chữ sau khi căn (2.1.3): câu có chữ bị kéo dài bất thường (`align.stretched_chars` – thường
+    kéo qua đoạn lặng / nhạc) hoặc chữ lấn sang câu liền trước (câu nghe lại / câu sửa căn riêng) -> căn lại RIÊNG câu
+    đó trong cửa sổ hẹp (chỉ phần có tiếng theo giọng đã tách; câu lấn nhau: căn CHUNG 2 câu rồi chia theo số chữ).
+    Chỉ nhận mốc mới khi hợp lý, bớt chữ bị kéo, không lấn câu bên cạnh; không thì giữ mốc cũ (`snap.fix_stretched`
+    co tiếp theo độ to giọng ở bước bám mép). Trả {"bad", "fixed"}."""
+    from . import asr_qwen
+    from .align import PAD, _char_positions, _latin_run, fix_overlaps, stretched_chars, times_from_words
+    from .snap import ct_ok, voiced_span
+
+    st = {"bad": 0, "fixed": 0}
+    if language not in ("zh", "yue", "auto") or not segs:
+        return st
+    n = len(segs)
+    ctv = [s.extra["ct"] if ct_ok(s) else None for s in segs]
+    groups: list[list[int]] = []
+    used: set[int] = set()
+    for i in range(n):
+        if ctv[i] is None or i in used:
+            continue
+        if i > 0 and ctv[i - 1] and i - 1 not in used and float(ctv[i][0][0]) < float(ctv[i - 1][-1][1]) - 0.05:
+            groups.append([i - 1, i])
+            used |= {i - 1, i}
+        elif stretched_chars(ctv[i]):
+            groups.append([i])
+            used.add(i)
+    st["bad"] = len(groups)
+    if not groups:
+        return st
+    env = None
+    if stems(p):
+        try:
+            env, hop, _src = voice_env(p, None, cancel)
+        except ff.Cancelled:
+            raise
+        except Exception:  # noqa: BLE001 – không có độ to giọng: chỉ căn lại câu lấn nhau
+            env = None
+    items, todo = [], []
+    for g in groups:
+        a, b = segs[g[0]].start, segs[g[-1]].end
+        lo = segs[g[0] - 1].end if g[0] > 0 else 0.0
+        hi = segs[g[-1] + 1].start if g[-1] + 1 < n else b + 0.3
+        if len(g) == 1:
+            if env is None or not len(env):
+                continue
+            vs = voiced_span(env, hop, a, b)
+            if not vs or vs[1] - vs[0] > (b - a) - 0.3:
+                continue   # phần có tiếng không hẹp hơn câu: căn lại cũng ra như cũ
+            a, b = vs[0] - 0.25, vs[1] + 0.25
+        else:
+            a, b = a - 0.2, b + 0.2
+        a = max(0.0, lo, a)
+        b = min(hi, b) if hi > a else b
+        if b - a < 0.3:
+            continue
+        items.append([round(a, 3), round(b, 3), "".join(segs[k].text for k in g)])
+        todo.append(g)
+    if not items:
+        return st
+    r = asr_qwen.asr_worker("firered" if engine == "firered" else "qwen3", settings).call(
+        {"cmd": "align", "wav": str(Path(wav).resolve()), "items": items, "language": language}, progress, cancel)
+    if r.get("align_error"):
+        return st
+    for g, (a, b, text), it in zip(todo, items, r.get("items") or []):
+        ct = times_from_words(text, it.get("words") or [], a)
+        if not ct:
+            continue
+        parts, k0 = [], 0
+        for k in g:
+            m = len(_char_positions(segs[k].text))
+            parts.append(ct[k0:k0 + m])
+            k0 += m
+        if any(not x for x in parts) or sum(len(stretched_chars(x)) for x in parts) > \
+                sum(len(stretched_chars(ctv[k])) for k in g) - (1 if len(g) == 1 else 0):
+            continue
+        prev_ct = ctv[g[0] - 1] if g[0] > 0 else None
+        next_ct = ctv[g[-1] + 1] if g[-1] + 1 < n else None
+        if (prev_ct and parts[0][0][0] < float(prev_ct[-1][1]) - 0.05) or \
+                (next_ct and parts[-1][-1][1] > float(next_ct[0][0]) + 0.05):
+            continue   # mốc mới lấn câu bên ngoài nhóm
+        for k, x in zip(g, parts):
+            s = segs[k]
+            s.extra["ct"] = [[round(u, 3), round(v, 3)] for u, v in x]
+            if not _latin_run(s.text, True):
+                s.start = round(max(0.0, x[0][0] - PAD), 3)
+            if not _latin_run(s.text, False):
+                s.end = round(max(s.start + 0.2, x[-1][1] + PAD), 3)
+        st["fixed"] += 1
+    fix_overlaps(segs)
+    return st
+
+
+def _verify_ct_safe(p: Project, segs: list, wav: Path, language: str, settings: dict, engine: str,
+                    cancel=None) -> dict:
+    """verify_char_times như 1 bước phụ: lỗi (thiếu bộ nhớ GPU, bộ căn chưa tải…) thì giữ mốc đang có."""
+    try:
+        return verify_char_times(p, segs, wav, language, settings, engine, None, cancel)
+    except ff.Cancelled:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log_error("Kiểm tra mốc từng chữ")
+        return {"error": err_text(e)[:120]}
+
+
 def split_lines(segs, max_chars: int = 28):
     """Chia dòng dài theo dấu câu / số chữ (cách cũ, khi không căn được thời gian từng chữ)."""
     from .asr_funasr import split_long
@@ -721,8 +826,10 @@ def split_lines(segs, max_chars: int = 28):
 
 
 def rescue_segments(segs, wav: Path, engine: str, language: str, settings: dict, keep_speakers: bool = False,
-                    progress: Prog | None = None, cancel=None, keep_lines: bool = False) -> tuple[list, int]:
-    """Tìm đoạn có tiếng nói (trên giọng đã tách) mà chưa có câu nào, nghe lại từng đoạn. Trả về (câu, số câu thêm)."""
+                    progress: Prog | None = None, cancel=None, keep_lines: bool = False,
+                    stats: dict | None = None) -> tuple[list, int]:
+    """Tìm đoạn có tiếng nói (trên giọng đã tách) mà chưa có câu nào, nghe lại từng đoạn. Trả về (câu, số câu thêm).
+    stats["lowconf"]: số đoạn bỏ vì bộ nghe không chắc (nhạc / tiếng động bị đoán thành lời – 2.1.3)."""
     from . import align
     from .asr_funasr import load_wav16k
 
@@ -743,7 +850,7 @@ def rescue_segments(segs, wav: Path, engine: str, language: str, settings: dict,
                 return segs, 0
             decode = sensevoice_decoder(settings, language)
         new = align.rescue_missed(segs, load_wav16k(wav), decode, int(settings.get("asr_max_chars", 28)),
-                                  progress, cancel, keep_lines=keep_lines)
+                                  progress, cancel, keep_lines=keep_lines, stats=stats)
     except ff.Cancelled:
         raise
     except Exception as e:  # noqa: BLE001 – bước phụ, lỗi thì giữ kết quả nhận dạng
@@ -772,8 +879,12 @@ def realign(p: Project, settings: dict | None = None, progress: Prog | None = No
     drop_char_times(segs, keep=False)   # đo lại từ đầu theo lời hiện tại (người dùng có thể đã sửa chữ)
     old_texts = {s.text for s in segs}
     try:
+        eng = p.data.get("asr_engine_used", "")
         segs = align_segments(segs, wav, p.data.get("language", "zh"), settings, _sub(progress, 0.1, 0.9), cancel,
-                              engine=p.data.get("asr_engine_used", ""))
+                              engine=eng)
+        if eng in ("qwen3", "firered") or use_qwen_align(eng, settings):
+            p.data["ct_check"] = _verify_ct_safe(p, segs, wav, p.data.get("language", "zh") or "zh", settings, eng,
+                                                 cancel)
     finally:
         from .asr_qwen import release
 
@@ -1066,8 +1177,11 @@ def hybrid_listen(p: Project, segs, settings: dict, language: str, engine: str, 
         if audio_in != Path(p.source):   # câu phụ đề không có mà có tiếng nói -> bộ nghe nghe thêm
             ears = engine if engine in ("qwen3", "firered") else (al or "qwen3")
             before = {id(x) for x in segs}
+            rst: dict = {}
             segs, st["added"] = rescue_segments(segs, wav, ears, language, settings, False,
-                                                _sub(progress, 0.75, 0.95), cancel, keep_lines=True)
+                                                _sub(progress, 0.75, 0.95), cancel, keep_lines=True, stats=rst)
+            if rst.get("lowconf"):
+                p.data["asr_rescue_lowconf"] = rst["lowconf"]
             for x in segs:
                 if id(x) not in before:
                     x.extra["from_asr"] = True
@@ -1170,6 +1284,8 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
     src = p.source
     engine = engine or settings.get("asr_engine", "qwen3")
     want_spk = bool(settings.get("diarize", True))
+    p.data.pop("asr_rescue_lowconf", None)
+    p.data.pop("breaths_marked", None)
     if method in ("ocr", "hybrid"):
         opr = progress if method == "ocr" else _sub(progress, 0.0, 0.4)
         from .ocr import detect_subtitle_region, expand_region, extract_hardsubs
@@ -1306,13 +1422,19 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         # 2a) nghe lại các đoạn CÓ TIẾNG mà bộ chia đoạn (VAD) bỏ sót -> không còn câu bị bỏ không dịch
         p.data["asr_rescued"] = 0
         if settings.get("asr_rescue", True) and segs is not None and audio_in != Path(src):
+            rst: dict = {}
             segs, p.data["asr_rescued"] = rescue_segments(segs, wav, engine, language, settings, spk_from_asr,
-                                                          _sub(progress, asr_end - 0.03, asr_end), cancel)
+                                                          _sub(progress, asr_end - 0.03, asr_end), cancel, stats=rst)
+            if rst.get("lowconf"):
+                p.data["asr_rescue_lowconf"] = rst["lowconf"]
         # 2b) căn thời gian từng chữ + tách câu trọn nghĩa (cuối câu / chỗ nghỉ thật, phẩy nói liền không tách)
+        p.data.pop("ct_check", None)
         try:
             if settings.get("align_words", True) and segs:
                 segs = align_segments(segs, wav, language, settings, _sub(progress, asr_end, asr_end + 0.07),
                                       cancel, engine=engine)
+                if engine in ("qwen3", "firered") or use_qwen_align(engine, settings):
+                    p.data["ct_check"] = _verify_ct_safe(p, segs, wav, language, settings, engine, cancel)
         finally:
             from .asr_qwen import release
 
@@ -1392,6 +1514,11 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
                 p.data["voice_trimmed"] = res["trimmed"]
             except Exception:  # noqa: BLE001 – bước phụ
                 log_error("Lọc câu nghe nhầm theo cao độ")
+        # 2h) chỗ nhân vật ngắt hơi giữa câu mà bộ nghe không đặt dấu câu -> "，" (dịch giữ vế, giọng lồng nghỉ đúng chỗ)
+        if segs and language in ("zh", "yue", "auto") and settings.get("breath_marks", True):
+            from .align import mark_breaths
+
+            p.data["breaths_marked"] = mark_breaths(segs, float(settings.get("dub_pause_min", 0.3)))
     segs = normalize(segs)
     one_spk = want_spk and int(settings.get("diarize_speakers", 0) or 0) == 1
     if one_spk:   # đặt "1 người nói": gán hết S1, không đo giọng / không tách câu theo chỗ đổi giọng
@@ -1441,6 +1568,9 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
             raise
         except Exception:  # noqa: BLE001 – bước phụ
             log_error("Bám mép câu theo giọng")
+    from .asr_qwen import clear_progress
+
+    clear_progress(p.work)   # nghe xong trọn vẹn -> bỏ tiến độ nghe dở (lần sau nghe lại từ đầu)
     return len(p.segments)
 
 
@@ -1509,8 +1639,9 @@ def snap_edges(p: Project, settings: dict | None = None, rows: list[int] | None 
     if env is None or not len(env):
         raise RuntimeError("Chưa có âm thanh để đo (video gốc không còn ở chỗ cũ?)")
     before = [(s.start, s.end) for s in segs]
+    stretched = snap.fix_stretched(segs, env, hop, rows) if src == "vocals" else 0
     stats = snap.snap(segs, env, hop, rows, float(p.data.get("info", {}).get("duration", 0) or 0))
-    stats.update({"src": src, "measured": measured})
+    stats.update({"src": src, "measured": measured, "stretched": stretched})
     p.segments = segs
     p.data["snap_stats"] = stats
     p.save()
@@ -1527,6 +1658,8 @@ def snap_note(stats: dict | None) -> str:
         return ""
     t = (f"bám mép {stats['moved']} câu theo giọng (dời trung bình {stats['shift']:.2f} s)" if stats.get("moved")
          else "mép câu đã khớp giọng")
+    if stats.get("stretched"):
+        t += f", co {stats['stretched']} câu có chữ bị kéo dài qua chỗ lặng"
     if stats.get("src") == "mix":
         t += " – đo trên tiếng gốc (chưa tách giọng, kém chính xác hơn)"
     if stats.get("est"):
@@ -1615,6 +1748,17 @@ def listen_note(p: Project) -> str:
     """Kết quả các bước nghe chính xác hơn (2.1.0) cho thông báo xong "1. Nghe & tách câu" / Tự động."""
     out = [x for x in (hybrid_note(p.data.get("hybrid")) if p.data.get("sub_source") == "hybrid" else "",
                        name_note(p.data.get("name_pass")), dual_note(p.data.get("asr_dual"))) if x]
+    if p.data.get("breaths_marked"):
+        out.append(f"thêm dấu phẩy ở {p.data['breaths_marked']} chỗ nhân vật ngắt hơi")
+    if (p.data.get("asr_relisten") or {}).get("foreign"):
+        out.append(f"{p.data['asr_relisten']['foreign']} khúc nói tiếng khác (VD tiếng Anh) – đã nghe lại đúng tiếng")
+    if (p.data.get("asr_relisten") or {}).get("resumed"):
+        out.append(f"chạy tiếp lần nghe dở: dùng lại {p.data['asr_relisten']['resumed']} khúc đã nghe")
+    ck = p.data.get("ct_check") or {}
+    if ck.get("fixed"):
+        out.append(f"căn lại mốc chữ {ck['fixed']} câu (chữ bị kéo dài / lấn câu bên)")
+    if p.data.get("asr_rescue_lowconf"):
+        out.append(f"bỏ {p.data['asr_rescue_lowconf']} đoạn nghe lại mà bộ nghe không chắc (nhạc / tiếng động)")
     return " · ".join(out)
 
 
@@ -1631,6 +1775,53 @@ def _voice_wav16(p: Project, progress: Prog | None = None, cancel=None) -> Path:
 
 
 # ------------------------------------------------------------------ dịch
+
+def clause_state(s, lang: str, min_gap: float) -> tuple[list[int], int]:
+    """(chỗ ngắt hơi của câu gốc, số chỗ câu dịch đã có dấu câu tương ứng)."""
+    from .tts import breath_points, pause_points
+
+    bp = breath_points(s, min_gap)
+    if not bp:
+        return [], 0
+    have = {pz for _a, _b, pz, _pt in pause_points(s, lang, min_gap)}
+    return bp, sum(1 for b in bp if b in have)
+
+
+def match_clauses(segs, rows, tr, lang: str, min_gap: float = 0.3, cancel=None) -> int:
+    """Câu dịch thiếu vế so với chỗ nhân vật ngắt hơi (câu gốc có dấu câu ở chỗ khe ≥ min_gap): AI viết lại cho đủ vế
+    (Translator.match_clauses). Chỉ nhận khi ghép được thêm chỗ ngắt và không dài hơn hẳn; bản cũ lưu
+    extra["trans_before_clause"]. Bỏ qua câu người dùng tự sửa, câu 🎵. Trả số câu đã sửa (2.1.3)."""
+    from . import langs
+    from .tts import clause_texts
+
+    todo = []
+    for i in rows:
+        if not 0 <= i < len(segs):
+            continue
+        s = segs[i]
+        if not (s.trans or "").strip() or s.extra.get("trans_user") or s.extra.get("song"):
+            continue
+        bp, n = clause_state(s, lang, min_gap)
+        if bp and n < len(bp):
+            todo.append((i, clause_texts(s.text, bp), n))
+    fixed = 0
+    for b in range(0, len(todo), 40):
+        if cancel and cancel():
+            raise ff.Cancelled()
+        part = todo[b:b + 40]
+        for (i, _cl, n_old), new in zip(part, tr.match_clauses([(cl, segs[i].trans) for i, cl, _n in part])):
+            old = segs[i].trans
+            if not new or new == old:
+                continue
+            segs[i].trans = new
+            if clause_state(segs[i], lang, min_gap)[1] > n_old and \
+                    langs.units(new, lang) <= langs.units(old, lang) * 1.25 + 2:
+                segs[i].extra["trans_before_clause"] = old
+                fixed += 1
+            else:
+                segs[i].trans = old
+    return fixed
+
 
 def target_lang(p: Project | None, settings: dict | None = None) -> str:
     """Ngôn ngữ đích của dự án ("Dịch sang"): mỗi dự án nhớ riêng, chưa chọn -> theo Cài đặt (mặc định tiếng Việt)."""
@@ -2076,10 +2267,28 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
             p.save()
             last_save[0] = time.time()
 
+    # chỗ nhân vật ngắt hơi mà câu gốc chưa có dấu câu -> "，" trước khi dịch (AI giữ đúng vế -> giọng lồng nghỉ đúng chỗ)
+    min_gap = float(settings.get("dub_pause_min", 0.3))
+    if settings.get("breath_marks", True) and source_lang(p) in ("zh", "yue", "auto"):
+        from .align import mark_breaths
+
+        mark_breaths(segs, min_gap, rows if rows is not None else
+                     ([i for i, x in enumerate(segs) if not x.trans.strip()] if only_empty else None))
     before = [x.trans for x in segs]
     tr.translate_segments(segs, prog, cancel, only_empty=only_empty, summary=profile, auto_terms=not profile,
                           rows=set(rows) if rows is not None else None)
     new_rows = [i for i, x in enumerate(segs) if x.trans.strip() and x.trans != before[i]]   # câu vừa có bản dịch mới
+    # câu dịch thiếu vế so với chỗ nhân vật ngắt hơi -> AI sửa cho đủ vế (2.1.3)
+    if is_ai and new_rows and settings.get("trans_clause_match", True):
+        try:
+            nfix = match_clauses(segs, new_rows, tr, target, min_gap, cancel)
+            if nfix:
+                p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + \
+                    f"giữ nhịp ngắt hơi: sửa {nfix} câu dịch cho đủ vế như câu gốc"
+        except (ff.Cancelled, net.NetworkDown):
+            raise
+        except Exception:  # noqa: BLE001 – bước phụ
+            log_error("Sửa số vế câu dịch")
     # AI nhận ra lời bài hát (bản dịch có ♪) -> đánh dấu 🎵: không lồng tiếng, giữ giọng hát gốc
     n_song = mark_song_lines(segs, rows)
     if n_song:
@@ -3185,6 +3394,9 @@ def dub_summary(p: Project) -> str:
         extra.append(f"✂ {sh['cut']} câu bị cắt bớt cuối")
     if st.get("pauses"):
         extra.append(f"nghỉ đúng chỗ nhân vật ngắt hơi {st['pauses']} chỗ")
+    if st.get("clauses"):
+        extra.append(f"{st['clauses']} câu đọc từng vế theo nhịp ngắt của nhân vật" +
+                     (f" ({st['part_fast']} vế dài đọc nhanh riêng)" if st.get("part_fast") else ""))
     if st.get("shortened"):
         extra.append(f"AI đã rút gọn {st['shortened']} câu")
     if st.get("songs"):

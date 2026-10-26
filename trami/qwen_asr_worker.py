@@ -2,9 +2,12 @@
 Cùng giao thức với vieneu_worker (mỗi dòng 1 JSON, tiền tố @@TRAMI@@). Chạy riêng để: lỗi / thiếu bộ nhớ GPU không làm
 sập giao diện, tắt tiến trình là trả hết bộ nhớ GPU cho bước sau (tách giọng, lồng tiếng).
 
-  vào : {"cmd": "asr", "wav": "x.wav", "spans": [[đầu, cuối], ...], "language": "zh", "prompt": "", "align": true}
+  vào : {"cmd": "asr", "wav": "x.wav", "spans": [[đầu, cuối], ...], "language": "zh", "prompt": "", "align": true,
+         "conf": false}
         {"cmd": "align", "wav": "x.wav", "items": [[đầu, cuối, "lời"], ...], "language": "zh"}
-  ra  : @@TRAMI@@{"ok": true, "items": [{"text": "...", "words": [[chữ, đầu, cuối], ...]}]}   (giây, tính từ đầu khúc)
+  ra  : @@TRAMI@@{"ok": true, "items": [{"text": "...", "words": [[chữ, đầu, cuối], ...], "conf": 0.93}]}
+        (giây, tính từ đầu khúc; "conf" khi hỏi "conf": true = xác suất trung bình của các chữ bộ nghe chọn;
+        "lang" = tiếng bộ nghe tự nhận ra khi "language" là "auto" – VD "English")
         | {"error": "..."} | {"progress": 0.5, "msg": "..."}
 """
 from __future__ import annotations
@@ -21,14 +24,23 @@ LANG = {"zh": "Chinese", "yue": "Cantonese", "en": "English", "ja": "Japanese", 
 SR = 16000
 
 
-def _load_wav(path: str):
+def read_clips(path: str, spans: list[tuple[float, float]], max_len: float | None = None) -> list:
+    """Chỉ đọc đúng các khúc cần nghe từ file wav 16 kHz (phim 3 giờ: không nạp cả 345 MB vào bộ nhớ mỗi lệnh –
+    nghe theo từng nhóm khúc để lưu tiến độ thì mỗi nhóm 1 lệnh)."""
     import numpy as np
 
+    out = []
     with wave.open(path) as w:
-        a = np.frombuffer(w.readframes(w.getnframes()), np.int16).astype(np.float32) / 32768.0
-        if w.getnchannels() > 1:
-            a = a.reshape(-1, w.getnchannels()).mean(axis=1)
-    return a
+        ch, n = w.getnchannels(), w.getnframes()
+        for a, b in spans:
+            if max_len:
+                b = min(b, a + max_len)
+            i = min(n, max(0, int(a * SR)))
+            j = min(n, max(i + SR // 10, int(b * SR)))
+            w.setpos(i)
+            x = np.frombuffer(w.readframes(max(0, j - i)), np.int16).astype(np.float32) / 32768.0
+            out.append(x.reshape(-1, ch).mean(axis=1) if ch > 1 else x)
+    return out
 
 
 def plan_batches(lens: list[float], idx: list[int], budget: float, cap: int = 8) -> list[list[int]]:
@@ -59,6 +71,16 @@ def vram_plan(total_bytes: int) -> tuple[float, bool]:
     return 60.0, True          # card 8 GB (RTX 4060 laptop…): lô nhỏ, bộ nghe 1.7B và bộ căn 0.6B không nằm cùng lúc
 
 
+def mean_conf(gen_ids: list[int], logps: list[float], skip: set, start_id: int | None = None) -> float:
+    """Độ tin cậy 1 câu nghe: xác suất trung bình của các chữ bộ nghe chọn (bỏ ký hiệu đặc biệt; có `start_id` – thẻ
+    mở đầu lời <asr_text> – thì chỉ tính phần lời sau thẻ, không tính phần "language Chinese" luôn chắc chắn)."""
+    import math
+
+    st = gen_ids.index(start_id) + 1 if start_id is not None and start_id in gen_ids else 0
+    vals = [math.exp(lp) for t, lp in zip(gen_ids[st:], logps[st:]) if t not in skip]
+    return round(sum(vals) / len(vals), 3) if vals else 0.0
+
+
 def _load(cls, repo: str, **kw):
     """Đã tải ở tab Tài liệu -> nạp thẳng từ máy, KHÔNG hỏi mạng (mạng chập chờn / bị chặn vẫn chạy, không tải lại).
     Chưa có / thiếu file -> tải (lần đầu) từ HuggingFace vào đúng kho đó."""
@@ -84,7 +106,8 @@ def main(repo: str = "Qwen/Qwen3-ASR-1.7B-hf") -> None:
 
     try:
         import torch
-        from transformers import AutoProcessor, Qwen3ASRForConditionalGeneration, Qwen3ASRForTokenClassification
+        from transformers import (AutoProcessor, LogitsProcessor, LogitsProcessorList, Qwen3ASRForConditionalGeneration,
+                                  Qwen3ASRForTokenClassification)
 
         from .progress_hook import tqdm_progress
 
@@ -154,8 +177,31 @@ def main(repo: str = "Qwen/Qwen3-ASR-1.7B-hf") -> None:
                 for k in part:
                     fn([k])
 
-    def transcribe(clips, lang, prompt, lo: float, hi: float) -> list[str]:
+    class TokenConf(LogitsProcessor):
+        """Ghi log-xác suất của chữ được chọn ở mỗi bước (giải mã tham lam: chữ có điểm cao nhất) – không đổi kết quả,
+        không giữ cả bảng điểm (151 nghìn chữ × số bước) trong bộ nhớ."""
+
+        def __init__(self):
+            self.steps: list = []
+
+        def __call__(self, input_ids, scores):
+            self.steps.append(torch.log_softmax(scores.float(), dim=-1).max(dim=-1).values)
+            return scores
+
+    tok = getattr(proc, "tokenizer", None)
+    skip_ids = set(getattr(tok, "all_special_ids", None) or [])
+    eos = getattr(getattr(state["model"], "generation_config", None), "eos_token_id", None)
+    skip_ids |= set(eos if isinstance(eos, (list, tuple)) else [eos] if eos is not None else [])
+    try:
+        text_id = tok.convert_tokens_to_ids("<asr_text>") if tok is not None else None
+        text_id = None if text_id is None or text_id == getattr(tok, "unk_token_id", -1) else int(text_id)
+    except Exception:  # noqa: BLE001
+        text_id = None
+
+    def transcribe(clips, lang, prompt, lo: float, hi: float, conf: bool = False) -> tuple[list[str], list]:
         texts = [""] * len(clips)
+        confs: list = [None] * len(clips)
+        found: list = [None] * len(clips)   # tiếng bộ nghe tự nhận ra (khi không ép tiếng)
         done = [0]
         model = get_model()
 
@@ -166,16 +212,25 @@ def main(repo: str = "Qwen/Qwen3-ASR-1.7B-hf") -> None:
             inputs = proc.apply_transcription_request(audio=[clips[k] for k in part], **kw).to(model.device,
                                                                                                model.dtype)
             longest = max(len(clips[k]) for k in part) / SR
+            rec = TokenConf() if conf else None
+            gkw = {"logits_processor": LogitsProcessorList([rec])} if rec is not None else {}
             with torch.inference_mode():
-                out = model.generate(**inputs, max_new_tokens=int(longest * 10) + 48, do_sample=False)
+                out = model.generate(**inputs, max_new_tokens=int(longest * 10) + 48, do_sample=False, **gkw)
             gen = out[:, inputs["input_ids"].shape[1]:]
             for k, r in zip(part, proc.decode(gen, return_format="parsed")):
                 texts[k] = (r.get("transcription") or "").strip()
+                found[k] = r.get("language") or None
+            if rec is not None and rec.steps:
+                lp = torch.stack(rec.steps, dim=1).cpu()
+                n = min(lp.shape[1], gen.shape[1])
+                for row, k in enumerate(part):
+                    confs[k] = mean_conf(gen[row, :n].tolist(), lp[row, :n].tolist(), skip_ids, text_id)
             done[0] += len(part)
             prog(lo + (hi - lo) * done[0] / max(1, len(clips)), f"Qwen3-ASR đang nghe {done[0]}/{len(clips)} khúc")
 
         run_batched(fn, list(range(len(clips))), [len(c) / SR for c in clips])
-        return texts
+        state["found"] = found
+        return texts, confs
 
     def align(clips, texts, lang, lo: float, hi: float) -> list[list]:
         aproc, amodel = get_aligner()
@@ -205,7 +260,6 @@ def main(repo: str = "Qwen/Qwen3-ASR-1.7B-hf") -> None:
             continue
         try:
             req = json.loads(line)
-            audio = _load_wav(req["wav"])
             lang = LANG.get(req.get("language") or "", None)
             if req.get("cmd") == "align":
                 spans = [(float(a), float(b)) for a, b, _t in req["items"]]
@@ -213,10 +267,14 @@ def main(repo: str = "Qwen/Qwen3-ASR-1.7B-hf") -> None:
             else:
                 spans = [(float(a), float(b)) for a, b in req["spans"]]
                 texts = None
-            clips = [audio[int(a * SR):max(int(a * SR) + SR // 10, int(b * SR))] for a, b in spans]
+            clips = read_clips(req["wav"], spans)
             want_align = req.get("cmd") == "align" or bool(req.get("align"))
+            confs: list = [None] * len(clips)
+            found: list = [None] * len(clips)
             if texts is None:
-                texts = transcribe(clips, lang, req.get("prompt") or "", 0.0, 0.75 if want_align else 1.0)
+                texts, confs = transcribe(clips, lang, req.get("prompt") or "", 0.0, 0.75 if want_align else 1.0,
+                                          conf=bool(req.get("conf")))
+                found = state.pop("found", found)
                 if want_align and dev != "cpu":
                     torch.cuda.empty_cache()   # trả bộ nhớ tạm của bước nghe trước khi nạp bộ căn thời gian
             words, err = [[] for _ in clips], ""
@@ -229,6 +287,8 @@ def main(repo: str = "Qwen/Qwen3-ASR-1.7B-hf") -> None:
                 except Exception as e:  # noqa: BLE001
                     err = f"{type(e).__name__}: {e}"
             _reply(proto, {"ok": True, "align_error": err,
-                           "items": [{"text": t, "words": w} for t, w in zip(texts, words)]})
+                           "items": [dict({"text": t, "words": w}, **({} if c is None else {"conf": c}),
+                                          **({"lang": f} if f else {}))
+                                     for t, w, c, f in zip(texts, words, confs, found)]})
         except Exception as e:  # noqa: BLE001
             _reply(proto, {"error": f"{type(e).__name__}: {e}"})

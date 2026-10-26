@@ -692,6 +692,7 @@ class SettingsPage(QWidget):
         ("sep_model", "sep_model", "c"), ("sep_before", "sep_before_asr", "b"), ("diarize", "diarize", "b"),
         ("spk_n", "diarize_speakers", "i"), ("spk_thr", "diarize_threshold", "f"),
         ("engine", "translate_engine", "c"), ("style", "translate_style", "c"), ("ai_join", "ai_join_engine", "c"),
+        ("breath_marks", "breath_marks", "b"), ("clause_match", "trans_clause_match", "b"),
         ("target", "target_lang", "c"),
         ("ds_model", "deepseek_model", "t"), ("oa_base", "openai_base_url", "t"), ("oa_model", "openai_model", "t"),
         ("an_model", "anthropic_model", "t"), ("ge_model", "gemini_model", "t"),
@@ -811,6 +812,13 @@ class SettingsPage(QWidget):
                              "Sau bước Nghe & tách câu: AI đọc cả kịch bản, gộp các dòng thực ra là 1 câu mà luật không "
                              "đoán được (\"这笔账。\" | \"你自己算。\"). Chọn 1 AI đã nhập key ở các khung bên dưới (Ollama chạy "
                              "trên máy, không cần key). Tắt = chỉ dùng luật nối câu")
+        self.breath_marks = f.row("Dấu phẩy ở chỗ ngắt hơi", Switch(),
+                                  "Nhân vật ngừng giữa câu (≥ mức 'khi nhân vật ngừng từ' ở tab Lồng tiếng) mà câu gốc "
+                                  "chưa có dấu câu -> tự thêm \"，\" (sau khi nghe và trước khi dịch) để bản dịch giữ đúng "
+                                  "vế, giọng lồng nghỉ đúng chỗ. Cần mốc từng chữ (câu nghe từ bản 2.0.96)")
+        self.clause_match = f.row("AI sửa câu dịch cho đủ vế", Switch(),
+                                  "Dịch bằng AI: câu dịch gộp mất vế so với chỗ nhân vật ngắt hơi -> AI viết lại cho đủ vế "
+                                  "(cùng ý, cùng độ dài). Tốn thêm 1 lần gọi AI cho các câu đó")
         t.add(f)
         t.add(label("API key, số câu mỗi lần gửi, giới hạn gói miễn phí: chỉnh riêng ở khung từng công cụ bên dưới. "
                     "Kỹ năng dịch chung (giữ đúng số câu, tên riêng chuẩn) sửa ở tab Tự động → 'Kỹ năng dịch AI' → "

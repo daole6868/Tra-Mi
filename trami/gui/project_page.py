@@ -1556,6 +1556,12 @@ class ProjectPage(QWidget):
         self.d_pause_min = g.row("… khi nhân vật ngừng từ", dspin(
             0.15, 2.0, 0.05, st.get("dub_pause_min", 0.3), "", " s", "Chỉ tái hiện chỗ nhân vật ngừng ít nhất bấy nhiêu "
             "giây (ngắn hơn thì để bộ đọc tự ngắt như thường)"))
+        self.d_by_clause = g.row("… đọc từng vế", Switch(bool(st.get("dub_by_clause", True))))
+        self.d_by_clause.setToolTip("Câu có chỗ nhân vật ngắt hơi: mỗi vế (chia ở dấu phẩy tương ứng) đọc riêng rồi ghép "
+                                    "lại – chỗ nghỉ luôn đúng chỗ, vế sau vào đúng lúc nhân vật nói tiếp, vế nào dài hơn "
+                                    "vế gốc thì chỉ đọc nhanh riêng vế đó. Có tác dụng khi bấm 'Tạo bản lồng tiếng' / "
+                                    "'Tạo lại giọng các câu đã tích' (đọc lại các câu đó). Tắt: đọc cả câu 1 lần, nghỉ ở "
+                                    "chỗ bộ đọc tự ngắt như bản 2.0.96")
         self.d_autoshort = g.row("AI tự rút gọn câu quá dài", Switch(bool(st.get("dub_auto_shorten", True))))
         self.d_autoshort.setToolTip("Khi bấm Tạo bản lồng tiếng: câu vẫn quá dài sau khi tăng tốc được AI viết lại ngắn "
                                     "hơn rồi đọc lại (cần công cụ dịch AI; câu bạn tự sửa lời không bị đổi)")
@@ -1565,6 +1571,7 @@ class ProjectPage(QWidget):
         for w in (self.d_maxspeed, self.d_lead, self.d_maxlag, self.d_pause_min):
             w.valueChanged.connect(self._dub_layout_changed)
         self.d_pauses.toggledOn.connect(self._dub_layout_changed)
+        self.d_by_clause.toggledOn.connect(self._dub_layout_changed)
         self.d_follow.toggledOn.connect(self._dub_follow_changed)
         self.d_autoshort.toggledOn.connect(self._dub_autoshort_changed)
         self._update_overflow_help()
@@ -4544,6 +4551,7 @@ class ProjectPage(QWidget):
         self.d_follow.setChecked(bool(st.get("dub_subs_follow", True)))
         self.d_pauses.setChecked(bool(st.get("dub_pauses", True)))
         self.d_pause_min.setValue(float(st.get("dub_pause_min", 0.3)))
+        self.d_by_clause.setChecked(bool(st.get("dub_by_clause", True)))
         self.d_autoshort.setChecked(bool(st.get("dub_auto_shorten", True)))
         self._update_overflow_help()
 
@@ -4557,7 +4565,8 @@ class ProjectPage(QWidget):
         save_settings({"dub_overflow": self.d_overflow.currentData() or "smart",
                        "tts_max_speedup": round(self.d_maxspeed.value(), 2),
                        "dub_lead_max": round(self.d_lead.value(), 2), "dub_max_lag": round(self.d_maxlag.value(), 2),
-                       "dub_pauses": self.d_pauses.isChecked(), "dub_pause_min": round(self.d_pause_min.value(), 2)})
+                       "dub_pauses": self.d_pauses.isChecked(), "dub_pause_min": round(self.d_pause_min.value(), 2),
+                       "dub_by_clause": self.d_by_clause.isChecked()})
         self.settings = load_settings()
         if self.p and any(x.extra.get("tts_file") for x in self.model.segs) and (self.p.edit.get("dub") or {}).get("wav"):
             self._relayout_timer.start()

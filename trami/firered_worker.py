@@ -13,7 +13,7 @@ import json
 import os
 import sys
 
-from .qwen_asr_worker import _load_wav, plan_batches, vram_plan
+from .qwen_asr_worker import plan_batches, read_clips, vram_plan
 from .vieneu_worker import _reply
 
 SR = 16000
@@ -88,14 +88,13 @@ def main(repo: str = "FireRedTeam/FireRedASR2-AED") -> None:
             continue
         try:
             req = json.loads(line)
-            audio = _load_wav(req["wav"])
             if req.get("cmd") == "align":
                 spans = [(float(a), float(b)) for a, b, _t in req["items"]]
                 given = [str(t) for _a, _b, t in req["items"]]
             else:
                 spans = [(float(a), float(b)) for a, b in req["spans"]]
                 given = None
-            clips = [audio[int(a * SR):max(int(a * SR) + SR // 10, int(min(b, a + MAX_CLIP) * SR))] for a, b in spans]
+            clips = read_clips(req["wav"], spans, MAX_CLIP)
             lens = [len(c) / SR for c in clips]
             items = [{"text": "", "words": [], "conf": 0.0} for _ in clips]
             done = [0]

@@ -57,7 +57,10 @@ Yêu cầu bắt buộc:
    cách nói đầy đủ thay cách nói tắt – KHÔNG thêm ý mới, không đổi nghĩa, không lặp từ vô nghĩa, không vượt N.
    KHÔNG chép ký hiệu ⟪⟫ vào bản dịch.
 9. Dòng chắc chắn là LỜI BÀI HÁT (nhạc phim, nhân vật đang hát – câu văn vần, điệp khúc lặp lại, không trả lời / không
-   nối tiếp lời thoại trước – sau) thì bắt đầu bản dịch bằng "♪ ". Lời thoại bình thường KHÔNG thêm ♪."""
+   nối tiếp lời thoại trước – sau) thì bắt đầu bản dịch bằng "♪ ". Lời thoại bình thường KHÔNG thêm ♪.
+10. Dấu phẩy / dấu câu GIỮA dòng gốc là chỗ nhân vật ngắt hơi: bản dịch đặt dấu phẩy (hoặc ? ! .) ở chỗ tương ứng, giữ
+   ĐÚNG số vế và thứ tự các vế như câu gốc (vế 1 dịch vế 1, vế 2 dịch vế 2…) để giọng lồng ngắt nghỉ khớp nhân vật;
+   chỉ đảo / gộp vế khi tiếng Việt không thể nói khác."""
 
 # Dịch sang Anh / Thái / Nhật / Hàn: lời nhắc tiếng Anh (luật giống bản tiếng Việt, đổi phần xưng hô / tên riêng)
 STYLES_EN = {
@@ -102,7 +105,11 @@ Mandatory rules:
    forms of address, fuller phrasing – WITHOUT adding new information or changing the meaning, never exceeding N.
    NEVER copy the ⟪⟫ marker into the translation.
 9. A line that is clearly SONG LYRICS (theme song, a character singing – verse, not dialogue) must start with "♪ ".
-   Never add ♪ to normal dialogue."""
+   Never add ♪ to normal dialogue.
+10. A comma / punctuation mark INSIDE a source line marks where the character pauses for breath: put a comma (or ? ! .)
+   at the matching place in the translation, keeping the SAME number and order of clauses (clause 1 translates clause
+   1, clause 2 translates clause 2…) so the dubbed voice pauses with the character; reorder or merge clauses only when
+   {L['english']} grammar leaves no other way."""
 
 
 SYL_PER_SEC = 4.6      # tiếng Việt lồng tiếng tự nhiên ~4–5 tiếng/giây (tiếng khác: langs.INFO[...]["rate"])
@@ -117,6 +124,20 @@ giữ nguyên xưng hô và tên riêng. Chỉ trả về JSON {"1": "câu mới
 SHORTEN_PROMPT_EN = """You are a film dubbing script editor. Each item has the source line, the current {lang} translation and
 the maximum length in {unit}. Rewrite the translation SHORTER, within the maximum length, still natural, keeping the core
 meaning, names and forms of address. Return ONLY JSON {{"1": "new line", ...}} with no explanation."""
+
+
+CLAUSE_PROMPT = """Bạn là biên tập viên lồng tiếng phim. Mỗi mục có câu gốc đã chia thành các VẾ theo chỗ nhân vật ngắt hơi
+("ve_goc") và bản dịch tiếng Việt hiện tại ("dich"). Viết lại bản dịch cho có ĐÚNG số vế như câu gốc: các vế nối nhau bằng
+dấu phẩy (hoặc ? ! nếu vế gốc là câu hỏi / cảm thán), vế thứ i dịch nghĩa vế gốc thứ i, đúng thứ tự – để giọng lồng ngắt
+nghỉ đúng lúc nhân vật ngắt hơi. Giữ nguyên ý, xưng hô, tên riêng, độ dài gần như cũ; chỉ đổi trật tự / cách nói khi cần.
+Chỉ trả về JSON {"1": "bản dịch mới", ...} không kèm giải thích."""
+
+CLAUSE_PROMPT_EN = """You are a film dubbing script editor. Each item has the source line split into CLAUSES where the
+character pauses for breath ("source_clauses") and the current {lang} translation ("translation"). Rewrite the translation
+so it has EXACTLY the same number of clauses: join them with commas (or ? ! when the source clause is a question /
+exclamation), clause i translates source clause i, in order – so the dubbed voice pauses with the character. Keep the
+meaning, forms of address, names and about the same length; only reorder / rephrase when needed. Return ONLY JSON
+{{"1": "new line", ...}} with no explanation."""
 
 
 def syllables(text: str, lang: str = "vi") -> int:
@@ -604,6 +625,33 @@ class Translator:
             out.append(v if v and syllables(v, self.target) < syllables(vi, self.target) else vi)
         return out
 
+    def match_clauses(self, items: list[tuple[list[str], str]]) -> list[str]:
+        """Sửa bản dịch cho đủ số vế như câu gốc (2.1.3). items: (các vế câu gốc theo chỗ ngắt hơi, bản dịch hiện tại).
+        Chỉ AI làm được (Google / Hy-MT2 trả lại nguyên bản dịch); AI lỗi -> giữ bản cũ."""
+        if not self.llm or not items:
+            return [tr for _, tr in items]
+        L = langs.INFO[self.target]
+        if self.target == "vi":
+            payload = {str(k + 1): {"ve_goc": cl, "dich": tr, "so_ve": len(cl)} for k, (cl, tr) in enumerate(items)}
+            sysp, user = CLAUSE_PROMPT, "SỬA SỐ VẾ CÁC BẢN DỊCH SAU:\n" + json.dumps(payload, ensure_ascii=False, indent=0)
+        else:
+            payload = {str(k + 1): {"source_clauses": cl, "translation": tr, "clauses": len(cl)}
+                       for k, (cl, tr) in enumerate(items)}
+            sysp = CLAUSE_PROMPT_EN.format(lang=L["english"])
+            user = "FIX THE CLAUSES OF THESE TRANSLATIONS:\n" + json.dumps(payload, ensure_ascii=False, indent=0)
+        try:
+            d = _extract_json(self.llm.chat(with_skill(sysp, self.skill), user))
+        except (Cancelled, net.NetworkDown):
+            raise
+        except Exception:  # noqa: BLE001
+            return [tr for _, tr in items]
+        out = []
+        for k, (_cl, tr) in enumerate(items):
+            v = d.get(str(k + 1)) if isinstance(d, dict) else None
+            v = BUDGET_RE.sub(" ", v).strip() if isinstance(v, str) else ""
+            out.append(self._post(v) if v and not untranslated(v, self.target) else tr)
+        return out
+
     def translate_lines(self, lines: list[str], progress: ProgressCB | None = None,
                         cancel: Callable[[], bool] | None = None, summary: str = "") -> list[str]:
         out: list[str | None] = [None] * len(lines)
@@ -812,9 +860,16 @@ class Translator:
         return batches
 
     def _gl(self) -> tuple[str, str]:
-        """(nguồn, đích) cho Google: nguồn theo ngôn ngữ gốc của dự án (trước đây ghi cứng tiếng Trung)."""
-        sl = {"zh": "zh-CN", "yue": "zh-TW", "en": "en", "ja": "ja", "ko": "ko"}.get(self.source, "auto")
+        """(nguồn, đích) cho Google: nguồn theo ngôn ngữ gốc của dự án (trước đây ghi cứng tiếng Trung); đang dịch câu
+        tiếng khác (`_foreign`) -> Google tự nhận tiếng."""
+        sl = "auto" if getattr(self, "_auto_sl", False) else \
+            {"zh": "zh-CN", "yue": "zh-TW", "en": "en", "ja": "ja", "ko": "ko"}.get(self.source, "auto")
         return sl, langs.INFO[self.target]["google"]
+
+    def _foreign(self, line: str) -> bool:
+        """Câu gốc nói tiếng khác tiếng chính (phim Trung có câu tiếng Anh – bộ nghe chép bằng chữ Latin, 2.1.3)."""
+        return self.source in ("zh", "yue") and not re.search(r"[㐀-鿿]", line) and \
+            bool(re.search(r"[A-Za-z]{2,}(?:[\s'’-]+[A-Za-z]{2,})+", line))
 
     def _gtx(self, text: str) -> str:
         """Google Translate (endpoint miễn phí trả JSON)."""
@@ -870,6 +925,27 @@ class Translator:
             net.sleep(2 * 2 ** (fails - 1))
 
     def _google(self, lines: list[str]) -> list[str]:
+        alien = [i for i, l in enumerate(lines) if self._foreign(l)]
+        if alien and len(alien) < len(lines):   # câu tiếng khác dịch riêng, Google tự nhận tiếng
+            out = [""] * len(lines)
+            rest = [i for i in range(len(lines)) if i not in set(alien)]
+            for i, t in zip(rest, self._google([lines[i] for i in rest])):
+                out[i] = t
+            self._auto_sl = True
+            try:
+                for i, t in zip(alien, self._google([lines[i] for i in alien])):
+                    out[i] = t
+            finally:
+                self._auto_sl = False
+            return out
+        if alien:
+            self._auto_sl = True
+        try:
+            return self._google_lines(lines)
+        finally:
+            self._auto_sl = False
+
+    def _google_lines(self, lines: list[str]) -> list[str]:
         src = [self._apply_glossary_src(l).replace("\n", " ").strip() for l in lines]
         try:
             parts = self._gt_one("\n".join(src)).split("\n")

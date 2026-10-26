@@ -138,6 +138,17 @@ lúc nhân vật nói tiếp (câu ngắn hay dài đều vậy, chỉ dùng ch�
 danh sách (a, ừm, hả, ha ha…) – câu chỉ gồm các từ đó bị xoá, vế cảm thán đứng riêng trong câu dài bị bỏ ("Ừm, đúng vậy."
 → "Đúng vậy."); từ không có trong danh sách giữ nguyên.
 
+**Nhịp ngắt theo giọng gốc** (2.1.3): (1) nhân vật ngừng ≥ 0,3 s giữa câu mà bộ nghe không đặt dấu câu → tự thêm "，" vào
+câu Trung (Cài đặt → Dịch thuật → *Dấu phẩy ở chỗ ngắt hơi*); (2) dịch bằng AI: câu dịch giữ đúng số vế, thiếu vế thì AI
+sửa lại cho đủ (*AI sửa câu dịch cho đủ vế*); (3) lồng tiếng **đọc từng vế** rồi ghép: vế sau vào đúng lúc nhân vật nói
+tiếp, vế nào dài hơn vế gốc thì chỉ đọc nhanh riêng vế đó (tab Lồng tiếng mục 3 → *… đọc từng vế*). Dự án cũ: dịch lại
+các câu cần (tab Phụ đề → *Dịch câu đã tích*) rồi *Tạo lại giọng các câu đã tích*.
+
+**Nghe chuẩn hơn** (2.1.3): đoạn nghe lại (câu bị sót) mà bộ nghe không chắc (nhạc / tiếng động bị đoán thành lời) thì bỏ;
+chữ bị bộ căn kéo dài qua chỗ lặng / câu lấn câu bên được căn lại riêng; "1. Nghe & tách câu" lưu tiến độ – lỗi / Huỷ /
+tắt tool giữa chừng thì lần sau chỉ nghe tiếp phần còn thiếu; câu nói tiếng khác (VD tiếng Anh trong phim Trung) được nghe
+lại đúng tiếng và dịch đúng.
+
 **Bộ nhận dạng giọng nói** (chọn ở tab Tự động hoặc trang Cài đặt):
 - **Qwen3-ASR** (mặc định): nghe tiếng Trung chuẩn nhất, tự đặt dấu câu theo nghĩa, kèm bộ căn giờ từng chữ (lệch ~0,03 s)
   để tách câu đúng chỗ nghỉ. Cần `transformers` ≥ 5.13: `.venv\Scripts\python -m pip install -U "transformers>=5.13" accelerate`.

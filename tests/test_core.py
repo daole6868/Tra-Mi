@@ -3459,6 +3459,9 @@ def test_qwen_streams_chunk_groups(monkeypatch, tmp_path):
     assert all(s.extra.get("ct") for s in segs)                 # câu cuối cùng có mốc từng chữ
     calls.clear()
     asr_qwen.transcribe_qwen(tmp_path / "a.wav", {}, "zh", None, None)
+    assert calls == []                                          # tiến độ lần nghe trước còn -> dùng lại (2.1.3)
+    asr_qwen.clear_progress(tmp_path)
+    asr_qwen.transcribe_qwen(tmp_path / "a.wav", {}, "zh", None, None)
     assert calls == [(14, False), ("align", 14)]                # chạy thường: nghe hết -> (nghe lại chỗ cắt) -> căn
 
 
@@ -7149,7 +7152,7 @@ def test_hybrid_ocr_listen(monkeypatch, tmp_path, sample_video):
             return len(segs)
 
         def fake_rescue(segs, wav, engine, language, settings, keep_speakers=False, progress=None, cancel=None,
-                        keep_lines=False):
+                        keep_lines=False, stats=None):
             seen["keep"] = keep_lines
             return sorted(segs + [Segment(5.0, 5.8, "嗯好的")], key=lambda x: x.start), 1
 
@@ -7437,3 +7440,282 @@ def test_gui_listen_accuracy_controls(sample_video, monkeypatch):
         save_settings({"asr_dual": old.get("asr_dual", False)})
         win.close()
         Project(p.id).delete()
+
+
+def test_rescue_drops_low_confidence_and_conf_tags():
+    """Nghe lại đoạn sót (2.1.3): bộ nghe trả "lowconf" (xác suất trung bình các chữ dưới ngưỡng – nhạc / tiếng động
+    bị đoán thành lời) -> bỏ câu, đếm stats["lowconf"]; câu chắc thì giữ, ghi extra["asr_conf"], không giữ nhãn kỹ thuật.
+    Độ tin cậy: Qwen3 = xác suất trung bình phần lời (sau <asr_text>, bỏ ký hiệu đặc biệt), Whisper = exp(avg_logprob)."""
+    import math
+    import types
+
+    from trami import align
+    from trami.asr import whisper_conf_tags
+    from trami.asr_qwen import conf_tags
+    from trami.qwen_asr_worker import mean_conf
+
+    sr = 16000
+    a = np.zeros(sr * 10, np.float32)
+    t = np.arange(sr * 2) / sr
+    for s0 in (2, 6):
+        a[int(s0 * sr):int((s0 + 1) * sr)] = 0.3 * np.sin(2 * np.pi * 220 * t[:sr])
+    replies = iter([("嗯嗯嗯啊哈", conf_tags(0.31, 0.5)), ("你别过来", conf_tags(0.92, 0.5))])
+    st: dict = {}
+    new = align.rescue_missed([], a, lambda clip: next(replies), stats=st)
+    assert [n.text for n in new] == ["你别过来"] and st["lowconf"] == 1
+    assert new[0].extra["asr_conf"] == 0.92 and new[0].extra["tags"] == []
+    assert conf_tags(None, 0.5) == [] and "lowconf" not in conf_tags(0.5, 0.5)
+    # 5 = <asr_text>, 0/1 = ký hiệu đặc biệt: chỉ tính 7, 8 sau thẻ
+    assert mean_conf([3, 5, 7, 8, 1], [0.0, 0.0, math.log(0.8), math.log(0.6), 0.0], {0, 1}, 5) == 0.7
+    assert mean_conf([7, 8], [math.log(0.5), math.log(0.5)], set(), None) == 0.5
+    seg = lambda lp, nsp: types.SimpleNamespace(start=0.0, end=2.0, avg_logprob=lp, no_speech_prob=nsp)  # noqa: E731
+    assert "lowconf" in whisper_conf_tags([seg(-1.2, 0.1)]) and "lowconf" in whisper_conf_tags([seg(-0.3, 0.6)])
+    assert "lowconf" not in whisper_conf_tags([seg(-0.3, 0.1)]) and whisper_conf_tags([]) == []
+
+
+def test_stretched_chars_fixed_by_voice_and_realigned(monkeypatch):
+    """Mốc từng chữ (2.1.3): chữ bị bộ căn kéo dài qua đoạn lặng -> co theo độ to giọng đã tách (chữ cuối / chữ giữa
+    giữ phần có tiếng, chữ đầu giữ phần cuối); câu có chữ lấn sang câu trước -> căn chung 2 câu, chỉ nhận khi hết lấn."""
+    from trami import align, pipeline, snap
+    from trami.project import Project
+
+    hop = 0.01
+    env = np.full(600, -90.0, np.float32)
+    env[100:160] = -20
+    s = Segment(0.95, 2.95, "你好吗")
+    s.extra["ct"] = [[1.0, 1.2], [1.2, 1.4], [1.4, 2.9]]
+    assert align.stretched_chars(s.extra["ct"]) == [2]
+    assert snap.fix_stretched([s], env, hop) == 1
+    assert s.extra["ct"][2] == [1.4, 1.6] and s.end == 1.65
+    e3 = np.full(600, -90.0, np.float32)
+    e3[100:120] = -20
+    e3[260:300] = -20
+    m = Segment(0.95, 3.05, "你好吗")
+    m.extra["ct"] = [[1.0, 1.2], [1.2, 2.8], [2.8, 3.0]]
+    assert snap.fix_stretched([m], e3, hop) == 1 and m.extra["ct"][1] == [2.6, 2.8]   # lặng TRƯỚC chữ giữa
+    assert align.stretched_chars([[0, 0.2], [0.2, 0.4], [0.4, 0.6]]) == []
+    # căn lại: câu sau có chữ lấn vào câu trước -> căn chung
+    p = Project.create("ct_check")
+    try:
+        segs = [Segment(1.0, 2.05, "我们走", extra={"ct": [[1.0, 1.3], [1.3, 1.6], [1.6, 2.0]]}),
+                Segment(1.75, 2.6, "快点", extra={"ct": [[1.8, 2.1], [2.1, 2.5]]})]
+        seen = []
+
+        class W:
+            def call(self, req, progress=None, cancel=None):
+                seen.append(req)
+                a, _b, text = req["items"][0]
+                return {"items": [{"words": [[ch, round(0.1 + 0.25 * k, 3), round(0.3 + 0.25 * k, 3)]
+                                             for k, ch in enumerate(text)]}]}
+        monkeypatch.setattr("trami.asr_qwen.asr_worker", lambda engine, settings=None: W())
+        st = pipeline.verify_char_times(p, segs, Path("x.wav"), "zh", {})
+        assert st == {"bad": 1, "fixed": 1} and seen[0]["cmd"] == "align" and seen[0]["items"][0][2] == "我们走快点"
+        assert segs[0].extra["ct"][-1][1] <= segs[1].extra["ct"][0][0]
+        assert segs[0].end <= segs[1].start
+        # bộ căn ra mốc vẫn lấn -> giữ mốc cũ
+        segs2 = [Segment(1.0, 2.05, "我们走", extra={"ct": [[1.0, 1.3], [1.3, 1.6], [1.6, 2.0]]}),
+                 Segment(1.75, 2.6, "快点", extra={"ct": [[1.8, 2.1], [2.1, 2.5]]}),
+                 Segment(2.0, 3.0, "好", extra={"ct": [[2.05, 2.3]]})]
+
+        class Bad(W):
+            def call(self, req, progress=None, cancel=None):
+                a = req["items"][0][0]
+                return {"items": [{"words": [[ch, 1.5 - a + 0.2 * k, 1.7 - a + 0.2 * k]   # tới 2,5 s: lấn câu 3
+                                             for k, ch in enumerate(req["items"][0][2])]}]}
+        monkeypatch.setattr("trami.asr_qwen.asr_worker", lambda engine, settings=None: Bad())
+        old = [list(x) for x in segs2[1].extra["ct"]]
+        st2 = pipeline.verify_char_times(p, segs2, Path("x.wav"), "zh", {})
+        assert st2["fixed"] == 0 and segs2[1].extra["ct"] == old
+    finally:
+        p.delete()
+
+
+def test_asr_resume_progress_and_foreign_lines(tmp_path, monkeypatch):
+    """Lưu tiến độ nghe (2.1.3): nghe từng nhóm khúc, nhóm nào xong ghi ngay; bị huỷ giữa chừng -> lần sau chỉ nghe
+    khúc còn thiếu (cùng âm thanh dù file 16 kHz được tạo lại). Khúc nghe chưa chắc -> nghe lại không ép tiếng: ra tiếng
+    Anh tin cậy hơn -> dùng bản đó, extra["lang"] = "en"."""
+    from trami import asr_qwen
+    from trami.ffmpeg import Cancelled
+    from trami.tts import write_wav
+
+    wav = tmp_path / "asr16k_vocals.wav"
+    write_wav(wav, (np.random.default_rng(0).standard_normal(16000 * 20) * 0.01).astype(np.float32), 16000)
+    spans = [(0.5, 2.0), (5.0, 6.5), (10.0, 11.5), (15.0, 16.5)]
+    monkeypatch.setattr(asr_qwen, "_spans", lambda audio, settings: list(spans))
+    monkeypatch.setattr(asr_qwen, "SAVE_GROUP", 2)
+    calls: list = []
+    fail = {"on": True}
+
+    class W:
+        def call(self, req, progress=None, cancel=None):
+            calls.append((req["cmd"], req.get("language"), [tuple(x[:2]) for x in (req.get("spans") or req["items"])]))
+            if req["cmd"] == "align":
+                return {"items": [{"words": []} for _ in req["items"]]}
+            if req["language"] == "auto":
+                return {"items": [{"text": "Let's go home.", "lang": "English", "conf": 0.9} for _ in req["spans"]]}
+            if fail["on"] and sum(1 for c in calls if c[0] == "asr") == 2:
+                raise Cancelled()
+            return {"items": [{"text": "回家吧。" if a == 15.0 else f"第{int(a)}句话。",
+                               "conf": 0.3 if a == 15.0 else 0.95} for a, _b in req["spans"]]}
+    monkeypatch.setattr(asr_qwen, "asr_worker", lambda engine, settings=None: W())
+    st = {"align_words": True, "asr_relisten": True}
+    with pytest.raises(Cancelled):
+        asr_qwen.transcribe_qwen(wav, st, "zh")
+    assert len(list(tmp_path.glob("asr_progress_*.json"))) == 1
+    fail["on"] = False
+    calls.clear()
+    write_wav(wav, (np.random.default_rng(0).standard_normal(16000 * 20) * 0.01).astype(np.float32), 16000)  # tạo lại
+    stats: dict = {}
+    segs = asr_qwen.transcribe_qwen(wav, st, "zh", stats=stats)
+    heard = [c for c in calls if c[0] == "asr" and c[1] == "zh"]
+    assert heard == [("asr", "zh", [(10.0, 11.5), (15.0, 16.5)])] and stats["resumed"] == 2
+    assert ("asr", "auto", [(15.0, 16.5)]) in calls and stats["foreign"] == 1
+    assert [s.text for s in segs] == ["第0句话。", "第5句话。", "第10句话。", "Let's go home."]
+    assert segs[-1].extra["lang"] == "en" and "lang" not in segs[0].extra
+    asr_qwen.clear_progress(tmp_path)
+    assert not list(tmp_path.glob("asr_progress_*"))
+    # khúc chép toàn chữ Latin cũng là tiếng Anh, không cần nghe lại
+    out = asr_qwen.foreign_pass([(0, 1, "OK let's go"), (1, 2, "好的OK")], [0.9, 0.9], wav, st, "zh")
+    assert out == {0: ("OK let's go", "en")}
+
+
+def test_google_translates_foreign_lines_with_auto_source(monkeypatch):
+    """Câu tiếng Anh trong phim Trung (2.1.3): Google dịch riêng với "tự nhận tiếng", câu Trung vẫn nguồn zh-CN."""
+    from trami import translate as tr
+
+    seen = []
+
+    def fake(self, text):
+        seen.append((self._gl()[0], text))
+        return text.upper()
+    monkeypatch.setattr(tr.Translator, "_gt_one", fake)
+    t = tr.Translator({}, "google", target="vi", source="zh")
+    out = t._google(["你好", "Let's go home", "走吧"])
+    assert out == ["你好".upper(), "LET'S GO HOME", "走吧".upper()]
+    assert ("auto", "Let's go home") in seen and all(sl == "zh-CN" for sl, x in seen if x != "Let's go home")
+    assert not getattr(t, "_auto_sl", False)
+
+
+def test_breath_marks_and_clause_match():
+    """Chỗ ngắt hơi (2.1.3): khe ≥ 0,3 s giữa 2 chữ ở ranh giới từ -> thêm "，" vào câu gốc (không trước trợ từ, không
+    thêm lại); câu dịch thiếu vế -> AI sửa cho đủ vế, chỉ nhận khi ghép được thêm chỗ ngắt và không dài hơn hẳn."""
+    from trami import pipeline, tts
+    from trami.align import mark_breaths
+
+    def mk(text, gap_at, gap=0.5):
+        ct, t = [], 1.0
+        for k in range(len(text)):
+            if k == gap_at:
+                t += gap
+            ct.append([round(t, 2), round(t + 0.2, 2)])
+            t += 0.22
+        return Segment(1.0, t, text, extra={"ct": ct})
+    s = mk("我刚回来就听说你要走了", 4)
+    assert mark_breaths([s]) == 1 and s.text == "我刚回来，就听说你要走了" and s.extra["breaths"] == 1
+    assert mark_breaths([s]) == 0                               # đã có dấu -> không thêm lại
+    s2 = mk("这是真的吗", 3, 0.6)                                 # ngừng trước trợ từ 的 -> không thêm
+    assert mark_breaths([s2]) == 0
+    s3 = mk("我刚回来就听说你要走了", 4, 0.2)                       # ngừng ngắn hơn mức -> không thêm
+    assert mark_breaths([s3]) == 0
+    s.trans = "Tôi vừa về đã nghe nói anh sắp đi"
+    assert pipeline.clause_state(s, "vi", 0.3) == ([5], 0)
+    assert tts.breath_points(s, 0.3) == [5]
+
+    class Tr:
+        def __init__(self, out):
+            self.out, self.got = out, []
+
+        def match_clauses(self, items):
+            self.got += items
+            return [self.out] * len(items)
+    t = Tr("Tôi vừa về, đã nghe nói anh sắp đi")
+    assert pipeline.match_clauses([s], [0], t, "vi") == 1
+    assert t.got[0][0] == ["我刚回来，", "就听说你要走了"]
+    assert s.trans == "Tôi vừa về, đã nghe nói anh sắp đi" and s.extra["trans_before_clause"].startswith("Tôi vừa về đã")
+    s4 = mk("我刚回来就听说你要走了", 4)
+    mark_breaths([s4])
+    s4.trans = "Tôi vừa về đã nghe nói anh sắp đi"
+    bad = Tr("Tôi vừa về đã nghe nói anh sắp đi rồi đó, thật là buồn quá đi mất thôi trời ơi")   # dài hơn hẳn
+    assert pipeline.match_clauses([s4], [0], bad, "vi") == 0 and s4.trans == "Tôi vừa về đã nghe nói anh sắp đi"
+    s4.extra["trans_user"] = True
+    assert pipeline.match_clauses([s4], [0], t, "vi") == 0      # câu người dùng tự sửa không đụng
+
+
+def test_dub_by_clause_joins_parts_on_original_timing(tmp_path, monkeypatch):
+    """Đọc từng vế (2.1.3): câu có chỗ nhân vật ngắt hơi ghép được với dấu phẩy câu dịch -> mỗi vế 1 lần đọc, ghép lại
+    (chỗ nối biết chính xác) -> vế sau vào đúng lúc nhân vật nói tiếp; vế đầu dài hơn vế gốc -> chỉ đọc nhanh riêng vế
+    đó; tắt cài đặt -> đọc cả câu 1 lần như cũ; vá bản lồng ra đúng như dựng cả bản."""
+    from trami import tts
+
+    sr = tts.SR
+    lens = {}
+    spoken = []
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, path, voice in items:
+            spoken.append(text)
+            tts.write_wav(path, np.clip(_speech_like(sr, lens.get(text, 0.6), len(text)) * 3, -0.95, 0.95), sr)
+        return []
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    ct = [[1.0, 1.2], [1.2, 1.4], [1.4, 1.6], [1.6, 1.8], [2.8, 3.0], [3.0, 3.2]]
+
+    def mk():
+        return [Segment(1.0, 3.3, "我们走吧，快点。", "Chúng ta đi thôi, nhanh lên.", "S1", {"ct": [list(x) for x in ct]}),
+                Segment(6.0, 6.8, "好", "Được.", "S1")]
+    lens.update({"Chúng ta đi thôi,": 0.7, "nhanh lên.": 0.4, "Được.": 0.5})
+    segs = mk()
+    st: dict = {}
+    tts.synthesize_dub(segs, tmp_path / "o.wav", 9, tmp_path / "w", stats=st, max_speedup=1.0,
+                       settings={"dub_level_match": False})
+    assert sorted(spoken) == sorted(["Chúng ta đi thôi,", "nhanh lên.", "Được."]) and st["clauses"] == 1
+    assert segs[0].extra["tts_file"].endswith("_v.wav") and st["pauses"] == 1
+    assert Path(segs[0].extra["tts_file"] + ".joins.json").exists()
+    a = tts._decode(tmp_path / "o.wav")
+    win = lambda t0, t1: float(np.abs(a[int(t0 * sr):int(t1 * sr)]).max())   # noqa: E731
+    assert win(1.0 + 0.7 + 0.2, 2.75) < 0.01          # lặng tới lúc nhân vật nói tiếp
+    assert win(2.8, 3.1) > 0.05                        # vế sau vào đúng 2,8 s
+    full = a.copy()
+    tab = st["placed_tab"]
+    # vế đầu dài hơn vế gốc (2 s > 1,8 s tới lúc nói tiếp): đọc nhanh riêng vế đầu, vế sau vẫn gần đúng giờ
+    spoken.clear()
+    lens["Chúng ta đi thôi, đi thôi,"] = 2.2
+    segs = mk()
+    segs[0].trans = "Chúng ta đi thôi, đi thôi, nhanh lên."
+    segs[0].text = "我们走吧走吧，快点。"
+    segs[0].extra["ct"] = [[1.0, 1.15], [1.15, 1.3], [1.3, 1.45], [1.45, 1.6], [1.6, 1.7], [1.7, 1.8],
+                           [2.8, 3.0], [3.0, 3.2]]
+    st2: dict = {}
+    tts.synthesize_dub(segs, tmp_path / "o2.wav", 9, tmp_path / "w", stats=st2, max_speedup=1.3,
+                       settings={"dub_level_match": False})
+    ent = [e for e in st2["placed_tab"] if e[0].endswith("_v.wav")][0]
+    assert len(ent[6][0]) == 3 and 1000 < ent[6][0][2] <= int(tts.PART_SPEED * 1000)
+    late = segs[0].extra["dub_at"][1]
+    monkeypatch.setattr(tts, "PART_SPEED", 1.0)
+    segs = mk()
+    segs[0].trans, segs[0].text = "Chúng ta đi thôi, đi thôi, nhanh lên.", "我们走吧走吧，快点。"
+    segs[0].extra["ct"] = [[1.0, 1.15], [1.15, 1.3], [1.3, 1.45], [1.45, 1.6], [1.6, 1.7], [1.7, 1.8],
+                           [2.8, 3.0], [3.0, 3.2]]
+    tts.synthesize_dub(segs, tmp_path / "o3.wav", 9, tmp_path / "w", stats={}, max_speedup=1.3,
+                       settings={"dub_level_match": False})
+    assert segs[0].extra["dub_at"][1] > late + 0.2     # không đọc nhanh riêng vế -> vế sau trễ hơn
+    monkeypatch.setattr(tts, "PART_SPEED", 1.25)
+    # tắt đọc từng vế -> đọc cả câu
+    spoken.clear()
+    segs = mk()
+    st4: dict = {}
+    tts.synthesize_dub(segs, tmp_path / "o4.wav", 9, tmp_path / "w", stats=st4, max_speedup=1.0,
+                       settings={"dub_level_match": False, "dub_by_clause": False})
+    assert spoken == ["Chúng ta đi thôi, nhanh lên."] and st4["clauses"] == 0
+    # vá bản lồng (không đọc từng vế) -> bật lại đọc từng vế: vá đúng đoạn, kết quả = dựng cả bản
+    import shutil
+
+    shutil.copy(tmp_path / "o4.wav", tmp_path / "o5.wav")
+    segs = mk()
+    st5: dict = {}
+    tts.synthesize_dub(segs, tmp_path / "o5_new.wav", 9, tmp_path / "w", stats=st5, max_speedup=1.0,
+                       settings={"dub_level_match": False},
+                       patch={"wav": str(tmp_path / "o5.wav"), "placed": st4["placed_tab"]})
+    assert st5.get("patched")
+    b = tts._decode(tmp_path / "o5.wav")
+    assert len(b) == len(full) and float(np.abs(b - full).max()) < 2e-4
+    assert tab == st5["placed_tab"]

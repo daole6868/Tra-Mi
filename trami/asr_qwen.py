@@ -168,6 +168,8 @@ def _segment(s: float, e: float, item: dict, simplify: bool) -> Segment | None:
     if not text or is_hallucination(text):
         return None
     seg = Segment(round(s, 3), round(e, 3), text)
+    if item.get("lang"):
+        seg.extra["lang"] = item["lang"]    # khúc nói tiếng khác tiếng chính của phim (2.1.3)
     ct = times_from_words(text, item.get("words") or [], s)
     if ct:
         seg.extra["ct"] = [[a, b] for a, b in ct]
@@ -176,6 +178,79 @@ def _segment(s: float, e: float, item: dict, simplify: bool) -> Segment | None:
 
 
 STREAM_GROUP = 6   # chế độ vừa tách vừa dịch: nghe từng nhóm 6 khúc (≤ ~3 phút) rồi gửi câu sang bộ dịch ngay
+SAVE_GROUP = 40    # không vừa tách vừa dịch: nghe từng nhóm 40 khúc (≤ ~18 phút), xong nhóm nào lưu tiến độ nhóm đó
+PROGRESS_FILE = "asr_progress.json"   # work/asr_progress_<mã>.json: kết quả nghe + căn từng khúc của lần nghe dở
+
+
+class Resume:
+    """Tiến độ "1. Nghe & tách câu" (2.1.3): mỗi nhóm khúc nghe xong / căn xong được ghi ngay vào
+    work/asr_progress_<mã>.json. Lần chạy sau cùng âm thanh + bộ nghe + mô hình + tiếng + gợi ý tên riêng -> dùng lại,
+    chỉ nghe tiếp khúc còn thiếu. pipeline.recognize xoá file khi nghe xong trọn vẹn."""
+
+    def __init__(self, wav: str | Path, engine: str, settings: dict, language: str, prompt: str):
+        import hashlib
+
+        w = Path(wav)
+        model = "firered" if engine == "firered" else settings.get("qwen_asr_model") or MODELS[0][0]
+        self.key = json.dumps([engine, model, language, prompt, w.name, file_sig(w)], ensure_ascii=False)
+        # mỗi bộ nghe 1 file (bộ nghe thứ 2 của "Nghe 2 bộ rồi so" không ghi đè tiến độ của bộ chính)
+        tag = hashlib.md5(self.key.encode()).hexdigest()[:10]
+        self.path = w.parent / PROGRESS_FILE.replace(".json", f"_{tag}.json")
+        self.heard: dict = {}
+        self.words: dict = {}
+        self.reused = 0
+        try:
+            d = json.loads(self.path.read_text(encoding="utf-8"))
+            if d.get("key") == self.key:
+                self.heard, self.words = dict(d.get("heard") or {}), dict(d.get("words") or {})
+        except (OSError, ValueError):
+            pass
+
+    @staticmethod
+    def span(s: float, e: float) -> str:
+        return f"{float(s):.3f}-{float(e):.3f}"
+
+    def word_key(self, s: float, e: float, text: str) -> str:
+        return self.span(s, e) + "|" + text
+
+    def save(self) -> None:
+        import os
+
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        try:
+            tmp.write_text(json.dumps({"key": self.key, "heard": self.heard, "words": self.words},
+                                      ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp, self.path)
+        except OSError:
+            pass   # không ghi được (ổ đầy…) -> chỉ mất khả năng chạy tiếp, không làm hỏng việc nghe
+
+
+def file_sig(path: Path) -> str:
+    """Dấu của file âm thanh theo NỘI DUNG (cỡ + 3 mẫu 256 KB đầu / giữa / cuối) – bản 16 kHz bị tạo lại y hệt (lần
+    nghe trước dừng giữa chừng nên dự án chưa ghi mốc giờ) vẫn nhận ra là cùng âm thanh."""
+    import hashlib
+
+    try:
+        n = path.stat().st_size
+        h = hashlib.md5(str(n).encode())
+        with open(path, "rb") as f:
+            for at in (0, max(0, n // 2 - 131072), max(0, n - 262144)):
+                f.seek(at)
+                h.update(f.read(262144))
+        return h.hexdigest()
+    except OSError:
+        return ""
+
+
+def clear_progress(work: str | Path) -> None:
+    """Xoá tiến độ nghe dở (nghe xong trọn vẹn)."""
+    for f in Path(work).glob(PROGRESS_FILE.replace(".json", "*")):
+        try:
+            f.unlink()
+        except OSError:
+            pass
+
+
 FORCED_GAP = 0.3   # 2 khúc nghe liền nhau (nghỉ < 0,3 s): khúc bị cắt giữa lúc đang nói vì dài quá 28 s
 RELISTEN_PAD = 6.0  # nghe lại 6 s mỗi bên chỗ cắt khúc để bộ nghe thấy trọn câu
 MERGE_MAX = 56.0    # khúc sau khi nối ≤ 56 s (bộ căn thời gian chạy 1 khúc / lô trên card 8 GB)
@@ -262,24 +337,38 @@ def transcribe_qwen(wav: str | Path, settings: dict, language: str = "zh", progr
     simplify = language in ("zh", "yue", "auto")
     want_align = bool(settings.get("align_words", True))
     w = asr_worker(engine, settings)
-    req = {"cmd": "asr", "wav": _wav_path(wav), "language": language, "prompt": hotwords(settings),
-           "align": want_align}
+    prompt = hotwords(settings)
+    req = {"cmd": "asr", "wav": _wav_path(wav), "language": language, "prompt": prompt, "align": want_align,
+           "conf": True}
+    ck = Resume(wav, engine, settings, language, prompt)
     heard_words: dict[tuple, list] = {}   # FireRedASR2 trả mốc từng chữ ngay khi nghe
     # NGHE hết (chưa căn) -> nghe lại chỗ cắt khúc -> CĂN 1 lần cho cả phim (bộ căn chỉ nạp sau khi nghe xong).
     # Vừa tách vừa dịch: nghe theo từng nhóm khúc -> gửi câu nháp ngay. (2.0.64 nghe + căn xen kẽ từng nhóm -> từ nhóm 2
     # bộ căn 0.6B nằm sẵn trên card trong lúc bộ nghe 1.7B chạy -> đỉnh bộ nhớ cao hơn ~1,2 GB, card nhỏ tràn sang RAM)
-    groups = [chunks[i:i + STREAM_GROUP] for i in range(0, len(chunks), STREAM_GROUP)] if on_chunk else [chunks]
+    size = STREAM_GROUP if on_chunk else SAVE_GROUP
+    groups = [chunks[i:i + size] for i in range(0, len(chunks), size)]
     a_end = 0.8 if want_align else 0.95
     raw: list[tuple[float, float, str]] = []
+    have = sum(1 for c in chunks if ck.span(*c) in ck.heard)
+    if have and progress:
+        progress(0.0, f"Chạy tiếp lần nghe trước: đã nghe {have}/{len(chunks)} khúc, nghe tiếp phần còn lại…")
     for g, part in enumerate(groups):
         lo, hi = a_end * g / len(groups), a_end * (g + 1) / len(groups)
         pr = None
         if progress:
             def pr(x, m, lo=lo, hi=hi, g=g):
                 progress(lo + (hi - lo) * x, m + (f" (phần {g + 1}/{len(groups)})" if len(groups) > 1 else ""))
-        r = w.call(dict(req, spans=[list(c) for c in part], align=False), pr, cancel)
+        todo = [c for c in part if ck.span(*c) not in ck.heard]
+        if todo:
+            r = w.call(dict(req, spans=[list(c) for c in todo], align=False), pr, cancel)
+            for c, it in zip(todo, r.get("items") or []):
+                ck.heard[ck.span(*c)] = {"text": (it.get("text") or "").strip(), "words": it.get("words") or [],
+                                         "conf": it.get("conf")}
+            ck.save()
+        ck.reused += len(part) - len(todo)
         new = []
-        for (s, e), it in zip(part, r.get("items") or []):
+        for s, e in part:
+            it = ck.heard.get(ck.span(s, e)) or {}
             text = (it.get("text") or "").strip()
             raw.append((s, e, text))
             if it.get("words"):
@@ -288,43 +377,147 @@ def transcribe_qwen(wav: str | Path, settings: dict, language: str = "zh", progr
                 new.append(x)
         if new and on_chunk:
             on_chunk(new)
+    # khúc nói tiếng khác (câu tiếng Anh trong phim Trung…): nghe lại không ép tiếng (2.1.3)
+    langs_of: dict[tuple, str] = {}
+    try:
+        fpr = (lambda x, m: progress(a_end, m)) if progress else None
+        alt = {}
+        if spans is not None:
+            pass   # bộ nghe thứ 2 nghe lại đúng khúc của bộ chính ("Nghe 2 bộ rồi so") – không nghe lại tiếng khác
+        elif any("alt" in (ck.heard.get(ck.span(s, e)) or {}) for s, e, _t in raw):   # chạy tiếp: đã nghe lại rồi
+            for k, (s, e, _t) in enumerate(raw):
+                a = (ck.heard.get(ck.span(s, e)) or {}).get("alt")
+                if a:
+                    alt[k] = (a["text"], a["lang"])
+        else:
+            alt = foreign_pass(raw, [(ck.heard.get(ck.span(s, e)) or {}).get("conf") for s, e, _t in raw], wav,
+                               settings, language, fpr, cancel, engine)
+            for k, (t, code) in alt.items():
+                ck.heard.setdefault(ck.span(raw[k][0], raw[k][1]), {})["alt"] = {"text": t, "lang": code}
+            if alt:
+                ck.save()
+        for k, (t, code) in alt.items():
+            s, e, _old = raw[k]
+            raw[k] = (s, e, t)
+            langs_of[(s, e)] = code
+    except Exception as ex:  # noqa: BLE001 – bước phụ: lỗi thì giữ bản nghe ép tiếng chính
+        from .ffmpeg import Cancelled
+
+        if isinstance(ex, Cancelled):
+            raise
+        from .config import log_error
+
+        log_error("Nghe lại khúc tiếng khác")
+    if stats is not None:
+        stats["foreign"] = len(langs_of)
     if settings.get("asr_relisten", True) and len(raw) > 1:
         rpr = (lambda x, m: progress(a_end + 0.03 * x, m)) if progress else None
+        keep = {k: v for k, v in langs_of.items()}
         raw = relisten_cuts(raw, wav, settings, language, rpr, cancel, stats, engine=engine)
+        langs_of = {(s, e): keep[(s, e)] for s, e, _t in raw if (s, e) in keep}
     a_end = min(0.97, a_end + 0.03)
-    words: list = [heard_words.get(x, []) for x in raw]
+    words: list = [heard_words.get(x, []) or ck.words.get(ck.word_key(*x), []) for x in raw]
     if want_align and raw:
         todo = [k for k, (_s, _e, t) in enumerate(raw) if t and not words[k]]
-        apr = (lambda x, m: progress(a_end + (1 - a_end) * x, m)) if progress else None
-        r = w.call({"cmd": "align", "wav": _wav_path(wav), "language": language,
-                    "items": [[raw[k][0], raw[k][1], raw[k][2]] for k in todo]}, apr, cancel) if todo else {}
-        for k, it in zip(todo, r.get("items") or []):
-            words[k] = it.get("words") or []
-        if r.get("align_error") and progress:
-            progress(1.0, f"Không căn được thời gian bằng {engine_name(engine)} (" + r["align_error"][:80]
-                     + ") – dùng cách dự phòng")
-    return [x for (s, e, t), w in zip(raw, words) if (x := _segment(s, e, {"text": t, "words": w}, simplify))]
+        parts = [todo[i:i + SAVE_GROUP * 2] for i in range(0, len(todo), SAVE_GROUP * 2)]
+        err = ""
+        for g, part in enumerate(parts):
+            lo, hi = a_end + (1 - a_end) * g / len(parts), a_end + (1 - a_end) * (g + 1) / len(parts)
+            apr = (lambda x, m, lo=lo, hi=hi: progress(lo + (hi - lo) * x, m)) if progress else None
+            r = w.call({"cmd": "align", "wav": _wav_path(wav), "language": language,
+                        "items": [[raw[k][0], raw[k][1], raw[k][2]] for k in part]}, apr, cancel)
+            for k, it in zip(part, r.get("items") or []):
+                words[k] = it.get("words") or []
+                if words[k]:
+                    ck.words[ck.word_key(*raw[k])] = words[k]
+            ck.save()
+            if r.get("align_error"):
+                err = r["align_error"]
+                break   # bộ căn lỗi (thiếu bộ nhớ…) – các khúc còn lại dùng cách dự phòng
+        if err and progress:
+            progress(1.0, f"Không căn được thời gian bằng {engine_name(engine)} (" + err[:80] + ") – dùng cách dự phòng")
+    if stats is not None:
+        stats["resumed"] = ck.reused
+    return [x for (s, e, t), w in zip(raw, words)
+            if (x := _segment(s, e, {"text": t, "words": w, "lang": langs_of.get((s, e))}, simplify))]
+
+
+RESCUE_CONF = 0.5   # nghe lại đoạn sót: xác suất trung bình các chữ < 0,5 -> bộ nghe "đoán bừa" (nhạc / tiếng động)
+LANG_CONF = 0.6     # khúc nghe (ép tiếng chính) độ tin cậy < 0,6 -> nghe lại để bộ nghe tự nhận tiếng
+LANG_GAIN = 0.1     # ... nhận bản tiếng khác khi tin cậy hơn ít nhất 0,1
+LANG_CODES = {"chinese": "zh", "cantonese": "yue", "english": "en", "japanese": "ja", "korean": "ko",
+              "vietnamese": "vi", "thai": "th"}
+LATIN_LINE = re.compile(r"[A-Za-z]{2,}(?:[\s'’-]+[A-Za-z]{2,})+")
+
+
+def lang_code(name: str | None) -> str:
+    n = (name or "").strip().lower()
+    return LANG_CODES.get(n, n[:12])
+
+
+def foreign_pass(raw: list[tuple[float, float, str]], confs: list, wav: str | Path, settings: dict, language: str,
+                 progress: Prog | None = None, cancel=None, engine: str = "qwen3") -> dict:
+    """Câu / khúc nói tiếng khác tiếng chính của phim (câu tiếng Anh trong phim Trung…), 2.1.3. Bộ nghe bị ép nghe
+    tiếng chính thì nghe khúc tiếng khác kém tự tin -> khúc có độ tin cậy < LANG_CONF được nghe lại KHÔNG ép tiếng (bộ
+    nghe tự nhận tiếng); ra tiếng khác mà tin cậy hơn -> dùng bản đó. Khúc chép ra toàn chữ Latin (≥ 2 từ, không chữ
+    Hán) cũng là tiếng Anh. Trả {khúc k: (lời, mã tiếng)}."""
+    from .align import CJK
+
+    out: dict[int, tuple[str, str]] = {}
+    if language in ("auto", "", None):
+        return out
+    for k, (_s, _e, t) in enumerate(raw):
+        if language != "en" and t and not CJK.search(t) and LATIN_LINE.search(t):
+            out[k] = (t, "en")
+    if engine != "qwen3" or not settings.get("asr_lang_check", True):
+        return out   # FireRedASR2 tự nghe lẫn Trung – Anh, không có chế độ tự nhận tiếng
+    low = [k for k, (_s, _e, t) in enumerate(raw) if k not in out and t and confs[k] is not None
+           and float(confs[k]) < LANG_CONF]
+    if not low:
+        return out
+    if progress:
+        progress(0.0, f"Nghe lại {len(low)} khúc nghe chưa chắc – xem có phải tiếng khác không…")
+    r = asr_worker(engine, settings).call({"cmd": "asr", "wav": _wav_path(wav), "language": "auto",
+                                           "prompt": hotwords(settings), "align": False, "conf": True,
+                                           "spans": [[raw[k][0], raw[k][1]] for k in low]}, progress, cancel)
+    for k, it in zip(low, r.get("items") or []):
+        code = lang_code(it.get("lang"))
+        text = (it.get("text") or "").strip()
+        if text and code and code != language and not (language in ("zh", "yue") and code in ("zh", "yue")) \
+                and float(it.get("conf") or 0) >= float(confs[k]) + LANG_GAIN:
+            out[k] = (text, code)
+    return out
+
+
+def conf_tags(conf, threshold: float) -> list[str]:
+    """Nhãn độ tin cậy cho hàm nghe 1 đoạn: ["conf=0.82"] (+ "lowconf" khi dưới ngưỡng – câu bị bỏ)."""
+    if conf is None:
+        return []
+    return [f"conf={float(conf):.3f}"] + (["lowconf"] if float(conf) < threshold else [])
 
 
 def qwen_decoder(settings: dict, language: str, work: Path,
                  engine: str = "qwen3") -> Callable[[np.ndarray], tuple[str, list[str]]]:
-    """Hàm nghe 1 đoạn ngắn bằng Qwen3-ASR / FireRedASR2 – dùng để nghe lại các đoạn bị bộ chia đoạn bỏ sót."""
+    """Hàm nghe 1 đoạn ngắn bằng Qwen3-ASR / FireRedASR2 – dùng để nghe lại các đoạn bị bộ chia đoạn bỏ sót.
+    Nhãn trả về có độ tin cậy của bộ nghe (`conf_tags`): dưới ngưỡng `asr_rescue_conf` -> "lowconf" (2.1.3)."""
     from .tts import write_wav
 
     w = asr_worker(engine, settings)
     tmp = Path(work) / f"{engine}_clip.wav"
+    thr = float(settings.get("asr_rescue_conf", RESCUE_CONF) or 0)
 
     def decode(clip: np.ndarray) -> tuple[str, list[str]]:
         if len(clip) < SR * 0.2:
             return "", []
         write_wav(tmp, clip.astype(np.float32), SR)
         r = w.call({"cmd": "asr", "wav": _wav_path(tmp), "spans": [[0.0, len(clip) / SR]], "language": language,
-                    "prompt": hotwords(settings), "align": False})
+                    "prompt": hotwords(settings), "align": False, "conf": True})
         items = r.get("items") or [{}]
         from .asr import to_simplified
 
         text = (items[0].get("text") or "").strip()
-        return (to_simplified(text) if language in ("zh", "yue", "auto") else text), []
+        return (to_simplified(text) if language in ("zh", "yue", "auto") else text), \
+            conf_tags(items[0].get("conf"), thr)
     return decode
 
 

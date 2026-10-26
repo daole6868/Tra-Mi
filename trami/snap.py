@@ -95,6 +95,103 @@ def _edges(env: np.ndarray, hop: float, lo: float, hi: float, thr: float):
     return on, off
 
 
+def _thr(env: np.ndarray, hop: float, a: float, b: float, floor: float) -> float | None:
+    """Ngưỡng "có tiếng" cho đoạn [a, b] theo độ to của chính đoạn đó (None: quá nhỏ so với nền, không đoán được)."""
+    seg = env[max(0, int(a / hop)):max(int(a / hop) + 1, int(np.ceil(b / hop)))]
+    if len(seg) < 3:
+        return None
+    level = float(np.percentile(seg, 80))
+    if level - floor < MIN_CONTRAST:
+        return None
+    return max(level - DROP_DB, floor + FLOOR_DB)
+
+
+def _clusters(env: np.ndarray, hop: float, a: float, b: float, thr: float, gap: float = 0.15) -> list[list[float]]:
+    """Các cụm có tiếng trong [a, b] (giây), cụm cách nhau < gap giây gộp lại."""
+    fa = max(0, int(a / hop))
+    fb = min(len(env), max(fa + 1, int(np.ceil(b / hop))))
+    if fb - fa < 2:
+        return []
+    out: list[list[float]] = []
+    for i, j in _runs(_mask(env[fa:fb].copy(), thr, hop), True):
+        x, y = (fa + i) * hop, (fa + j) * hop
+        if out and x - out[-1][1] < gap:
+            out[-1][1] = y
+        else:
+            out.append([x, y])
+    return out
+
+
+def voiced_span(env: np.ndarray, hop: float, a: float, b: float, floor: float | None = None):
+    """(lúc bắt đầu có tiếng, lúc hết tiếng) trong [a, b] theo giọng đã tách; None nếu không đoán được."""
+    env = np.asarray(env, np.float32)
+    thr = _thr(env, hop, a, b, _floor(env) if floor is None else floor)
+    cl = _clusters(env, hop, a, b, thr) if thr is not None else []
+    return (cl[0][0], cl[-1][1]) if cl else None
+
+
+def fix_stretched(segs: list, env: np.ndarray, hop: float = HOP, rows=None) -> int:
+    """Chữ bị bộ căn thời gian kéo dài bất thường (`align.stretched_chars`): co lại theo độ to giọng đã tách – chữ cuối
+    / chữ giữa giữ phần có tiếng ở đầu (đoạn lặng phía sau là chỗ nhân vật ngừng), chữ đầu giữ phần có tiếng ở cuối.
+    Đầu / cuối câu theo chữ đầu / chữ cuối đã sửa. Trả số câu đã sửa (2.1.3)."""
+    from .align import PAD, _latin_run, stretched_chars
+
+    env = np.asarray(env, np.float32)
+    n = len(segs)
+    pick = range(n) if rows is None else sorted({int(r) for r in rows if 0 <= int(r) < n})
+    if not len(env):
+        return 0
+    floor = _floor(env)
+    fixed = 0
+    for i in pick:
+        s = segs[i]
+        if not ct_ok(s):
+            continue
+        ct = [[float(a), float(b)] for a, b in s.extra["ct"]]
+        bad = stretched_chars(ct)
+        if not bad:
+            continue
+        thr = _thr(env, hop, ct[0][0], ct[-1][1], floor)
+        if thr is None:
+            continue
+        good = [b - a for k, (a, b) in enumerate(ct) if k not in bad]
+        med = float(np.median(good)) if good else 0.25
+        last = len(ct) - 1
+        changed = False
+        for k in bad:
+            a, b = ct[k]
+            cl = _clusters(env, hop, a, b, thr)
+            head = bool(cl) and cl[0][0] - a < 0.12      # có tiếng ngay đầu chữ
+            tail = bool(cl) and b - cl[-1][1] < 0.12     # có tiếng tới cuối chữ
+            if not cl:
+                na, nb = (b - med, b) if k == 0 and last > 0 else (a, a + med)
+            elif k == 0 and last > 0:          # chữ đầu: bộ căn cho bắt đầu từ tiếng động / lặng trước câu
+                na, nb = cl[-1][0], (b if tail else cl[-1][1])
+            elif k == last:                    # chữ cuối: kéo qua đoạn lặng sau câu
+                na, nb = (a if head else cl[0][0]), cl[0][1]
+            elif head:                         # chữ giữa: nhân vật ngừng SAU chữ này
+                na, nb = a, cl[0][1]
+            elif tail:                         # ... ngừng TRƯỚC chữ này
+                na, nb = cl[-1][0], b
+            else:
+                na, nb = cl[0][0], cl[0][1]
+            na = max(na, ct[k - 1][1] if k > 0 else na)
+            nb = min(nb, ct[k + 1][0] if k < last else nb)
+            if nb - na >= 0.04 and (abs(na - a) > 0.05 or abs(nb - b) > 0.05):
+                ct[k] = [round(na, 3), round(nb, 3)]
+                changed = True
+        if not changed:
+            continue
+        s.extra["ct"] = ct
+        lo = segs[i - 1].end + GAP if i > 0 else 0.0
+        if 0 in bad and not _latin_run(s.text, True):
+            s.start = round(max(lo, ct[0][0] - PAD), 3)
+        if last in bad and not _latin_run(s.text, False):
+            s.end = round(max(s.start + 0.2, ct[-1][1] + PAD), 3)
+        fixed += 1
+    return fixed
+
+
 def snap(segs: list, env: np.ndarray, hop: float = HOP, rows=None, total: float = 0.0) -> dict:
     """Dời đầu / cuối các câu (tại chỗ) về đúng lúc nhân vật bắt đầu / thôi nói. rows: chỉ các câu này (số thứ tự
     trong segs đã sắp theo giờ). Trả {"moved": số câu dời, "start": số đầu câu dời, "end": số cuối câu dời,

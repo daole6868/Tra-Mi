@@ -141,6 +141,31 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (keep=True)`), đi theo `subtitle.merge` / `split` (`ct_of`, `han_cut`) / `align.split_clauses` / kéo khối (`shift_ct`).
   Sóng âm timeline `tl_wave_10ms.npy` (float16, 0,01 s, cùng lần đo `voice_10ms`); dòng Lồng tiếng `tts.ENV_HOP` 0,01 s
   (`<bản lồng>.env10.npy`, `pipeline._dub_env_full` đọc từng khối; file 0,05 s cũ `.env.npy` tự làm lại + xoá – 2.0.97).
+- Nghe chuẩn + nhịp ngắt (2.1.3): A tin cậy – `qwen_asr_worker` hỏi `"conf": true` -> `TokenConf` (LogitsProcessor ghi
+  log-xác suất chữ được chọn, không giữ bảng điểm) + `mean_conf` (phần lời sau <asr_text>); FireRed có sẵn `conf`;
+  `asr_qwen.conf_tags` / `asr.whisper_conf_tags` -> nhãn "conf=…" / "lowconf" (`asr_rescue_conf` 0,5) -> `align.rescue_missed`
+  bỏ câu lowconf (`stats["lowconf"]` -> `p.data["asr_rescue_lowconf"]`), câu giữ có `extra["asr_conf"]`. B mốc chữ –
+  `align.stretched_chars` (> 1,2 s và > 5 × trung vị), `pipeline.verify_char_times` (sau `align_segments` trong recognize /
+  realign, khi Qwen3 / FireRed: câu lấn câu trước -> căn CHUNG 2 câu; chữ kéo dài -> căn lại trong phần có tiếng
+  `snap.voiced_span`; chỉ nhận khi bớt lỗi + không lấn câu ngoài nhóm; `p.data["ct_check"]`), `snap.fix_stretched` (đầu
+  `snap_edges`, chỉ khi có giọng đã tách: co chữ theo cụm có tiếng `_clusters`; `stats["stretched"]`). C tiến độ –
+  `asr_qwen.Resume` (work/asr_progress_<mã>.json, mã = bộ nghe + mô hình + tiếng + gợi ý + `file_sig` theo NỘI DUNG
+  wav), nghe từng nhóm `SAVE_GROUP` 40 khúc, căn từng nhóm 80, `stats["resumed"]`; `clear_progress` cuối `recognize`;
+  `qwen_asr_worker.read_clips` chỉ đọc đúng khúc cần (FireRed dùng chung). D tiếng khác – `asr_qwen.foreign_pass` (khúc
+  toàn chữ Latin -> "en"; Qwen3 khúc conf < `LANG_CONF` 0,6 -> nghe lại language "auto", worker trả `lang`, nhận khi tiếng
+  khác + conf hơn ≥ 0,1; không áp cho bộ nghe thứ 2) -> `extra["lang"]`, `stats["foreign"]`; `translate._google` dịch câu
+  Latin riêng với `sl=auto` (`_foreign`, `_auto_sl`). E – `align.mark_breaths` (khe ≥ `dub_pause_min` giữa 2 chữ ở ranh giới
+  từ, không trước trợ từ -> "，", `extra["breaths"]`; cuối recognize bước 2h `p.data["breaths_marked"]` + đầu `translate`
+  cho các câu sắp dịch; Cài đặt `breath_marks`). F – luật 10 lời nhắc dịch (giữ số vế / thứ tự vế), `pipeline.clause_state`
+  / `match_clauses` (câu dịch thiếu vế -> `Translator.match_clauses` `CLAUSE_PROMPT(_EN)`, nhận khi ghép thêm được chỗ ngắt
+  và ≤ 1,25 × dài; `extra["trans_before_clause"]`; Cài đặt `trans_clause_match`). G – `tts.pause_points` (thêm vị trí câu
+  gốc / câu dịch; `orig_pauses` dựa trên nó), `breath_points`, `clause_texts`, `join_parts` (ghép vế, lặng `JOIN_GAP`
+  0,15 s, `<file>.joins.json` -> `_ClipMeta.gaps` trả đúng chỗ nối); `synthesize_dub` (Cài đặt `dub_by_clause`, cần
+  `dub_pauses`): câu có pause_points -> mỗi vế 1 file `tts_<mã>` (cùng công thức mã) + file ghép `tts_<mã>_v.wav`, bộ đọc
+  AI không đọc vế < 2 tiếng riêng; `plan_pauses(part_speed=PART_SPEED 1,25, max_speed)` vế trước dài hơn vế gốc -> đọc
+  nhanh riêng vế đó (WSOLA `voicefx.stretch`), mục khoảng nghỉ [cắt, lặng, tốc độ×1000] (`insert_pauses`, `_gk` so cả
+  tốc độ); `stats["clauses"]` / `["part_fast"]` -> `dub_summary`. GUI: tab Lồng tiếng mục 3 "… đọc từng vế"
+  (`d_by_clause`), Cài đặt → Dịch thuật "Dấu phẩy ở chỗ ngắt hơi" / "AI sửa câu dịch cho đủ vế"; `listen_note` báo các bước.
 - Giờ HIỆN phụ đề (2.0.96): `subtitle.follow_dub(mode="always", lead, hold, min_dur, join)` + `pipeline.follow_params`
   (Cài đặt `sub_follow_mode` / `sub_lead` 0,1 / `sub_hold` 0,3 / `sub_min_dur` 1 / `sub_join_gap` 0,3, công tắc
   `dub_subs_follow`) – xem trước, xuất video, SRT đã dịch (`export_subs`, `_export_sub`); tab Phụ đề → Công cụ → "Giờ
@@ -200,7 +225,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (193 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (199 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1675,7 +1700,19 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `edited`) -> 0,10 s, hoàn tác vẫn đúng 1 bước. Các nút hàng loạt khác (bỏ lồng, 🎵, tốc độ, cách xếp, không phải nhạc)
   vốn đã báo đổi 1 lần.
 
+- 2.1.3: người dùng xem cách HaizFlow 1.0.4 nghe / tách câu (WhisperX: VAD cắt mẩu ≤ 8 s ở chỗ lặng ≥ 0,35 s rồi nghe lại
+  từng mẩu, chỉ cắt câu ở 。！？, bỏ câu nghe lại kém tin cậy, kiểm tra mốc căn, lưu tiến độ; tiếng Trung KHÔNG có bộ căn
+  chữ; giọng lồng không có nhịp nghỉ – chỉ dựa vào câu vụn) -> làm "nghe chuẩn" A–D + "nhịp ngắt theo giọng gốc" E–G (tự
+  viết, không chép mã – HaizFlow là Source-Available). Xem Cấu trúc "Nghe chuẩn + nhịp ngắt (2.1.3)". Thử: điểm tin cậy
+  bằng Qwen3 tí hon (khớp compute_transition_scores ±5e-7), chạy tiếp lần nghe dở với tiến trình thật (7,6 s -> 0,1 s),
+  bộ nghe / bộ căn / Edge giả cho các bước còn lại (vế sau vào đúng 2,8 s, vế đầu dài đọc nhanh riêng, vá = dựng cả bản).
+
 ## Vấn đề đang mở
+- 2.1.3: chờ người dùng chạy lại "1. Nghe & tách câu" trên phim thật (thông báo có "thêm dấu phẩy ở N chỗ…", "bỏ N đoạn
+  nghe lại mà bộ nghe không chắc", "căn lại mốc chữ N câu"), thử Huỷ giữa chừng rồi chạy lại (phải "Chạy tiếp lần nghe
+  trước"), dịch bằng AI rồi Tạo bản lồng tiếng: nghe câu có chỗ nhân vật ngắt hơi – giọng lồng có nghỉ đúng chỗ, vế sau
+  vào đúng lúc không, ngữ điệu nối giữa các vế có bị rời không (không ổn thì tắt "… đọc từng vế"). Ngưỡng tin cậy 0,5 /
+  0,6 chưa đo trên mô hình thật (đo với mô hình tí hon: xác suất khớp đúng compute_transition_scores).
 - 2.1.2: chờ người dùng thử lại tích hết câu → chọn "Giọng cho câu đã tích" trên phim dài (phải xong ngay, không đơ).
 - 2.1.1: chờ người dùng mở tab Tài liệu xem SenseVoice / Paraformer / FA-zh đã về "✓ Đã có trên máy" chưa (không phải tải lại).
 - 2.1.0: chờ người dùng `pip install pypinyin`, tải FireRedASR2 (tab Tài liệu – xem có tải được qua HF / ModelScope, mô

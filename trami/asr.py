@@ -164,10 +164,24 @@ def whisper_decoder(settings: dict, language: str = "zh") -> Callable:
                                    beam_size=int(settings.get("asr_beam_size", 5)), vad_filter=False,
                                    condition_on_previous_text=False, initial_prompt=ZH_PROMPT if zh else None,
                                    no_speech_threshold=0.6)
-        parts = [s.text.strip() for s in segs if getattr(s, "no_speech_prob", 0) < 0.6]
-        text = ("" if zh else " ").join(parts)
-        return _clean_repeats(to_simplified(text) if zh else text), []
+        segs = [s for s in segs if getattr(s, "no_speech_prob", 0) < 0.6]
+        text = ("" if zh else " ").join(s.text.strip() for s in segs)
+        return _clean_repeats(to_simplified(text) if zh else text), whisper_conf_tags(segs)
     return decode
+
+
+def whisper_conf_tags(segs) -> list[str]:
+    """Độ tin cậy của Whisper cho 1 đoạn nghe lại: xác suất trung bình mỗi chữ (exp avg_logprob, theo độ dài) +
+    "lowconf" khi < 0,4 (avg_logprob < -0,9) hoặc khả năng "không phải lời nói" > 0,45 (2.1.3)."""
+    import math
+
+    segs = [s for s in segs if getattr(s, "avg_logprob", None) is not None]
+    if not segs:
+        return []
+    w = [max(1.0, float(getattr(s, "end", 0) - getattr(s, "start", 0))) for s in segs]
+    lp = sum(float(s.avg_logprob) * x for s, x in zip(segs, w)) / sum(w)
+    nsp = max(float(getattr(s, "no_speech_prob", 0) or 0) for s in segs)
+    return [f"conf={math.exp(lp):.3f}"] + (["lowconf"] if lp < -0.9 or nsp > 0.45 else [])
 
 
 def transcribe(audio_path: str | Path, settings: dict, language: str = "zh",

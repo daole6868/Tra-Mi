@@ -1128,7 +1128,17 @@ class _ClipMeta:
         while len(e) < 6:
             e.append(None)
         if e[5] is None:
-            e[5] = clip_gaps(_trim_silence(_decode_cached(path)), SR)
+            a = _decode_cached(path)
+            j = Path(path).with_name(Path(path).name + ".joins.json")
+            if j.exists():   # đọc từng vế (2.1.3): chỗ nối giữa các vế biết chính xác
+                try:
+                    off, n = _trim_start(a), len(_trim_silence(a))
+                    e[5] = [[max(0, int(x) - off), min(n, int(y) - off)] for x, y in json.loads(j.read_text())
+                            if 0 < int(x) - off < n]
+                except (OSError, ValueError, TypeError):
+                    e[5] = clip_gaps(_trim_silence(a), SR)
+            else:
+                e[5] = clip_gaps(_trim_silence(a), SR)
             self.dirty = True
         return e[5]
 
@@ -1234,6 +1244,8 @@ def _shaped_clip(path, speed: float, gain: float | None, keep_n: int, g: float |
 PAUSE_MIN = 0.3     # nhân vật ngừng ≥ 0,3 s giữa câu (ở chỗ có dấu câu) -> giọng lồng cũng nghỉ ở đó (dub_pause_min)
 PAUSE_SIL = 0.06    # chỗ lặng trong giọng lồng ≥ 60 ms mới cắt được (không cắt giữa chữ)
 PAUSE_MAX = 1.5     # thêm tối đa 1,5 s lặng mỗi chỗ nghỉ
+JOIN_GAP = 0.15     # đọc từng vế (2.1.3): các vế nối nhau bằng khoảng lặng ngắn như hơi thở ở dấu phẩy
+PART_SPEED = 1.25   # vế dài hơn vế gốc (vế sau sẽ vào muộn): chỉ đọc nhanh riêng vế đó, tối đa thêm ×1,25
 
 
 def clip_gaps(a: np.ndarray, sr: int = SR) -> list:
@@ -1261,19 +1273,28 @@ def clip_gaps(a: np.ndarray, sr: int = SR) -> list:
 
 
 def insert_pauses(clip: np.ndarray, gaps) -> np.ndarray:
-    """Chèn lặng vào đoạn giọng: gaps = [[mẫu cắt (đã theo tốc độ), số mẫu lặng]] – cắt ở giữa chỗ bộ đọc tự ngắt."""
+    """Chèn lặng vào đoạn giọng: gaps = [[mẫu cắt (đã theo tốc độ), số mẫu lặng(, tốc độ riêng vế trước ×1000)]] – cắt
+    ở giữa chỗ bộ đọc tự ngắt / chỗ nối 2 vế; vế trước dài hơn vế gốc thì đọc nhanh riêng vế đó (2.1.3)."""
     parts, last = [], 0
-    for cut, pad in sorted((int(c), int(p)) for c, p in gaps):
+    for g in sorted((tuple(int(v) for v in q) for q in gaps)):
+        cut, pad = g[0], g[1]
+        f = g[2] / 1000.0 if len(g) > 2 else 1.0
         cut = min(max(cut, last), len(clip))
-        parts += [clip[last:cut], np.zeros(max(0, pad), np.float32)]
+        piece = clip[last:cut]
+        if f > 1.001 and len(piece) > SR // 10:
+            from .voicefx import stretch
+
+            piece = stretch(piece, f, SR)
+        parts += [piece, np.zeros(max(0, pad), np.float32)]
         last = cut
     parts.append(clip[last:])
     return np.concatenate(parts).astype(np.float32, copy=False)
 
 
-def orig_pauses(s: Segment, lang: str = "vi", min_gap: float = PAUSE_MIN) -> list[tuple[float, float, float]]:
+def pause_points(s: Segment, lang: str = "vi", min_gap: float = PAUSE_MIN) -> list[tuple[float, float, int, int]]:
     """Chỗ nhân vật ngắt hơi giữa câu (theo mốc từng chữ thật extra["ct"]) mà câu dịch có dấu câu tương ứng:
-    [(giây thôi nói, giây nói tiếp, tỉ lệ vị trí trong câu dịch)]. Không có mốc từng chữ / không dấu câu -> []."""
+    [(giây thôi nói, giây nói tiếp, vị trí ngắt trong câu gốc, vị trí ngắt trong câu dịch)]. Không có mốc từng chữ /
+    không dấu câu ghép được -> []."""
     from .align import CJK, _pair_cuts
     from .subtitle import ct_of
 
@@ -1281,7 +1302,6 @@ def orig_pauses(s: Segment, lang: str = "vi", min_gap: float = PAUSE_MIN) -> lis
     zh, tr = (s.text or "").strip(), (s.trans or "").strip()
     if not ct or len(ct) < 2 or not tr:
         return []
-    nt = max(1, langs.units(tr, lang))
     out = []
     for pz, pt, _kind in _pair_cuts(zh, tr, lang):
         k = len(CJK.findall(zh[:pz]))
@@ -1289,19 +1309,87 @@ def orig_pauses(s: Segment, lang: str = "vi", min_gap: float = PAUSE_MIN) -> lis
             continue
         g0, g1 = float(ct[k - 1][1]), float(ct[k][0])
         if g1 - g0 >= min_gap:
-            out.append((g0, g1, langs.units(tr[:pt], lang) / nt))
+            out.append((g0, g1, pz, pt))
     return out
 
 
+def orig_pauses(s: Segment, lang: str = "vi", min_gap: float = PAUSE_MIN) -> list[tuple[float, float, float]]:
+    """pause_points dạng [(giây thôi nói, giây nói tiếp, tỉ lệ vị trí trong câu dịch)]."""
+    tr = (s.trans or "").strip()
+    nt = max(1, langs.units(tr, lang))
+    return [(g0, g1, langs.units(tr[:pt], lang) / nt) for g0, g1, _pz, pt in pause_points(s, lang, min_gap)]
+
+
+def breath_points(s: Segment, min_gap: float = PAUSE_MIN) -> list[int]:
+    """Chỗ nhân vật ngắt hơi trong câu GỐC (khe ≥ min_gap giữa 2 chữ, có dấu câu ở đó): vị trí ngay sau dấu câu –
+    cùng cách tính với vị trí câu gốc của align._pair_cuts (để biết câu dịch đã giữ đủ các vế chưa)."""
+    from .align import END_ZH, CLAUSE_ZH, _bounds, _char_positions
+    from .subtitle import ct_of
+
+    ct = ct_of(s)
+    zh = (s.text or "").strip()
+    pos = _char_positions(zh)
+    if not ct or len(ct) != len(pos) or len(pos) < 2:
+        return []
+    out = []
+    for pz, _kind in _bounds(zh, END_ZH, CLAUSE_ZH):
+        k = sum(1 for q in pos if q < pz)
+        if 0 < k < len(ct) and float(ct[k][0]) - float(ct[k - 1][1]) >= min_gap:
+            out.append(pz)
+    return out
+
+
+def clause_texts(text: str, cuts: list[int]) -> list[str]:
+    """Chia câu dịch thành các vế tại các vị trí ngắt (ngay sau dấu câu)."""
+    out, last = [], 0
+    for c in sorted(set(int(x) for x in cuts)):
+        if last < c < len(text):
+            out.append(text[last:c].strip())
+            last = c
+    out.append(text[last:].strip())
+    return [x for x in out if x]
+
+
+def join_parts(files: list[str | Path], out: str | Path, gap: float = JOIN_GAP) -> list[list[int]]:
+    """Ghép giọng từng vế (đã bỏ lặng 2 đầu) thành 1 đoạn giọng, giữa các vế lặng `gap` giây; ghi kèm
+    <file>.joins.json = chỗ nối [[mẫu đầu, mẫu cuối]] (để cắt chèn khoảng nghỉ đúng chỗ nối, không đoán theo độ to)."""
+    clips = [_trim_silence(_decode_cached(f)) for f in files]
+    z = np.zeros(int(gap * SR), np.float32)
+    pieces, runs, pos = [], [], 0
+    for j, c in enumerate(clips):
+        if j:
+            pieces.append(z)
+            runs.append([pos, pos + len(z)])
+            pos += len(z)
+        pieces.append(c)
+        pos += len(c)
+    out = Path(out)
+    write_wav(out, np.concatenate(pieces) if pieces else z)
+    out.with_name(out.name + ".joins.json").write_text(json.dumps(runs), encoding="utf-8")
+    return runs
+
+
+def _trim_start(a: np.ndarray, thr: float = 0.01) -> int:
+    """Mẫu bắt đầu của _trim_silence(a)."""
+    if not len(a):
+        return 0
+    pk = float(np.abs(a).max())
+    thr = min(thr, max(0.002, 0.03 * pk))
+    idx = np.where(np.abs(a) > thr)[0]
+    return max(0, int(idx[0]) - int(0.03 * SR)) if len(idx) else 0
+
+
 def plan_pauses(s: Segment, x: dict, runs: list, n1: int, speed: float, room: float, lang: str = "vi",
-                min_gap: float = PAUSE_MIN) -> list[list[int]]:
+                min_gap: float = PAUSE_MIN, part_speed: float = 1.0, max_speed: float = 1.5) -> list[list[int]]:
     """Khoảng nghỉ chèn vào giọng lồng 1 câu: phần sau chỗ nhân vật ngắt hơi bắt đầu đúng lúc nhân vật nói tiếp (tính
     từ lúc giọng câu bắt đầu như trong phim gốc), chỉ dùng chỗ trống `room` giây trước câu sau. runs: chỗ lặng của
-    đoạn giọng ở ×1 (mẫu), n1: độ dài ×1. Trả [[mẫu cắt (theo tốc độ), số mẫu lặng]]."""
+    đoạn giọng ở ×1 (mẫu), n1: độ dài ×1. part_speed > 1 (đọc từng vế): vế trước dài hơn vế gốc -> đọc nhanh riêng
+    vế đó (≤ part_speed, tổng ≤ max_speed) để vế sau vẫn vào đúng lúc. Trả [[mẫu cắt (theo tốc độ), số mẫu lặng(,
+    tốc độ riêng ×1000)]]."""
     ps = orig_pauses(s, lang, min_gap)
-    if not ps or not runs or room < 0.05:
+    if not ps or not runs or (room < 0.05 and part_speed <= 1.0):
         return []
-    out, added, used = [], 0.0, set()
+    out, added, used, prev = [], 0.0, set(), 0
     for g0, g1, frac in ps:
         exp = frac * n1
         best = None
@@ -1317,11 +1405,26 @@ def plan_pauses(s: Segment, x: dict, runs: list, n1: int, speed: float, room: fl
         used.add(j)
         mid = (a + b) / 2
         after = x["start"] + added + (b / speed) / SR          # lúc giọng lồng nói tiếp nếu không chèn gì
-        pad = min(PAUSE_MAX, room - added, x["start"] + (g1 - s.start) - after)
-        if pad < 0.05:
+        target = x["start"] + (g1 - s.start)                    # lúc nhân vật nói tiếp
+        f = 1.0
+        if after - target > 0.05 and part_speed > 1.0:          # vế trước dài hơn vế gốc: đọc nhanh riêng vế đó
+            dur = (a - prev) / speed / SR
+            if dur > 0.3:
+                f = min(part_speed, max(1.0, max_speed / max(speed, 1e-3)), dur / max(0.1, dur - (after - target)))
+                if f > 1.02:
+                    added -= dur * (1 - 1 / f)
+                    after -= dur * (1 - 1 / f)
+                else:
+                    f = 1.0
+        pad = max(0.0, min(PAUSE_MAX, room - added, target - after))
+        if pad < 0.05 and f == 1.0:
+            prev = b
             continue
-        out.append([int(mid / speed), int(pad * SR)])
-        added += pad
+        out.append([int(mid / speed), int(pad * SR)] + ([int(round(f * 1000))] if f > 1.0 else []))
+        added += pad if pad >= 0.05 else 0.0
+        if pad < 0.05:
+            out[-1][1] = 0
+        prev = b
     return out
 
 
@@ -1448,6 +1551,13 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     vn_presets = vieneu_presets(mode) if vieneu_available() else []
     vn_gender = {v["id"]: v.get("gender", "") for v in (vn_presets + vieneu_sample_voices() + trend_voices.voices())} \
         if vieneu_available() else {}
+    # đọc từng vế (2.1.3): câu có chỗ nhân vật ngắt hơi ghép được với dấu câu của câu dịch -> mỗi vế 1 lần đọc rồi
+    # ghép lại (chỗ nối biết chính xác) -> giọng lồng nghỉ đúng chỗ, vế sau vào đúng lúc nhân vật nói tiếp
+    by_clause = bool(settings.get("dub_by_clause", True)) and bool(settings.get("dub_pauses", True))
+    min_gap = float(settings.get("dub_pause_min", PAUSE_MIN))
+    joins: dict[int, tuple[Path, list[Path]]] = {}
+    queued: set[str] = set()
+    n_clause = 0
     for i, s in enumerate(segs):
         lg = langs.detect(s.trans or "", lang)
         t = clean_tts_text(s.trans or "", lg)
@@ -1513,23 +1623,55 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                 extra += "|" + trend_voices.key(spec) + "|" + trend_voices.base_voice(spec, vn_presets)
         groups[i] = spec
         take = int(s.extra.get("take", 0) or 0)   # "Tạo lại giọng": lần đọc mới của cùng câu
-        h = hashlib.md5((f"{t}|{spec}|{rate}|{pitch}|{mode}|{extra}" + (f"|take{take}" if take else "")).encode()
-                        ).hexdigest()[:14]
-        p = work / (f"tts_{h}.mp3" if spec.startswith("edge:") else f"tts_{h}.wav")
+
+        def tts_path(text: str) -> Path:
+            h = hashlib.md5((f"{text}|{spec}|{rate}|{pitch}|{mode}|{extra}" + (f"|take{take}" if take else ""))
+                            .encode()).hexdigest()[:14]
+            return work / (f"tts_{h}.mp3" if spec.startswith("edge:") else f"tts_{h}.wav")
+
+        def enqueue(text: str, path: Path) -> None:
+            if str(path) in queued:
+                return
+            queued.add(str(path))
+            if spec.startswith(("omni:", "omniclone:", "omnid:")):
+                omni_items.append((i, text, path, spec, lg))
+            elif spec.startswith("edge:"):
+                edge_items.append((i, text, path, spec[5:]))
+            else:
+                vn_items.append((i, text, path, spec))
+
+        parts: list[str] = []
+        if by_clause and not keep and "ct" in s.extra:
+            cuts = [pt for _a, _b, _pz, pt in pause_points(s, lg, min_gap)]
+            if cuts:
+                parts = [clean_tts_text(x, lg) for x in clause_texts(s.trans or "", cuts)]
+                if not spec.startswith("edge:") and lg == "vi":
+                    parts = [spoken_vi(x) for x in parts]
+                if len(parts) < 2 or not all(re.search(r"\w", x) for x in parts):
+                    parts = []
+                elif not spec.startswith("edge:") and any(langs.units(x, lg) < 2 for x in parts):
+                    parts = []   # bộ đọc AI đọc 1 tiếng đứng riêng dễ méo / bịa tiếng -> đọc cả câu như cũ
+        if parts:
+            pfiles = [tts_path(x) for x in parts]
+            for x, pf in zip(parts, pfiles):
+                if not (pf.exists() and pf.stat().st_size > 0):
+                    enqueue(x, pf)
+            hj = hashlib.md5(("|".join(pf.name for pf in pfiles) + f"|join{JOIN_GAP}").encode()).hexdigest()[:14]
+            pj = work / f"tts_{hj}_v.wav"
+            joins[i] = (pj, pfiles)
+            s.extra["_tts"] = str(pj)
+            n_clause += 1
+            continue
+        p = tts_path(t)
         have = p.exists() and p.stat().st_size > 0
         if keep:   # bản lồng cũ (trước 2.0.26) chưa ghi tts_file: dùng file đã đọc nếu còn, không đọc mới
             if have:
                 s.extra["_tts"] = str(p)
             continue
-        if spec.startswith(("omni:", "omniclone:", "omnid:")):
-            if not have:
-                omni_items.append((i, t, p, spec, lg))
-        elif spec.startswith("edge:"):
-            if not have:
-                edge_items.append((i, t, p, spec[5:]))
-        elif not have:
-            vn_items.append((i, t, p, spec))
+        if not have:
+            enqueue(t, p)
         s.extra["_tts"] = str(p)
+    stats["clauses"] = n_clause
     total_items = len(edge_items) + len(vn_items) + len(omni_items)
     if progress:
         progress(0.0, f"Đang tạo giọng đọc 0/{total_items}")
@@ -1666,6 +1808,16 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                                             base + b))
     if cancel and cancel():
         raise Cancelled()
+    for i, (pj, pfiles) in joins.items():   # đọc từng vế: ghép các vế đã đọc thành đoạn giọng của câu
+        try:
+            if all(pf.exists() and pf.stat().st_size > 0 for pf in pfiles):
+                if not (pj.exists() and pj.stat().st_mtime >= max(pf.stat().st_mtime for pf in pfiles)):
+                    join_parts(pfiles, pj)
+            else:
+                pj.unlink(missing_ok=True)   # có vế đọc lỗi -> câu không có giọng (hoặc giữ giọng cũ bên dưới)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"Câu {i + 1}: ghép các vế lỗi ({e})")
+            pj.unlink(missing_ok=True)
     redone = kept_old = 0
     for i, s in enumerate(segs):   # câu đọc (lại) bị lỗi nhưng đã có giọng ở bản trước -> dùng giọng cũ
         p = s.extra.get("_tts")
@@ -1747,20 +1899,21 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     if settings.get("dub_pauses", True):
         starts = sorted((x["start"], k) for k, x in plan.items())
         nxt = {k: starts[j + 1][0] for j, (_a, k) in enumerate(starts[:-1])}
-        min_gap = float(settings.get("dub_pause_min", PAUSE_MIN))
         for k, x in plan.items():
             s = segs[k]
             if x["keep"] is not None or "ct" not in s.extra:
                 continue
             room = min(nxt.get(k, total), total) - GAP - x["end"]
-            if room < 0.05:
+            if room < 0.05 and not files[k].endswith("_v.wav"):
                 continue
             spd = _clip_speed(x["speed"])
             g = plan_pauses(s, x, meta.gaps(files[k]), meta.n(files[k]), spd, room,
-                            langs.detect(s.trans or "", lang), min_gap)
+                            langs.detect(s.trans or "", lang), min_gap,
+                            PART_SPEED if files[k].endswith("_v.wav") else 1.0, max_speedup)
             if g:
                 pauses[k] = g
-    stats["pauses"] = sum(len(v) for v in pauses.values())
+    stats["pauses"] = sum(1 for v in pauses.values() for q in v if q[1] > 0)
+    stats["part_fast"] = sum(1 for v in pauses.values() for q in v if len(q) > 2)
 
     def assemble(patch_on: bool):
         """Đặt từng đoạn giọng vào bản lồng. patch_on: chỉ ghi lại những đoạn thời gian có thay đổi vào file bản lồng
@@ -1805,8 +1958,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                 layout.append([a0, a1, k, x["fit"]])
                 s.extra["tts_file"] = str(p)   # giọng đang dùng của câu này (để lần sau chỉ đọc lại câu được chọn)
                 s.extra["dub_at"] = [a0, a1]   # đoạn giọng đang phát của câu (phụ đề chạy theo giọng lồng)
-                if gaps:
-                    s.extra["dub_pauses"] = len(gaps)
+                if any(q[1] > 0 for q in gaps):
+                    s.extra["dub_pauses"] = sum(1 for q in gaps if q[1] > 0)
                 if abs(x["shift"]) >= 0.05:
                     s.extra["fit_shift"] = round(x["shift"], 2)
                 if x["over"] >= 0.05:

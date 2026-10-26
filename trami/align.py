@@ -292,6 +292,49 @@ def _cut_ok(text: str, pos: list[int], k: int, info) -> bool:
     return not any(left.endswith(w) for w in HANG_WORDS) and text[j] not in HEAD_WORDS
 
 
+BREATH_MIN = 0.3   # nhân vật ngừng ≥ 0,3 s giữa 2 chữ (theo mốc từng chữ thật) = chỗ ngắt hơi
+
+
+def mark_breaths(segs: list[Segment], min_gap: float = BREATH_MIN, rows=None) -> int:
+    """Chỗ nhân vật NGẮT HƠI giữa câu mà bộ nghe không đặt dấu câu (2.1.3): khe ≥ min_gap giây giữa 2 chữ Hán liền
+    nhau (mốc từng chữ thật extra["ct"]) ở ranh giới từ (không giữa 1 từ, không trước trợ từ 的 / 了 / 吗…) -> thêm "，"
+    vào câu gốc. Câu dịch giữ dấu phẩy ở vế tương ứng -> giọng lồng nghỉ đúng chỗ (tts.pause_points). Trả số dấu đã
+    thêm; câu có thêm dấu ghi extra["breaths"]."""
+    from .snap import ct_ok
+
+    n = 0
+    pick = range(len(segs)) if rows is None else sorted({int(r) for r in rows if 0 <= int(r) < len(segs)})
+    marks = STRONG + WEAK + "、"
+    for i in pick:
+        s = segs[i]
+        if not ct_ok(s):
+            continue
+        ct, text = s.extra["ct"], s.text
+        pos = _char_positions(text)
+        cuts = []
+        for k in range(len(pos) - 1):
+            if float(ct[k + 1][0]) - float(ct[k][1]) < min_gap:
+                continue
+            between = text[pos[k] + 1:pos[k + 1]]
+            if between.strip() or any(c in marks for c in between):
+                continue   # đã có dấu câu / chữ Latin, số xen giữa
+            cuts.append(k)
+        if not cuts:
+            continue
+        info = _word_info(text)
+        ends = info[0] if info else _word_ends(text)
+        heads = info[2] if info else set()
+        add = [k for k in cuts if (ends is None or pos[k] in ends) and pos[k + 1] not in heads
+               and text[pos[k + 1]] not in HEAD_WORDS]
+        for k in reversed(add):
+            text = text[:pos[k] + 1] + "，" + text[pos[k] + 1:]
+        if add:
+            s.text = text
+            s.extra["breaths"] = int(s.extra.get("breaths", 0) or 0) + len(add)
+            n += len(add)
+    return n
+
+
 def _word_ends(text: str) -> set[int] | None:
     """Vị trí ký tự cuối của mỗi từ (jieba) – để không bao giờ cắt đôi 1 từ; None nếu chưa cài jieba."""
     try:
@@ -553,6 +596,20 @@ def times_from_words(text: str, words: list, offset: float = 0.0) -> list[tuple[
         out.append((round(offset + a, 3), round(offset + b, 3)))
         last = a
     return out if plausible_times(out) else None
+
+
+STRETCH_ABS = 1.2      # 1 chữ dài > 1,2 s ...
+STRETCH_RATIO = 5.0    # ... và > 5 lần chữ trung vị của câu: bộ căn kéo chữ qua chỗ lặng / nhạc / tiếng động
+
+
+def stretched_chars(ct) -> list[int]:
+    """Chữ bị bộ căn thời gian kéo dài bất thường (thường là chữ cuối kéo qua đoạn lặng sau câu, chữ đầu bắt đầu từ
+    tiếng động trước câu, chữ giữa nuốt chỗ ngắt hơi) – số thứ tự các chữ đó (2.1.3)."""
+    if not ct:
+        return []
+    durs = [float(b) - float(a) for a, b in ct]
+    lim = max(STRETCH_ABS, STRETCH_RATIO * float(np.median(durs)))
+    return [i for i, d in enumerate(durs) if d > lim]
 
 
 def plausible_times(times: list[tuple[float, float]]) -> bool:
@@ -963,17 +1020,36 @@ def repeats_neighbor(text: str, segs: list[Segment], t0: float, t1: float, near:
     return False
 
 
+def _conf_of(tags: list[str]) -> float | None:
+    for g in tags:
+        if g.startswith("conf="):
+            try:
+                return float(g[5:])
+            except ValueError:
+                return None
+    return None
+
+
+def _plain_tags(tags: list[str]) -> list[str]:
+    """Nhãn giữ lại trên câu (bỏ nhãn kỹ thuật của bộ nghe: ITN, độ tin cậy)."""
+    return [g for g in tags if g not in ("withitn", "woitn", "lowconf") and not g.startswith("conf=")]
+
+
 def rescue_missed(segs: list[Segment], audio: np.ndarray, decode: Callable, max_chars: int = 22,
-                  progress: Prog | None = None, cancel=None, keep_lines: bool = False) -> list[Segment]:
+                  progress: Prog | None = None, cancel=None, keep_lines: bool = False,
+                  stats: dict | None = None) -> list[Segment]:
     """Nghe lại các đoạn có tiếng mà chưa có câu: decode(clip) -> (lời, nhãn). Trả về các câu mới (chưa sắp xếp);
     câu cũ được gộp vào câu mới có extra["absorbed"] = True – người gọi bỏ chúng đi. keep_lines: không gộp câu cũ
-    (câu phụ đề OCR – chữ đã đúng, chỉ thêm câu mới)."""
+    (câu phụ đề OCR – chữ đã đúng, chỉ thêm câu mới). Nhãn "lowconf" (bộ nghe không chắc – nhạc / tiếng động bị đoán
+    thành lời) -> bỏ, đếm vào stats["lowconf"] (2.1.3)."""
     from .asr import is_hallucination
     from .asr_funasr import split_long
     from .ffmpeg import Cancelled
 
     wins = missed_speech([(s.start, s.end) for s in segs], audio)
     new: list[Segment] = []
+    st = stats if stats is not None else {}
+    st.setdefault("lowconf", 0)
     for k, (a, b, lo, hi) in enumerate(wins):
         if cancel and cancel():
             raise Cancelled()
@@ -987,13 +1063,16 @@ def rescue_missed(segs: list[Segment], audio: np.ndarray, decode: Callable, max_
             lo2, hi2 = min([lo] + [s.start for s in touch]), max([hi] + [s.end for s in touch])
             text, tags = decode(audio[int(lo2 * SR):int(hi2 * SR)])
             core = re.sub(r"[\W_]", "", text or "")
-            if len(core) >= max(len(re.sub(r"[\W_]", "", s.text)) for s in touch) + 2 and not is_hallucination(text):
+            if len(core) >= max(len(re.sub(r"[\W_]", "", s.text)) for s in touch) + 2 and not is_hallucination(text) \
+                    and "lowconf" not in tags:
                 for s in touch:
                     s.extra["absorbed"] = True   # câu cũ bị thay bằng câu gộp (pipeline bỏ đi)
                 a, b = min([a] + [s.start for s in touch]), max([b] + [s.end for s in touch])
                 for x, y, t in split_long(a, b, text.strip(), max_chars):
                     ns = Segment(round(x, 3), round(y, 3), t, "", touch[0].speaker)
-                    ns.extra.update({"tags": [g for g in tags if g not in ("withitn", "woitn")], "rescued": True})
+                    ns.extra.update({"tags": _plain_tags(tags), "rescued": True})
+                    if _conf_of(tags) is not None:
+                        ns.extra["asr_conf"] = _conf_of(tags)
                     new.append(ns)
                 continue
         text, tags = decode(audio[int(lo * SR):int(hi * SR)])
@@ -1002,13 +1081,18 @@ def rescue_missed(segs: list[Segment], audio: np.ndarray, decode: Callable, max_
         n = len(CJK.findall(text)) if CJK.search(text) else len(core.split()) + (len(core) >= 4)
         if n < 2 or is_hallucination(text):
             continue   # mẩu 1 chữ ("啊", "嗯"…): tiếng thở / đuôi câu bên cạnh, không phải câu thoại
+        if "lowconf" in tags:
+            st["lowconf"] += 1   # bộ nghe không chắc: nhạc / tiếng động bị "đoán" thành lời
+            continue
         if any(t in tags for t in ("Breath", "Cough", "Sneeze")) or \
                 repeats_neighbor(text, [s for s in segs if not s.extra.get("absorbed")], a, b):
             continue
         for x, y, t in split_long(a, b, text, max_chars):
             s = Segment(round(x, 3), round(y, 3), t)
-            s.extra["tags"] = [g for g in tags if g not in ("withitn", "woitn")]
+            s.extra["tags"] = _plain_tags(tags)
             s.extra["rescued"] = True
+            if _conf_of(tags) is not None:
+                s.extra["asr_conf"] = _conf_of(tags)
             if "Sing" in tags:
                 s.extra["song"] = True
             new.append(s)
