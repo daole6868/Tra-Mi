@@ -1828,7 +1828,8 @@ def clean_asr(p: Project, settings: dict | None = None, progress: Prog | None = 
     from difflib import SequenceMatcher
 
     from . import asr_qwen
-    from .align import CJK, ECHO_MARKERS, decide_repeat, drop_false_starts, near_duplicates, prompt_echo, repeat_block
+    from .align import (CJK, ECHO_MARKERS, decide_repeat, drop_false_starts, latin_echo, near_duplicates,
+                        prompt_echo, repeat_block)
 
     settings = dict(settings or load_settings())
     language = p.data.get("language", "zh") or "zh"
@@ -1839,12 +1840,17 @@ def clean_asr(p: Project, settings: dict | None = None, progress: Prog | None = 
     backup = [x.to_dict() for x in segs]
     old_texts = {x.text for x in segs}
     prompt = old_prompt(p, settings)
-    tags = "、".join(str(t) for t in (p.data.get("video_meta") or {}).get("tags") or [])
+    meta = p.data.get("video_meta") or {}
+    tags = "、".join(str(t) for t in meta.get("tags") or [])
+    meta_text = "\n".join([str(meta.get("title") or ""), str(meta.get("description") or ""), tags])
 
     def echo(x) -> bool:
         """Câu chép lời gợi ý: có dấu hiệu ("视频标题"…) / là danh sách thẻ video / trùng tiêu đề, mô tả mà nói nhanh
-        bất thường (> ECHO_CPS chữ/s – bộ căn thời gian ép vào khúc nhạc ngắn). Câu thuyết minh đọc đúng nguyên văn mô tả
-        ở tốc độ thường (nhân vật nói thật) được giữ."""
+        bất thường (> ECHO_CPS chữ/s – bộ căn thời gian ép vào khúc nhạc ngắn) / chỉ có đuôi chữ Latin – số của tiêu đề
+        ("p03 3" – phần thứ mấy của video Bilibili, 2.1.11). Câu thuyết minh đọc đúng nguyên văn mô tả ở tốc độ thường
+        (nhân vật nói thật) được giữ."""
+        if latin_echo(x.text, meta_text):
+            return True
         if not prompt_echo(x.text, prompt):
             return False
         if any(m in x.text for m in ECHO_MARKERS) or (tags and prompt_echo(x.text, tags)):
@@ -3373,6 +3379,29 @@ def apply_translation(segs: list, cues: list, stats: dict | None = None) -> list
     rows = [k for k, x in enumerate(segs) if id(x) in changed_ids]
     st["songs"] = mark_song_lines(segs, rows)
     return rows
+
+
+def fix_punct(p: Project, segs: list, rows=None, settings: dict | None = None) -> list[int]:
+    """Sửa dấu câu bản dịch đã có (2.1.11, không gọi AI): bỏ dấu phẩy chen giữa 1 cụm từ / tên riêng trong bảng thuật
+    ngữ, thêm dấu câu cuối theo câu gốc (bản trước 2.1.11 tự bỏ dấu chấm cuối câu; AI hay quên "?"). Câu lời hát (♪)
+    và câu đã sửa tay vẫn được sửa dấu câu. Trả về chỉ số các câu đổi lời."""
+    from .translate import parse_glossary, punct_fix
+
+    settings = settings if settings is not None else load_settings()
+    lang = trans_lang(p)
+    g = dict(parse_glossary(settings.get("glossary", ""))) if lang == "vi" else {}
+    g.update(parse_glossary(p.data.get(glossary_key(lang), "")))
+    names = [v for v in g.values() if isinstance(v, str) and len(v.split()) >= 2]
+    changed = []
+    for k in (range(len(segs)) if rows is None else rows):
+        x = segs[k]
+        if not (x.trans or "").strip():
+            continue
+        new = punct_fix(x.trans.strip(), x.text, lang, names)
+        if new != x.trans:
+            x.trans = new
+            changed.append(k)
+    return changed
 
 
 SONG_MARKS = ("♪", "♫", "♬", "🎵", "🎶")

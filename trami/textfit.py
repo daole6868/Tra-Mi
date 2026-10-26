@@ -166,53 +166,143 @@ def _units(text: str) -> list[str]:
 
 
 _JA_PARTICLE = set("はがをにでともへや")
+_STRONG_END = set("。！？.!?…")
+
+# Xuống dòng tiếng có dấu cách (Việt / Anh – 2.1.11): ngắt ở dấu câu trước, không xé tên riêng / từ ghép / cụm "lượng
+# từ + danh từ" ("một món | đồ tốt" -> "… món đồ tốt, | nhớ …"). Điểm cộng / trừ tính theo phần của cả câu.
+_VI_NO_END = set(
+    "một những các mấy mỗi từng mọi cái chiếc con món quyển cuốn bức tấm ngôi căn sợi đôi bộ "
+    "của và với cho là thì mà để vì nên nhưng hay hoặc rằng nếu khi đã đang sẽ rất bị "
+    "ở tại trong ngoài trên dưới từ đến tới sau trước bằng như theo giữa cùng "
+    "a an the of to and or but in on at for with from by my your his her our their its".split())
+_VI_GOOD_START = set(
+    "và nhưng mà thì vì nên để nếu khi rằng hay hoặc còn rồi tuy dù nhưng "
+    "and but or because so if when which who that".split())
+_VI_PAIRS = set("""hôm nay|ngày mai|hôm qua|bây giờ|lúc này|tại sao|vì sao|như vậy|vì vậy|cho nên|bởi vì|nhưng mà|thế nào|
+bao nhiêu|bao giờ|ở đâu|cái gì|làm gì|có thể|phải không|được không|đi làm|về nhà|đi đâu|làm sao|ra sao|chuyện gì|
+sư huynh|sư tỷ|sư phụ|sư đệ|sư muội|sư tôn|sư thúc|sư bá|đại ca|đại sư|tiểu thư|công tử|ca ca|muội muội|tỷ tỷ|đệ đệ|
+huynh đệ|tông môn|hệ thống|thế giới|tu luyện|linh khí|đan dược|trưởng lão|chưởng môn|thiếu gia|lão gia|phu nhân|
+hoàng thượng|điện hạ|bệ hạ|nương nương|cô nương|tiền bối|vãn bối|thiếu chủ|gia chủ|tộc trưởng|đệ tử|cao thủ|
+ông chủ|bà chủ|cảm ơn|xin lỗi|không sao|đúng vậy|tất nhiên|chắc chắn|thật sự|thực sự|bởi vậy|tuy nhiên|nhưng không|
+một chút|một lát|một lúc|một người|một ngày|một lần|mọi người|chúng ta|chúng tôi|các người|bọn họ|bọn chúng|
+anh ấy|cô ấy|ông ấy|bà ấy|em ấy|nó ấy|cậu ấy""".replace("\n", "").split("|"))
+
+
+def _word(u: str) -> str:
+    return u.strip().strip("\"'“”‘’()[]«»").lower()
+
+
+def _capital(u: str) -> bool:
+    w = u.strip().lstrip("\"'“‘([«")
+    return bool(w) and w[0].isupper()
+
+
+def _break_score(units: list[str], b: int, spaced: bool, caps: bool) -> float:
+    """Điểm cho chỗ ngắt TRƯỚC units[b] (âm = nên ngắt ở đây, dương = tránh), theo phần của cả câu."""
+    prev, nxt = units[b - 1].rstrip(), units[b]
+    end = prev[-1:]
+    if end in _STRONG_END or prev.endswith(("...", "…")):
+        return -0.30
+    if end in _BREAK_AFTER or end in "–—":
+        return -0.22
+    if not spaced:
+        return -0.05 if end in _JA_PARTICLE else 0.0
+    c = 0.0
+    pw, nw = _word(prev), _word(nxt)
+    if pw in _VI_NO_END:
+        c += 0.15                                  # không để dòng kết thúc bằng lượng từ / giới từ / liên từ
+    if nw in _VI_GOOD_START:
+        c -= 0.08                                  # ngắt trước liên từ: đúng chỗ tách vế
+    if f"{pw} {nw}" in _VI_PAIRS:
+        c += 0.15                                  # từ ghép hay gặp
+    if caps and _capital(prev) and _capital(nxt):
+        c += 0.30                                  # giữa tên riêng ("Thiên Kiếm | Tông")
+    if pw[:1].isdigit():
+        c += 0.12                                  # "3 | tiếng"
+    return c
 
 
 def split_balanced(text: str, n: int, measure, avail: float = float("inf")) -> list[str]:
-    """Chia câu thành n dòng sao cho dòng dài nhất ngắn nhất (không dòng nào quá `avail`); ưu tiên ngắt sau dấu câu
-    (tiếng viết liền: ưu tiên mạnh hơn, và sau trợ từ tiếng Nhật), tránh dòng chỉ 1 từ."""
+    """Chia câu thành n dòng (không dòng nào quá `avail`): ưu tiên ngắt sau dấu câu (? ! . , …), không xé tên riêng /
+    từ ghép / cụm lượng từ + danh từ, không để dòng kết thúc bằng giới từ / liên từ (tiếng có dấu cách – 2.1.11); tiếng
+    viết liền: sau dấu câu, sau trợ từ tiếng Nhật; trong các cách ngắt đó chọn cách dòng dài nhất ngắn nhất, tránh dòng
+    chỉ 1 từ. Điểm = dòng dài nhất (phần của cả câu) + điểm từng chỗ ngắt (`_break_score`)."""
     units = _units(text)
     if n <= 1 or len(units) < 2:
         return [text.strip()]
     n = min(n, len(units))
+    L = len(units)
     ws = [measure(u) for u in units]
     pre = [0.0]
     for w in ws:
         pre.append(pre[-1] + w)
-    total = pre[-1]
+    total = pre[-1] or 1.0
     spaced = units[0].endswith(" ")
+    letters = [c for c in text if c.isalpha()]
+    caps = not (letters and all(c.isupper() for c in letters))       # chữ in hoa hết: không đoán tên riêng
+    bscore = [0.0] + [_break_score(units, b, spaced, caps) for b in range(1, L)]
+    single = 0.15 if L > n + 1 else 0.0
+    INF = float("inf")
+
+    def frac(a: int, b: int) -> float:
+        w = pre[b] - pre[a]
+        return INF if w > avail else w / total
+
+    def score(cuts: tuple) -> float:
+        edges = (0,) + cuts + (L,)
+        parts = [frac(edges[k], edges[k + 1]) for k in range(len(edges) - 1)]
+        return (max(parts) + sum(bscore[c] for c in cuts)
+                + single * sum(1 for k in range(len(edges) - 1) if edges[k + 1] - edges[k] == 1))
+
+    best: tuple[float, tuple] = (INF, ())
+    if n == 2:
+        for i in range(1, L):
+            v = score((i,))
+            if v < best[0]:
+                best = (v, (i,))
+    elif n == 3 and L <= 120:
+        for i in range(1, L - 1):
+            if frac(0, i) == INF:
+                break
+            for j in range(i + 1, L):
+                if frac(i, j) == INF:
+                    break
+                v = score((i, j))
+                if v < best[0]:
+                    best = (v, (i, j))
+    if best[1]:
+        edges = (0,) + best[1] + (L,)
+        return ["".join(units[edges[k]:edges[k + 1]]).strip() for k in range(len(edges) - 1)]
+    # > 3 dòng / không cách nào vừa khung: quy hoạch động dòng dài nhất ngắn nhất, cộng điểm sau dấu câu (trước 2.1.11)
     bonus = (0.08 if spaced else 0.16) * total / n
 
     def cost(a: int, b: int) -> float:
         w = pre[b] - pre[a]
         c = w + (1e6 if w > avail else 0.0)
-        if b < len(units):
+        if b < L:
             end = units[b - 1].rstrip()[-1:]
             if end in _BREAK_AFTER:
                 c -= bonus
             elif not spaced and end in _JA_PARTICLE:
                 c -= bonus * 0.3
-        if b - a == 1 and len(units) > n + 1:
-            c += bonus            # dòng chỉ 1 từ / 1 chữ: tránh nếu được
+        if b - a == 1 and L > n + 1:
+            c += bonus
         return c
 
-    # quy hoạch động: best[k][j] = (giá trị lớn nhất nhỏ nhất, chỗ cắt) khi xếp units[:j] vào k dòng
-    L = len(units)
-    INF = float("inf")
-    best = [[(INF, -1)] * (L + 1) for _ in range(n + 1)]
-    best[0][0] = (0.0, -1)
+    dp = [[(INF, -1)] * (L + 1) for _ in range(n + 1)]
+    dp[0][0] = (0.0, -1)
     for k in range(1, n + 1):
         for j in range(k, L - (n - k) + 1):
             for i in range(k - 1, j):
-                prev = best[k - 1][i][0]
+                prev = dp[k - 1][i][0]
                 if prev == INF:
                     continue
                 v = max(prev, cost(i, j))
-                if v < best[k][j][0] - 1e-6:
-                    best[k][j] = (v, i)
+                if v < dp[k][j][0] - 1e-6:
+                    dp[k][j] = (v, i)
     cuts, j = [], L
     for k in range(n, 0, -1):
-        i = best[k][j][1]
+        i = dp[k][j][1]
         cuts.append((i, j))
         j = i
     return ["".join(units[a:b]).strip() for a, b in reversed(cuts)]

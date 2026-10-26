@@ -956,6 +956,16 @@ def prompt_echo(text: str, prompt: str = "") -> bool:
     return bool(sizes) and max(sizes) >= 6 and sum(sizes) >= 0.8 * len(h)
 
 
+def latin_echo(text: str, prompt: str = "") -> bool:
+    """Câu KHÔNG có chữ Hán mà y nguyên 1 đoạn chữ Latin / số của lời gợi ý (≥ 3 ký tự, trọn từ) – phần đuôi tiêu đề
+    video nhiều phần của Bilibili ("… p03 3") bộ nghe chép thành câu riêng (2.1.11; `prompt_echo` chỉ xét chữ Hán)."""
+    t = " ".join(re.sub(r"[^\w]+", " ", (text or "").lower()).split())
+    if not t or CJK.search(t) or len(t.replace(" ", "")) < 3:
+        return False
+    p = " ".join(re.sub(r"[^\w]+", " ", (prompt or "").lower()).split())
+    return f" {t} " in f" {p} "
+
+
 def near_duplicates(segs: list[Segment], ratio: float = 0.8, gap: float = 1.0) -> list[tuple[int, str]]:
     """Cặp câu liền nhau gần như giống nhau (cụm chung ≥ REPEAT_MIN chữ, giống ≥ 80 %, cách ≤ 1 s) – bộ nghe lặp vòng
     rồi bị tách thành 2 câu. Trả [(chỉ số câu đầu, cụm chung)]."""

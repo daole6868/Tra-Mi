@@ -1885,6 +1885,13 @@ def test_perf_fixes_2110(sample_video, monkeypatch):
     set_combo(pp.a_engine, "gemini")
     app.processEvents()
     assert pp.a_clean.isEnabled() and pp.a_ai_note.isHidden()
+    # 2.1.11: nút "Sửa dấu câu" (không AI) – sửa câu thiếu dấu câu cuối, Ctrl+Z hoàn tác
+    pp.model.segs[0].text, pp.model.segs[0].trans = "你去哪？", "Ngươi đi đâu"
+    pp._undo_mark()                                       # (như sửa tay trong bảng)
+    pp._fix_punct()
+    assert pp.model.segs[0].trans == "Ngươi đi đâu?"
+    pp.undo()
+    assert pp.model.segs[0].trans == "Ngươi đi đâu"
     win.timer.stop()
     pp.p = None
     win.close()
@@ -2969,7 +2976,7 @@ def test_ai_skills_in_translate_pipeline(monkeypatch):
     segs = p.segments
     assert [s.text for s in segs] == ["真的假的", "D神你好"] and segs[0].extra["src_before"] == "真 | 的假的"
     assert segs[0].trans == "Thật hay đùa vậy?" and segs[0].extra["review_note"] == "tự nhiên hơn"
-    assert segs[0].extra["trans_before_review"] == "Câu 1" and segs[1].trans == "Câu 2"
+    assert segs[0].extra["trans_before_review"] == "Câu 1." and segs[1].trans == "Câu 2."   # 2.1.11: giữ dấu câu cuối
     assert "Thần D" in p.data["film_profile"] and parse_glossary(p.data["glossary"]) == {"D神": "Thần D"}
     assert "nối 1" in p.data["skill_note"] and "kiểm tra và sửa 1" in p.data["skill_note"]
     # dịch lại cả phim: không sửa lỗi nghe lần 2, không lập lại hồ sơ phim (dùng lại bản đã lưu / đã sửa)
@@ -3901,7 +3908,7 @@ def test_auto_parallel_translates_and_reads_while_listening(monkeypatch):
     assert set(p.data["voices"].values()) == {"edge:vi-VN-NamMinhNeural"}
     # Edge: 9 câu đọc trước + đúng 1 câu bị đổi đọc ở bước lồng tiếng
     assert len(spoken) == 10 and {v for _, v in spoken} == {"vi-VN-NamMinhNeural"}
-    assert [t for t, _ in spoken].count("Dịch 5 4") == 1
+    assert [t for t, _ in spoken].count("Dịch 5 4?") == 1   # câu gốc tận cùng 吗 -> "?" (2.1.11)
     assert not stream.draft_path(p.work).exists()               # dọn file câu nháp
     assert threading.active_count() < 50
 
@@ -8095,6 +8102,73 @@ def test_false_start_stammer(tmp_path):
         assert res["stammer"] == 1 and res["changed"] == [1] and [x.text for x in p.segments] == ["你少管闲事，", "我不管闲事。"]
         assert "nói vấp" in pipeline.clean_asr_note(res, True) and "Dịch câu đã tích" in pipeline.clean_asr_note(res, True)
         assert pipeline.undo_cleanup(Project(p.id), {}) == 2 and Project(p.id).segments[1].text == "我不管闲，我不管闲事。"
+    finally:
+        p.delete()
+
+
+def test_punct_wrap_and_title_echo_2111():
+    """2.1.11: (1) câu chỉ có "p03 3" (đuôi tiêu đề video Bilibili nhiều phần) bị "Dọn câu bịa / câu lặp" bỏ – trước
+    lọt vì chỉ xét chữ Hán; (2) xuống dòng phụ đề ngắt ở dấu câu, không xé "món đồ tốt" / tên riêng; (3) bản dịch giữ
+    dấu câu cuối theo câu gốc, bỏ dấu phẩy chen giữa cụm từ; (4) kỹ năng câu ngắn không còn ngược luật từ đệm."""
+    from trami import pipeline, skills, textfit, translate
+    from trami.align import latin_echo
+    from trami.project import Project
+
+    title = "（1-3季）全民垂钓我百万倍增幅！穿越成底层杂鱼的林北，觉醒百万倍垂钓系统！ p03 3"
+    assert latin_echo("p03 3", title) and latin_echo("P03 3。", title)
+    assert not latin_echo("OK", title) and not latin_echo("p03", "") and not latin_echo("林北", title)
+    assert not latin_echo("p0", title) and not latin_echo("p03 4", title)
+    p = Project.create("tiêu đề")
+    try:
+        p.data["video_meta"] = {"title": title}
+        p.segments = [Segment(0.0, 2.0, "林北，你来了。", "Lâm Bắc, ngươi tới rồi.", "S1"),
+                      Segment(3.0, 3.4, "p03 3", "P03 3", "S1"), Segment(4.0, 6.0, "走吧。", "Đi thôi.", "S1")]
+        p.save()
+        res = pipeline.clean_asr(p, {})
+        assert res["echo"] == 1 and [x.text for x in Project(p.id).segments] == ["林北，你来了。", "走吧。"]
+    finally:
+        p.delete()
+
+    meas = lambda t: len(t) * 10.0      # noqa: E731
+    s = "Anh à, hôm nay em mua được một món đồ tốt, nhớ đi làm về sớm nhé anh."
+    assert textfit.split_balanced(s, 2, meas) == ["Anh à, hôm nay em mua được một món đồ tốt,", "nhớ đi làm về sớm nhé anh."]
+    a, b = textfit.split_balanced("Sư huynh của ta tu luyện ba trăm năm ở Thiên Kiếm Tông mà vẫn chưa đột phá", 2, meas)
+    assert "Thiên Kiếm Tông" in a + " | " + b and not a.endswith(("Thiên", "Kiếm")) and not a.endswith(" của")
+    a, b = textfit.split_balanced("Hôm nay mình sẽ kể cho các bạn nghe một câu chuyện thật thú vị nhé", 2, meas)
+    assert not a.endswith((" một", " các", "Hôm"))
+    # dòng phải vừa khung: chỗ dấu phẩy làm dòng 1 tràn khung thì ngắt chỗ khác
+    lines = textfit.split_balanced(s, 2, meas, avail=380)
+    assert max(len(x) for x in lines) * 10 <= 380 and " ".join(lines) == s
+    assert len(textfit.split_balanced(s, 3, meas)) == 3
+
+    pf = translate.punct_fix
+    assert pf("Chỉ vậy thôi sao", "就这？") == "Chỉ vậy thôi sao?"
+    assert pf("Ngươi đi đâu", "你去哪儿吗") == "Ngươi đi đâu?"
+    assert pf("Sáu vạn, chốt đơn", "六万成交。") == "Sáu vạn, chốt đơn."
+    assert pf("Mau chạy đi", "快跑！") == "Mau chạy đi!" and pf("Đúng vậy!", "对。") == "Đúng vậy!"
+    assert pf("viên Hồn Châu Nam Hải", "南海魂珠一颗，") == "viên Hồn Châu Nam Hải,"
+    assert pf("♪ Gió thổi mây bay", "风吹云飘") == "♪ Gió thổi mây bay"
+    assert pf("em mua được một món, đồ tốt", "买了个好东西。") == "em mua được một món đồ tốt."
+    assert pf("Một, hai, ba", "一，二，三") == "Một, hai, ba."
+    assert pf("Thiên Kiếm, Tông nghèo rớt", "天剑宗穷了。", "vi", ["Thiên Kiếm Tông"]) == "Thiên Kiếm Tông nghèo rớt."
+    assert pf("行きましょう", "走吧。", "ja") == "行きましょう。" and pf("ไปกันเถอะ", "走吧。", "th") == "ไปกันเถอะ"
+    t = translate.Translator({}, "google", target="vi")
+    assert t._post("Xin chào.", "你好。") == "Xin chào." and t._post("xin chào", "你好？") == "Xin chào?"
+    # lời nhắc: dấu phẩy chỉ ở ranh giới tự nhiên + giữ dấu câu cuối (mọi tiếng đích), kỹ năng không ngược luật 8
+    for tg in ("vi", "en", "th"):
+        sp = translate.system_prompt(tg)
+        assert ("TUYỆT ĐỐI không chen dấu phẩy" in sp or "NEVER inside a" in sp) and ("12." in sp)
+    assert "trọn nghĩa" in translate.CLAUSE_PROMPT.lower() or "TRỌN NGHĨA" in translate.CLAUSE_PROMPT
+    assert "thiếu dấu câu cuối" in skills.REVIEW_PROMPT
+    short = next(x for x in skills.BUILTIN if x["id"] == "dub_short")["text"]
+    assert "GIỮ / thêm từ đệm" in short and "lược từ đệm (thì, là, mà, cái, ấy) nếu không mất ý" not in short
+    # dự án đã dịch (bản trước 2.1.11 bị bỏ dấu chấm cuối): nút Sửa dấu câu, không gọi AI
+    p = Project.create("dấu câu")
+    try:
+        segs = [Segment(0.0, 2.0, "你去哪？", "Ngươi đi đâu"), Segment(2.0, 4.0, "好东西。", "Một món, đồ tốt"),
+                Segment(4.0, 6.0, "好。", "Được.")]
+        assert pipeline.fix_punct(p, segs, None, {}) == [0, 1]
+        assert [x.trans for x in segs] == ["Ngươi đi đâu?", "Một món đồ tốt.", "Được."]
     finally:
         p.delete()
 

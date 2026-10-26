@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import unicodedata
 from typing import Callable
 
 import requests
@@ -59,12 +60,19 @@ Yêu cầu bắt buộc:
 9. Dòng chắc chắn là LỜI BÀI HÁT (nhạc phim, nhân vật đang hát – câu văn vần, điệp khúc lặp lại, không trả lời / không
    nối tiếp lời thoại trước – sau) thì bắt đầu bản dịch bằng "♪ ". Lời thoại bình thường KHÔNG thêm ♪.
 10. Dấu phẩy / dấu câu GIỮA dòng gốc là chỗ nhân vật ngắt hơi: bản dịch đặt dấu phẩy (hoặc ? ! .) ở chỗ tương ứng, giữ
-   ĐÚNG số vế và thứ tự các vế như câu gốc (vế 1 dịch vế 1, vế 2 dịch vế 2…) để giọng lồng ngắt nghỉ khớp nhân vật;
-   chỉ đảo / gộp vế khi tiếng Việt không thể nói khác.
+   số vế và thứ tự các vế như câu gốc (vế 1 dịch vế 1, vế 2 dịch vế 2…) để giọng lồng ngắt nghỉ khớp nhân vật. Dấu phẩy
+   chỉ đặt ở RANH GIỚI TỰ NHIÊN của tiếng Việt (giữa 2 vế / 2 cụm trọn nghĩa, sau lời gọi "Anh à,", trước liên từ "nhưng,
+   mà, thì, vì, nên, để…"); TUYỆT ĐỐI không chen dấu phẩy vào giữa 1 cụm từ: giữa lượng từ và danh từ ("một món, đồ"),
+   danh từ và tính từ đi kèm ("món đồ, tốt"), động từ và tân ngữ, giữa các tiếng của 1 tên riêng ("Thiên Kiếm, Tông"),
+   thành ngữ / từ ghép. Vế tiếng Việt không khớp đúng chỗ thì đặt dấu phẩy ở ranh giới tự nhiên gần nhất, hoặc bớt 1
+   dấu phẩy – câu đọc trôi chảy quan trọng hơn đủ số vế.
 11. Chỗ NÓI VẤP / nói dở rồi nói lại (vế trước là vế sau bị bỏ dở: 我不管闲，我不管闲事 = 我不管闲事; 你还没我一，你还没
    我一半 = 你还没我一半) hoặc 1 cụm bị lặp vô nghĩa (以后所有以后所有的货): chỉ dịch 1 lần, không lặp lại trong bản dịch
    (luật 10 không áp cho vế bị lặp). Lặp CÓ CHỦ Ý để nhấn mạnh / gọi / giục (让一让，让一让; 龙鳅王，龙鳅王; 快走，快走)
-   thì giữ lặp."""
+   thì giữ lặp.
+12. GIỮ DẤU CÂU CUỐI: mỗi bản dịch kết thúc bằng dấu câu hợp nghĩa – câu hỏi "?" (kể cả câu gốc hỏi bằng 吗 / 呢 / 吧 /
+   难道 mà thiếu dấu ？), cảm thán / ra lệnh "!", câu kể ".", bỏ lửng "…"; dòng gốc dừng ở dấu phẩy (câu nói tiếp ở dòng
+   sau) thì kết thúc bằng ",". Dấu câu cuối giúp giọng lồng lên / xuống giọng đúng."""
 
 # Dịch sang Anh / Thái / Nhật / Hàn: lời nhắc tiếng Anh (luật giống bản tiếng Việt, đổi phần xưng hô / tên riêng)
 STYLES_EN = {
@@ -111,13 +119,20 @@ Mandatory rules:
 9. A line that is clearly SONG LYRICS (theme song, a character singing – verse, not dialogue) must start with "♪ ".
    Never add ♪ to normal dialogue.
 10. A comma / punctuation mark INSIDE a source line marks where the character pauses for breath: put a comma (or ? ! .)
-   at the matching place in the translation, keeping the SAME number and order of clauses (clause 1 translates clause
-   1, clause 2 translates clause 2…) so the dubbed voice pauses with the character; reorder or merge clauses only when
-   {L['english']} grammar leaves no other way.
+   at the matching place in the translation, keeping the number and order of clauses (clause 1 translates clause 1,
+   clause 2 translates clause 2…) so the dubbed voice pauses with the character. Put commas ONLY at natural
+   {L['english']} boundaries (between clauses / complete phrases, after a vocative, before a conjunction); NEVER inside a
+   phrase – between a determiner / numeral and its noun, a noun and its modifier, a verb and its object, inside a name
+   or an idiom. If a clause boundary does not fall naturally, use the nearest natural boundary or drop that comma – a
+   fluent line matters more than the exact clause count.
 11. A STAMMER / false start (an earlier clause is an unfinished copy of the next one: 我不管闲，我不管闲事 = 我不管闲事;
    你还没我一，你还没我一半 = 你还没我一半) or a meaningless repeated chunk (以后所有以后所有的货): translate it ONCE, do
    not repeat it in the translation (rule 10 does not apply to the repeated clause). Deliberate repetition for emphasis /
-   calling / urging (让一让，让一让; 龙鳅王，龙鳅王; 快走，快走) stays repeated."""
+   calling / urging (让一让，让一让; 龙鳅王，龙鳅王; 快走，快走) stays repeated.
+12. KEEP THE FINAL PUNCTUATION: every translation ends with the fitting mark – "?" for questions (also when the source
+   asks with 吗 / 呢 / 吧 / 难道 but lacks ？), "!" for exclamations / orders, a full stop for statements, "…" when it
+   trails off; a source line that stops at a comma (the sentence continues on the next line) ends with a comma. The
+   final mark lets the dubbed voice rise / fall correctly{" (Thai: no full stop, keep ? and !)" if target == "th" else ""}."""
 
 
 SYL_PER_SEC = 4.6      # tiếng Việt lồng tiếng tự nhiên ~4–5 tiếng/giây (tiếng khác: langs.INFO[...]["rate"])
@@ -137,15 +152,83 @@ meaning, names and forms of address. Return ONLY JSON {{"1": "new line", ...}} w
 CLAUSE_PROMPT = """Bạn là biên tập viên lồng tiếng phim. Mỗi mục có câu gốc đã chia thành các VẾ theo chỗ nhân vật ngắt hơi
 ("ve_goc") và bản dịch tiếng Việt hiện tại ("dich"). Viết lại bản dịch cho có ĐÚNG số vế như câu gốc: các vế nối nhau bằng
 dấu phẩy (hoặc ? ! nếu vế gốc là câu hỏi / cảm thán), vế thứ i dịch nghĩa vế gốc thứ i, đúng thứ tự – để giọng lồng ngắt
-nghỉ đúng lúc nhân vật ngắt hơi. Giữ nguyên ý, xưng hô, tên riêng, độ dài gần như cũ; chỉ đổi trật tự / cách nói khi cần.
+nghỉ đúng lúc nhân vật ngắt hơi. Mỗi vế phải là 1 cụm TRỌN NGHĨA đọc lên tự nhiên: không chen dấu phẩy giữa lượng từ và
+danh từ, danh từ và tính từ, động từ và tân ngữ, giữa các tiếng của tên riêng / thành ngữ – không làm được thì giữ nguyên
+bản dịch cũ. Giữ nguyên ý, xưng hô, tên riêng, dấu câu cuối, độ dài gần như cũ; chỉ đổi trật tự / cách nói khi cần.
 Chỉ trả về JSON {"1": "bản dịch mới", ...} không kèm giải thích."""
 
 CLAUSE_PROMPT_EN = """You are a film dubbing script editor. Each item has the source line split into CLAUSES where the
 character pauses for breath ("source_clauses") and the current {lang} translation ("translation"). Rewrite the translation
 so it has EXACTLY the same number of clauses: join them with commas (or ? ! when the source clause is a question /
-exclamation), clause i translates source clause i, in order – so the dubbed voice pauses with the character. Keep the
-meaning, forms of address, names and about the same length; only reorder / rephrase when needed. Return ONLY JSON
-{{"1": "new line", ...}} with no explanation."""
+exclamation), clause i translates source clause i, in order – so the dubbed voice pauses with the character. Each clause
+must be a COMPLETE, natural phrase: never put a comma between a determiner / numeral and its noun, a noun and its modifier,
+a verb and its object, or inside a name / idiom – if that is impossible, return the current translation unchanged. Keep the
+meaning, forms of address, names, final punctuation and about the same length; only reorder / rephrase when needed.
+Return ONLY JSON {{"1": "new line", ...}} with no explanation."""
+
+
+# Dấu câu bản dịch (2.1.11) ------------------------------------------------------------------------------------
+_CLOSERS = "\"'”’」』)）]»"
+_ENDS = set(".?!…。？！,，、;；:：~～-–—♪")
+# chữ luôn đi liền với chữ sau (lượng từ / số lượng / "của"): dấu phẩy ngay sau chúng là chen giữa cụm từ
+COMMA_GLUE = set("một những các mấy mỗi mọi chiếc món quyển cuốn bức tấm ngôi căn sợi của".split())
+_NUMERAL = set("một hai ba bốn năm sáu bảy tám chín mười mươi trăm nghìn ngàn vạn triệu tỷ linh lẻ rưỡi".split())
+_END_MAP = {"vi": (".", "?", "!", ","), "en": (".", "?", "!", ","), "ko": (".", "?", "!", ","),
+            "ja": ("。", "？", "！", "、"), "th": ("", "?", "!", "")}
+
+
+def end_punct(trans: str, src: str, lang: str = "vi") -> str:
+    """Bản dịch thiếu dấu câu cuối -> thêm theo câu gốc: ？ -> "?", ！ -> "!", … -> "…", câu gốc dừng ở dấu phẩy (vế
+    nói tiếp ở dòng sau) -> ",", còn lại "." (câu gốc tận cùng 吗 / 么 -> "?"). Tiếng Thái không dùng dấu chấm câu."""
+    t = (trans or "").rstrip()
+    core = t.rstrip(_CLOSERS + " ")
+    if not core or core[-1] in _ENDS or core.lstrip().startswith("♪") or unicodedata.category(core[-1])[0] not in "LNM":
+        return trans                     # đã có dấu câu / lời hát / tận cùng bằng biểu tượng cảm xúc, ký hiệu
+    s = re.sub(r"[\s" + re.escape(_CLOSERS) + r"♪]+$", "", src or "")
+    last = s[-1:]
+    dot, q, ex, comma = _END_MAP.get(langs.norm(lang), _END_MAP["vi"])
+    if last in "？?" or re.search(r"[吗么][。.]?$", s):
+        mark = q
+    elif last in "！!":
+        mark = ex
+    elif last == "…" or s.endswith("..."):
+        mark = "…"
+    elif last in "，,、；;：:":
+        mark = comma
+    else:
+        mark = dot
+    return core + mark + t[len(core):] if mark else trans
+
+
+def fix_commas(trans: str, names: list[str] | tuple = ()) -> str:
+    """Bỏ dấu phẩy chen GIỮA 1 cụm từ (AI cố đặt đủ số vế như câu gốc): sau lượng từ / "của" mà chữ sau viết thường
+    ("một món, đồ tốt" -> "một món đồ tốt"; giữ "một, hai, ba"), và giữa các tiếng của 1 tên riêng trong bảng thuật ngữ
+    ("Thiên Kiếm, Tông")."""
+    t = trans or ""
+    if "," not in t:
+        return t
+
+    def glue(m: re.Match) -> str:
+        w, nxt = m.group(1), m.group(2)
+        if w.lower() in COMMA_GLUE and nxt[:1].islower() and nxt.lower() not in _NUMERAL:
+            return f"{w} {nxt}"
+        return m.group(0)
+    t = re.sub(r"(\w+),\s+(\w+)", glue, t)
+    for name in names or ():
+        parts = name.split()
+        if len(parts) >= 2:
+            pat = r",?\s+".join(re.escape(x) for x in parts)
+            t = re.sub(pat, lambda _m, n=name: n, t)
+    return t
+
+
+def punct_fix(trans: str, src: str = "", lang: str = "vi", names: list[str] | tuple = ()) -> str:
+    """Dọn dấu câu bản dịch: dấu phẩy chen sai chỗ (tiếng Việt) + dấu câu cuối theo câu gốc."""
+    if not trans:
+        return trans
+    if langs.norm(lang) == "vi":
+        trans = fix_commas(trans, names)
+    return end_punct(trans, src, lang) if src else trans
 
 
 def syllables(text: str, lang: str = "vi") -> int:
@@ -630,6 +713,7 @@ class Translator:
         for k, (_, vi, n) in enumerate(items):
             v = d.get(str(k + 1)) if isinstance(d, dict) else None
             v = BUDGET_RE.sub(" ", v).strip() if isinstance(v, str) else ""
+            v = self._post(v, items[k][0]) if v else ""
             out.append(v if v and syllables(v, self.target) < syllables(vi, self.target) else vi)
         return out
 
@@ -657,7 +741,7 @@ class Translator:
         for k, (_cl, tr) in enumerate(items):
             v = d.get(str(k + 1)) if isinstance(d, dict) else None
             v = BUDGET_RE.sub(" ", v).strip() if isinstance(v, str) else ""
-            out.append(self._post(v) if v and not untranslated(v, self.target) else tr)
+            out.append(self._post(v, "，".join(_cl)) if v and not untranslated(v, self.target) else tr)
         return out
 
     def translate_lines(self, lines: list[str], progress: ProgressCB | None = None,
@@ -708,7 +792,7 @@ class Translator:
                 done += len(ids)
                 if progress:
                     progress(done / len(lines), f"AI đang dịch {done}/{len(lines)} câu ({self.engine})")
-        return [self._post(o or "") for o in out]
+        return [self._post(o or "", BUDGET_RE.sub(" ", lines[k])) for k, o in enumerate(out)]
 
     # ------------------------------------------------------------- AI
     def analyze(self, texts: list[str]) -> str:
@@ -965,16 +1049,19 @@ class Translator:
         return [self._gt_one(l).strip() if l else "" for l in src]
 
     # ------------------------------------------------------------- hậu xử lý
-    def _post(self, t: str) -> str:
+    def _post(self, t: str, src: str = "") -> str:
+        """Dọn bản dịch: gộp dòng / khoảng trắng, bỏ ngoặc kép bao ngoài, viết hoa chữ đầu, bỏ dấu phẩy chen sai chỗ,
+        thêm dấu câu cuối theo câu gốc (2.1.11 – trước đây BỎ dấu chấm cuối câu, mất cả ngữ điệu kết câu khi lồng)."""
         t = " ".join(t.replace("\n", " ").split())
         t = re.sub(r"\s+([,.!?;:])", r"\1", t)
         t = t.strip(" \"'“”")
-        # bỏ dấu chấm cuối câu (phong cách phụ đề), giữ ? ! ...
-        if t.endswith(".") and not t.endswith(".."):
-            t = t[:-1]
         if t:
             t = t[0].upper() + t[1:]
-        return t
+        return punct_fix(t, src, self.target, self.names())
+
+    def names(self) -> list[str]:
+        """Tên riêng nhiều tiếng (theo bảng thuật ngữ) – không được chen dấu phẩy vào giữa."""
+        return [v for v in self.glossary.values() if isinstance(v, str) and len(v.split()) >= 2]
 
 
 def translate_text(text: str, settings: dict, engine: str | None = None, target: str | None = None,

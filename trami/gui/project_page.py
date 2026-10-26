@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QFont, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
-                               QHeaderView, QInputDialog, QLineEdit, QMessageBox, QPlainTextEdit,
+                               QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
                                QScrollArea, QSpinBox, QSplitter, QStackedWidget, QTableView, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget, QGridLayout, QSizePolicy)
 
@@ -60,6 +60,31 @@ def _rowlbl(text: str) -> QWidget:
     lb = label(text, "muted")
     lb.setFixedWidth(84)
     return lb
+
+
+def _group(text: str, ic: str, first: bool = False) -> QWidget:
+    """Tiêu đề nhóm trong 1 Form dài (tab Tự động – 2.1.11): vạch mảnh phía trên + icon + chữ đậm, chiếm cả 2 cột."""
+    w = QWidget()
+    v = QVBoxLayout(w)
+    v.setContentsMargins(0, 0 if first else 8, 0, 2)
+    v.setSpacing(8)
+    if not first:
+        ln = QFrame()
+        ln.setFrameShape(QFrame.Shape.HLine)
+        ln.setFixedHeight(1)
+        ln.setStyleSheet(f"background: {theme.BORDER}; border: none;")
+        v.addWidget(ln)
+    row = QHBoxLayout()
+    row.setSpacing(8)
+    pic = QLabel()
+    pic.setPixmap(icons.pixmap(ic, theme.ACCENT, 18))
+    row.addWidget(pic)
+    t = QLabel(text)
+    t.setStyleSheet("font-weight: 700; font-size: 11pt;")
+    row.addWidget(t)
+    row.addStretch(1)
+    v.addLayout(row)
+    return w
 
 
 def _vsep() -> QWidget:
@@ -291,6 +316,8 @@ class ProjectPage(QWidget):
         s = self.settings
         card = SectionCard("Dịch tự động trọn gói", "bolt", "Chọn tuỳ chọn rồi bấm Bắt đầu. Có thể làm từng bước bên dưới.")
         f = Form()
+        # 2.1.11: chia nhóm theo 4 bước (trước 28 dòng liền nhau, khó tìm)
+        f.addRow(_group("1 · Nghe & tách câu", "mic", first=True))
         self.a_method = f.row("Nguồn phụ đề", combo(C.METHODS, "asr"))
         self.a_asr = f.row("Bộ nhận dạng", combo(C.ASR_ENGINES, s.get("asr_engine")))
         self.a_ocrfps = f.row("Tốc độ quét phụ đề", combo(C.OCR_SPEEDS, str(s.get("ocr_fps", "4"))),
@@ -315,6 +342,9 @@ class ProjectPage(QWidget):
                               "được (\"这笔账。\" | \"你自己算。\"). Chọn AI trong danh sách đã nhập key ở Cài đặt → Công cụ "
                               "dịch. Tắt = chỉ dùng luật nối câu (không tốn lượt AI)")
         self.a_joinai.currentIndexChanged.connect(self._audio_opts_changed)
+        self.a_denoise = f.row("Lọc nhiễu âm thanh", Switch(False))
+        self.a_force = f.row("Nhận dạng lại từ đầu", Switch(False))
+        f.addRow(_group("2 · Dịch", "globe"))
         self.a_engine = f.row("Công cụ dịch", combo(C.ENGINES + [(pipeline.NO_TRANSLATE, "Không dịch – chỉ nghe & tách câu, "
                                                                  "xuất SRT gốc (dịch ở phần mềm khác)")],
                                                     s.get("translate_engine")))
@@ -360,8 +390,13 @@ class ProjectPage(QWidget):
         self.a_review.toggled.connect(self._ai_switch_changed)
         self.a_songai.toggled.connect(self._ai_switch_changed)
         self.a_fill.toggled.connect(self._ai_switch_changed)
-        self.a_hardsub = f.row("Phụ đề Trung cũ", combo(C.HARDSUB, "none"))
-        self.a_which = f.row("Ghép phụ đề vào video", combo(C.WHICH, "trans"))
+        self.a_parallel = f.row("Vừa tách vừa dịch", Switch(bool(s.get("auto_parallel", False))),
+                                "Nghe tới đâu dịch tới đó: đủ 'Số câu mỗi lần gửi' của công cụ dịch (Cài đặt → Công cụ "
+                                "dịch) là gửi đi luôn, câu dịch hiện ngay ở tab Phụ đề; Edge đọc trước giọng các câu đã "
+                                "dịch. Nghe xong, câu bị đổi (nghe lại đoạn sót / tách người nói) được dịch / đọc lại. "
+                                "Dịch trên máy (Hy-MT2) và VieNeu / OmniVoice dùng card đồ hoạ nên chạy sau khi nghe xong")
+        self.a_parallel.toggled.connect(lambda on: None if self.loading else self._save_setting("auto_parallel", on))
+        f.addRow(_group("3 · Lồng tiếng", "volume"))
         self.a_dub = f.row("Lồng tiếng (đọc bản dịch)", Switch(False))
         self.a_tts = f.row("Bộ đọc lồng tiếng", combo(C.TTS_ENGINES, s.get("tts_engine", "edge")))
         # cùng 1 bộ đọc với tab Lồng tiếng (trước đây bước "3. Lồng tiếng" dùng ô ở tab Lồng tiếng, ô này bị bỏ qua)
@@ -379,14 +414,9 @@ class ProjectPage(QWidget):
         f.row("Giọng lồng", v_row,
               "1 giọng cho MỌI người nói – áp cho mọi nút lồng tiếng (cả '3. Lồng tiếng', 'Tạo bản lồng tiếng') và nhớ làm "
               "mặc định cho video sau. 'Theo giọng từng người nói' = chọn giọng từng người ở tab Lồng tiếng mục 2")
-        self.a_parallel = f.row("Vừa tách vừa dịch", Switch(bool(s.get("auto_parallel", False))),
-                                "Nghe tới đâu dịch tới đó: đủ 'Số câu mỗi lần gửi' của công cụ dịch (Cài đặt → Công cụ "
-                                "dịch) là gửi đi luôn, câu dịch hiện ngay ở tab Phụ đề; Edge đọc trước giọng các câu đã "
-                                "dịch. Nghe xong, câu bị đổi (nghe lại đoạn sót / tách người nói) được dịch / đọc lại. "
-                                "Dịch trên máy (Hy-MT2) và VieNeu / OmniVoice dùng card đồ hoạ nên chạy sau khi nghe xong")
-        self.a_parallel.toggled.connect(lambda on: None if self.loading else self._save_setting("auto_parallel", on))
-        self.a_denoise = f.row("Lọc nhiễu âm thanh", Switch(False))
-        self.a_force = f.row("Nhận dạng lại từ đầu", Switch(False))
+        f.addRow(_group("4 · Phụ đề & video khi xuất", "export"))
+        self.a_hardsub = f.row("Phụ đề Trung cũ", combo(C.HARDSUB, "none"))
+        self.a_which = f.row("Ghép phụ đề vào video", combo(C.WHICH, "trans"))
         self.a_method.currentIndexChanged.connect(
             lambda: (self.a_asr.setEnabled(self.a_method.currentData() in ("asr", "hybrid")),
                      self.a_ocrfps.setEnabled(self.a_method.currentData() in ("ocr", "hybrid"))))
@@ -540,6 +570,9 @@ class ProjectPage(QWidget):
                  button("Dời giờ", "clock", "Dời giờ mọi câu (hoặc các câu đã tích) sớm / muộn đi vài giây",
                         on_click=self._shift),
                  button("Tìm && thay", "search", on_click=self._replace),
+                 button("Sửa dấu câu", "wand", "Câu đã tích (hoặc cả phim): bỏ dấu phẩy chen giữa 1 cụm từ / tên riêng "
+                        "(\"một món, đồ tốt\", \"Thiên Kiếm, Tông\"), thêm dấu câu cuối theo câu gốc (? ! . ,) – bản dịch "
+                        "trước 2.1.11 bị bỏ dấu chấm cuối câu. Không gọi AI, Ctrl+Z hoàn tác", on_click=self._fix_punct),
                  button("Căn khớp thoại", "wand", "Căn mốc từng câu sát lời thoại thật, tách câu ở chỗ nghỉ "
                         "(dùng cho phụ đề đã nhận dạng từ bản cũ)", on_click=self.run_realign),
                  _vsep(),
@@ -4998,6 +5031,25 @@ class ProjectPage(QWidget):
                 msg += f" · cao độ giọng thường – {prof}"
             return {"message": msg, "pick": res["suspect"]}
         self.submit("join", "Lọc câu nghe nhầm", fn)
+
+    def _fix_punct(self):
+        """Sửa dấu câu bản dịch (không AI): câu đã tích hoặc cả phim; đã lồng thì tích sẵn câu đổi để đọc lại giọng."""
+        if not self.p:
+            return
+        segs = self.model.segs
+        rows = [r for r in sorted(self.model.selected) if 0 <= r < len(segs)] or None
+        changed = pipeline.fix_punct(self.p, segs, rows, self.settings)
+        if not changed:
+            return self.win.toast("Dấu câu đã ổn – không có câu nào cần sửa", "ok")
+        self.model.dataChanged.emit(self.model.index(min(changed), 0),
+                                    self.model.index(max(changed), self.model.columnCount() - 1))
+        self._segs_edited()
+        msg = f"Đã sửa dấu câu {len(changed)} câu"
+        if pipeline.has_dub(self.p):
+            self.model.set_picked(range(len(segs)), False)
+            self.model.set_picked(changed, True)
+            msg += " – đã tích sẵn các câu này: bấm 'Tạo lại giọng các câu đã tích' để giọng lồng lên / xuống giọng theo dấu mới"
+        self.win.toast(msg, "ok")
 
     def _voice_ok(self):
         rows = [r for r in sorted(self.model.selected) if 0 <= r < len(self.model.segs)]

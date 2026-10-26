@@ -96,7 +96,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   việc (`before_job` / `after_job` trong `jobs._run`, `reap_idle` tắt VieNeu/Omni để không 10 phút); `trami/gui/*` –
   giao diện (QPainter), `common.run_async`,
   `WheelGuard` (lăn chuột không đổi ô chọn khi chưa bấm vào). Trang dự án bố cục kiểu trình dựng phim (từ 2.0.28):
-  trái `IconTabs` + 10 tab (Chữ+Logo = tab 5 `TAB_LAYERS`, Lồng tiếng 6, Âm thanh 7, Tài liệu 8, `TAB_EXPORT` = 9), giữa
+  trái `IconTabs` + 10 tab (Chữ+Logo = tab 5 `TAB_LAYERS`, Lồng tiếng 6, Âm thanh 7, Tài liệu 8, `TAB_EXPORT` = 9; tab Tự
+  động chia 4 nhóm bằng `_group` – 1 Nghe & tách câu / 2 Dịch / 3 Lồng tiếng / 4 Phụ đề & video khi xuất, 2.1.11), giữa
   trình phát, phải `gui/inspector.LineInspector` (câu đang chọn), dưới `gui/timeline.TrackTimeline`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
   Timeline `_Canvas`: phần đứng yên vẽ vào ảnh đệm (`_paint_static`, `_dirty` – mọi `update()` / `repaint()` / đổi cỡ),
@@ -125,6 +126,10 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - `trami/textfit.py` – đo bề rộng chữ phụ đề như libass (Qt khi có giao diện, không thì Pillow+fontTools, không thì ước
   lượng) + `fit_lines` (xếp câu vào dòng: % bề rộng, số dòng tối đa, thu nhỏ chữ). `subtitle.layout_event` dùng chung
   cho `to_ass` và khung xem trước (`player.SubtitleItem._layout`) -> xuống dòng / cỡ chữ / ô nền giống hệt.
+  `split_balanced` (2.1.11): duyệt mọi cách ngắt 2–3 dòng vừa khung, điểm = dòng dài nhất (phần của cả câu) + `_break_score`
+  từng chỗ ngắt (sau ? ! . … −0,30; sau , ; : −0,22; sau lượng từ / giới từ / liên từ `_VI_NO_END` +0,15; trước liên từ
+  `_VI_GOOD_START` −0,08; giữa từ ghép `_VI_PAIRS` +0,15; giữa 2 chữ viết hoa (tên riêng) +0,30; sau số +0,12) + dòng 1 từ
+  +0,15; > 3 dòng -> quy hoạch động cũ.
 - `trami/vfill.py` – xoá chữ bằng NỀN THẬT từ khung trước / sau (`BandFiller`: đo chuyển động bằng tương quan pha trên
   dải hình quanh vùng, so viền rồi lấp, khung đã lấp làm nguồn tiếp, cảnh đứng yên giữ phần đã vẽ; `subtitle_mask` mặt nạ
   chữ mọi màu). `trami/logo.py` – gỡ logo cố định (tính ngược lớp logo trong suốt từ ~200 khung). `inpaint.inpaint_video`
@@ -179,7 +184,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - Chặn câu bịa / lặp của bộ nghe (2.1.8): `align.prompt_echo` (dấu hiệu `ECHO_MARKERS` "视频标题" / "简介："… hoặc ≥ 80 %
   chữ trùng lời gợi ý, có đoạn ≥ 6 chữ), `repeat_block` (cụm ≥ `REPEAT_MIN` 5 chữ lặp ngay sau nó, bỏ "哈哈哈"),
   `drop_repeat` (bỏ lần đầu), `decide_repeat` (nghe lại vẫn 2 lần = nói thật -> giữ), `near_duplicates` (2 câu liền giống
-  ≥ 0,8). Khi nghe: `asr_qwen.guard_pass` (sau foreign_pass, trước relisten_cuts; Cài đặt `asr_guard`) nghe lại khúc nghi
+  ≥ 0,8), `latin_echo` (2.1.11: câu KHÔNG chữ Hán y nguyên 1 đoạn Latin / số ≥ 3 ký tự của tiêu đề / mô tả / thẻ video –
+  "p03 3" = đuôi tiêu đề video Bilibili nhiều phần; chỉ so với `video_meta`, không so tên riêng). Khi nghe: `asr_qwen.guard_pass` (sau foreign_pass, trước relisten_cuts; Cài đặt `asr_guard`) nghe lại khúc nghi
   với prompt "" + `REP_PENALTY` 1,2 (worker `"rep_penalty"` -> `repetition_penalty`), quyết định nhớ trong `Resume`
   (`heard[span]["guard"]`); `stats` echo / repeat_fixed / repeat_kept -> `listen_note`. Cuối `recognize`:
   `pipeline.mark_repeats` -> `extra["asr_repeat"]` (chữ gốc hồng, tooltip), `p.data["asr_repeat"]`. Dự án đã nghe:
@@ -192,6 +198,15 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `recognize` (`p.data["asr_stammer"]`) + trong `clean_asr` (`st["stammer"]`); `repeat_block` thêm cụm 4 chữ dính liền
   (`_LOOP4_RE`); `align.restarts` (vế trước trùng / là đầu vế sau) -> `match_clauses` không ép đủ vế; luật dịch 11 (Việt +
   tiếng khác) + `REVIEW_PROMPT` mục 7: nói vấp / lặp vô nghĩa dịch 1 lần, lặp nhấn mạnh giữ.
+- Dấu câu bản dịch (2.1.11): `translate.punct_fix` = `fix_commas` (bỏ dấu phẩy ngay sau `COMMA_GLUE` lượng từ / "của" khi
+  chữ sau viết thường, trừ dãy số; dấu phẩy giữa các tiếng của tên trong bảng thuật ngữ `Translator.names`) + `end_punct`
+  (thiếu dấu câu cuối -> theo câu gốc: ？/吗/么 -> ?, ！ -> !, … , dấu phẩy -> ",", còn lại "."; Nhật 。？！、, Thái không
+  chấm; câu ♪ không đụng). Gọi trong `Translator._post(t, src)` (mọi công cụ dịch – TRƯỚC 2.1.11 `_post` BỎ dấu chấm cuối
+  câu), `shorten`, `match_clauses`, `skills.review_lines`. Lời nhắc: luật 10 (dấu phẩy chỉ ở ranh giới tự nhiên, không chen
+  giữa cụm từ / tên riêng, câu trôi chảy hơn đủ số vế), luật 12 giữ dấu câu cuối (vi + en/th/ja/ko), `CLAUSE_PROMPT(_EN)`
+  mỗi vế trọn nghĩa, `REVIEW_PROMPT` mục 4. Dự án đã dịch: `pipeline.fix_punct` + nút "Sửa dấu câu" (tab Phụ đề → Công
+  cụ → Sửa câu, không AI, đã lồng -> tích sẵn câu đổi). Kỹ năng `dub_short` "Lồng tiếng – vừa thời gian, dễ đọc" (lược từ
+  thừa chỉ khi dài hơn mức tối đa, ngắn thì giữ / thêm từ đệm như luật 8).
 - Giờ HIỆN phụ đề (2.0.96): `subtitle.follow_dub(mode="always", lead, hold, min_dur, join)` + `pipeline.follow_params`
   (Cài đặt `sub_follow_mode` / `sub_lead` 0,1 / `sub_hold` 0,3 / `sub_min_dur` 1 / `sub_join_gap` 0,3, công tắc
   `dub_subs_follow`) – xem trước, xuất video, SRT đã dịch (`export_subs`, `_export_sub`); tab Phụ đề → Công cụ → "Giờ
@@ -251,7 +266,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (207 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (208 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1817,10 +1832,24 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   đệm cho vừa thời gian"; 22–31 % câu dịch dài hơn mức tối đa (bước lồng tiếng tự rút gọn). Xuống dòng khi hiện phụ đề
   (A) vẫn chờ người dùng chọn. Tab Tự động 28 dòng phẳng – đề xuất chia nhóm Nghe / Dịch / Lồng tiếng / Xuất.
 
+- 2.1.11: "làm hết A, B, dấu câu cuối, kỹ năng, chia nhóm" + "file phụ đề vẫn có chỗ hiện p03 không hiểu ở đâu ra". p03:
+  tiêu đề video Bilibili nhiều phần yt-dlp trả "<tiêu đề> p03 3"; bản 2.1.0–2.1.7 gửi "视频标题：…" cho Qwen3 -> khúc
+  không lời bộ nghe chép lại (21 câu có p03 trong file .zh.srt). 2.1.8 đã thôi gửi tiêu đề + nút "Dọn câu bịa / câu lặp"
+  nhưng 13 câu CHỈ có "p03 3" vẫn lọt (`prompt_echo` chỉ xét chữ Hán) -> `align.latin_echo`. Chạy trên file người dùng:
+  bắt đủ 21/21 câu p03 (133 câu chép tiêu đề), phim cũ 2610 câu 0 câu. A xuống dòng: "Anh à, … một món đồ tốt, | nhớ đi
+  làm về sớm nhé anh." (trước "… món đồ | tốt, …"), không xé "Thiên Kiếm Tông", không để dòng kết thúc bằng "một / của /
+  các…"; ~1 ms / câu. B + dấu câu cuối: tìm ra chính `Translator._post` bỏ dấu chấm cuối câu ("phong cách phụ đề") ->
+  p03 993/3058 câu dịch không dấu câu cuối, AI còn hay quên "?" ("Chỉ vậy thôi sao"); giờ giữ + tự thêm theo câu gốc, bỏ
+  dấu phẩy chen giữa cụm từ, luật 10 / 12 mới (xem Cấu trúc "Dấu câu bản dịch"). Kỹ năng "câu ngắn" không còn bảo lược từ
+  đệm (ngược luật 8). Tab Tự động 4 nhóm có tiêu đề.
+
 ## Vấn đề đang mở
-- 2.1.10: chờ người dùng chọn làm tiếp: A (xuống dòng phụ đề ở dấu câu / không xé từ ghép, tên riêng), B (luật dấu phẩy
-  cho AI + kiểm tra dấu phẩy sai chỗ), luật giữ dấu câu cuối, sửa kỹ năng "Lồng tiếng – câu ngắn", chia nhóm tab Tự động.
-  Mở dự án phim dài sau cập nhật: phát video xem timeline có còn giật không, đổi cỡ chữ / màu có còn khựng không.
+- 2.1.11: chờ người dùng (1) dự án p03: tab Phụ đề → Công cụ → Lời hát & nghe nhầm → "Dọn câu bịa / câu lặp" (phải bỏ
+  hết câu "p03 3"), rồi Công cụ → Sửa câu → "Sửa dấu câu" (thêm dấu câu cuối cho bản dịch cũ) + Tạo lại giọng các câu đã
+  tích; (2) xem phụ đề 2 dòng có còn ngắt giữa cụm từ / tên riêng không (danh sách từ ghép `_VI_PAIRS` còn ngắn – gặp chỗ
+  ngắt sai thì xin câu để thêm); (3) dịch thử bằng AI: dấu câu cuối có đủ, dấu phẩy có hết chen sai chỗ không; phụ đề giờ
+  CÓ dấu chấm cuối câu (trước bị bỏ) – không thích thì cần thêm ô "Ẩn dấu chấm cuối khi hiện phụ đề".
+- 2.1.10: mở dự án phim dài sau cập nhật: phát video xem timeline có còn giật không, đổi cỡ chữ / màu có còn khựng không.
 - 2.1.9: chờ người dùng bấm lại "Dọn câu bịa / câu lặp" trên dự án p03 (câu #1019 thành "我不管闲事。", đã tích) -> "Dịch câu
   đã tích" -> "Tạo lại giọng các câu đã tích"; báo câu lặp kiểu khác còn sót (gửi chữ gốc + bản dịch).
 - 2.1.8: chờ người dùng (1) dự án phim p03: tab Phụ đề → Công cụ → Lời hát & nghe nhầm → "Dọn câu bịa / câu lặp" (phải

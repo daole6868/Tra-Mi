@@ -32,10 +32,12 @@ BUILTIN = [
         "Gemini, Kimi, 豆包 = Doubao, 通义 = Qwen; AGI, API, code giữ nguyên.\n"
         "- Tiếng cảm thán: 嗯 -> Ừm; 啊 -> Á / À / Ơ; 哦 -> Ờ; 嘎 -> Quác; 哈哈 -> Haha.\n"
         "- Bạn bè ngang hàng xưng tớ – cậu (hoặc tao – mày nếu cãi nhau), con – bố với người tạo ra / bố mẹ.")},
-    {"id": "dub_short", "name": "Lồng tiếng – câu ngắn, dễ đọc", "builtin": True, "text": (
-        "- Bản dịch để LỒNG TIẾNG: ưu tiên câu ngắn, tự nhiên khi nói; lược từ đệm (thì, là, mà, cái, ấy) nếu không mất ý.\n"
+    {"id": "dub_short", "name": "Lồng tiếng – vừa thời gian, dễ đọc", "builtin": True, "text": (
+        "- Bản dịch để LỒNG TIẾNG: câu nói tự nhiên, độ dài theo ký hiệu ⟪…⟫ của từng dòng. Dài hơn mức tối đa -> lược "
+        "từ thừa (thì, là, mà, cái, ấy) nếu không mất ý; ngắn hơn hẳn mức tối thiểu (⟪M–N tiếng⟫) -> GIỮ / thêm từ đệm, "
+        "xưng hô cho đủ dài như luật 8 – đừng lược tới mức câu cụt, giọng lồng xong sớm rồi im.\n"
         "- Tránh chuỗi số dài, ký hiệu, viết tắt khó đọc; số nhỏ viết bằng chữ.\n"
-        "- Không thêm dấu ngoặc / chú thích trong câu.")},
+        "- Không thêm dấu ngoặc / chú thích trong câu; giữ dấu câu cuối (? ! .) để giọng đọc lên / xuống đúng.")},
     {"id": "co_trang_kn", "name": "Cổ trang – tiên hiệp (chuẩn truyện convert)", "builtin": True, "text": (
         "- Xưng hô cổ trang: ta – ngươi, huynh – đệ, tỷ – muội, sư phụ – đồ nhi, bổn tọa, lão phu, tại hạ, các hạ.\n"
         "- Cảnh giới tu luyện, công pháp, pháp bảo, môn phái: Hán Việt (筑基 -> Trúc Cơ, 金丹 -> Kim Đan, 元婴 -> Nguyên Anh).\n"
@@ -130,7 +132,8 @@ và độ dài nói vừa thời gian câu thoại ("≤N" = tối đa N; "M–N
 3. Độ dài: đếm số tiếng (âm tiết; số đếm theo cách đọc). Dài hơn N -> rút gọn, giữ ý (bỏ từ thừa, dùng từ ngắn hơn).
    Ngắn hơn M -> nói đầy đủ, tự nhiên hơn bằng phụ từ / từ đệm / xưng hô (à, ấy, nhé, đấy, thì, mà, cơ, nhỉ, chứ, vậy,
    thật là, đúng là…) – KHÔNG thêm ý mới, không thêm tên / thông tin. Dư / thiếu 1–2 tiếng thì để nguyên.
-4. Còn chữ Hán, sai chính tả, sai dấu câu.
+4. Còn chữ Hán, sai chính tả, sai dấu câu: dấu phẩy chen giữa 1 cụm từ ("một món, đồ tốt", "Thiên Kiếm, Tông") -> chuyển về
+   ranh giới tự nhiên; thiếu dấu câu cuối (câu hỏi thiếu "?", câu kể thiếu ".") -> thêm.
 5. Sai giọng điệu (phim hài mà câu đùa không còn buồn cười…).
 6. Câu gốc là lời bài hát (văn vần, điệp khúc, không ăn nhập với lời thoại) mà bản dịch chưa có "♪ " ở đầu -> thêm "♪ ".
 7. Bản dịch lặp lại 1 vế vì câu gốc NÓI VẤP / nói dở rồi nói lại (我不管闲，我不管闲事) hoặc bộ nghe lặp 1 cụm -> chỉ giữ
@@ -390,6 +393,7 @@ def review_lines(llm, items: list[tuple[int, str, str, int | str]], profile: str
     """items: (chỉ số câu, câu gốc, bản dịch, độ dài: số tối đa hoặc chữ "M–N tiếng"). Trả về {chỉ số: (bản dịch mới,
     lý do)}."""
     from .ffmpeg import Cancelled
+    from .translate import punct_fix
 
     out: dict[int, tuple[str, str]] = {}
     for a in range(0, len(items), REVIEW_CHUNK):
@@ -408,8 +412,8 @@ def review_lines(llm, items: list[tuple[int, str, str, int | str]], profile: str
         for k, v in d.items():
             if not str(k).isdigit() or not (1 <= int(k) <= len(chunk)) or not isinstance(v, dict):
                 continue
-            new = str(v.get("sua") or "").strip()
-            i, _, old, _ = chunk[int(k) - 1]
+            i, zh, old, _ = chunk[int(k) - 1]
+            new = punct_fix(str(v.get("sua") or "").strip(), zh, lang)       # dấu phẩy chen sai / thiếu dấu câu cuối
             if new and new != old and (lang == "ja" or len(_HAN.findall(new)) < 2):   # tiếng Nhật có chữ Hán
                 out[i] = (new, str(v.get("ly_do") or "")[:200])
         if progress:
