@@ -216,6 +216,24 @@ def load_raw(path: str | Path) -> np.ndarray:
     return np.memmap(str(path), dtype=np.int16, mode="r").reshape(-1, 2)
 
 
+ENV_BLOCK = 60.0   # giây mỗi khối khi đo độ to bản lồng (không nạp cả bản vào RAM)
+
+
+def dub_envelope(dub: np.ndarray | None, hop_s: float = 0.05) -> np.ndarray | None:
+    """Độ to giọng lồng (đỉnh 0..1) mỗi `hop_s` giây, đọc từng khối ENV_BLOCK giây của PCM int16 [khung, 2]."""
+    if dub is None or not len(dub):
+        return None
+    hop = int(SR * hop_s)
+    n = len(dub) // hop
+    out = np.zeros(n, np.float32)
+    blk = hop * max(1, int(ENV_BLOCK / hop_s))
+    for a in range(0, n * hop, blk):
+        b = min(n * hop, a + blk)
+        x = np.abs(np.asarray(dub[a:b, 0], dtype=np.int32))    # int32: |−32768| không tràn
+        out[a // hop:b // hop] = x.reshape(-1, hop).max(axis=1) / 32768.0
+    return out
+
+
 class LiveMix:
     """Trộn các lớp âm thanh theo thời gian video, từng khối nhỏ (~20–50 ms) ngay lúc phát: đổi âm lượng / tắt lớp /
     nghe riêng có tác dụng ngay ở khối kế tiếp. Không phụ thuộc Qt (kiểm thử được)."""
@@ -231,18 +249,15 @@ class LiveMix:
         self.solo: str | None = None              # "nghe riêng" 1 lớp (chỉ khi xem trước, không lưu)
         self.rate = 1.0                           # tốc độ phát
         self._dub_env = None                      # độ to giọng lồng mỗi 0,05 s (để giảm nhạc thêm)
+        self._duck_cs = None                      # (âm lượng lồng tiếng, tổng tích luỹ các khối có lời)
 
     # ---- cấu hình
     def set_tracks(self, tracks: dict[str, np.ndarray]):
         self.tracks = dict(tracks)
-        dub = self.tracks.get("dub")
-        if dub is not None and len(dub):
-            hop = int(SR * 0.05)
-            n = len(dub) // hop
-            x = np.abs(dub[: n * hop, 0].astype(np.float32)).reshape(n, hop).max(axis=1) / 32768.0
-            self._dub_env = x
-        else:
-            self._dub_env = None
+        # độ to giọng lồng chỉ dùng để giảm nhạc thêm khi có lời -> chỉ tính khi có lớp nhạc thêm (2.1.10: trước tính
+        # mọi lần chuẩn bị âm thanh = đọc cả bản lồng 1,4 GB / phim 2 giờ + cấp thêm 1,4 GB RAM, ~10 s)
+        self._dub_env = dub_envelope(self.tracks.get("dub")) if "bgm" in self.tracks else None
+        self._duck_cs = None
 
     def duration(self) -> float:
         return max((len(t) for t in self.tracks.values()), default=0) / SR
@@ -324,15 +339,19 @@ class LiveMix:
         return acc, span
 
     def _duck_curve(self, t: np.ndarray) -> np.ndarray:
-        """Hệ số nhạc thêm: có lời lồng tiếng trong 0,4 s vừa qua -> giảm DUCK_DB."""
-        env = self._dub_env
+        """Hệ số nhạc thêm: có lời lồng tiếng trong 0,4 s vừa qua -> giảm DUCK_DB. Tổng tích luỹ tính 1 lần theo âm
+        lượng lồng tiếng (trước: tính lại trên cả phim ở MỖI khối âm thanh ~20 ms của luồng phát)."""
         hop = 0.05
+        gd = self.g.get("dub", 1.0)
+        if self._duck_cs is None or self._duck_cs[0] != gd:
+            active = (self._dub_env * gd) > DUCK_THR
+            self._duck_cs = (gd, np.concatenate([[0], np.cumsum(active)]))
+        cs = self._duck_cs[1]
+        n = len(cs) - 1
         k = (t / hop).astype(np.int64)
         look = int(DUCK_RELEASE / hop)
-        active = (env * self.g.get("dub", 1.0)) > DUCK_THR
-        cs = np.concatenate([[0], np.cumsum(active)])
-        hi = np.clip(k + 1, 0, len(active))
-        lo = np.clip(k - look, 0, len(active))
+        hi = np.clip(k + 1, 0, n)
+        lo = np.clip(k - look, 0, n)
         on = (cs[hi] - cs[lo]) > 0
         return np.where(on, 10 ** (DUCK_DB / 20), 1.0).astype(np.float32)
 

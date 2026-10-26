@@ -1787,6 +1787,110 @@ def test_audio_settings_and_live_mix():
     assert adv == 2000 and out.shape == (1000, 2)
 
 
+def test_perf_fixes_2110(sample_video, monkeypatch):
+    """2.1.10 (rà hiệu năng phim 2 giờ / 2500 câu): (1) độ to bản lồng chỉ đo khi có nhạc thêm, đọc từng khối, kết quả như
+    cách cũ; tổng tích luỹ giảm nhạc tính 1 lần; (2) chuẩn bị âm thanh không chạy chồng khi đang chuẩn bị đúng bộ lớp
+    đó; (3) timeline: đổi vị trí phát không vẽ lại các khối; (4) lưu dự án: to_dict chép sâu như asdict, JSON gọn đọc lại
+    được; không đổi gì thì không ghi; (5) mục AI mờ khi dịch bằng Google."""
+    import dataclasses
+    import json
+
+    from trami import audiomix, pipeline
+    from trami.audiomix import SR, LiveMix, dub_envelope
+
+    rng = np.random.default_rng(1)
+    dub = (rng.standard_normal((SR * 7, 2)) * 8000).clip(-32768, 32767).astype(np.int16)
+    dub[5] = -32768
+    hop = int(SR * 0.05)
+    n = len(dub) // hop
+    ref = np.abs(dub[: n * hop, 0].astype(np.float32)).reshape(n, hop).max(axis=1) / 32768.0
+    monkeypatch.setattr(audiomix, "ENV_BLOCK", 1.0)      # nhiều khối -> kiểm chỗ nối khối
+    assert np.allclose(dub_envelope(dub), ref)
+    mix = LiveMix()
+    mix.set_tracks({"orig": dub, "dub": dub})
+    assert mix._dub_env is None                           # không có nhạc thêm: không đọc bản lồng
+    mix.set_tracks({"bgm": dub[:SR], "dub": dub})
+    mix.g, mix.duck = {"bgm": 1.0, "dub": 1.0}, True
+    mix.render(SR, 512)
+    cs = mix._duck_cs
+    mix.render(SR * 2, 512)
+    assert cs is not None and mix._duck_cs is cs          # không tính lại mỗi khối
+
+    s = Segment(1.0, 2.0, "你好", "Xin chào", "S1", extra={"ct": [[1.0, 1.2], [1.3, 1.5]], "dub_at": (1.0, 2.1),
+                                                             "voice": "edge:x", "n": {"a": [1, [2, 3]]}})
+    d = s.to_dict()
+    assert d == dataclasses.asdict(s)
+    d["extra"]["ct"][0][0] = 9.0
+    d["extra"]["n"]["a"][1][0] = 7
+    assert s.extra["ct"][0][0] == 1.0 and s.extra["n"]["a"][1][0] == 2
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.gui.timeline import TrackTimeline
+    from trami.gui.widgets import set_combo
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    theme.load_fonts()
+    app.setStyleSheet(theme.stylesheet())
+    tl = TrackTimeline()
+    tl.resize(900, 220)
+    tl.show()
+    tl.set_data(60.0, [Segment(k * 2.0, k * 2.0 + 1.5, "你好", f"câu {k}", "S1") for k in range(25)], [])
+    app.processEvents()
+    calls = []
+    orig = tl.canvas._paint_static
+    monkeypatch.setattr(tl.canvas, "_paint_static", lambda p: (calls.append(1), orig(p)))
+    tl.canvas.grab()
+    n0 = len(calls)
+    for k in range(5):
+        tl.set_pos(3.0 + k * 0.04)
+        tl.canvas.grab()
+    assert len(calls) == n0                               # chỉ vạch đầu phát
+    tl.set_selected(3)
+    tl.canvas.grab()
+    assert len(calls) == n0 + 1                           # đổi câu chọn: vẽ lại khối
+
+    p = Project.create("perf")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [s]
+    p.save()
+    assert json.loads(p.file.read_text("utf-8"))["segments"][0]["extra"]["ct"] == [[1.0, 1.2], [1.3, 1.5]]
+    win = MainWindow()
+    win.show()
+    win.open_project(p.id)
+    pp = win.project_page
+    app.processEvents()
+    jobs = []
+    monkeypatch.setattr("trami.gui.project_page.run_async", lambda fn, done=None, err=None: jobs.append(fn))
+    pp.player.live.mix = None
+    pp._audio_key = pp._audio_pending = None
+    pp._update_player_audio()
+    pp._update_player_audio()
+    pp._update_player_audio()
+    assert len(jobs) == 1                                 # đang chuẩn bị: không chạy chồng
+    pp._update_player_audio(force=True)
+    assert len(jobs) == 2
+    pp._save_edit_now()
+    mt = p.file.stat().st_mtime_ns
+    pp._save_edit_now()                                   # không đổi gì: không ghi lại dự án
+    assert p.file.stat().st_mtime_ns == mt
+    set_combo(pp.a_engine, "google")
+    app.processEvents()
+    assert not pp.a_clean.isEnabled() and not pp.a_review.isEnabled() and not pp.a_ai_note.isHidden()
+    set_combo(pp.a_engine, "gemini")
+    app.processEvents()
+    assert pp.a_clean.isEnabled() and pp.a_ai_note.isHidden()
+    win.timer.stop()
+    pp.p = None
+    win.close()
+    p.delete()
+
+
 def test_karaoke_timing_and_ass():
     from trami import karaoke as K
 

@@ -558,9 +558,60 @@ class _Canvas(QWidget):
         e.accept()
 
     # ------------------------------------------------------------------ vẽ
+    # 2.1.10: đang phát, mỗi lần vị trí đổi (~25 lần / giây) trước đây vẽ lại CẢ timeline (mọi khối phụ đề, giọng lồng,
+    # sóng âm – 40–70 ms / lần với phim 2500 câu) -> luồng giao diện bận gần hết -> giật hình / tiếng. Giờ phần đứng yên
+    # vẽ 1 lần vào ảnh đệm; chỉ đổi vị trí thì dán ảnh đệm + vẽ vạch đầu phát.
+    def update(self, *a):
+        self._dirty = True
+        super().update(*a)
+
+    def repaint(self, *a):
+        self._dirty = True
+        super().repaint(*a)
+
+    def update_playhead(self):
+        """Chỉ vị trí phát đổi: không vẽ lại các khối."""
+        super().update()
+
+    def resizeEvent(self, e):
+        self._dirty = True
+        super().resizeEvent(e)
+
     def paintEvent(self, e):
-        tl = self.tl
+        W, H = self.width(), self.height()
+        dpr = self.devicePixelRatioF()
+        pm = getattr(self, "_static", None)
+        if getattr(self, "_dirty", True) or pm is None or pm.devicePixelRatio() != dpr or \
+                pm.width() != round(W * dpr) or pm.height() != round(H * dpr):
+            pm = QPixmap(round(W * dpr), round(H * dpr))
+            pm.setDevicePixelRatio(dpr)
+            sp = QPainter(pm)
+            self._paint_static(sp)
+            sp.end()
+            self._static, self._dirty = pm, False
         p = QPainter(self)
+        p.drawPixmap(0, 0, pm)
+        if self.tl.duration:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setClipRect(QRectF(self.HEAD, 0, W - self.HEAD, H))
+            self._paint_playhead(p, H)
+        p.end()
+
+    def _paint_playhead(self, p: QPainter, bot: float):
+        hx = self.x(self.tl.pos)
+        p.setPen(QPen(QColor(theme.ACCENT), 1.6))
+        p.drawLine(QPointF(hx, 4), QPointF(hx, bot))
+        tri = QPainterPath()
+        tri.moveTo(hx - 6, 2)
+        tri.lineTo(hx + 6, 2)
+        tri.lineTo(hx, 10)
+        tri.closeSubpath()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(theme.ACCENT))
+        p.drawPath(tri)
+
+    def _paint_static(self, p: QPainter):
+        tl = self.tl
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.fillRect(self.rect(), QColor("#121722"))
         W, H = self.width(), self.height()
@@ -858,21 +909,10 @@ class _Canvas(QWidget):
         p.setBrush(theme.c(theme.ERR, 70))
         for a, b in tl.cuts:
             p.drawRect(QRectF(self.x(a), top, max(2.0, (b - a) * tl.pps), bot - top))
-        # điểm đánh dấu cắt + đầu phát
+        # điểm đánh dấu cắt (vạch đầu phát vẽ riêng – _paint_playhead)
         if tl.mark is not None:
             p.setPen(QPen(QColor(theme.WARN), 1.5, Qt.PenStyle.DashLine))
             p.drawLine(QPointF(self.x(tl.mark), top), QPointF(self.x(tl.mark), bot))
-        hx = self.x(tl.pos)
-        p.setPen(QPen(QColor(theme.ACCENT), 1.6))
-        p.drawLine(QPointF(hx, 4), QPointF(hx, bot))
-        tri = QPainterPath()
-        tri.moveTo(hx - 6, 2)
-        tri.lineTo(hx + 6, 2)
-        tri.lineTo(hx, 10)
-        tri.closeSubpath()
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(theme.ACCENT))
-        p.drawPath(tri)
 
 
     def _paint_shift(self, p: QPainter, rd: QRectF, a: float, k: int):
@@ -1134,8 +1174,8 @@ class TrackTimeline(QWidget):
         self.pos = t
         vw = self._view_secs()
         if follow and self.duration and not (self.t0 <= t <= self.t0 + vw * 0.92):
-            self.scroll_to(t - vw * 0.1)
-        self.canvas.update()
+            self.scroll_to(t - vw * 0.1)     # cuộn khung nhìn -> vẽ lại cả timeline
+        self.canvas.update_playhead()
 
     # ------------------------------------------------------------------ lựa chọn
     def pieces(self) -> list[tuple[float, float]]:

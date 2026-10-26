@@ -70,14 +70,17 @@ QLabel[h2="true"] {{ font-size: 12.5pt; font-weight: 700; }}
 QLabel[h3="true"] {{ font-size: 10.5pt; font-weight: 700; color: {TEXT}; }}
 QToolTip {{ background: {CARD3}; color: {TEXT}; border: 1px solid {BORDER}; padding: 6px 8px; border-radius: 6px; }}
 
-QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTimeEdit {{
+QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTimeEdit, QDateTimeEdit {{
     background: #0F141D; border: 1px solid {BORDER}; border-radius: 9px; padding: 7px 10px;
     selection-background-color: {ACCENT}; min-height: 20px;
 }}
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
     border: 1px solid {ACCENT2};
 }}
-QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled {{ color: {MUTED}; }}
+QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QDateTimeEdit:disabled {{
+    color: {MUTED}; }}
+QDateTimeEdit::drop-down {{ border: none; width: 26px; }}
+QDateTimeEdit::down-arrow {{ image: url("{{CHEV}}"); width: 14px; height: 14px; margin-right: 10px; }}
 QComboBox::drop-down {{ border: none; width: 26px; }}
 QComboBox::down-arrow {{ image: url("{{CHEV}}"); width: 14px; height: 14px; margin-right: 10px; }}
 QComboBox QAbstractItemView {{ background: {CARD2}; border: 1px solid {BORDER}; border-radius: 8px;

@@ -153,7 +153,8 @@ class Project:
         with _lock(self.id):
             self.data["updated"] = time.time()
             tmp = self.file.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=1), "utf-8")
+            # JSON gọn (bộ mã hoá C của Python, không thụt lề): phim 2500 câu 175 -> ~45 ms mỗi lần lưu (2.1.10)
+            tmp.write_text(json.dumps(self.data, ensure_ascii=False, separators=(",", ":")), "utf-8")
             tmp.replace(self.file)
 
     def reload(self):

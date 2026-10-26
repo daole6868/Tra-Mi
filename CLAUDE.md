@@ -73,6 +73,9 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - `trami/audiomix.py` – quy tắc trộn âm thanh dùng chung cho xuất video (`video.build_and_render`) và bộ trộn trực tiếp
   `LiveMix` của trình phát (`player.LiveAudio` + `_Feeder` ở QThread riêng, QAudioSink); cài đặt ở `edit["audio"]`, tab `gui/audio_tab.py`.
   `decode_track` giải mã mỗi lớp 1 lần (`work/live/<lớp>_<mã>.raw`); `patch_track` vá từng đoạn + `<lớp>_<mã mới>.ref`.
+  `LiveMix.set_tracks` chỉ đo độ to bản lồng (`dub_envelope`, từng khối `ENV_BLOCK` 60 s) khi có lớp nhạc thêm;
+  `_duck_cs` tổng tích luỹ giảm nhạc tính 1 lần / âm lượng. `project_page._update_player_audio`: `_audio_pending` – đang
+  chuẩn bị đúng bộ lớp đó thì không chạy chồng (2.1.10).
 - `trami/jobs.py` – hàng đợi: MẶC ĐỊNH LẦN LƯỢT từng việc (2.0.70, `max_running()` = 1); Cài đặt "Chạy nhiều việc cùng
   lúc" (`jobs_parallel`) -> tối đa `MAX_RUNNING` 4: cùng dự án lần lượt (trừ `READONLY_KINDS`; `LIGHT_KINDS` "relayout"
   không chờ việc của dự án khác), mỗi lúc 1 việc GPU
@@ -96,6 +99,9 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   trái `IconTabs` + 10 tab (Chữ+Logo = tab 5 `TAB_LAYERS`, Lồng tiếng 6, Âm thanh 7, Tài liệu 8, `TAB_EXPORT` = 9), giữa
   trình phát, phải `gui/inspector.LineInspector` (câu đang chọn), dưới `gui/timeline.TrackTimeline`.
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
+  Timeline `_Canvas`: phần đứng yên vẽ vào ảnh đệm (`_paint_static`, `_dirty` – mọi `update()` / `repaint()` / đổi cỡ),
+  đổi vị trí phát chỉ `update_playhead` + `_paint_playhead` (2.1.10). Lưu dự án: JSON gọn (bộ mã hoá C), `Segment.to_dict`
+  chép sâu tự viết (`subtitle._deep_copy`), `_save_edit_now` không đổi gì thì không ghi.
   Chụp ảnh kiểm tra giao diện phải nạp theme như `run()`: `theme.load_fonts(); app.setFont(theme.font(10));
   app.setStyleSheet(theme.stylesheet())`.
 - `trami/langs.py` – tiếng đích (vi/en/th/ja/ko): tên, mã Google, tên cho Hy-MT2, giọng Edge, tốc độ nói (`budget`),
@@ -245,7 +251,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (206 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (207 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1796,7 +1802,25 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   nói lại không bị ép đủ vế. Đo trên 2 file người dùng: p03 sửa đúng #1019 + #2802 ("你还没我一，你还没我一半"), #914 cụm 4
   chữ lặp; phim cũ 2610 câu 0 câu bị đổi; giữ "来不及，来不及了", "六千，六千五", "让一让，让一让", "积分，积分换食物".
 
+- 2.1.10: "xem lại toàn bộ: tối ưu chưa, lệnh AI chuẩn chưa, tab rõ chưa, lệnh xung đột không, chỗ nào 1 thao tác chạy
+  liên tục làm chậm". Rà có đo trên dự án thử 2498 câu / phim 2 giờ 10 có bản lồng (`ruff`: không lỗi thật; CPU khi đứng
+  yên < 3 %; lần mở dự án đầu chạy nền ~15–60 s chuẩn bị âm thanh / sóng âm / ảnh timeline rồi thôi). Lỗi tìm ra + sửa:
+  (1) chuẩn bị âm thanh nghe trực tiếp đọc CẢ bản lồng (1,4 GB) + cấp thêm 1,4 GB RAM để đo độ to dù không có nhạc thêm
+  (~10–16 s CPU mỗi lượt) và mỗi lần đổi ô chỉnh sửa lúc đang chuẩn bị lại chạy thêm 1 lượt song song (mở dự án = 2 lượt
+  chồng, CPU 200–250 %) -> 0,01 s, không chạy chồng; tổng tích luỹ giảm nhạc trước tính lại ở mỗi khối ~20 ms của luồng
+  phát; (2) đang phát, timeline vẽ lại cả khung mỗi lần vị trí đổi (40–70 ms × ~25 lần / s -> giật) -> 0,6 ms; (3) lưu dự
+  án 176 -> 44 ms, ghi danh sách câu 112 -> 24 ms, đổi ô không đổi giá trị / mở dự án không ghi lại cả dự án; (4) ô "Hẹn
+  giờ đăng" (tab Xuất) trắng khi tắt -> theo theme; (5) tab Tự động: chọn Google / Hy-MT2 thì các mục AI (kỹ năng, sửa lỗi
+  nghe, lọc lời hát, kiểm tra, từ đệm) mờ đi + dòng giải thích (trước công tắc vẫn bật mà không có tác dụng); `widgets.Switch` bị khoá vẽ mờ (trước trông y như đang dùng được). Lời nhắc
+  AI: đúng hướng; điểm yếu (đề xuất, chưa làm): luật giữ đủ số vế ép dấu phẩy theo chữ Trung (B), p03 32 % câu dịch mất
+  dấu câu cuối (phim cũ 0 %) – nên có luật giữ dấu câu cuối; kỹ năng "Lồng tiếng – câu ngắn" (lược từ đệm) ngược với "từ
+  đệm cho vừa thời gian"; 22–31 % câu dịch dài hơn mức tối đa (bước lồng tiếng tự rút gọn). Xuống dòng khi hiện phụ đề
+  (A) vẫn chờ người dùng chọn. Tab Tự động 28 dòng phẳng – đề xuất chia nhóm Nghe / Dịch / Lồng tiếng / Xuất.
+
 ## Vấn đề đang mở
+- 2.1.10: chờ người dùng chọn làm tiếp: A (xuống dòng phụ đề ở dấu câu / không xé từ ghép, tên riêng), B (luật dấu phẩy
+  cho AI + kiểm tra dấu phẩy sai chỗ), luật giữ dấu câu cuối, sửa kỹ năng "Lồng tiếng – câu ngắn", chia nhóm tab Tự động.
+  Mở dự án phim dài sau cập nhật: phát video xem timeline có còn giật không, đổi cỡ chữ / màu có còn khựng không.
 - 2.1.9: chờ người dùng bấm lại "Dọn câu bịa / câu lặp" trên dự án p03 (câu #1019 thành "我不管闲事。", đã tích) -> "Dịch câu
   đã tích" -> "Tạo lại giọng các câu đã tích"; báo câu lặp kiểu khác còn sót (gửi chữ gốc + bản dịch).
 - 2.1.8: chờ người dùng (1) dự án phim p03: tab Phụ đề → Công cụ → Lời hát & nghe nhầm → "Dọn câu bịa / câu lặp" (phải

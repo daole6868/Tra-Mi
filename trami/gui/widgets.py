@@ -343,6 +343,8 @@ class Switch(QAbstractButton):
     def paintEvent(self, e):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if not self.isEnabled():
+            p.setOpacity(0.35)                                   # công tắc bị khoá: mờ đi cho dễ thấy
         r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         off_c, on_c = QColor(theme.CARD3), QColor(theme.ACCENT)
         t = self._pos

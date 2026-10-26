@@ -346,6 +346,11 @@ class ProjectPage(QWidget):
                             "Dịch bằng AI: câu dịch ngắn hơn hẳn thời gian nhân vật nói thì nói đầy đủ hơn – thêm từ "
                             "đệm / phụ từ (à, nhé, đấy, cơ, mà, thế…), xưng hô – không thêm ý, không dài quá → giọng "
                             "lồng không hụt so với miệng nhân vật. Tắt = chỉ giới hạn độ dài tối đa")
+        # 2.1.10: các mục AI chỉ chạy khi Công cụ dịch là AI – chọn Google / Hy-MT2 thì làm mờ + ghi rõ (trước: công tắc
+        # vẫn bật mà không có tác dụng gì, người dùng tưởng tool bỏ sót bước)
+        self.a_ai_note = label("Các mục AI ở trên chỉ chạy khi Công cụ dịch là AI (Gemini / DeepSeek / Claude / GPT / "
+                               "Ollama) – Google / Hy-MT2 bỏ qua.", "muted", wrap=True)
+        f.addRow(self.a_ai_note)
         # = công tắc "Tự tách câu dịch dài" ở tab Phụ đề (1 cài đặt chung split_long_trans, 2 công tắc luôn giống nhau)
         self.a_split_long = f.row("Tách câu dịch dài", Switch(bool(s.get("split_long_trans", True))),
                                   "Dịch xong cả phim -> câu dịch dài hơn mức đặt ở tab Phụ đề (mặc định 14 tiếng) được "
@@ -2000,12 +2005,27 @@ class ProjectPage(QWidget):
         if not force and key == getattr(self, "_audio_key", None) and self.player.live.mix is not None:
             self._audio_srcs = srcs
             return self._apply_audio_now()
+        if not force and key == getattr(self, "_audio_pending", None):
+            # đúng bộ lớp này đang được chuẩn bị ở nền: không chạy chồng thêm 1 lần (2.1.10 – trước đây mỗi lần đổi ô
+            # chỉnh sửa lúc đang chuẩn bị lại chạy thêm 1 lượt song song, mỗi lượt ~10–16 s CPU với phim 2 giờ)
+            self._audio_srcs = srcs
+            return
         self._audio_key = key
+        self._audio_pending = key
         self._audio_srcs = srcs
         pid = self.p.id
         self.audio_tab.show_state(pipeline.audio_state(self.p, ed, srcs), srcs)
 
+        def settled():
+            if getattr(self, "_audio_pending", None) == key:
+                self._audio_pending = None
+
+        def failed(m):
+            settled()
+            self.win.toast("Không chuẩn bị được âm thanh để nghe thử: " + m, "err")
+
         def done(mix):
+            settled()
             if not self.p or self.p.id != pid or self._audio_key != key:
                 return
             mix.solo = self.player.live.mix.solo if self.player.live.mix is not None else None
@@ -2015,8 +2035,7 @@ class ProjectPage(QWidget):
             if row is not None:
                 self._play_after_mix = None
                 self._play_line(row)      # vừa tạo lại giọng -> phát luôn câu đó bằng bản mới
-        run_async(lambda: pipeline.live_mix(Project(pid), ed), done,
-                  lambda m: self.win.toast("Không chuẩn bị được âm thanh để nghe thử: " + m, "err"))
+        run_async(lambda: pipeline.live_mix(Project(pid), ed), done, failed)
 
     def _fill_edit(self):
         e = self.p.edit
@@ -2181,12 +2200,15 @@ class ProjectPage(QWidget):
             return
         self.p.reload()
         ed = self.collect_edit()
+        before = self.p.edit
         cur = self.p.edit
         cur.update(ed)
+        extra = {pipeline.glossary_key(pipeline.target_lang(self.p, self.settings)): self.glossary.toPlainText(),
+                 "film_profile": self.profile_edit.toPlainText(), "tts_engine": self.d_engine.currentData()}
+        if cur == before and all(self.p.data.get(k) == v or not (self.p.data.get(k) or v) for k, v in extra.items()):
+            return    # không có gì đổi (mở dự án, chọn lại đúng giá trị cũ…): không ghi lại cả dự án (2.1.10)
         self.p.data["edit"] = cur
-        self.p.data[pipeline.glossary_key(pipeline.target_lang(self.p, self.settings))] = self.glossary.toPlainText()
-        self.p.data["film_profile"] = self.profile_edit.toPlainText()
-        self.p.data["tts_engine"] = self.d_engine.currentData()
+        self.p.data.update(extra)
         self.p.save()
         self._update_summary()
         self._update_timeline()
@@ -2973,6 +2995,16 @@ class ProjectPage(QWidget):
         if getattr(self, "d_engine_lbl", None) is not None:
             self.d_engine_lbl.setText("bằng: " + self.a_engine.currentText().split(" – ")[0] +
                                       " (đổi ở Cài đặt hoặc tab Tự động)")
+        from ..translate import LOCAL_ENGINES
+
+        eng = self.a_engine.currentData()
+        ai = eng not in LOCAL_ENGINES and eng != pipeline.NO_TRANSLATE
+        for name in ("a_skill", "a_clean", "a_songai", "a_review", "a_fill", "s_skill"):
+            w = getattr(self, name, None)
+            if w is not None:
+                w.setEnabled(ai)
+        if getattr(self, "a_ai_note", None) is not None:
+            self.a_ai_note.setVisible(not ai)
 
     def _translate_rows(self, rows: list[int] | None, only_empty: bool):
         """Dịch ngay ở tab Lồng tiếng: câu chưa dịch (rows None) / dịch lại câu đã tích; đã có bản lồng thì đọc luôn

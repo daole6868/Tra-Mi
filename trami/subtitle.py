@@ -4,8 +4,24 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
+
+
+_SCALARS = (str, int, float, bool, type(None))
+
+
+def _deep_copy(v):
+    """Chép sâu dict / list / tuple của dữ liệu câu (chỉ gồm số, chữ, dict, list)."""
+    t = type(v)
+    if t is dict:
+        return {k: _deep_copy(x) for k, x in v.items()}
+    if t is list or t is tuple:
+        if all(type(x) in _SCALARS for x in v):
+            return list(v) if t is list else v
+        out = [_deep_copy(x) for x in v]
+        return out if t is list else tuple(out)
+    return v
 
 
 @dataclass
@@ -18,7 +34,9 @@ class Segment:
     extra: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        # chép sâu tự viết thay dataclasses.asdict (nhanh ~4 lần: phim 2500 câu có mốc từng chữ 110 -> ~25 ms mỗi lần lưu)
+        return {"start": self.start, "end": self.end, "text": self.text, "trans": self.trans, "speaker": self.speaker,
+                "extra": _deep_copy(self.extra)}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Segment":
