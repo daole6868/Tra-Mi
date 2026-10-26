@@ -769,12 +769,14 @@ def _omni(settings: dict | None = None) -> OmniWorker:
 
 
 OMNI_SHORT_WORDS = 10   # câu OmniVoice ≤ 10 tiếng: trước 2.1.5 bị kéo dài gấp 2–2,5 lần (đọc lặp lời)
-# VieNeu v3 Turbo sinh giọng từng khung 0,08 s (3840 mẫu / 48 kHz); câu ≤ 4 tiếng bị chặn ở 13 khung + 5 khung mỗi tiếng
-# thêm (vieneu_utils.core_utils.max_expected_frames). Bộ đọc không dừng được (trượt dấu hiệu kết thúc) thì đọc lặp lời
-# tới đúng trần đó: "Được thôi" -> "được thôi được thôi" 18 khung = 1,44 s, "Mất điện rồi" -> x2 = 23 khung = 1,84 s.
+# VieNeu v3 Turbo sinh giọng từng khung 0,08 s (3840 mẫu / 48 kHz) và TỰ quyết lúc dừng. Câu ≤ 4 tiếng hay trượt chỗ dừng
+# rồi đọc lặp lời tới trần số khung của thư viện (13 khung + 5 mỗi tiếng thêm): "Được thôi" -> "được thôi được thôi"
+# 1,44 s. 2.1.7: tiến trình VieNeu hạ trần câu ngắn xuống sát độ dài đọc thật (`VN_SHORT_CAP` – thư viện đo 1 tiếng 6–9
+# khung, 2 tiếng 6–10, 3–4 tiếng 12–15) -> không đủ chỗ để đọc lặp 2–3 lần; phần lặp còn sót thì cắt (`voicefix.repeat_cut`).
 VN_FRAME = 0.08
 VN_CAP_SYL = 4
-# đọc lại câu chạm trần: thông số lấy mẫu mặc định của VieNeu, rồi "nóng" hơn (kiểu đọc Rõ ràng 0,6 dễ lặp lại y hệt)
+VN_SHORT_CAP = (0, 11, 14, 19, 22)   # trần số khung theo số tiếng (1–4)
+# chạm trần mà không thấy lặp để cắt -> đọc lại: thông số lấy mẫu mặc định của VieNeu, rồi "nóng" hơn
 VN_RETRY_PARAMS = ({}, {"temperature": 0.9, "top_k": 40, "top_p": 0.97})
 AI_PART_MIN = 5         # bộ đọc AI không đọc riêng vế < 5 tiếng (câu rất ngắn hay bị đọc lặp / bịa tiếng) -> đọc cả câu
 
@@ -785,10 +787,10 @@ def vn_short(text: str) -> bool:
 
 
 def vn_cap_hit(a: np.ndarray, sr: int, text: str) -> bool:
-    """Giọng VieNeu v3 Turbo của câu ≤ 4 tiếng dài tới sát trần số khung = bộ đọc không dừng, đọc lặp lời."""
+    """Giọng VieNeu v3 Turbo của câu ≤ 4 tiếng dài tới sát trần số khung = bộ đọc không dừng (đọc lặp / kéo dài)."""
     if not vn_short(text) or not sr:
         return False
-    cap = 13 + 5 * (len(re.findall(r"\w+", text)) - 1)
+    cap = VN_SHORT_CAP[len(re.findall(r"\w+", text))]
     return len(a) / sr >= (cap - 1.5) * VN_FRAME
 
 
@@ -800,9 +802,12 @@ def omni_short(text: str) -> bool:
 def synth_checked(worker: VieneuWorker, text: str, out: Path, cap_check: bool = False, report: dict | None = None,
                   **kw) -> Path:  # kw: voice, ref_audio, params, on_wait…
     """Đọc 1 câu rồi kiểm tra file giọng: im lặng / tiếng bíp / tiếng ù -> đọc lại 1 lần (hạt ngẫu nhiên khác).
-    Vẫn hỏng thì báo lỗi (câu đó không được ghép vào bản lồng tiếng). cap_check (VieNeu v3 Turbo): câu ≤ 4 tiếng đọc
-    tới sát trần số khung = đọc lặp lời -> đọc lại tối đa 2 lần với thông số lấy mẫu khác (`VN_RETRY_PARAMS`);
-    report["babble"] = 1 (đã đọc lại được) / 2 (vẫn lặp – giữ bản cuối)."""
+    Vẫn hỏng thì báo lỗi (câu đó không được ghép vào bản lồng tiếng). cap_check (VieNeu v3 Turbo, câu ≤ 4 tiếng): đọc
+    lặp lời -> cắt phần lặp (`voicefix.repeat_cut`, không đọc lại); chạm trần số khung mà không thấy chỗ cắt -> đọc lại
+    tối đa 2 lần với thông số lấy mẫu khác (`VN_RETRY_PARAMS`). report["babble"] = 1 (đã cắt / đọc lại được) / 2 (vẫn
+    lặp – giữ bản cuối)."""
+    from .voicefix import repeat_cut
+
     why, babble = None, 0
     tries = 2 + (len(VN_RETRY_PARAMS) if cap_check else 0)
     for attempt in range(tries):
@@ -815,13 +820,23 @@ def synth_checked(worker: VieneuWorker, text: str, out: Path, cap_check: bool = 
         except (OSError, EOFError, wave.Error):
             return Path(out)       # không đọc được kiểu file này -> bỏ qua bước kiểm tra
         why = voice_problem(a, sr)
-        if not why and cap_check and vn_cap_hit(a, sr, text):
-            babble += 1
-            if babble > len(VN_RETRY_PARAMS):   # đọc lại vẫn lặp: giữ bản này, báo câu để sửa lời / đổi giọng
+        if not why and cap_check and vn_short(text):
+            cut = repeat_cut(a, sr, text)
+            if cut:                # đọc lặp lời: giữ lần đọc đầu (mờ 15 ms ở chỗ cắt, không nghe tiếng tách)
+                a = a[:cut].copy()
+                f = min(len(a), int(0.015 * sr))
+                a[len(a) - f:] *= np.linspace(1.0, 0.0, f, dtype=a.dtype)
+                write_wav(out, a, sr)
                 if report is not None:
-                    report["babble"] = 2
+                    report["babble"] = 1
                 return Path(out)
-            continue
+            if vn_cap_hit(a, sr, text):
+                babble += 1
+                if babble > len(VN_RETRY_PARAMS):   # đọc lại vẫn lặp: giữ bản này, báo câu để sửa lời / đổi giọng
+                    if report is not None:
+                        report["babble"] = 2
+                    return Path(out)
+                continue
         if not why:
             if babble and report is not None:
                 report["babble"] = 1
@@ -1678,7 +1693,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             if spec.startswith(("omni:", "omniclone:", "omnid:")) and omni_short(text):
                 ex += "|dur2"   # 2.1.5: câu ngắn đọc trước đó bị OmniVoice kéo dài -> đọc lặp lời -> đọc lại
             elif spec.startswith(("vieneu:", "clone:")) and mode != "v3nano" and vn_short(text):
-                ex += "|cap2"   # 2.1.6: câu VieNeu ≤ 4 tiếng đọc trước đó có thể lặp lời -> đọc lại có kiểm tra
+                ex += "|cap3"   # 2.1.7: câu VieNeu ≤ 4 tiếng đọc trước đó có thể lặp lời -> đọc lại (trần thấp + cắt lặp)
             h = hashlib.md5((f"{text}|{spec}|{rate}|{pitch}|{mode}|{ex}" + (f"|take{take}" if take else ""))
                             .encode()).hexdigest()[:14]
             return work / (f"tts_{h}.mp3" if spec.startswith("edge:") else f"tts_{h}.wav")

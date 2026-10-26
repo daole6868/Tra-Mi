@@ -4,6 +4,8 @@
   Bộ đọc AI gặp chữ số hay đọc sai hoặc phát ra tiếng "bíp".
 - `voice_problem`: phát hiện file giọng hỏng (im lặng, tiếng ù một chiều, tiếng bíp / còi một tần số) để đọc lại.
 - `speech_level` + `level_gains`: câu nào nhỏ hơn hẳn các câu khác cùng giọng thì tăng lên cho đều.
+- `repeat_cut`: câu ngắn (≤ 4 tiếng) mà bộ đọc đọc lặp lời ("Được thôi" -> "được thôi được thôi") -> chỗ cắt sau lần đọc
+  đầu (so âm phần sau với phần trước – giống nhau mới cắt).
 - `lone_interjection`: câu CHỈ gồm từ cảm thán trong danh sách ("A!", "Ừm.", "Ái!", "Hả?") -> xoá trước khi lồng tiếng Việt;
   `strip_interjections`: bỏ vế chỉ gồm từ cảm thán trong câu dài ("Ừm, đúng vậy." -> "Đúng vậy."). Danh sách từ do người
   dùng điền (Cài đặt `interj_words`, 2.0.96) – chỉ lọc đúng các từ đó.
@@ -200,6 +202,126 @@ def level_gains(levels: dict, groups: dict, max_boost_db: float = 9.0, tol_db: f
         if 0.003 <= v < t * 10 ** (-tol_db / 20):
             out[k] = min(t / v, lim)
     return out
+
+
+# ------------------------------------------------------------------ đọc lặp lời (câu rất ngắn)
+# Bộ đọc AI sinh giọng từng khung và tự quyết lúc dừng. Câu 1–4 tiếng hay "trượt" chỗ dừng rồi đọc lại cả câu / đọc lại
+# vế cuối ("Thôi nào, đừng khóc" -> "… đừng khóc đừng khóc"). Nhận ra bằng cách so âm: phần sau 1 chỗ ngắt (lặng hoặc
+# trũng) phải GIỐNG phần trước nó (DTW trên MFCC). Đo (2.1.7): 3/3 file VieNeu lỗi người dùng gửi cắt đúng; 550 câu đọc
+# tự nhiên (3 giọng tổng hợp, có câu có dấu phẩy, tốc độ 0,7–1,2) không câu nào bị cắt.
+REPEAT_MAX_WORDS = 4
+REPEAT_THR = 1.5          # chi phí DTW trung bình / bước: lần đọc lặp 0,7–1,4; 2 cụm từ khác nhau ≥ 1,85
+REPEAT_MIN_FRAC = 0.65    # phần giữ lại ≥ 65 % độ dài 1 lần đọc ước lượng (không cắt giữa lần đọc đầu)
+_HOP = 0.01
+_FB: dict = {}
+
+
+def _mfcc(a: np.ndarray, sr: int) -> tuple[np.ndarray, np.ndarray]:
+    """MFCC 1–12 + năng lượng (dB) mỗi 10 ms."""
+    hop, win = int(_HOP * sr), int(0.025 * sr)
+    n_fft = 1 << (win - 1).bit_length()
+    m = max(0, (len(a) - win) // hop + 1)
+    if m == 0:
+        return np.zeros((0, 12)), np.zeros(0)
+    fb = _FB.get((sr, n_fft))
+    if fb is None:
+        def mel(f):
+            return 2595 * np.log10(1 + f / 700)
+        pts = 700 * (10 ** (np.linspace(mel(80.0), mel(min(7600.0, sr / 2)), 42) / 2595) - 1)
+        bins = np.fft.rfftfreq(n_fft, 1 / sr)
+        fb = np.stack([np.clip(np.minimum((bins - pts[i]) / (pts[i + 1] - pts[i]),
+                                          (pts[i + 2] - bins) / (pts[i + 2] - pts[i + 1])), 0, None) for i in range(40)])
+        _FB[(sr, n_fft)] = fb
+    idx = np.arange(win)[None, :] + hop * np.arange(m)[:, None]
+    p = np.abs(np.fft.rfft(a[idx] * np.hanning(win), n_fft)) ** 2
+    lm = np.log(p @ fb.T + 1e-10)
+    k = np.arange(lm.shape[1])
+    dct = np.cos(np.pi / lm.shape[1] * (k[None, :] + 0.5) * np.arange(1, 13)[:, None])
+    return lm @ dct.T, 10 * np.log10(p.sum(1) / n_fft + 1e-12)
+
+
+def _dtw_open(x: np.ndarray, y: np.ndarray, lo: float = 0.6, hi: float = 1.7) -> float:
+    """DTW từ đầu 2 dãy tới khi 1 dãy hết (dãy kia đi lo..hi lần độ dài) -> chi phí trung bình mỗi bước (nhỏ = giống)."""
+    n, m = len(x), len(y)
+    d = np.sqrt(((x[:, None, :] - y[None, :, :]) ** 2).sum(-1))
+    acc = np.full((n + 1, m + 1), np.inf)
+    acc[0, 0] = 0.0
+    for i in range(1, n + 1):
+        row, cur = d[i - 1], acc[i]
+        prev = np.minimum(acc[i - 1, :-1], acc[i - 1, 1:])
+        for j in range(1, m + 1):
+            cur[j] = row[j - 1] + min(prev[j - 1], cur[j - 1])
+    best = np.inf
+    j = np.arange(1, m + 1)
+    ok = (j >= lo * n) & (j <= hi * n)
+    if ok.any():
+        best = min(best, float((acc[n, 1:][ok] / (n + j[ok])).min()))
+    i = np.arange(1, n + 1)
+    ok = (i >= lo * m) & (i <= hi * m)
+    if ok.any():
+        best = min(best, float((acc[1:, m][ok] / (i[ok] + m)).min()))
+    return best
+
+
+def _breaks(sm: np.ndarray, s0: int, s1: int, pk: float) -> list[tuple[int, int]]:
+    """Chỗ có thể là ranh giới 2 lần đọc: đoạn lặng (≥ 30 ms, thấp hơn đỉnh 22 dB) -> (đầu, cuối);
+    chỗ trũng (thấp nhất trong ±60 ms, thấp hơn 2 bên ≥ 6 dB và thấp hơn đỉnh ≥ 12 dB) -> (v, v)."""
+    out = []
+    low = sm < pk - 22
+    i = s0
+    while i < s1:
+        if low[i]:
+            j = i
+            while j < s1 and low[j]:
+                j += 1
+            if j - i >= 3 and j < s1:
+                out.append((i, j))
+            i = j
+        i += 1
+    for v in range(s0 + 6, s1 - 6):
+        w = sm[v - 6:v + 7]
+        if (sm[v] == w.min() and sm[v] < pk - 12 and min(sm[v - 6:v].max(), sm[v + 1:v + 7].max()) - sm[v] >= 6
+                and not any(a - 3 <= v <= b + 3 for a, b in out)):
+            out.append((v, v))
+    return sorted(set(out))
+
+
+def repeat_cut(a: np.ndarray, sr: int, text: str) -> int | None:
+    """Câu ≤ 4 tiếng (không có từ lặp sẵn trong lời) mà giọng đọc lặp lời -> số mẫu giữ lại (hết lần đọc đầu); không
+    thấy lặp -> None. Chỉ cắt ở chỗ ngắt mà phần sau giống phần trước (cả câu hoặc vế cuối)."""
+    words = re.findall(r"\w+", (text or "").lower())
+    n = len(words)
+    if not 1 <= n <= REPEAT_MAX_WORDS or len(set(words)) < n or not sr or len(a) < sr * 0.3:
+        return None
+    inner = len(re.findall(r"[,;:]\s", text.strip().rstrip(",;:.!?…")))
+    exp = 0.05 + 0.22 * n + 0.12 * inner          # 1 lần đọc ở tốc độ thường (giây)
+    mf, en = _mfcc(np.asarray(a, np.float32), sr)
+    if len(en) < 30:
+        return None
+    pk = float(en.max())
+    voiced = en > pk - 30
+    on = np.flatnonzero(voiced)
+    s0, s1 = int(on[0]), int(on[-1]) + 1
+    if (s1 - s0) * _HOP < 0.8 * exp + 0.25:        # không dài hơn 1 lần đọc -> không có gì để cắt
+        return None
+    sm = np.convolve(en, np.ones(3) / 3, mode="same")
+    x = (mf - mf[voiced].mean(0)) / (mf[voiced].std(0) + 1e-6)
+    cuts = _breaks(sm, s0, s1, pk)
+    starts = [s0] + [b for _, b in cuts]           # lần lặp có thể là cả câu (từ đầu) hoặc vế sau 1 chỗ ngắt
+    lim = 120                                      # so tối đa 1,2 s mỗi bên
+    for g0, g1 in cuts:
+        if (g0 - s0) * _HOP < REPEAT_MIN_FRAC * exp:
+            continue
+        post = x[g1:min(s1, g1 + lim)][voiced[g1:min(s1, g1 + lim)]]
+        if len(post) < 20:
+            continue
+        for st in starts:
+            if st >= g0:
+                break
+            pre = x[st:g0][voiced[st:g0]]
+            if len(pre) >= 20 and _dtw_open(pre[-lim:], post) < REPEAT_THR:
+                return min(len(a), int((g0 + (4 if g1 > g0 else 1)) * _HOP * sr))
+    return None
 
 
 # tiếng cảm thán / tiếng đệm (không mang nghĩa) – câu chỉ gồm 1–2 tiếng này thì bỏ khi lồng tiếng Việt.

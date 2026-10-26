@@ -67,7 +67,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Hy-MT2 trên máy qua `hymt_worker.py`), `voicefix.py` (đọc số, phát hiện giọng AI hỏng, cân âm lượng),
   `gender.py` (đoán giọng nam/nữ mỗi người nói), `karaoke.py` (thời điểm từng từ cho phụ đề karaoke),
   `omni_design.py` (23 giọng OmniVoice chọn sẵn tạo theo mô tả; `omni_worker.fix_short_duration` – câu ngắn
-  không bị kéo dài / đọc lặp, 2.1.5; VieNeu đọc lặp câu ngắn: `tts.vn_cap_hit` + `synth_checked(cap_check=)`, 2.1.6), `trend_voices.py` (20 giọng VieNeu theo trend
+  không bị kéo dài / đọc lặp, 2.1.5; VieNeu đọc lặp câu ngắn: `tts.vn_cap_hit` + `synth_checked(cap_check=)`, 2.1.6; trần thấp `vieneu_worker.short_caps` + cắt phần lặp `voicefix.repeat_cut`, 2.1.7), `trend_voices.py` (20 giọng VieNeu theo trend
   `vieneu:trend:<mã>` = giọng dựng sẵn + kiểu đọc + hiệu ứng) + `voicefx.py` (hiệu ứng giọng chỉ bằng numpy).
 - `trami/audiomix.py` – quy tắc trộn âm thanh dùng chung cho xuất video (`video.build_and_render`) và bộ trộn trực tiếp
   `LiveMix` của trình phát (`player.LiveAudio` + `_Feeder` ở QThread riêng, QAudioSink); cài đặt ở `edit["audio"]`, tab `gui/audio_tab.py`.
@@ -228,7 +228,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (203 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (204 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1745,11 +1745,25 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `AI_PART_MIN` 5 tiếng (trước 2) -> đọc cả câu. Câu VieNeu ≤ 4 tiếng thêm "|cap2" vào mã file -> Tạo bản lồng tiếng là đọc
   lại 1 lần có kiểm tra. Đã thử cắt bỏ phần lặp tự động (chỗ lặng sau lần đọc đầu / độ giống) – đúng 3/3 file thật nhưng sai
   nhiều trên mẫu tự tạo -> KHÔNG dùng. Chưa chạy VieNeu thật (sandbox chặn HF).
+- 2.1.7: "câu #19 'Được thôi' tạo lại nhiều lần vẫn lặp – sao cứ đọc lại, không cho VieNeu đọc đúng câu được sao, bản cũ
+  làm tốt". VieNeu sinh giọng từng khung và TỰ quyết lúc dừng (không có tham số "đọc đúng N tiếng"); câu này trượt chỗ dừng
+  lần nào cũng vậy nên đọc lại (2.1.6) vô ích. Bản trước 2.1.3 không đọc riêng từng vế nên ít khi đưa cho VieNeu mẩu 2–3
+  tiếng. Sửa (không cần đọc lại): (1) `vieneu_worker.short_caps` thay `max_expected_frames` của thư viện (mọi module đã
+  import tên đó) – đoạn ≤ 4 tiếng không có emotion cue: trần `tts.VN_SHORT_CAP` 11 / 14 / 19 / 22 khung (thư viện 13 / 18 /
+  23 / 28; đọc thật 6–10 / 12–15) -> không đủ chỗ lặp 2–3 lần, lớp chặn bịa tiếng của thư viện cũng dùng trần này;
+  (2) `voicefix.repeat_cut` (MFCC 12 + DTW mở đầu-cuối, chỗ ngắt = đoạn lặng ≥ 30 ms hoặc chỗ trũng ≥ 6 dB; phần sau phải
+  GIỐNG phần trước – cả câu hoặc vế sau 1 chỗ ngắt – chi phí < `REPEAT_THR` 1,5; giữ ≥ 65 % 1 lần đọc ước lượng; lời có từ
+  lặp sẵn / > 4 tiếng -> bỏ qua) -> `synth_checked` cắt + mờ 15 ms, `report["babble"]` = 1; chạm trần mà không thấy lặp
+  mới đọc lại như 2.1.6. Mã file câu ngắn "|cap3" -> Tạo bản lồng tiếng đọc lại 1 lần. Đo: 3/3 file thật cắt đúng (nghe lại
+  bằng máy nghe tiếng Việt: đúng lời); bộ thử giọng piper (sherpa-onnx vits vi, 3 giọng, 550 câu đọc tự nhiên + 550 câu
+  lặp): 0 câu tự nhiên bị cắt, ~60 % câu lặp cắt đúng chỗ, 1 câu cắt hụt (mất 1 tiếng cuối), còn lại không nhận ra (lặp
+  dính liền). Chưa chạy VieNeu thật (sandbox chặn HF).
 
 ## Vấn đề đang mở
-- 2.1.6: chờ người dùng bấm "Tạo bản lồng tiếng" (câu VieNeu ≤ 4 tiếng đọc lại 1 lần có kiểm tra; câu có vế ngắn đọc cả
-  câu) rồi nghe các câu ngắn: còn lặp không, thông báo có "N câu ngắn VieNeu đọc lặp lời – đã tự đọc lại" / "⚠ câu … vẫn
-  đọc lặp lời" không. Vẫn lặp nhiều -> thử Cài đặt kiểu đọc VieNeu "Tự nhiên" (Rõ ràng 0,6 có thể là nguyên nhân).
+- 2.1.7: chờ người dùng bấm "Tạo bản lồng tiếng" (câu VieNeu ≤ 4 tiếng đọc lại 1 lần với trần thấp + cắt lặp) rồi nghe
+  câu #19 "Được thôi" và các câu ngắn khác; thông báo có "N câu ngắn VieNeu đọc lặp lời – đã tự cắt phần lặp / đọc lại".
+  Còn lặp -> xin file `work\tts\tts_*.wav` của câu đó; câu ngắn bị cụt chữ cuối (trần thấp quá với giọng đọc chậm) ->
+  nới `VN_SHORT_CAP`.
 - 2.1.4: chờ người dùng tải HT-Demucs ở tab Tài liệu (máy chủ dl.fbaipublicfiles.com của Meta – sandbox bị chặn, chưa
   tải thật) rồi chọn ở Cài đặt → Mô hình tách giọng, bấm "Tách ngay" (tab Lồng tiếng mục 1) – xem tốc độ, nghe tab Âm thanh.
 - 2.1.3: chờ người dùng chạy lại "1. Nghe & tách câu" trên phim thật (thông báo có "thêm dấu phẩy ở N chỗ…", "bỏ N đoạn

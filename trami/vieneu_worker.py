@@ -86,6 +86,43 @@ def _seed(n: int) -> None:
         pass
 
 
+def short_caps(caps=None) -> int:
+    """Hạ trần số khung của VieNeu v3 Turbo cho đoạn ≤ 4 tiếng xuống sát độ dài đọc thật (`tts.VN_SHORT_CAP`).
+    Thư viện cho 13 khung + 5 mỗi tiếng thêm (gấp ≥ 1,5 lần đọc thật) – câu ngắn trượt chỗ dừng là đọc lặp lời tới đúng
+    trần đó ("được thôi được thôi"). Trần thấp -> không đủ chỗ đọc lặp; lớp chặn "bịa thêm" của thư viện cũng dùng trần
+    này nên tự đọc lại khi chạm trần. Đoạn có tiếng cười / thở dài (emotion cue) và đoạn dài giữ trần cũ.
+    Trả về số module đã thay hàm (0 = bản VieNeu không có hàm này)."""
+    try:
+        import vieneu_utils.core_utils as cu
+    except Exception:  # noqa: BLE001
+        return 0
+    if caps is None:
+        from .tts import VN_SHORT_CAP as caps
+    orig = getattr(cu, "max_expected_frames", None)
+    if orig is None or not callable(getattr(cu, "syllable_count", None)):
+        return 0
+    orig = getattr(orig, "_trami_orig", orig)
+
+    def capped(phonemes):
+        cap = orig(phonemes)
+        try:
+            if "<|emotion_" in (phonemes or ""):
+                return cap
+            syl = int(cu.syllable_count(phonemes))
+        except Exception:  # noqa: BLE001
+            return cap
+        return min(cap, caps[syl]) if 1 <= syl < len(caps) else cap
+    capped._trami_orig = orig  # type: ignore[attr-defined]
+    n = 0
+    for name, mod in list(sys.modules.items()):   # cả các module đã "from … import max_expected_frames"
+        if (name == "vieneu_utils.core_utils" or name.startswith("vieneu")) and mod is not None:
+            cur = getattr(mod, "max_expected_frames", None)
+            if cur is not None and getattr(cur, "_trami_orig", cur) is orig:
+                setattr(mod, "max_expected_frames", capped)
+                n += 1
+    return n
+
+
 def _reply(out, obj: dict) -> None:
     out.write(MARK + json.dumps(obj, ensure_ascii=False) + "\n")
     out.flush()
@@ -119,6 +156,8 @@ def main(mode: str = "v3turbo") -> None:
     except Exception as e:  # noqa: BLE001
         _reply(proto, {"error": f"Không nạp được VieNeu: {type(e).__name__}: {e}"})
         return
+    if mode != "v3nano" and short_caps():
+        print("[Subvideo] VieNeu: câu ≤ 4 tiếng dùng trần số khung thấp (chống đọc lặp lời)", file=sys.stderr, flush=True)
     _reply(proto, {"ready": True, "sr": sr})
     one_chunk = {"batch_size": 1} if _small_card() else {}
     for line in sys.stdin:

@@ -303,6 +303,27 @@ def _speech_like(sr: int, dur: float = 1.0, seed: int = 0) -> np.ndarray:
     return (0.2 * voiced * env + 0.02 * rng.standard_normal(len(t)) * (1 - env)).astype(np.float32)
 
 
+_VOWELS = {"a": (800, 1200), "i": (300, 2300), "u": (320, 800), "e": (500, 1900), "o": (500, 900), "ơ": (520, 1400)}
+
+
+def _reading(sr: int, vowels: str, rate: float = 1.0, f0: float = 170.0, seed: int = 0) -> np.ndarray:
+    """1 "lần đọc" giả: mỗi tiếng 1 nguyên âm (2 formant khác nhau -> MFCC khác nhau), nghỉ 40 ms giữa các tiếng.
+    Đọc lại cùng chuỗi nguyên âm (hơi nhanh / chậm, cao độ khác chút) = đọc lặp lời."""
+    rng = np.random.default_rng(seed)
+    out = []
+    for i, v in enumerate(vowels):
+        dur, f = 0.22 / rate, f0 + 12 * i
+        t = np.arange(int(dur * sr)) / sr
+        ph = 2 * np.pi * np.cumsum(f - 30 * t / dur) / sr
+        f1, f2 = _VOWELS[v]
+        x = sum((np.exp(-((k * f - f1) / 130) ** 2) + 0.7 * np.exp(-((k * f - f2) / 160) ** 2) + 0.03 / k) * np.sin(k * ph)
+                for k in range(1, 30))
+        env = np.minimum(1, np.minimum(t / 0.03, (dur - t) / 0.04))
+        out += [(0.3 * x * env / np.abs(x).max() + 0.003 * rng.standard_normal(len(t))).astype(np.float32),
+                np.zeros(int(0.04 * sr / rate), np.float32)]
+    return np.concatenate(out[:-1])
+
+
 def _fake_audio(path, dur, freq=500):
     subprocess.run([ff.ffmpeg_bin(), "-loglevel", "error", "-y", "-f", "lavfi", "-i",
                     f"sine=frequency={freq}:duration={dur}", str(path)], check=True)
@@ -1100,45 +1121,69 @@ def test_omnivoice_short_lines_not_stretched(monkeypatch, tmp_path):
 
 
 def test_vieneu_short_lines_repeat_guard(monkeypatch, tmp_path):
-    """VieNeu v3 Turbo: câu ≤ 4 tiếng không dừng được -> đọc lặp lời tới đúng trần số khung (13 + 5 mỗi tiếng thêm,
-    0,08 s/khung) – file người dùng gửi: "Được thôi," 1,44 s, "Mất điện rồi," 1,84 s, "Thôi nào, đừng khóc," 2,16 s.
-    Tool nhận ra, đọc lại với thông số lấy mẫu khác; vẫn lặp thì giữ + báo số câu; vế < 5 tiếng không đọc riêng."""
+    """VieNeu v3 Turbo: câu ≤ 4 tiếng không dừng được -> đọc lặp lời tới trần số khung – file người dùng gửi: "Được
+    thôi," 1,44 s, "Mất điện rồi," 1,84 s, "Thôi nào, đừng khóc," 2,16 s. 2.1.7: tiến trình VieNeu hạ trần câu ngắn
+    (`vieneu_worker.short_caps`); đọc lặp -> CẮT phần lặp (không đọc lại); chạm trần mà không lặp (kéo dài / bịa tiếng
+    khác) -> đọc lại với thông số khác; vẫn vậy thì giữ + báo số câu; vế < 5 tiếng không đọc riêng."""
+    import re
     import types
 
-    from trami import pipeline, tts
+    from trami import pipeline, tts, vieneu_worker
 
     sr = 48000
     z = lambda sec: np.zeros(int(sec * sr), np.float32)   # noqa: E731
     assert tts.vn_cap_hit(z(1.44), sr, "Được thôi,") and tts.vn_cap_hit(z(1.84), sr, "Mất điện rồi,")
-    assert tts.vn_cap_hit(z(2.16), sr, "Thôi nào, đừng khóc,")                  # 27/28 khung
-    assert not tts.vn_cap_hit(z(0.7), sr, "Mất điện rồi,")
+    assert tts.vn_cap_hit(z(2.16), sr, "Thôi nào, đừng khóc,") and tts.vn_cap_hit(z(1.1), sr, "Được thôi,")
+    assert not tts.vn_cap_hit(z(0.7), sr, "Mất điện rồi,") and not tts.vn_cap_hit(z(1.2), sr, "Thôi nào, đừng khóc,")
     assert not tts.vn_cap_hit(z(3.0), sr, "Tôi vừa về đã nghe nói anh sắp đi.")   # > 4 tiếng: không có trần riêng
 
-    class Fake:   # n lần đầu đọc lặp (dài tới trần), sau đó đọc đúng
+    # trần số khung trong tiến trình VieNeu (giả lập module thư viện: 13 khung + 5 mỗi tiếng thêm)
+    cu = types.ModuleType("vieneu_utils.core_utils")
+    cu.syllable_count = lambda ph: len(ph.split())
+    cu.max_expected_frames = lambda ph: (13 + 5 * (len(ph.split()) - 1)) if len(ph.split()) <= 4 else 24 + 2 * len(ph)
+    v3 = types.ModuleType("vieneu.v3turbo")
+    v3.max_expected_frames = cu.max_expected_frames
+    monkeypatch.setitem(sys.modules, "vieneu_utils", types.ModuleType("vieneu_utils"))
+    monkeypatch.setitem(sys.modules, "vieneu_utils.core_utils", cu)
+    monkeypatch.setitem(sys.modules, "vieneu.v3turbo", v3)
+    assert vieneu_worker.short_caps() == 2 and vieneu_worker.short_caps() == 2      # gọi lại không chồng 2 lớp
+    assert [v3.max_expected_frames(x) for x in ("a", "a b", "a b c", "a b c d")] == [11, 14, 19, 22]
+    assert cu.max_expected_frames("a b c d e") == 24 + 2 * 9                         # câu dài: trần cũ
+    assert cu.max_expected_frames("<|emotion_1|> a") == 13 + 5                       # có tiếng cười / thở: trần cũ
+
+    class Fake:   # n lần đầu đọc hỏng: "loop" = đọc lại cả câu / "drag" = bịa thêm tiếng khác tới trần
         sr = 48000
 
-        def __init__(self, bad=0, bad_text=None):
-            self.bad, self.bad_text, self.calls = bad, bad_text, []
+        def __init__(self, bad=0, bad_text=None, kind="loop"):
+            self.bad, self.bad_text, self.kind, self.calls = bad, bad_text, kind, []
 
         def ensure_started(self, progress=None, cancel=None):
             pass
 
         def synth(self, text, out, seed=None, params=None, **kw):
             self.calls.append((text, dict(params or {})))
-            n = sum(1 for t, _ in self.calls if t == text)
-            hit = (self.bad_text is None or text == self.bad_text) and n <= self.bad
-            cap = (13 + 5 * (len(text.split()) - 1)) * tts.VN_FRAME
-            return tts.write_wav(out, _speech_like(sr, cap if hit else 0.3 + 0.15 * len(text.split())), sr)
-    f, rep = Fake(1), {}
-    tts.synth_checked(f, "Được thôi,", tmp_path / "a.wav", cap_check=True, report=rep, params={"temperature": 0.6})
-    assert rep == {"babble": 1} and len(f.calls) == 2 and f.calls[1][1] == {}     # đọc lại: thông số mặc định VieNeu
+            k = sum(1 for t, _ in self.calls if t == text)
+            n = len(re.findall(r"\w+", text))
+            v = "aiueoơ"[:min(n, 6)]
+            a = _reading(sr, v, seed=k)
+            if (self.bad_text is None or text == self.bad_text) and k <= self.bad:
+                a = (np.concatenate([a, z(0.25), _reading(sr, v, 1.08, 173, seed=k + 7)]) if self.kind == "loop"
+                     else _reading(sr, "aiueoơ"[:n + 2], seed=k))
+            return tts.write_wav(out, np.concatenate([z(0.05), a, z(0.1)]), sr)
     f, rep = Fake(9), {}
+    tts.synth_checked(f, "Được thôi,", tmp_path / "a.wav", cap_check=True, report=rep, params={"temperature": 0.6})
+    a, _ = tts.read_wav(tmp_path / "a.wav")
+    assert rep == {"babble": 1} and len(f.calls) == 1 and 0.5 < len(a) / sr < 0.65   # cắt phần lặp, không đọc lại
+    f, rep = Fake(1, kind="drag"), {}
     tts.synth_checked(f, "Được thôi,", tmp_path / "b.wav", cap_check=True, report=rep, params={"temperature": 0.6})
+    assert rep == {"babble": 1} and len(f.calls) == 2 and f.calls[1][1] == {}     # đọc lại: thông số mặc định VieNeu
+    f, rep = Fake(9, kind="drag"), {}
+    tts.synth_checked(f, "Được thôi,", tmp_path / "c.wav", cap_check=True, report=rep, params={"temperature": 0.6})
     assert rep == {"babble": 2} and len(f.calls) == 3 and f.calls[2][1]["temperature"] == 0.9
-    assert (tmp_path / "b.wav").exists()                                          # vẫn lặp: giữ bản cuối + báo
+    assert (tmp_path / "c.wav").exists()                                          # vẫn vậy: giữ bản cuối + báo
     f = Fake(9)
-    tts.synth_checked(f, "Được thôi,", tmp_path / "c.wav")                        # Nano / OmniVoice: 1 lần như cũ
-    assert len(f.calls) == 1
+    tts.synth_checked(f, "Được thôi,", tmp_path / "d.wav")                        # Nano / OmniVoice: như cũ
+    assert len(f.calls) == 1 and tts.read_wav(tmp_path / "d.wav")[0].size / sr > 1.0
 
     fake = Fake(1, "Mất điện rồi.")
     monkeypatch.setattr(tts, "vieneu_available", lambda: True)
@@ -1154,10 +1199,33 @@ def test_vieneu_short_lines_repeat_guard(monkeypatch, tmp_path):
     read = [t for t, _ in fake.calls]
     assert "Được thôi, nhanh lên nào các bạn ơi." in read and "Được thôi," not in read    # vế 2 tiếng: đọc cả câu
     assert "Chúng ta đi thôi nào các bạn," in read and st["clauses"] == 1                 # vế đủ dài: đọc từng vế
-    assert read.count("Mất điện rồi.") == 2 and st["babble_fixed"] == 1 and not st.get("babble_left")
+    assert read.count("Mất điện rồi.") == 1 and st["babble_fixed"] == 1 and not st.get("babble_left")
     proj = types.SimpleNamespace(data={"dub_stats": dict(st, babble_left=[7, 3])})
     msg = pipeline.dub_summary(proj)
-    assert "1 câu ngắn VieNeu đọc lặp lời – đã tự đọc lại" in msg and "⚠ câu 3, 7 vẫn đọc lặp lời" in msg
+    assert "1 câu ngắn VieNeu đọc lặp lời – đã tự cắt phần lặp" in msg and "⚠ câu 3, 7 vẫn đọc lặp" in msg
+
+
+def test_repeat_cut_only_cuts_real_repeats():
+    """`voicefix.repeat_cut`: chỉ cắt khi phần sau chỗ ngắt GIỐNG phần trước (đọc lại cả câu / vế cuối); câu đọc tự
+    nhiên có chỗ ngừng, câu dài hơn 4 tiếng, lời có từ lặp sẵn ("Đi đi") -> không cắt."""
+    from trami.voicefix import repeat_cut
+
+    sr = 48000
+    z = lambda s: np.zeros(int(s * sr), np.float32)   # noqa: E731
+    a = _reading(sr, "ai")
+    loop = np.concatenate([z(0.05), a, z(0.25), _reading(sr, "ai", 1.08, 172, 5), z(0.1)])
+    c = repeat_cut(loop, sr, "Được thôi.")
+    assert c is not None and abs(c / sr - (0.05 + len(a) / sr)) < 0.08
+    b = _reading(sr, "oeu", seed=3)
+    tail = np.concatenate([z(0.05), b, z(0.05), _reading(sr, "eu", 1.05, 175, 9), z(0.06),
+                           _reading(sr, "eu", 0.95, 168, 11), z(0.1)])                    # "… đừng khóc đừng khóc"
+    c = repeat_cut(tail, sr, "Thôi nào, đừng khóc.")
+    assert c is not None and abs(c / sr - (0.05 + len(b) / sr)) < 0.08
+    assert repeat_cut(np.concatenate([z(0.05), _reading(sr, "aiueoơ"), z(0.1)]), sr, "Được thôi.") is None
+    pause = np.concatenate([z(0.05), _reading(sr, "ao"), z(0.3), _reading(sr, "iu", seed=4), z(0.1)])
+    assert repeat_cut(pause, sr, "Thôi nào, đừng khóc.") is None
+    assert repeat_cut(loop, sr, "Đi đi.") is None and repeat_cut(loop, sr, "Thôi được rồi, mình đi về.") is None
+    assert repeat_cut(z(0.2), sr, "Ừ.") is None
 
 
 def test_dub_placement_no_overlap(tmp_path, monkeypatch):
