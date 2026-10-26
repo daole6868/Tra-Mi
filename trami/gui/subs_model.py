@@ -247,6 +247,8 @@ class SubsModel(QAbstractTableModel):
             if c == C_ZH:
                 if s.extra.get("noise"):
                     return QColor("#B98CFF")       # tím = nghi nhạc / tiếng động bị nghe thành lời
+                if s.extra.get("asr_repeat"):
+                    return QColor("#F28FB0")       # hồng = còn 1 cụm lặp liền nhau / 2 câu liền giống nhau
                 if s.extra.get("asr_unsure"):
                     return QColor("#6FC8E8")       # xanh = 2 bộ nghe ra khác nhau, chưa chọn được -> nghe lại
                 if s.extra.get("from_asr"):
@@ -272,6 +274,10 @@ class SubsModel(QAbstractTableModel):
                 return tip
             if c == C_ZH and s.extra.get("noise"):
                 return f"⚠ Nghi nghe nhầm: {s.extra['noise']}\nNghe lại câu này – đúng là nhạc / tiếng động thì Xoá"
+            if c == C_ZH and s.extra.get("asr_repeat"):
+                return f"⚠ Nghi bộ nghe lặp lời: \"{s.extra['asr_repeat']}\" lặp liền nhau (hoặc câu bên cạnh gần giống " \
+                       "hệt). Nghe lại – nói 1 lần thì sửa chữ / Xoá câu thừa; hoặc tab Phụ đề → Công cụ → Lời hát & " \
+                       "nghe nhầm → 'Dọn câu bịa / câu lặp'"
             if c == C_ZH and s.extra.get("ai_song") and s.extra.get("song"):
                 return f"🎵 AI: lời bài hát – {s.extra['ai_song']}\nKhông lồng tiếng câu này. Là lời thoại thật: tích rồi " \
                        "bấm 'Không phải nhạc'"
@@ -322,6 +328,7 @@ class SubsModel(QAbstractTableModel):
                 s.text = " ".join(v.split())
                 s.extra.pop("src_unsure", None)   # người dùng đã xem / sửa
                 s.extra.pop("asr_unsure", None)
+                s.extra.pop("asr_repeat", None)
             elif c == C_VI:
                 s.trans = " ".join(v.split())
                 s.extra.pop("fit", None)   # bản dịch đổi -> cần tạo lại bản lồng để đo lại

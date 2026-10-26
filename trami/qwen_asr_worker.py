@@ -3,7 +3,7 @@ Cùng giao thức với vieneu_worker (mỗi dòng 1 JSON, tiền tố @@TRAMI@@
 sập giao diện, tắt tiến trình là trả hết bộ nhớ GPU cho bước sau (tách giọng, lồng tiếng).
 
   vào : {"cmd": "asr", "wav": "x.wav", "spans": [[đầu, cuối], ...], "language": "zh", "prompt": "", "align": true,
-         "conf": false}
+         "conf": false, "rep_penalty": 1.2 (tuỳ chọn – nghe lại khúc nghi lặp vòng, 2.1.8)}
         {"cmd": "align", "wav": "x.wav", "items": [[đầu, cuối, "lời"], ...], "language": "zh"}
   ra  : @@TRAMI@@{"ok": true, "items": [{"text": "...", "words": [[chữ, đầu, cuối], ...], "conf": 0.93}]}
         (giây, tính từ đầu khúc; "conf" khi hỏi "conf": true = xác suất trung bình của các chữ bộ nghe chọn;
@@ -198,7 +198,8 @@ def main(repo: str = "Qwen/Qwen3-ASR-1.7B-hf") -> None:
     except Exception:  # noqa: BLE001
         text_id = None
 
-    def transcribe(clips, lang, prompt, lo: float, hi: float, conf: bool = False) -> tuple[list[str], list]:
+    def transcribe(clips, lang, prompt, lo: float, hi: float, conf: bool = False,
+                   rep: float | None = None) -> tuple[list[str], list]:
         texts = [""] * len(clips)
         confs: list = [None] * len(clips)
         found: list = [None] * len(clips)   # tiếng bộ nghe tự nhận ra (khi không ép tiếng)
@@ -214,6 +215,8 @@ def main(repo: str = "Qwen/Qwen3-ASR-1.7B-hf") -> None:
             longest = max(len(clips[k]) for k in part) / SR
             rec = TokenConf() if conf else None
             gkw = {"logits_processor": LogitsProcessorList([rec])} if rec is not None else {}
+            if rep:
+                gkw["repetition_penalty"] = float(rep)   # phạt chữ đã viết -> bộ nghe không "lặp vòng" được nữa
             with torch.inference_mode():
                 out = model.generate(**inputs, max_new_tokens=int(longest * 10) + 48, do_sample=False, **gkw)
             gen = out[:, inputs["input_ids"].shape[1]:]
@@ -273,7 +276,7 @@ def main(repo: str = "Qwen/Qwen3-ASR-1.7B-hf") -> None:
             found: list = [None] * len(clips)
             if texts is None:
                 texts, confs = transcribe(clips, lang, req.get("prompt") or "", 0.0, 0.75 if want_align else 1.0,
-                                          conf=bool(req.get("conf")))
+                                          conf=bool(req.get("conf")), rep=req.get("rep_penalty"))
                 found = state.pop("found", found)
                 if want_align and dev != "cpu":
                     torch.cuda.empty_cache()   # trả bộ nhớ tạm của bước nghe trước khi nạp bộ căn thời gian

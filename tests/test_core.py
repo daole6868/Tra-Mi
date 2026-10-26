@@ -7256,7 +7256,7 @@ def test_dual_assign_merge_and_ai_pick():
 
 
 def test_names_context_candidates_and_fix():
-    """Tên riêng: lấy từ bảng tên riêng + hồ sơ phim, gợi ý kèm tiêu đề / mô tả video; chỗ đọc giống tên (cùng âm) mà
+    """Tên riêng: lấy từ bảng tên riêng + hồ sơ phim, gợi ý chỉ gồm tên (không tiêu đề video); chỗ đọc giống tên (cùng âm) mà
     viết khác -> sửa (tên 2 chữ phải cùng cả thanh điệu, không đổi từ thông dụng); chọn câu nghe lại thì lỏng hơn."""
     pytest.importorskip("pypinyin")
     from trami import names
@@ -7271,7 +7271,7 @@ def test_names_context_candidates_and_fix():
         nm = names.names_of(p, {})
         assert nm == ["延旭将军", "万仙盟", "林北"]
         ctx = names.context_text(p, {}, nm)
-        assert ctx.startswith("热词：延旭将军、万仙盟、林北") and "视频标题：【万仙盟】" in ctx and "标签：仙侠" in ctx
+        assert ctx == "热词：延旭将军、万仙盟、林北"     # 2.1.8: chỉ tên – tiêu đề / mô tả / thẻ video không gửi bộ nghe
         assert names.candidates("临北师兄，你来了。", nm) == [(0, 2, "林北")]
         assert names.candidates("林贝，快走！", nm) == [] and names.candidates("林贝，快走！", nm, loose=True)
         assert names.candidates("他在万先盟等你", nm) == [(2, 5, "万仙盟")]
@@ -7395,8 +7395,11 @@ def test_recognize_firered_engine_and_fallback(monkeypatch, sample_video):
         assert pipeline.recognize(p, settings=dict(st)) == 2
         assert used[-1][0] == "firered" and p.data["asr_engine_used"] == "firered" and not p.data.get("asr_warning")
         monkeypatch.setattr(models, "firered_ready", lambda: False)
+        p.data["video_meta"] = {"title": "林北下山第3集", "description": "全球海平面暴涨，人人在海上搏命。"}
         pipeline.recognize(p, settings=dict(st))
-        assert used[-1][0] == "qwen3" and "FireRedASR2" in p.data["asr_warning"] and "热词：林北" in used[-1][1]
+        assert used[-1][0] == "qwen3" and "FireRedASR2" in p.data["asr_warning"] and used[-1][1] == ""  # như 2.0.99
+        pipeline.recognize(p, settings=dict(st, asr_context=True))      # bật gợi ý tên: chỉ tên, không tiêu đề video
+        assert used[-1][1] == "热词：林北"
         assert p.data["asr_engine_used"] == "qwen3"
         monkeypatch.setattr(models, "firered_ready", lambda: True)
         pipeline.recognize(p, language="ja", settings=dict(st))
@@ -7853,6 +7856,96 @@ def test_asr_resume_progress_and_foreign_lines(tmp_path, monkeypatch):
     # khúc chép toàn chữ Latin cũng là tiếng Anh, không cần nghe lại
     out = asr_qwen.foreign_pass([(0, 1, "OK let's go"), (1, 2, "好的OK")], [0.9, 0.9], wav, st, "zh")
     assert out == {0: ("OK let's go", "en")}
+
+
+def test_asr_guard_echo_repeat_and_clean(tmp_path, monkeypatch):
+    """2.1.8: bộ nghe chép lời gợi ý / lặp vòng. (1) Khi nghe: khúc chép lời gợi ý -> nghe lại không gợi ý, vẫn không có
+    lời -> bỏ; khúc có 1 cụm lặp liền nhau -> nghe lại không gợi ý + phạt lặp: ra 1 lần -> bỏ lần lặp, vẫn 2 lần (nói 2
+    lần thật) -> giữ; quyết định nhớ trong tiến độ nghe. (2) Dự án đã nghe (bản 2.1.0–2.1.7): "Dọn câu bịa / câu lặp" bỏ
+    câu chép tiêu đề / mô tả / thẻ video (câu thuyết minh đọc nguyên văn ở tốc độ thường thì giữ), sửa câu lặp, gộp 2
+    câu liền giống nhau, giữ + tô màu câu nói 2 lần thật; Hoàn tác sửa khôi phục."""
+    from trami import align, asr_qwen, pipeline
+    from trami.project import Project
+    from trami.tts import write_wav
+
+    assert align.repeat_block("从没有让别从没有让别人的道理。") == "从没有让别"
+    assert align.drop_repeat("对异兽气息的感知极为敏锐。龙蛋的孵化度目前感知极为敏锐，龙蛋的孵化度目前飙到了五十多，",
+                             "感知极为敏锐龙蛋的孵化度目前") == "对异兽气息的感知极为敏锐，龙蛋的孵化度目前飙到了五十多，"
+    assert align.repeat_block("哈哈哈哈哈哈哈哈") is None and align.repeat_block("走了，走了，全走了。") is None
+    assert align.prompt_echo("视频标题：（1-3季）全民垂钓我百万倍增幅！")
+    assert not align.prompt_echo("林北，骆星，快跑！", "热词：林北、骆星、王放")    # 2 tên cạnh nhau trong câu thật
+    assert not align.prompt_echo("没触发百万倍增幅，", "（1-3季）全民垂钓我百万倍增幅！")
+
+    wav = tmp_path / "asr16k_vocals.wav"
+    write_wav(wav, (np.random.default_rng(0).standard_normal(16000 * 20) * 0.01).astype(np.float32), 16000)
+    spans = [(0.5, 2.0), (5.0, 6.5), (10.0, 11.5), (15.0, 16.5)]
+    monkeypatch.setattr(asr_qwen, "_spans", lambda audio, settings: list(spans))
+    first = {0.5: "你好，欢迎回来。", 5.0: "林北骆星王放。", 10.0: "差点在船上给你跪了，差点在船上给你跪了。",
+             15.0: "我不是故意的，我不是故意的！"}
+    again = {5.0: "", 10.0: "差点在船上给你跪了。", 15.0: "我不是故意的，我不是故意的！"}
+    calls: list = []
+
+    class W:
+        def call(self, req, progress=None, cancel=None):
+            calls.append(req)
+            src = again if req.get("rep_penalty") else first
+            return {"items": [{"text": src[a], "conf": 0.95} for a, _b in req["spans"]]}
+    monkeypatch.setattr(asr_qwen, "asr_worker", lambda engine, settings=None: W())
+    st = {"align_words": False, "asr_relisten": False, "asr_lang_check": False,
+          "glossary": "林北=Lâm Bắc\n骆星=Lạc Tinh\n王放=Vương Phóng"}
+    stats: dict = {}
+    segs = asr_qwen.transcribe_qwen(wav, st, "zh", stats=stats)
+    assert [x.text for x in segs] == ["你好，欢迎回来。", "差点在船上给你跪了。", "我不是故意的，我不是故意的！"]
+    assert stats["echo"] == 1 and stats["repeat_fixed"] == 1 and stats["repeat_kept"] == 1
+    re_req = [c for c in calls if c.get("rep_penalty")]
+    assert len(re_req) == 1 and re_req[0]["prompt"] == "" and [x[0] for x in re_req[0]["spans"]] == [5.0, 10.0, 15.0]
+    assert calls[0]["prompt"] == "热词：林北、骆星、王放"      # như 2.0.99: chỉ tên trong Bảng thuật ngữ ở Cài đặt
+    calls.clear()
+    stats = {}
+    asr_qwen.transcribe_qwen(wav, st, "zh", stats=stats)      # chạy lại (tiến độ còn): không nghe lại lần nữa
+    assert not calls and stats["echo"] == 1 and stats["repeat_fixed"] == 1
+
+    # dự án đã nghe bằng bản cũ: dọn câu bịa / câu lặp
+    p = Project.create("dọn câu lặp")
+    try:
+        p.data["video_meta"] = {"title": "（1-3季）全民垂钓我百万倍增幅！全球海平面暴涨，人人在海上搏命。",
+                                "description": "别人钓烂鱼，他一小时连出双史诗。穿越成底层杂鱼的林北，觉醒百万倍垂钓系统！",
+                                "tags": ["系统", "全球", "增幅", "全民", "杂鱼"]}
+        p.segments = [Segment(0.0, 0.3, "视频标题：（1-3季）全民垂钓我百万倍增幅！", "Tiêu đề…", "S1"),
+                      Segment(1.0, 1.2, "全球海平面暴涨，人人在海上搏命。", "Nước biển dâng…", "S1"),
+                      Segment(2.0, 5.0, "系统、全球、增幅、全民、杂鱼。", "Hệ thống…", "S1"),
+                      Segment(6.0, 12.0, "穿越成底层杂鱼的林北，觉醒百万倍垂钓系统！", "Xuyên không…", "S1"),
+                      Segment(13.0, 15.0, "可我的嘴他自己控嘴他自己控制不住啊。", "Miệng tôi…", "S1"),
+                      Segment(16.0, 18.0, "你说的好，有道理，我居然没法反。", "Cậu nói phải…", "S1"),
+                      Segment(18.1, 20.3, "你说的好，有道理，我居然没法，反驳。", "Cậu nói phải, tôi không cãi được.", "S1"),
+                      Segment(21.0, 23.0, "我不是故意的，我不是故意的！", "Tôi không cố ý!", "S1"),
+                      Segment(24.0, 25.0, "没触发百万倍增幅，", "Không kích hoạt…", "S1")]
+        p.save()
+        relisten = {13.0: "可我的嘴他自己控制不住啊。", 16.0: "你说的好，有道理，我居然没法，反驳。",
+                    21.0: "我不是故意的，我不是故意的！"}
+        reqs: list = []
+
+        class Q:
+            def call(self, req, progress=None, cancel=None):
+                reqs.append(req)
+                return {"items": [{"text": relisten[round(a + 0.1, 1)]} for a, _b in req["spans"]]}
+        monkeypatch.setattr(asr_qwen, "available", lambda: True)
+        monkeypatch.setattr(asr_qwen, "worker", lambda settings=None: Q())
+        monkeypatch.setattr(asr_qwen, "align_qwen", lambda segs, *a, **k: len(segs))
+        monkeypatch.setattr(pipeline, "_voice_wav16", lambda p, *a, **k: wav)
+        res = pipeline.clean_asr(p, {})
+        texts = [x.text for x in p.segments]
+        assert texts == ["穿越成底层杂鱼的林北，觉醒百万倍垂钓系统！", "可我的嘴他自己控制不住啊。",
+                         "你说的好，有道理，我居然没法，反驳。", "我不是故意的，我不是故意的！", "没触发百万倍增幅，"]
+        assert res["echo"] == 3 and res["fixed"] == 1 and res["merged"] == 1 and res["kept"] == 1
+        merged = p.segments[2]
+        assert (merged.start, merged.end) == (16.0, 20.3) and merged.trans == "Cậu nói phải, tôi không cãi được."
+        assert res["changed"] == [1, 2] and p.segments[3].extra.get("asr_repeat") == "我不是故意的"
+        assert reqs[0]["prompt"] == "" and reqs[0]["rep_penalty"] == asr_qwen.REP_PENALTY
+        assert "bỏ 3 câu" in pipeline.clean_asr_note(res, True) and "Dịch câu đã tích" in pipeline.clean_asr_note(res, True)
+        assert pipeline.undo_cleanup(Project(p.id), {}) == 9 and len(Project(p.id).segments) == 9
+    finally:
+        p.delete()
 
 
 def test_google_translates_foreign_lines_with_auto_source(monkeypatch):

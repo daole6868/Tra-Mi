@@ -1,8 +1,10 @@
 """Tên riêng cho bộ nghe (2.1.0).
 
 Bộ nghe hay sai TÊN (nhân vật, môn phái, chiêu thức…) vì tên không có trong từ điển: "林北" -> "临北" / "林贝". Ba cách:
-  1. Gợi ý trước khi nghe (`context_text`): tên trong bảng thuật ngữ (Cài đặt + dự án) + hồ sơ phim + tiêu đề / mô tả
-     video (lúc tải từ link) -> lời nhắc của Qwen3-ASR (mô hình nhận ngữ cảnh dạng chữ bất kỳ).
+  1. Gợi ý trước khi nghe (`context_text`, Cài đặt `asr_context`, mặc định TẮT từ 2.1.8): CHỈ danh sách tên trong bảng
+     thuật ngữ (Cài đặt + dự án) + hồ sơ phim -> lời nhắc của Qwen3-ASR. 2.1.0–2.1.7 gửi cả tiêu đề / mô tả / thẻ video:
+     khúc chỉ có nhạc / không ai nói thì Qwen3 CHÉP lời nhắc ra thành phụ đề ("视频标题：…", "剧情简介：…") và hay lặp vòng
+     -> bỏ hẳn; mặc định lời nhắc như bản 2.0.99 (chỉ bảng thuật ngữ ở Cài đặt).
   2. Nghe lại câu nghi sai tên (`candidates`): chữ đọc giống hệt 1 tên (cùng âm pinyin) mà viết khác -> nghe lại câu đó
      kèm gợi ý tên (pipeline.name_pass).
   3. Sửa theo âm đọc (`fix`): nghe lại vẫn chưa ra tên -> thay đúng chỗ đọc giống tên. Tên 2 chữ cần trùng cả thanh điệu
@@ -62,22 +64,10 @@ def _han(text: str, n: int) -> str:
 
 
 def context_text(p, settings: dict, names: list[str] | None = None) -> str:
-    """Lời nhắc cho Qwen3-ASR: tên riêng + tiêu đề / mô tả / thẻ của video (chỉ phần có chữ Hán)."""
+    """Lời nhắc tên riêng cho Qwen3-ASR: CHỈ danh sách tên (bảng thuật ngữ + hồ sơ phim), không tiêu đề / mô tả / thẻ
+    video (2.1.8 – bộ nghe chép nguyên văn chúng vào khúc không có lời)."""
     names = names_of(p, settings) if names is None else names
-    meta = p.data.get("video_meta") or {}
-    parts = []
-    if names:
-        parts.append("热词：" + "、".join(names[:MAX_NAMES]))
-    title = str(meta.get("title") or "").strip()
-    if CJK.search(title):
-        parts.append("视频标题：" + title[:100])
-    desc = re.sub(r"\s+", " ", str(meta.get("description") or "")).strip()
-    if len(CJK.findall(desc)) >= 4:
-        parts.append("简介：" + desc[:150])
-    tags = [t for t in (meta.get("tags") or []) if CJK.search(str(t))][:10]
-    if tags:
-        parts.append("标签：" + "、".join(tags))
-    return "\n".join(parts)
+    return ("热词：" + "、".join(names[:MAX_NAMES])) if names else ""
 
 
 def _pinyin(chars: str) -> tuple[list[str], list[str]] | None:

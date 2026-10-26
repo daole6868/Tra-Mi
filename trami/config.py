@@ -79,7 +79,7 @@ DEFAULT_SETTINGS: dict = {
     "asr_engine": "qwen3",            # qwen3 / firered / sensevoice / paraformer / whisper (qwen3 chưa cài -> sensevoice)
     "asr_dual": False,                # nghe 2 bộ rồi so (Qwen3-ASR + FireRedASR2): câu khác nhau -> AI chọn / tô xanh
     "asr_ai": "auto",                 # AI hỗ trợ nghe (chọn bản đúng khi 2 bộ khác nhau, lập hồ sơ tên nhân vật): auto/off/tên AI
-    "asr_context": True,              # gợi ý cho bộ nghe: tên riêng (bảng thuật ngữ, hồ sơ phim) + tiêu đề / mô tả video
+    "asr_context": False,             # gợi ý cho bộ nghe: danh sách tên riêng của dự án (tắt = như 2.0.99: bảng thuật ngữ)
     "asr_name_pass": True,            # nghe xong: tìm câu có chữ đọc giống tên nhân vật -> nghe lại với gợi ý tên / sửa theo âm
     "qwen_asr_model": "Qwen/Qwen3-ASR-1.7B-hf",   # hoặc Qwen/Qwen3-ASR-0.6B-hf (GPU yếu)
     "asr_model": "large-v3",          # (Whisper) tiny/base/small/medium/large-v3/large-v3-turbo
@@ -150,6 +150,7 @@ DEFAULT_SETTINGS: dict = {
     "ai_join_engine": "auto",                 # AI nối câu theo nghĩa sau khi tách câu: auto (công cụ dịch nếu là AI) / off / tên AI
     "asr_relisten": True,                     # nghe lại chỗ cắt khúc giữa lúc đang nói (bỏ dấu "。" giả bộ nghe tự đặt)
     "asr_lang_check": True,                   # khúc nghe chưa chắc -> nghe lại không ép tiếng (câu tiếng Anh trong phim Trung)
+    "asr_guard": True,                        # khúc bộ nghe chép lời gợi ý / lặp 1 cụm -> nghe lại không gợi ý (2.1.8)
     # đăng video (publish.py): Zernio / API riêng YouTube (dự án Google Cloud) / API riêng Facebook (app Meta)
     "zernio_api_key": "", "zernio_profile_id": "",
     "yt_client_id": "", "yt_client_secret": "", "fb_app_id": "", "fb_app_secret": "",

@@ -410,6 +410,11 @@ def transcribe_qwen(wav: str | Path, settings: dict, language: str = "zh", progr
         log_error("Nghe lại khúc tiếng khác")
     if stats is not None:
         stats["foreign"] = len(langs_of)
+    if raw and settings.get("asr_guard", True):   # khúc chép lời gợi ý / lặp vòng -> nghe lại không gợi ý (2.1.8)
+        gpr = (lambda x, m: progress(a_end, m)) if progress else None
+        gst = guard_pass(raw, wav, settings, language, prompt, engine, ck, gpr, cancel)
+        if stats is not None:
+            stats.update(gst)
     if settings.get("asr_relisten", True) and len(raw) > 1:
         rpr = (lambda x, m: progress(a_end + 0.03 * x, m)) if progress else None
         keep = {k: v for k, v in langs_of.items()}
@@ -440,6 +445,70 @@ def transcribe_qwen(wav: str | Path, settings: dict, language: str = "zh", progr
         stats["resumed"] = ck.reused
     return [x for (s, e, t), w in zip(raw, words)
             if (x := _segment(s, e, {"text": t, "words": w, "lang": langs_of.get((s, e))}, simplify))]
+
+
+REP_PENALTY = 1.2   # nghe lại khúc nghi lặp vòng: phạt chữ đã viết (bộ nghe không lặp lại cụm vừa viết được nữa)
+
+
+def guard_pass(raw: list[tuple[float, float, str]], wav: str | Path, settings: dict, language: str, prompt: str,
+               engine: str = "qwen3", ck: Resume | None = None, progress: Prog | None = None,
+               cancel=None) -> dict:
+    """Chặn 2 lỗi của bộ nghe là mô hình ngôn ngữ (2.1.8), sửa `raw` tại chỗ:
+    - khúc CHÉP lời gợi ý (`align.prompt_echo` – khúc chỉ có nhạc / không ai nói) -> nghe lại KHÔNG gợi ý; vẫn chép /
+      không ra chữ -> bỏ khúc;
+    - khúc có 1 cụm ≥ 5 chữ lặp liền nhau (`align.repeat_block`) -> nghe lại không gợi ý + phạt lặp (`REP_PENALTY`):
+      cụm vẫn ra 2 lần = nói 2 lần thật -> giữ; ra 1 lần -> bỏ lần lặp (`align.decide_repeat`, giữ nguyên chữ còn lại).
+    Kết quả nhớ trong tiến độ nghe (`ck`) – chạy tiếp không nghe lại. Trả {"echo", "repeat_fixed", "repeat_kept"}."""
+    from .align import decide_repeat, prompt_echo, repeat_block
+
+    st = {"echo": 0, "repeat_fixed": 0, "repeat_kept": 0}
+    todo = []
+    for k, (s, e, t) in enumerate(raw):
+        if not t:
+            continue
+        g = (ck.heard.get(ck.span(s, e)) or {}).get("guard") if ck is not None else None
+        if g:     # chạy tiếp lần nghe trước: đã quyết rồi
+            raw[k] = (s, e, g.get("text", t))
+            st[g.get("why", "repeat_kept")] = st.get(g.get("why", "repeat_kept"), 0) + 1
+            continue
+        if prompt_echo(t, prompt):
+            todo.append((k, "echo", None))
+        elif blk := repeat_block(t):
+            todo.append((k, "repeat", blk))
+    if not todo:
+        return st
+    if progress:
+        progress(0.0, f"Nghe lại {len(todo)} khúc nghi chép lời gợi ý / lặp lời…")
+    try:
+        r = asr_worker(engine, settings).call({"cmd": "asr", "wav": _wav_path(wav), "language": language, "prompt": "",
+                                               "align": False, "rep_penalty": REP_PENALTY,
+                                               "spans": [[raw[k][0], raw[k][1]] for k, _w, _b in todo]},
+                                              progress, cancel)
+        items = r.get("items") or []
+    except Exception as ex:  # noqa: BLE001 – nghe lại lỗi: khúc chép gợi ý vẫn bỏ, khúc lặp giữ nguyên
+        from .ffmpeg import Cancelled
+
+        if isinstance(ex, Cancelled):
+            raise
+        items = []
+    for n, (k, what, blk) in enumerate(todo):
+        s, e, old = raw[k]
+        heard = (items[n].get("text") or "").strip() if n < len(items) else None
+        if what == "echo":
+            txt = "" if not heard or prompt_echo(heard, prompt) else heard
+            why = "echo"
+        elif heard is None:
+            txt, why = old, "repeat_kept"
+        else:
+            txt, fixed = decide_repeat(old, heard, blk)
+            why = "repeat_fixed" if fixed else "repeat_kept"
+        raw[k] = (s, e, txt)
+        st[why] += 1
+        if ck is not None and heard is not None:
+            ck.heard.setdefault(ck.span(s, e), {})["guard"] = {"text": txt, "why": why}
+    if ck is not None:
+        ck.save()
+    return st
 
 
 RESCUE_CONF = 0.5   # nghe lại đoạn sót: xác suất trung bình các chữ < 0,5 -> bộ nghe "đoán bừa" (nhạc / tiếng động)

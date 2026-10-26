@@ -614,6 +614,15 @@ class ProjectPage(QWidget):
             flow(button("Tích câu nghi nghe nhầm", "check", flat=True, on_click=lambda: self._pick_flag("noise")),
                  button("Không phải nhạc", "x", "Bỏ đánh dấu các câu đã tích (câu thoại thật) – lần lọc sau không đánh "
                         "dấu lại", flat=True, on_click=self._voice_ok)),
+            flow(_rowlbl("Câu bịa / lặp"),
+                 button("Dọn câu bịa / câu lặp", "wand", "Bỏ câu bộ nghe chép lại tiêu đề / mô tả / thẻ video (đoạn nhạc, "
+                        "không ai nói – lỗi bản 2.1.0–2.1.7); câu có 1 cụm lặp liền nhau và 2 câu liền nhau gần giống "
+                        "nhau -> Qwen3-ASR nghe lại đúng đoạn đó: chỉ ra 1 lần thì bỏ lần lặp / gộp 2 câu, vẫn ra 2 lần "
+                        "(nói 2 lần thật) thì giữ. Không phải nghe lại cả phim. Không ưng: Hoàn tác sửa",
+                        on_click=self.run_clean_asr),
+                 button("Tích câu nghi lặp", "check", "Câu chữ gốc màu hồng: còn 1 cụm lặp liền nhau / 2 câu liền nhau "
+                        "gần giống nhau – nghe lại rồi sửa hoặc Xoá", flat=True,
+                        on_click=lambda: self._pick_flag("asr_repeat"))),
             flow(_rowlbl("2 bộ nghe"),
                  button("Nghe 2 bộ rồi so", "mic", C.DUAL_HELP + ". Chạy cho câu đã tích (chưa tích = cả phim)",
                         on_click=self.run_dual),
@@ -4851,7 +4860,8 @@ class ProjectPage(QWidget):
                 [i for i, s in enumerate(self.model.segs) if s.extra.get("asr_alt") is not None]
         else:
             rows = [i for i, s in enumerate(self.model.segs) if s.extra.get(key)]
-        what = {"noise": "nghi nghe nhầm (nhạc / tiếng động)", "asr_alt": "2 bộ nghe ra khác nhau"}.get(key, "bài hát 🎵")
+        what = {"noise": "nghi nghe nhầm (nhạc / tiếng động)", "asr_alt": "2 bộ nghe ra khác nhau",
+                "asr_repeat": "nghi bộ nghe lặp lời"}.get(key, "bài hát 🎵")
         if not rows:
             return self.win.toast(f"Không có câu nào đánh dấu {what}", "ok")
         self.model.set_picked(range(len(self.model.segs)), False)
@@ -4859,6 +4869,18 @@ class ProjectPage(QWidget):
         self._select_line(rows[0], seek=True)
         self.win.toast(f"Đã tích {len(rows)} câu {what}" + (" – rê chuột vào chữ gốc để xem lý do, nghe lại rồi bấm "
                        "Xoá (hoặc 'Không phải nhạc' cho câu thoại thật)" if key == "noise" else ""), "ok")
+
+    def run_clean_asr(self):
+        """Dọn câu bộ nghe chép lời gợi ý / lặp lời (2.1.8) – cho phim đã nghe xong, không phải nghe lại cả phim."""
+        if not self.model.segs:
+            return self.win.toast("Chưa có phụ đề", "warn")
+        translated = any(x.trans.strip() for x in self.model.segs)
+
+        def fn(j, p):
+            st = pipeline.clean_asr(p, None, j.update, j.cancelled)
+            pick = st["changed"] + [i for i, x in enumerate(p.segments) if x.extra.get("asr_repeat")]
+            return {"message": pipeline.clean_asr_note(st, translated), "pick": sorted(set(pick))}
+        self.submit("dual", "Dọn câu bịa / câu lặp", fn)
 
     def run_dual(self):
         """Nghe 2 bộ rồi so cho phụ đề đã có (câu đã tích / cả phim)."""

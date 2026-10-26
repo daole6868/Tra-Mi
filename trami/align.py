@@ -873,6 +873,100 @@ def heard_junction(t1: str, t2: str, heard: str, near: int = 6) -> dict | None:
     return out
 
 
+# ------------------------------------------------------------------ bộ nghe lặp vòng / chép lời gợi ý (2.1.8)
+# Qwen3-ASR là mô hình ngôn ngữ: (1) khúc chỉ có nhạc / không ai nói -> chép nguyên văn lời gợi ý (2.1.0–2.1.7 gửi cả
+# tiêu đề / mô tả / thẻ video: "视频标题：…", "剧情简介：…"); (2) đôi khi "lặp vòng" 1 cụm trong cùng khúc
+# ("差点在船上给你跪了，差点在船上给你跪了", "从没有让别从没有让别人的道理") -> bước tách câu chia thành 2 câu gần
+# giống nhau. Đo: phim nghe bằng 2.0.99 (2610 câu) 0 câu lặp; 2.1.7 (3058 câu) 169 câu chép gợi ý + 39 câu lặp.
+REPEAT_MIN = 5       # cụm ≥ 5 chữ Hán lặp lại ngay sau nó (cách ≤ 2 chữ) = nghi bộ nghe lặp vòng
+REPEAT_GAP = 2
+ECHO_MARKERS = ("视频标题", "剧情简介", "简介：", "标签：", "热词：")
+_REPEAT_RE = re.compile(r"(.{%d,})(.{0,%d}?)\1" % (REPEAT_MIN, REPEAT_GAP))
+
+
+def _han_pos(text: str) -> list[tuple[int, str]]:
+    return [(i, ch) for i, ch in enumerate(text or "") if CJK.match(ch)]
+
+
+def repeat_block(text: str) -> str | None:
+    """Cụm chữ Hán dài nhất (≥ REPEAT_MIN) lặp lại ngay sau chính nó trong lời nghe (bỏ qua dấu câu) – nghi bộ nghe
+    lặp vòng. Cụm chỉ gồm 1–2 chữ lặp đi lặp lại ("哈哈哈哈哈", "对对对对对") không tính. Không có -> None."""
+    h = "".join(ch for _, ch in _han_pos(text))
+    pos = 0
+    while True:
+        m = _REPEAT_RE.search(h, pos)
+        if not m:
+            return None
+        blk = m.group(1)
+        if not re.fullmatch(r"(.{1,2})\1+.?", blk):
+            return blk
+        pos = m.start() + 1
+
+
+def drop_repeat(text: str, block: str) -> str:
+    """Bỏ lần xuất hiện ĐẦU của cụm lặp (kèm dấu câu / chữ chen giữa tới lần sau): "A，A，B" -> "A，B"."""
+    pos = _han_pos(text)
+    h = "".join(ch for _, ch in pos)
+    a = h.find(block)
+    b = h.find(block, a + len(block)) if a >= 0 else -1
+    if a < 0 or b < 0:
+        return text
+    return text[:pos[a][0]] + text[pos[b][0]:]
+
+
+def decide_repeat(old: str, heard: str, block: str) -> tuple[str, bool]:
+    """Nghe lại khúc nghi lặp (phạt chữ đã viết -> bộ nghe không lặp vòng được): cụm vẫn ra ≥ 2 lần = nhân vật nói 2 lần
+    thật -> giữ (False); ra 1 lần, hoặc bản nghe lại giống bản đã bỏ lặp -> bỏ lần lặp (True). Trả (lời, đã sửa)."""
+    from difflib import SequenceMatcher
+
+    fixed = drop_repeat(old, block)
+    hn = "".join(CJK.findall(heard or ""))
+    n = hn.count(block)
+    if n >= 2 or fixed == old:
+        return old, False
+    if n == 1 or (hn and SequenceMatcher(None, "".join(CJK.findall(fixed)), hn, autojunk=False).ratio() >= 0.6):
+        return fixed, True
+    return old, False
+
+
+def prompt_echo(text: str, prompt: str = "") -> bool:
+    """Lời nghe ra là bộ nghe CHÉP lại lời gợi ý (khúc không có lời): có dấu hiệu của lời gợi ý ("视频标题", "简介："…)
+    hoặc ≥ 80 % chữ nằm trong các đoạn ≥ 4 chữ trùng nguyên văn lời gợi ý (có ít nhất 1 đoạn ≥ 6 chữ – 2 tên riêng
+    đứng cạnh nhau trong câu thoại thật không bị tính)."""
+    from difflib import SequenceMatcher
+
+    h = "".join(CJK.findall(text or ""))
+    if not h:
+        return False
+    if any(mk in (text or "") for mk in ECHO_MARKERS):
+        return True
+    P = "".join(CJK.findall(prompt or ""))
+    if len(h) < 6 or len(P) < 6:
+        return False
+    sizes = [b.size for b in SequenceMatcher(None, h, P, autojunk=False).get_matching_blocks() if b.size >= 4]
+    return bool(sizes) and max(sizes) >= 6 and sum(sizes) >= 0.8 * len(h)
+
+
+def near_duplicates(segs: list[Segment], ratio: float = 0.8, gap: float = 1.0) -> list[tuple[int, str]]:
+    """Cặp câu liền nhau gần như giống nhau (cụm chung ≥ REPEAT_MIN chữ, giống ≥ 80 %, cách ≤ 1 s) – bộ nghe lặp vòng
+    rồi bị tách thành 2 câu. Trả [(chỉ số câu đầu, cụm chung)]."""
+    from difflib import SequenceMatcher
+
+    out = []
+    for i in range(len(segs) - 1):
+        a, b = segs[i], segs[i + 1]
+        ha, hb = "".join(CJK.findall(a.text or "")), "".join(CJK.findall(b.text or ""))
+        if min(len(ha), len(hb)) < REPEAT_MIN or b.start - a.end > gap or split_mates(a, b):
+            continue
+        sm = SequenceMatcher(None, ha, hb, autojunk=False)
+        if sm.ratio() < ratio:
+            continue
+        m = sm.find_longest_match(0, len(ha), 0, len(hb))
+        if m.size >= REPEAT_MIN:
+            out.append((i, ha[m.a:m.a + m.size]))
+    return out
+
+
 def _should_join(grp: list[Segment], nxt: Segment, q: dict, punctuated: bool) -> bool:
     last = grp[-1]
     if not (CJK.search(last.text or "") and CJK.search(nxt.text or "")):

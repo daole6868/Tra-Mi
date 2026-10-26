@@ -52,8 +52,9 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   vào từng câu bằng SequenceMatcher, `merge_alt` giữ dấu câu, AI chọn `PICK_PROMPT` / `parse_pick`: C chỉ khi mọi chữ có
   trong A ∪ B) -> `pipeline.dual_listen` (cuối `recognize` nếu `asr_dual`) / `dual_check` (nút tab Phụ đề) / `use_alt`;
   `extra["asr_alt"]` / `asr_alt_eng` / `asr_pick` / `asr_unsure` (chữ gốc xanh); `trami/names.py` tên riêng: `names_of`
-  (bảng thuật ngữ + hồ sơ phim), `context_text` (热词 + tiêu đề / mô tả / thẻ video `p.data["video_meta"]` -> lời nhắc
-  Qwen3 qua `settings["_asr_context"]`), `candidates` (pypinyin: tên 2 chữ cần cùng thanh + không phải từ jieba thông
+  (bảng thuật ngữ + hồ sơ phim), `context_text` (CHỈ 热词 – từ 2.1.8 không gửi tiêu đề / mô tả / thẻ video; chỉ dùng khi
+  Cài đặt `asr_context` bật, mặc định tắt = lời nhắc như 2.0.99 `asr_qwen.hotwords` bảng thuật ngữ Cài đặt;
+  `pipeline._asr_context` -> `settings["_asr_context"]`), `candidates` (pypinyin: tên 2 chữ cần cùng thanh + không phải từ jieba thông
   dụng; loose = chỉ chọn câu nghe lại), `fix` -> `pipeline.name_pass` (nghe lại câu nghi sai tên kèm gợi ý, vẫn sai thì
   sửa theo âm, chưa có tên mà có AI -> `_learn_profile` lập hồ sơ phim) / `fix_names_now`; "OCR + nghe" (`method`
   "hybrid", `pipeline.hybrid_listen`: chữ OCR + căn giờ từng chữ từ giọng (pad 0,6), `rescue_segments(keep_lines=True)`
@@ -169,6 +170,17 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   nhanh riêng vế đó (WSOLA `voicefx.stretch`), mục khoảng nghỉ [cắt, lặng, tốc độ×1000] (`insert_pauses`, `_gk` so cả
   tốc độ); `stats["clauses"]` / `["part_fast"]` -> `dub_summary`. GUI: tab Lồng tiếng mục 3 "… đọc từng vế"
   (`d_by_clause`), Cài đặt → Dịch thuật "Dấu phẩy ở chỗ ngắt hơi" / "AI sửa câu dịch cho đủ vế"; `listen_note` báo các bước.
+- Chặn câu bịa / lặp của bộ nghe (2.1.8): `align.prompt_echo` (dấu hiệu `ECHO_MARKERS` "视频标题" / "简介："… hoặc ≥ 80 %
+  chữ trùng lời gợi ý, có đoạn ≥ 6 chữ), `repeat_block` (cụm ≥ `REPEAT_MIN` 5 chữ lặp ngay sau nó, bỏ "哈哈哈"),
+  `drop_repeat` (bỏ lần đầu), `decide_repeat` (nghe lại vẫn 2 lần = nói thật -> giữ), `near_duplicates` (2 câu liền giống
+  ≥ 0,8). Khi nghe: `asr_qwen.guard_pass` (sau foreign_pass, trước relisten_cuts; Cài đặt `asr_guard`) nghe lại khúc nghi
+  với prompt "" + `REP_PENALTY` 1,2 (worker `"rep_penalty"` -> `repetition_penalty`), quyết định nhớ trong `Resume`
+  (`heard[span]["guard"]`); `stats` echo / repeat_fixed / repeat_kept -> `listen_note`. Cuối `recognize`:
+  `pipeline.mark_repeats` -> `extra["asr_repeat"]` (chữ gốc hồng, tooltip), `p.data["asr_repeat"]`. Dự án đã nghe:
+  `pipeline.clean_asr` (nút "Dọn câu bịa / câu lặp" tab Phụ đề → Công cụ → Lời hát & nghe nhầm, việc "dual"; bỏ câu
+  chép `old_prompt` – tiêu đề / mô tả / thẻ `video_meta` + tên – khi có dấu hiệu / là danh sách thẻ / > `ECHO_CPS` 9 chữ/s;
+  câu lặp + cặp câu giống: Qwen3 nghe lại đúng đoạn (±0,1 s) -> sửa / gộp / giữ; căn lại mốc, `cleanup_backup` ->
+  "Hoàn tác sửa", xếp lại bản lồng), `clean_asr_note`; "Tích câu nghi lặp".
 - Giờ HIỆN phụ đề (2.0.96): `subtitle.follow_dub(mode="always", lead, hold, min_dur, join)` + `pipeline.follow_params`
   (Cài đặt `sub_follow_mode` / `sub_lead` 0,1 / `sub_hold` 0,3 / `sub_min_dur` 1 / `sub_join_gap` 0,3, công tắc
   `dub_subs_follow`) – xem trước, xuất video, SRT đã dịch (`export_subs`, `_export_sub`); tab Phụ đề → Công cụ → "Giờ
@@ -228,7 +240,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (204 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (205 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1759,7 +1771,24 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   lặp): 0 câu tự nhiên bị cắt, ~60 % câu lặp cắt đúng chỗ, 1 câu cắt hụt (mất 1 tiếng cuối), còn lại không nhận ra (lặp
   dính liền). Chưa chạy VieNeu thật (sandbox chặn HF).
 
+- 2.1.8: "đọc file phụ đề này, nhiều câu lặp đi lặp lại, câu đỏ" (phim p03 2 giờ 12, 3058 câu) + "có phải do đổi API dịch"
+  + "bản 2.0.99 không bị, làm theo cách 2.0.99". Không phải do dịch: lỗi có sẵn trong file .zh.srt. So mã 2.0.99 với 2.1.7:
+  chia khúc / đọc âm thanh / giải mã Qwen3 giống hệt, CHỈ khác lời gợi ý – 2.0.99 chỉ gửi "热词：" bảng thuật ngữ Cài đặt
+  (thường rỗng) và không lưu thông tin video; 2.1.0 lưu tiêu đề / mô tả / thẻ video khi tải từ link và gửi tất cả cho Qwen3
+  mọi khúc -> khúc chỉ có nhạc / không ai nói Qwen3 chép nguyên văn: 165 câu / 43 chỗ ("视频标题：…", "剧情简介：…", danh sách
+  thẻ, "p03 3"; 0,1–0,3 s -> ⚠ đỏ ×1,30) + lặp vòng 1 cụm trong khúc: 17 câu lặp trong câu + 22 cặp câu liền giống nhau
+  (12,8 / 1000 câu). File phim cũ người dùng gửi (2610 câu, nghe bằng bản cũ): 0 câu lặp trong câu, 3 cặp (đều thoại
+  thật), 0 câu chép gợi ý. Sửa: lời gợi ý như 2.0.99 (`asr_context` mặc định tắt; bật thì chỉ danh sách tên, KHÔNG BAO GIỜ
+  gửi tiêu đề / mô tả / thẻ), `guard_pass` khi nghe, `mark_repeats`, `clean_asr` cho dự án đã nghe. Thử trên đúng file của
+  người dùng (không bộ nghe): bỏ 165 câu chép tiêu đề / mô tả / thẻ, giữ câu thoại thật có chữ trong tiêu đề ("没触发百万倍
+  增幅"), 48 câu tô hồng chờ nghe lại; bộ nghe giả: sửa / gộp / giữ đúng, chạy tiếp lần nghe không nghe lại. Chưa chạy Qwen3
+  thật (sandbox chặn HF) – phạt lặp 1,2 có làm mất chỗ nói 2 lần thật không chưa đo.
+
 ## Vấn đề đang mở
+- 2.1.8: chờ người dùng (1) dự án phim p03: tab Phụ đề → Công cụ → Lời hát & nghe nhầm → "Dọn câu bịa / câu lặp" (phải
+  bỏ ~165 câu "Tiêu đề…" / "Tóm tắt…", sửa / gộp câu lặp), rồi Dịch câu đã tích + Tạo lại giọng; (2) phim mới: "1. Nghe &
+  tách câu" – thông báo có "bỏ N khúc bộ nghe chép lại lời gợi ý" / "sửa N chỗ bộ nghe lặp lời", đếm câu hồng còn lại so
+  với bản cũ (mục tiêu ~0 như 2.0.99).
 - 2.1.7: chờ người dùng bấm "Tạo bản lồng tiếng" (câu VieNeu ≤ 4 tiếng đọc lại 1 lần với trần thấp + cắt lặp) rồi nghe
   câu #19 "Được thôi" và các câu ngắn khác; thông báo có "N câu ngắn VieNeu đọc lặp lời – đã tự cắt phần lặp / đọc lại".
   Còn lặp -> xin file `work\tts\tts_*.wav` của câu đó; câu ngắn bị cụt chữ cuối (trần thấp quá với giọng đọc chậm) ->

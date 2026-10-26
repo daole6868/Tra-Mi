@@ -765,8 +765,9 @@ class SettingsPage(QWidget):
                             "AI chọn bản đúng khi 2 bộ nghe ra khác nhau + lập hồ sơ tên nhân vật (để nghe lại câu có "
                             "tên riêng). Theo công cụ dịch = dùng AI đang dịch (Google / Hy-MT2 thì không có)")
         self.asr_context = f.row("Gợi ý tên riêng cho bộ nghe", Switch(),
-                                 "Qwen3-ASR nghe kèm tên trong Bảng tên riêng / hồ sơ phim + tiêu đề, mô tả của video "
-                                 "(khi tải từ link) -> ít sai tên nhân vật, môn phái, chiêu thức")
+                                 "Qwen3-ASR nghe kèm danh sách tên trong Bảng tên riêng / hồ sơ phim. Tắt (mặc định) = như "
+                                 "bản 2.0.99: chỉ gửi tên trong Bảng thuật ngữ ở Cài đặt. Tiêu đề / mô tả video không "
+                                 "bao giờ gửi (bộ nghe chép chúng thành phụ đề ở đoạn nhạc)")
         self.asr_name_pass = f.row("Nghe lại câu có tên riêng", Switch(),
                                    "Nghe xong: câu có chữ đọc giống tên nhân vật mà viết khác (临北 / 林北) -> nghe lại câu "
                                    "đó kèm gợi ý tên; vẫn sai thì sửa theo âm đọc. Chưa có tên nào mà có AI hỗ trợ nghe -> "

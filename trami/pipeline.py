@@ -1137,6 +1137,18 @@ def name_note(st: dict | None) -> str:
     return ("tên riêng: " + ", ".join(parts)) if parts else ""
 
 
+def _asr_context(p: Project, settings: dict) -> None:
+    """Lời nhắc của bộ nghe (2.1.8 = như 2.0.99): mặc định chỉ tên trong Bảng thuật ngữ ở Cài đặt (asr_qwen.hotwords).
+    Bật "Gợi ý tên riêng cho bộ nghe" -> thêm tên của dự án (bảng tên riêng + hồ sơ phim). KHÔNG gửi tiêu đề / mô tả /
+    thẻ video: khúc chỉ có nhạc thì Qwen3-ASR chép nguyên văn chúng thành phụ đề (2.1.0–2.1.7: 169 câu / 3058)."""
+    settings.pop("_asr_context", None)
+    if settings.get("asr_context"):
+        from .names import context_text
+
+        if txt := context_text(p, settings):
+            settings["_asr_context"] = txt
+
+
 def hybrid_listen(p: Project, segs, settings: dict, language: str, engine: str, denoise: bool = False,
                   progress: Prog | None = None, cancel=None) -> list:
     """OCR + nghe (2.1.0): chữ lấy từ phụ đề Trung in sẵn (đúng tên riêng, chữ), giờ đo trên giọng nói (căn từng chữ
@@ -1148,10 +1160,7 @@ def hybrid_listen(p: Project, segs, settings: dict, language: str, engine: str, 
     st = {"lines": len(segs), "timed": 0, "added": 0}
     p.data.pop("asr_dual", None)
     audio_in, wav = _listen_audio(p, settings, denoise, _sub(progress, 0.0, 0.5), cancel)
-    if settings.get("asr_context", True):
-        from .names import context_text
-
-        settings["_asr_context"] = context_text(p, settings)
+    _asr_context(p, settings)
     for s in segs:
         s.extra["ocr_time"] = [s.start, s.end]
     al = "qwen3" if asr_qwen.available() and (engine == "qwen3" or use_qwen_align("qwen3", settings)) else \
@@ -1325,10 +1334,7 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
 
         info_dur = p.data.get("info", {}).get("duration", 0)
         audio_in, wav = _listen_audio(p, settings, denoise, progress, cancel)
-        if settings.get("asr_context", True):   # gợi ý tên riêng + tiêu đề video cho Qwen3-ASR (2.1.0)
-            from .names import context_text
-
-            settings["_asr_context"] = context_text(p, settings)
+        _asr_context(p, settings)
         asr_end = 0.78 if want_spk else 0.92
         pr = _sub(progress, 0.33, asr_end)
         segs = None
@@ -1519,6 +1525,8 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
             from .align import mark_breaths
 
             p.data["breaths_marked"] = mark_breaths(segs, float(settings.get("dub_pause_min", 0.3)))
+    if method != "ocr":
+        p.data["asr_repeat"] = mark_repeats(segs)   # câu vẫn còn lặp lời / 2 câu liền giống nhau -> tô màu để kiểm
     segs = normalize(segs)
     one_spk = want_spk and int(settings.get("diarize_speakers", 0) or 0) == 1
     if one_spk:   # đặt "1 người nói": gán hết S1, không đo giọng / không tách câu theo chỗ đổi giọng
@@ -1544,6 +1552,7 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         p.data.pop("ai_joined", None)
     if method == "ocr":
         p.data.pop("asr_warning", None)
+        p.data.pop("asr_repeat", None)
         p.data.pop("songs_found", None)
         p.data.pop("asr_dual", None)
     p.save()
@@ -1682,10 +1691,7 @@ def dual_check(p: Project, settings: dict | None = None, rows: list[int] | None 
     if dual_engine(primary, language, settings)[0] is None:
         raise RuntimeError("Chưa có bộ nghe thứ 2: " + dual_engine(primary, language, settings)[1])
     wav = _voice_wav16(p, _sub(progress, 0.0, 0.1), cancel)
-    if settings.get("asr_context", True):
-        from .names import context_text
-
-        settings["_asr_context"] = context_text(p, settings)
+    _asr_context(p, settings)
     pick = set(range(len(segs))) if rows is None else {r for r in rows if 0 <= r < len(segs)}
     sub = [segs[i] for i in sorted(pick)]
     for x in sub:
@@ -1759,7 +1765,184 @@ def listen_note(p: Project) -> str:
         out.append(f"căn lại mốc chữ {ck['fixed']} câu (chữ bị kéo dài / lấn câu bên)")
     if p.data.get("asr_rescue_lowconf"):
         out.append(f"bỏ {p.data['asr_rescue_lowconf']} đoạn nghe lại mà bộ nghe không chắc (nhạc / tiếng động)")
+    rl = p.data.get("asr_relisten") or {}
+    if rl.get("echo"):
+        out.append(f"bỏ {rl['echo']} khúc bộ nghe chép lại lời gợi ý (đoạn nhạc / không ai nói)")
+    if rl.get("repeat_fixed"):
+        out.append(f"sửa {rl['repeat_fixed']} chỗ bộ nghe lặp lời")
+    if p.data.get("asr_repeat"):
+        out.append(f"⚠ {p.data['asr_repeat']} câu còn lặp lời / 2 câu liền giống nhau (chữ gốc màu hồng) – nghe lại, "
+                   "hoặc tab Phụ đề → Công cụ → Lời hát & nghe nhầm → 'Dọn câu bịa / câu lặp'")
     return " · ".join(out)
+
+
+def mark_repeats(segs) -> int:
+    """Đánh dấu extra["asr_repeat"] câu còn 1 cụm ≥ 5 chữ lặp liền nhau hoặc 2 câu liền nhau gần như giống nhau (bộ
+    nghe lặp vòng mà lần nghe lại không gỡ được / nhân vật nói 2 lần thật) – chữ gốc tô màu để kiểm. Trả số câu."""
+    from .align import near_duplicates, repeat_block
+
+    for x in segs:
+        x.extra.pop("asr_repeat", None)
+    for x in segs:
+        if b := repeat_block(x.text):
+            x.extra["asr_repeat"] = b
+    for i, b in near_duplicates(segs):
+        segs[i].extra.setdefault("asr_repeat", b)
+        segs[i + 1].extra.setdefault("asr_repeat", b)
+    return sum(1 for x in segs if x.extra.get("asr_repeat"))
+
+
+def old_prompt(p: Project, settings: dict) -> str:
+    """Lời gợi ý bản 2.1.0–2.1.7 đã gửi bộ nghe (tên + tiêu đề / mô tả / thẻ video) – để nhận ra câu bộ nghe chép lại."""
+    import re
+
+    from . import asr_qwen, names
+
+    meta = p.data.get("video_meta") or {}
+    parts = [asr_qwen.hotwords({k: v for k, v in settings.items() if k != "_asr_context"}),
+             names.context_text(p, settings), str(meta.get("title") or ""),
+             re.sub(r"\s+", " ", str(meta.get("description") or "")), "、".join(str(t) for t in meta.get("tags") or [])]
+    return "\n".join(x for x in parts if x)
+
+
+ECHO_CPS = 9.0   # câu trùng tiêu đề / mô tả video mà > 9 chữ Hán / giây = bộ nghe chép lời gợi ý vào khúc nhạc ngắn
+
+
+def clean_asr(p: Project, settings: dict | None = None, progress: Prog | None = None, cancel=None) -> dict:
+    """Dọn phụ đề đã nghe xong (2.1.8) – không phải nghe lại cả phim:
+    1. bỏ câu bộ nghe CHÉP lời gợi ý (tiêu đề / mô tả / thẻ video, danh sách tên – đoạn nhạc / không ai nói);
+    2. câu có 1 cụm ≥ 5 chữ lặp liền nhau + 2 câu liền nhau gần giống nhau: Qwen3-ASR nghe lại đúng đoạn đó (không gợi
+       ý, phạt lặp): cụm chỉ còn 1 lần -> bỏ lần lặp / gộp 2 câu thành 1; vẫn 2 lần (nói 2 lần thật) -> giữ, tô màu.
+    Câu đổi chữ: căn lại mốc từng chữ, bỏ giọng lồng cũ; đã lồng -> xếp lại bản lồng (không đọc lại). Hoàn tác = "Hoàn
+    tác sửa" (cleanup_backup). Trả {"echo", "fixed", "merged", "kept", "changed": [chỉ số câu], "no_asr": bool}."""
+    from difflib import SequenceMatcher
+
+    from . import asr_qwen
+    from .align import CJK, ECHO_MARKERS, decide_repeat, near_duplicates, prompt_echo, repeat_block
+
+    settings = dict(settings or load_settings())
+    language = p.data.get("language", "zh") or "zh"
+    segs = list(p.segments)
+    st: dict = {"echo": 0, "fixed": 0, "merged": 0, "kept": 0, "changed": [], "no_asr": False}
+    if not segs:
+        return st
+    backup = [x.to_dict() for x in segs]
+    old_texts = {x.text for x in segs}
+    prompt = old_prompt(p, settings)
+    tags = "、".join(str(t) for t in (p.data.get("video_meta") or {}).get("tags") or [])
+
+    def echo(x) -> bool:
+        """Câu chép lời gợi ý: có dấu hiệu ("视频标题"…) / là danh sách thẻ video / trùng tiêu đề, mô tả mà nói nhanh
+        bất thường (> ECHO_CPS chữ/s – bộ căn thời gian ép vào khúc nhạc ngắn). Câu thuyết minh đọc đúng nguyên văn mô tả
+        ở tốc độ thường (nhân vật nói thật) được giữ."""
+        if not prompt_echo(x.text, prompt):
+            return False
+        if any(m in x.text for m in ECHO_MARKERS) or (tags and prompt_echo(x.text, tags)):
+            return True
+        return len(CJK.findall(x.text)) / max(0.05, x.end - x.start) > ECHO_CPS
+    keep = [x for x in segs if not echo(x)]
+    st["echo"] = len(segs) - len(keep)
+    segs = keep
+    reps = [(i, b) for i, x in enumerate(segs) if (b := repeat_block(x.text))]
+    pairs = near_duplicates(segs)
+    spans = [[max(0.0, segs[i].start - 0.1), segs[i].end + 0.1] for i, _b in reps] + \
+            [[max(0.0, segs[i].start - 0.1), segs[i + 1].end + 0.1] for i, _b in pairs]
+    heard: list = []
+    wav = None
+    if spans and asr_qwen.available():
+        wav = _voice_wav16(p, _sub(progress, 0.0, 0.15), cancel)
+        try:
+            r = asr_qwen.worker(settings).call(
+                {"cmd": "asr", "wav": str(Path(wav).resolve()), "language": language, "prompt": "", "align": False,
+                 "rep_penalty": asr_qwen.REP_PENALTY, "spans": spans}, _sub(progress, 0.15, 0.75), cancel)
+            heard = [_heard(it.get("text", ""), language) for it in r.get("items") or []]
+        except ff.Cancelled:
+            raise
+        except Exception:  # noqa: BLE001 – không nghe lại được: chỉ bỏ câu chép gợi ý, câu lặp tô màu để kiểm
+            log_error("Dọn câu lặp: nghe lại")
+            heard = []
+    elif spans:
+        st["no_asr"] = True
+    changed: list = []
+
+    def han(t: str) -> str:
+        return "".join(CJK.findall(t or ""))
+    for (i, b), h in zip(reps, heard[:len(reps)]):
+        x = segs[i]
+        txt, fixed = decide_repeat(x.text, h, b)
+        if fixed:
+            x.extra.setdefault("src_before", x.text)
+            x.text = txt
+            x.extra.pop("ct", None)
+            changed.append(x)
+            st["fixed"] += 1
+        else:
+            st["kept"] += 1
+    gone: set = set()
+    for (i, b), h in reversed(list(zip(pairs, heard[len(reps):]))):
+        a, c = segs[i], segs[i + 1]
+        if id(a) in gone or id(c) in gone:
+            continue
+        hn = han(h)
+        n = hn.count(b)
+        if n >= 2 or not hn:
+            st["kept"] += 1
+            continue
+        best = max((a, c), key=lambda y: (SequenceMatcher(None, han(y.text), hn, autojunk=False).ratio(),
+                                          len(han(y.text))))
+        if n == 0 and SequenceMatcher(None, han(best.text), hn, autojunk=False).ratio() < 0.6:
+            st["kept"] += 1
+            continue
+        other = c if best is a else a
+        best.extra.setdefault("src_before", a.text + " | " + c.text)
+        best.start, best.end = min(a.start, c.start), max(a.end, c.end)
+        best.extra.pop("ct", None)
+        gone.add(id(other))
+        if best not in changed:
+            changed.append(best)
+        st["merged"] += 1
+    segs = [x for x in segs if id(x) not in gone]
+    if changed and wav is not None:
+        try:
+            asr_qwen.align_qwen(changed, wav, language, settings, _sub(progress, 0.75, 0.95), cancel)
+        except ff.Cancelled:
+            raise
+        except Exception:  # noqa: BLE001 – căn lỗi: câu giữ mốc đầu / cuối như cũ
+            log_error("Dọn câu lặp: căn thời gian")
+    p.data["asr_repeat"] = mark_repeats(segs)
+    if st["echo"] or changed or gone:
+        p.data["cleanup_backup"] = backup
+        lost = forget_stale_voice(old_texts, segs, moved=bool(gone))
+        p.segments = segs
+        p.save()
+        if (st["echo"] or lost or gone) and has_dub(p):   # câu bị bỏ / đổi: xếp lại bản lồng, không đọc lại
+            relayout(p, settings)
+    else:
+        p.segments = segs
+        p.save()
+    pos = {id(x): k for k, x in enumerate(segs)}
+    st["changed"] = sorted(pos[id(x)] for x in changed if id(x) in pos)
+    return st
+
+
+def clean_asr_note(st: dict, translated: bool = False) -> str:
+    parts = []
+    if st.get("echo"):
+        parts.append(f"bỏ {st['echo']} câu bộ nghe chép lại tiêu đề / mô tả video")
+    if st.get("fixed"):
+        parts.append(f"bỏ chỗ lặp lời trong {st['fixed']} câu")
+    if st.get("merged"):
+        parts.append(f"gộp {st['merged']} cặp câu lặp thành 1")
+    if st.get("kept"):
+        parts.append(f"giữ {st['kept']} chỗ (nghe lại vẫn ra 2 lần – nhân vật nói 2 lần thật, chữ gốc màu hồng)")
+    if st.get("no_asr"):
+        parts.append("chưa nghe lại được câu lặp (cần Qwen3-ASR) – đã tô màu hồng để kiểm tay")
+    if not parts:
+        return "Không thấy câu bịa / câu lặp nào"
+    msg = "Đã " + ", ".join(parts)
+    if st.get("changed") and translated:
+        msg += " · câu đổi chữ gốc đã tích sẵn – bấm 'Dịch câu đã tích' rồi 'Tạo lại giọng các câu đã tích'"
+    return msg + " · không ưng: 'Hoàn tác sửa'"
 
 
 def _voice_wav16(p: Project, progress: Prog | None = None, cancel=None) -> Path:
