@@ -48,6 +48,10 @@ MODELS = [
               "\"Kết hợp\" (chính xác nhất)", "639 MB", ("audio_separator",), "layers"),
     ModelInfo("sep_mdx", "Tách giọng – MDX-Net Voc FT", "Tách giọng nhanh, hợp máy chỉ có CPU", "67 MB",
               ("audio_separator",), "layers"),
+    ModelInfo("sep_demucs", "Tách giọng – HT-Demucs", "Tách giọng nhanh, nhẹ (1 mô hình, máy card yếu); học trên nhạc nên "
+              "giọng thoại kém sạch hơn RoFormer", "~80 MB", ("audio_separator",), "layers"),
+    ModelInfo("sep_demucs_ft", "Tách giọng – HT-Demucs FT", "4 mô hình Demucs chuyên từng phần: sạch hơn HT-Demucs, chậm "
+              "hơn khoảng 4 lần", "~320 MB", ("audio_separator",), "layers"),
     ModelInfo("qwen_asr", "Nhận dạng – Qwen3-ASR", "Nghe tiếng Trung chuẩn nhất, tự đặt dấu câu (mặc định; chọn bản "
               "1.7B / 0.6B ở Cài đặt)", "~4,7 GB / 1,9 GB", ("transformers", "torch"), "mic"),
     ModelInfo("qwen_align", "Căn thời gian từng chữ – Qwen3", "Giờ từng chữ lệch ~0,03 s: tách câu đúng chỗ nghỉ, giọng "
@@ -83,13 +87,28 @@ BY_KEY = {m.key: m for m in MODELS}
 
 # ------------------------------------------------------------------ kiểm tra đã tải chưa
 
-SEP_KEYS = ("sep_kim", "sep_roformer", "sep_mdx")
+SEP_KEYS = ("sep_kim", "sep_roformer", "sep_mdx", "sep_demucs", "sep_demucs_ft")
 
 
 def _sep_file(key: str) -> str:
     from .separate import BS_ROFORMER, KIM_ROFORMER
 
-    return {"sep_kim": KIM_ROFORMER, "sep_roformer": BS_ROFORMER}.get(key, "UVR-MDX-NET-Voc_FT.onnx")
+    return {"sep_kim": KIM_ROFORMER, "sep_roformer": BS_ROFORMER, "sep_demucs": "htdemucs.yaml",
+            "sep_demucs_ft": "htdemucs_ft.yaml"}.get(key, "UVR-MDX-NET-Voc_FT.onnx")
+
+
+def _sep_ready(name: str) -> bool:
+    """Mô hình tách đã tải đủ: file trọng số > 1 MB, không còn file tải dở; Demucs = file .yaml + mọi file .th."""
+    from .separate import DEMUCS_FILES, SEP_DIR
+
+    weights = DEMUCS_FILES.get(name, ())
+    if weights and not (SEP_DIR / name).is_file():
+        return False
+    for w in weights or (name,):
+        f = SEP_DIR / w
+        if not (f.is_file() and f.stat().st_size > 1_000_000) or (SEP_DIR / (w + ".part")).exists():
+            return False
+    return True
 
 
 def _hf_snapshot(repo: str) -> Path | None:
@@ -282,10 +301,7 @@ def qwen_repo(settings: dict | None = None) -> str:
 def is_ready(key: str, settings: dict | None = None) -> bool:
     try:
         if key in SEP_KEYS:
-            from .separate import SEP_DIR
-
-            f = SEP_DIR / _sep_file(key)
-            return f.exists() and f.stat().st_size > 1_000_000 and not (SEP_DIR / (f.name + ".part")).exists()
+            return _sep_ready(_sep_file(key))
         if key == "qwen_asr":
             return _hf_complete(qwen_repo(settings))
         if key == "qwen_align":

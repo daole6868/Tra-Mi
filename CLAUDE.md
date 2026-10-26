@@ -59,7 +59,9 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   "hybrid", `pipeline.hybrid_listen`: chữ OCR + căn giờ từng chữ từ giọng (pad 0,6), `rescue_segments(keep_lines=True)`
   thêm câu OCR sót `extra["from_asr"]` (chữ cam), `sub_source` "hybrid"); Cài đặt `asr_dual` / `asr_ai` / `asr_context`
   / `asr_name_pass`; `pipeline.listen_note`, `_listen_audio`. `trami/asr.py` (faster-whisper), `asr_funasr.py` (SenseVoice/Paraformer, `mark_songs`), `diarize.py` (ECAPA),
-  `separate.py` (audio-separator; phim > ~13 phút tách từng đoạn 10 phút `plan_chunks` / `_Joiner`), `lama.py` + `inpaint.py` (xoá chữ), `ocr.py` (RapidOCR),
+  `separate.py` (audio-separator; phim > ~13 phút tách từng đoạn 10 phút `plan_chunks` / `_Joiner`; Demucs
+  `htdemucs` / `htdemucs_ft` 4 phần -> `_find` trộn 3 phần nhạc thành nhạc nền, chạy 1 lượt `DEMUCS_PARAMS` shifts 0,
+  file trọng số `DEMUCS_FILES` -> `models._sep_ready`), `lama.py` + `inpaint.py` (xoá chữ), `ocr.py` (RapidOCR),
   `skills.py` (kỹ năng dịch AI: sửa lỗi nghe & nối câu, hồ sơ phim, kiểm tra bản dịch, kỹ năng riêng – `gui/skills_dialog.py`),
   `translate.py` (`LLMClient` gọi HTTP: anthropic / OpenAI-compatible / gemini / deepseek / ollama; Google gtx;
   Hy-MT2 trên máy qua `hymt_worker.py`), `voicefix.py` (đọc số, phát hiện giọng AI hỏng, cân âm lượng),
@@ -225,7 +227,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (199 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (201 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1707,7 +1709,18 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   bằng Qwen3 tí hon (khớp compute_transition_scores ±5e-7), chạy tiếp lần nghe dở với tiến trình thật (7,6 s -> 0,1 s),
   bộ nghe / bộ căn / Edge giả cho các bước còn lại (vế sau vào đúng 2,8 s, vế đầu dài đọc nhanh riêng, vá = dựng cả bản).
 
+- 2.1.4: "thêm Demucs (như HaizFlow – htdemucs, 2 phần, 1 lượt) được không, có chạy như mô hình đang dùng không". Tool đã
+  có "HT-Demucs FT" (audio-separator, mọi chức năng như mô hình khác: tách từng đoạn 10 phút, tab Âm thanh, nghe / bám mép
+  / lọc nghe nhầm / tìm câu hát trên giọng đã tách). Bảng đo của thư viện (SDR giọng): Mel-RoFormer Kim 12,6, BS-RoFormer
+  11,8, htdemucs_ft 10,8, MDX Voc FT 10,2, htdemucs 9,9 -> giữ Kim làm mặc định. Thêm: `htdemucs.yaml` "HT-Demucs – nhanh,
+  nhẹ (1 mô hình)" vào `SEP_MODELS`; `DEMUCS_PARAMS` (shifts 0 – thư viện mặc định 2 lượt dời giờ ngẫu nhiên = chậm gấp
+  đôi, hơn ≤ 0,2 SDR; overlap 0,25) truyền vào mọi `Separator`; tab Tài liệu 2 mục `sep_demucs` (~80 MB) / `sep_demucs_ft`
+  (~320 MB) – "đã tải" khi có .yaml + đủ file .th (`DEMUCS_FILES`; .yaml chỉ là file cấu hình nhỏ). Chưa làm (người dùng
+  chưa chọn): "Kết hợp Mel-RoFormer + Demucs" (thư viện không tự gộp mô hình 4 phần với 2 phần).
+
 ## Vấn đề đang mở
+- 2.1.4: chờ người dùng tải HT-Demucs ở tab Tài liệu (máy chủ dl.fbaipublicfiles.com của Meta – sandbox bị chặn, chưa
+  tải thật) rồi chọn ở Cài đặt → Mô hình tách giọng, bấm "Tách ngay" (tab Lồng tiếng mục 1) – xem tốc độ, nghe tab Âm thanh.
 - 2.1.3: chờ người dùng chạy lại "1. Nghe & tách câu" trên phim thật (thông báo có "thêm dấu phẩy ở N chỗ…", "bỏ N đoạn
   nghe lại mà bộ nghe không chắc", "căn lại mốc chữ N câu"), thử Huỷ giữa chừng rồi chạy lại (phải "Chạy tiếp lần nghe
   trước"), dịch bằng AI rồi Tạo bản lồng tiếng: nghe câu có chỗ nhân vật ngắt hơi – giọng lồng có nghỉ đúng chỗ, vế sau

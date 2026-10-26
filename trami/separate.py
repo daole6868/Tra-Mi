@@ -4,6 +4,8 @@ Dùng thư viện audio-separator (github.com/nomadkaraoke/python-audio-separato
   - Mel-RoFormer Kim: điểm tách giọng cao nhất trong bảng đo của thư viện (SDR giọng 12,6), nên chạy GPU NVIDIA.
   - Kết hợp BS + Mel-RoFormer: chạy cả 2 mô hình rồi lấy trung bình -> sạch nhất, chậm gấp đôi.
   - BS-RoFormer: rất tốt (SDR 11,8).  MDX-Net Voc FT (ONNX): nhẹ, dùng được trên CPU.
+  - HT-Demucs (Meta, MIT): 1 mô hình nhẹ / bản FT 4 mô hình (SDR giọng 9,9 / 10,8) – học trên nhạc, xuất 4 phần (giọng,
+    trống, bass, nhạc khác) -> 3 phần nhạc trộn lại thành nhạc nền.
 Mô hình tự tải từ GitHub về thư mục data/models/separator ở lần đầu (hoặc tải trước ở tab Tài liệu).
 """
 from __future__ import annotations
@@ -29,8 +31,17 @@ SEP_MODELS = [
     ("model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt", "Mel-RoFormer 3005 – nhẹ hơn"),
     ("UVR-MDX-NET-Voc_FT.onnx", "MDX-Net Voc FT – nhanh, hợp máy chỉ có CPU"),
     ("htdemucs_ft.yaml", "HT-Demucs FT – ổn định, tách nhiều loại nhạc"),
+    ("htdemucs.yaml", "HT-Demucs – nhanh, nhẹ (1 mô hình)"),
 ]
 SEP_DIR = MODELS_DIR / "separator"
+# file trọng số của từng mô hình Demucs (thư viện tải từ máy chủ của Meta; .yaml chỉ là file cấu hình nhỏ)
+DEMUCS_FILES = {
+    "htdemucs.yaml": ("955717e8-8726e21a.th",),
+    "htdemucs_ft.yaml": ("f7e0c4bc-ba3fe64a.th", "d12395a8-e57c48e6.th", "92cfc3b6-ef3bcb9c.th",
+                         "04573f0d-f3cf25b2.th"),
+}
+# Demucs chạy 1 lượt (thư viện mặc định 2 lượt dời giờ ngẫu nhiên rồi lấy trung bình -> chậm gấp đôi, sạch hơn rất ít)
+DEMUCS_PARAMS = {"segment_size": "Default", "shifts": 0, "overlap": 0.25, "segments_enabled": True}
 # Thư viện tách giọng giữ CẢ BÀI trong RAM nhiều lần (bản gốc + kết quả + bộ đếm cho 2 phần × 2 kênh, rồi các bản sao
 # khi ghi file): phim 1,5 giờ ~12–15 GB, "Kết hợp" còn hơn -> máy 32 GB đầy RAM. Phim dài: tách từng đoạn 10 phút
 # (RAM ~2 GB dù phim dài bao nhiêu), 2 đoạn liền chồng 6 s và nối mượt ở 4 s giữa (bỏ 1 s mép – mép đoạn tách kém hơn)
@@ -356,6 +367,7 @@ def _separate_whole(mix: Path, tmp: Path, model: str, progress, cancel) -> tuple
     models = model_list(model)
     try:
         sep = Separator(output_dir=str(tmp), model_file_dir=str(SEP_DIR), output_format="WAV", log_level=40,
+                        demucs_params=dict(DEMUCS_PARAMS),
                         **({"ensemble_algorithm": "avg_wave"} if len(models) > 1 else {}))
     except TypeError:
         raise RuntimeError("Bản audio-separator đang cài chưa hỗ trợ kết hợp 2 mô hình. Cập nhật bằng lệnh:\n"
@@ -388,7 +400,8 @@ def _separate_chunked(mix: Path, tmp: Path, model: str, chunks: list[tuple[int, 
     results: list[tuple[Path, Path]] = []
     used: list[str] = []
     for j, m in enumerate(models):
-        sep = Separator(output_dir=str(tmp), model_file_dir=str(SEP_DIR), output_format="WAV", log_level=40)
+        sep = Separator(output_dir=str(tmp), model_file_dir=str(SEP_DIR), output_format="WAV", log_level=40,
+                        demucs_params=dict(DEMUCS_PARAMS))
         lo = 0.08 + 0.89 * j / len(models)
         m = _load(sep, m, [m], progress, cancel, lo, lo + 0.02)
         used.append(m)

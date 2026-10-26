@@ -1221,10 +1221,85 @@ def test_separate_picks_right_stems(tmp_path, monkeypatch, model):
     v, i = sp.separate(src, tmp_path / "stems", model)
     loud = lambda f: float(np.abs(np.frombuffer(open(f, "rb").read()[44:], np.int16)).mean())  # noqa: E731
     assert loud(v) > 5 * loud(i)          # file "vocals" là giọng thật, không phải phần nhạc nền
+    assert seen["kw"].pop("demucs_params") == sp.DEMUCS_PARAMS
     if model.startswith("ens:"):
         assert seen["model"] == sp.model_list(model) and seen["kw"] == {"ensemble_algorithm": "avg_wave"}
     else:
         assert seen["model"] == model and seen["kw"] == {}
+
+
+def test_separate_demucs_four_stems_and_model_files(tmp_path, monkeypatch):
+    """Demucs xuất 4 phần (giọng, trống, bass, nhạc khác): 3 phần nhạc trộn thành nhạc nền; chạy 1 lượt (shifts 0);
+    tab Tài liệu coi HT-Demucs / FT là "đã tải" chỉ khi có đủ .yaml + mọi file trọng số .th."""
+    import types
+    import wave as wv
+
+    from trami import models
+    from trami import separate as sp
+
+    assert ("htdemucs.yaml", "HT-Demucs – nhanh, nhẹ (1 mô hình)") in sp.SEP_MODELS
+    assert sp.DEMUCS_PARAMS["shifts"] == 0
+    sr = 44100
+    t = np.arange(sr) / sr
+    src = tmp_path / "a.wav"
+    with wv.open(str(src), "wb") as w:
+        w.setnchannels(2), w.setsampwidth(2), w.setframerate(sr)
+        w.writeframes((np.stack([0.5 * np.sin(2 * np.pi * 440 * t)] * 2, 1) * 32767).astype(np.int16).tobytes())
+    seen = {}
+
+    class FakeSep:
+        def __init__(self, output_dir, model_file_dir, output_format, log_level, **kw):
+            self.out = Path(output_dir)
+            seen["kw"] = kw
+
+        def load_model(self, model_filename):
+            seen["model"] = model_filename
+
+        def separate(self, path, names):
+            assert "Other" not in names            # "Other" của Demucs là nhạc khác, không phải cả nhạc nền
+            with wv.open(path, "rb") as r:
+                a = np.frombuffer(r.readframes(r.getnframes()), np.int16).reshape(-1, 2).astype(np.float32)
+            outs = []
+            for name, g in (("vocals", 0.7), ("mix44k_(Drums)_htdemucs", 0.1), ("mix44k_(Bass)_htdemucs", 0.1),
+                            ("mix44k_(Other)_htdemucs", 0.1)):
+                with wv.open(str(self.out / f"{name}.wav"), "wb") as w:
+                    w.setnchannels(2), w.setsampwidth(2), w.setframerate(sr)
+                    w.writeframes((a * g).astype(np.int16).tobytes())
+                outs.append(f"{name}.wav")
+            return outs
+
+    mod = types.ModuleType("audio_separator.separator")
+    mod.Separator = FakeSep
+    monkeypatch.setitem(sys.modules, "audio_separator", types.ModuleType("audio_separator"))
+    monkeypatch.setitem(sys.modules, "audio_separator.separator", mod)
+    monkeypatch.setattr(sp, "available", lambda: True)
+    v, i = sp.separate(src, tmp_path / "stems", "htdemucs.yaml")
+    assert seen["model"] == "htdemucs.yaml" and seen["kw"] == {"demucs_params": sp.DEMUCS_PARAMS}
+
+    def peak(f):
+        with wv.open(str(f), "rb") as r:
+            return float(np.abs(np.frombuffer(r.readframes(r.getnframes()), np.int16)).max()) / 32767
+    assert abs(peak(v) - 0.35) < 0.01 and abs(peak(i) - 0.15) < 0.01     # nhạc nền = trống + bass + nhạc khác
+    assert sorted(f.name for f in (tmp_path / "stems").iterdir()) == ["instrumental.wav", "model.txt",
+                                                                      "timeline.txt", "vocals.wav"]
+
+    sep_dir = tmp_path / "separator"
+    sep_dir.mkdir()
+    monkeypatch.setattr(sp, "SEP_DIR", sep_dir)
+    assert {"sep_demucs", "sep_demucs_ft"} <= set(models.SEP_KEYS) and "sep_demucs" in models.BY_KEY
+    (sep_dir / "htdemucs.yaml").write_text("models: ['955717e8']", "utf-8")
+    assert not models.is_ready("sep_demucs")                  # chỉ có file cấu hình nhỏ
+    (sep_dir / "955717e8-8726e21a.th").write_bytes(b"\0" * 2_000_000)
+    assert models.is_ready("sep_demucs") and not models.is_ready("sep_demucs_ft")
+    for f in sp.DEMUCS_FILES["htdemucs_ft.yaml"]:
+        (sep_dir / f).write_bytes(b"\0" * 2_000_000)
+    assert not models.is_ready("sep_demucs_ft")               # thiếu htdemucs_ft.yaml
+    (sep_dir / "htdemucs_ft.yaml").write_text("models: []", "utf-8")
+    assert models.is_ready("sep_demucs_ft")
+    (sep_dir / "d12395a8-e57c48e6.th.part").write_bytes(b"")
+    assert not models.is_ready("sep_demucs_ft")               # còn file tải dở
+    (sep_dir / sp.KIM_ROFORMER).write_bytes(b"\0" * 2_000_000)
+    assert models.is_ready("sep_kim")
 
 
 def test_ocr_drops_static_watermark():
@@ -3752,7 +3827,7 @@ def test_trend_voices_vieneu(monkeypatch, tmp_path):
     assert out.exists() and tts.read_wav_rate(out) == 24000
 
 
-@pytest.mark.parametrize("model", ["vocals_mel_band_roformer.ckpt",
+@pytest.mark.parametrize("model", ["vocals_mel_band_roformer.ckpt", "htdemucs.yaml",
                                    "ens:model_bs_roformer_ep_317_sdr_12.9755.ckpt+vocals_mel_band_roformer.ckpt"])
 def test_separate_long_audio_in_chunks(tmp_path, monkeypatch, model):
     """Phim dài: tách từng đoạn (mỗi mô hình nạp 1 lần), nối mượt chỗ chồng, đúng độ dài; mép đoạn tách kém (thư viện
@@ -3773,31 +3848,35 @@ def test_separate_long_audio_in_chunks(tmp_path, monkeypatch, model):
         w.setnchannels(2), w.setsampwidth(2), w.setframerate(sr)
         w.writeframes((mix * 32767).astype(np.int16).tobytes())
     calls = {"init": 0, "load": [], "sep": 0}
-    gain = {sp.BS_ROFORMER: 0.6, sp.KIM_ROFORMER: 0.8}
+    gain = {sp.BS_ROFORMER: 0.6, sp.KIM_ROFORMER: 0.8, "htdemucs.yaml": 0.7}
 
     class FakeSep:
         def __init__(self, output_dir, model_file_dir, output_format, log_level, **kw):
             self.out = Path(output_dir)
             calls["init"] += 1
-            assert not kw                       # tự kết hợp, không cần bản thư viện có ensemble
+            assert kw == {"demucs_params": sp.DEMUCS_PARAMS}   # tự kết hợp, không cần bản thư viện có ensemble
 
         def load_model(self, model_filename):
             calls["load"].append(model_filename)
             self.g = gain[model_filename]
+            self.parts = [("vocals", self.g), ("instrumental", 1 - self.g)]
+            if model_filename.endswith(".yaml"):    # Demucs: 4 phần, nhạc nền chia 3
+                self.parts = [("vocals", self.g)] + [(f"piece_({x})_htdemucs", (1 - self.g) / 3)
+                                                     for x in ("Drums", "Bass", "Other")]
 
         def separate(self, path, names):
             calls["sep"] += 1
             with wv.open(path, "rb") as r:
                 a = np.frombuffer(r.readframes(r.getnframes()), np.int16).reshape(-1, 2).astype(np.float32)
             edge = int(0.3 * sr)
-            for name, g in (("vocals", self.g), ("instrumental", 1 - self.g)):
+            for name, g in self.parts:
                 y = a * g
                 y[:edge] = 0
                 y[-edge:] = 0                     # mép đoạn tách kém
                 with wv.open(str(self.out / f"{name}.wav"), "wb") as w:
                     w.setnchannels(2), w.setsampwidth(2), w.setframerate(sr)
                     w.writeframes(y.astype(np.int16).tobytes())
-            return ["vocals.wav", "instrumental.wav"]
+            return [f"{name}.wav" for name, _ in self.parts]
 
     mod = types.ModuleType("audio_separator.separator")
     mod.Separator = FakeSep
