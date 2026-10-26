@@ -3413,6 +3413,12 @@ def dub_summary(p: Project) -> str:
         extra.append(f"{st['errors']} câu lỗi")
     if st.get("slow_restarts"):
         extra.append(f"bộ đọc chậm bất thường {st['slow_restarts']} lần (card đồ hoạ đầy) – đã tự mở lại")
+    if st.get("babble_fixed"):
+        extra.append(f"{st['babble_fixed']} câu ngắn VieNeu đọc lặp lời – đã tự đọc lại")
+    if st.get("babble_left"):
+        rows = sorted(set(st["babble_left"]))
+        extra.append(f"⚠ câu {', '.join(map(str, rows[:12]))}{'…' if len(rows) > 12 else ''} vẫn đọc lặp lời sau 3 lần "
+                     "đọc – sửa lời (thêm 1–2 tiếng) hoặc đổi giọng rồi bấm Tạo lại giọng")
     if st.get("lang_edge"):
         extra.append(f"{st['lang_edge']} câu không phải tiếng Việt đọc bằng Edge (VieNeu chỉ đọc tiếng Việt)")
     if st.get("auto_voiced"):

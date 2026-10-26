@@ -769,6 +769,27 @@ def _omni(settings: dict | None = None) -> OmniWorker:
 
 
 OMNI_SHORT_WORDS = 10   # câu OmniVoice ≤ 10 tiếng: trước 2.1.5 bị kéo dài gấp 2–2,5 lần (đọc lặp lời)
+# VieNeu v3 Turbo sinh giọng từng khung 0,08 s (3840 mẫu / 48 kHz); câu ≤ 4 tiếng bị chặn ở 13 khung + 5 khung mỗi tiếng
+# thêm (vieneu_utils.core_utils.max_expected_frames). Bộ đọc không dừng được (trượt dấu hiệu kết thúc) thì đọc lặp lời
+# tới đúng trần đó: "Được thôi" -> "được thôi được thôi" 18 khung = 1,44 s, "Mất điện rồi" -> x2 = 23 khung = 1,84 s.
+VN_FRAME = 0.08
+VN_CAP_SYL = 4
+# đọc lại câu chạm trần: thông số lấy mẫu mặc định của VieNeu, rồi "nóng" hơn (kiểu đọc Rõ ràng 0,6 dễ lặp lại y hệt)
+VN_RETRY_PARAMS = ({}, {"temperature": 0.9, "top_k": 40, "top_p": 0.97})
+AI_PART_MIN = 5         # bộ đọc AI không đọc riêng vế < 5 tiếng (câu rất ngắn hay bị đọc lặp / bịa tiếng) -> đọc cả câu
+
+
+def vn_short(text: str) -> bool:
+    n = len(re.findall(r"\w+", text))
+    return 1 <= n <= VN_CAP_SYL
+
+
+def vn_cap_hit(a: np.ndarray, sr: int, text: str) -> bool:
+    """Giọng VieNeu v3 Turbo của câu ≤ 4 tiếng dài tới sát trần số khung = bộ đọc không dừng, đọc lặp lời."""
+    if not vn_short(text) or not sr:
+        return False
+    cap = 13 + 5 * (len(re.findall(r"\w+", text)) - 1)
+    return len(a) / sr >= (cap - 1.5) * VN_FRAME
 
 
 def omni_short(text: str) -> bool:
@@ -776,25 +797,44 @@ def omni_short(text: str) -> bool:
     return len(re.findall(r"\w+", text)) <= OMNI_SHORT_WORDS
 
 
-def synth_checked(worker: VieneuWorker, text: str, out: Path, **kw) -> Path:  # kw: voice, ref_audio, params, on_wait…
+def synth_checked(worker: VieneuWorker, text: str, out: Path, cap_check: bool = False, report: dict | None = None,
+                  **kw) -> Path:  # kw: voice, ref_audio, params, on_wait…
     """Đọc 1 câu rồi kiểm tra file giọng: im lặng / tiếng bíp / tiếng ù -> đọc lại 1 lần (hạt ngẫu nhiên khác).
-    Vẫn hỏng thì báo lỗi (câu đó không được ghép vào bản lồng tiếng)."""
-    why = None
-    for attempt in range(2):
-        worker.synth(text, out, seed=(None if attempt == 0 else int.from_bytes(os.urandom(3), "big")), **kw)
+    Vẫn hỏng thì báo lỗi (câu đó không được ghép vào bản lồng tiếng). cap_check (VieNeu v3 Turbo): câu ≤ 4 tiếng đọc
+    tới sát trần số khung = đọc lặp lời -> đọc lại tối đa 2 lần với thông số lấy mẫu khác (`VN_RETRY_PARAMS`);
+    report["babble"] = 1 (đã đọc lại được) / 2 (vẫn lặp – giữ bản cuối)."""
+    why, babble = None, 0
+    tries = 2 + (len(VN_RETRY_PARAMS) if cap_check else 0)
+    for attempt in range(tries):
+        kk = kw
+        if babble and attempt - 1 < len(VN_RETRY_PARAMS):
+            kk = dict(kw, params=dict(VN_RETRY_PARAMS[min(babble, len(VN_RETRY_PARAMS)) - 1]))
+        worker.synth(text, out, seed=(None if attempt == 0 else int.from_bytes(os.urandom(3), "big")), **kk)
         try:
             a, sr = read_wav(out)
         except (OSError, EOFError, wave.Error):
             return Path(out)       # không đọc được kiểu file này -> bỏ qua bước kiểm tra
         why = voice_problem(a, sr)
+        if not why and cap_check and vn_cap_hit(a, sr, text):
+            babble += 1
+            if babble > len(VN_RETRY_PARAMS):   # đọc lại vẫn lặp: giữ bản này, báo câu để sửa lời / đổi giọng
+                if report is not None:
+                    report["babble"] = 2
+                return Path(out)
+            continue
         if not why:
+            if babble and report is not None:
+                report["babble"] = 1
             return Path(out)
+        if attempt >= 1 + babble:
+            break
     Path(out).unlink(missing_ok=True)
     raise RuntimeError(f"giọng đọc hỏng ({why}) cả 2 lần đọc – sửa lời câu này rồi bấm Tạo lại giọng")
 
 
 def trend_synth(worker: VieneuWorker, spec: str, text: str, out: Path, params: dict,
-                presets: list[dict] | None = None, on_wait=None) -> Path:
+                presets: list[dict] | None = None, on_wait=None, cap_check: bool = False,
+                report: dict | None = None) -> Path:
     """Giọng VieNeu theo trend: đọc bằng giọng gốc + kiểu đọc của nó (đã qua kiểm tra giọng hỏng) rồi áp hiệu ứng.
     Ghi 24 kHz (bản lồng tiếng trộn ở 24 kHz; hiệu ứng chạy nhanh gấp đôi so với 48 kHz của VieNeu)."""
     from . import trend_voices
@@ -802,7 +842,8 @@ def trend_synth(worker: VieneuWorker, spec: str, text: str, out: Path, params: d
 
     if not trend_voices.get(spec):
         raise ValueError("Giọng trend này không còn trong bản Subvideo đang dùng")
-    synth_checked(worker, text, out, voice=trend_voices.base_voice(spec, presets) or None,
+    synth_checked(worker, text, out, cap_check=cap_check, report=report,
+                  voice=trend_voices.base_voice(spec, presets) or None,
                   params=trend_voices.params(spec, params), on_wait=on_wait)
     try:
         a, sr = read_wav(out)
@@ -1636,6 +1677,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             ex = extra
             if spec.startswith(("omni:", "omniclone:", "omnid:")) and omni_short(text):
                 ex += "|dur2"   # 2.1.5: câu ngắn đọc trước đó bị OmniVoice kéo dài -> đọc lặp lời -> đọc lại
+            elif spec.startswith(("vieneu:", "clone:")) and mode != "v3nano" and vn_short(text):
+                ex += "|cap2"   # 2.1.6: câu VieNeu ≤ 4 tiếng đọc trước đó có thể lặp lời -> đọc lại có kiểm tra
             h = hashlib.md5((f"{text}|{spec}|{rate}|{pitch}|{mode}|{ex}" + (f"|take{take}" if take else ""))
                             .encode()).hexdigest()[:14]
             return work / (f"tts_{h}.mp3" if spec.startswith("edge:") else f"tts_{h}.wav")
@@ -1660,8 +1703,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                     parts = [spoken_vi(x) for x in parts]
                 if len(parts) < 2 or not all(re.search(r"\w", x) for x in parts):
                     parts = []
-                elif not spec.startswith("edge:") and any(langs.units(x, lg) < 2 for x in parts):
-                    parts = []   # bộ đọc AI đọc 1 tiếng đứng riêng dễ méo / bịa tiếng -> đọc cả câu như cũ
+                elif not spec.startswith("edge:") and any(langs.units(x, lg) < AI_PART_MIN for x in parts):
+                    parts = []   # bộ đọc AI đọc vế rất ngắn dễ đọc lặp / bịa tiếng -> đọc cả câu như cũ
         if parts:
             pfiles = [tts_path(x) for x in parts]
             for x, pf in zip(parts, pfiles):
@@ -1708,6 +1751,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                 if progress:
                     progress(base_p, f"VieNeu đang đọc {n + 1}/{total_items} – câu này đã {sec:.0f} s "
                                      "(thường chỉ vài giây)")
+            rep: dict = {}
+            chk = {"cap_check": mode != "v3nano", "report": rep}   # Nano không sinh theo khung -> không có trần
             try:
                 tmp = p.with_suffix(".raw.wav")
                 if spec.startswith("clone:"):
@@ -1716,13 +1761,17 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                         refs[spk] = build_reference(ref_audio, segs, spk, work / f"ref_{spk}.wav") if ref_audio else None
                     # không đủ mẫu giọng -> dùng giọng mặc định
                     synth_checked(tts, text, tmp, ref_audio=str(refs[spk]) if refs[spk] else None, params=vn_params,
-                                  on_wait=waiting)
+                                  on_wait=waiting, **chk)
                 elif spec.startswith((VN_SAMPLE, VN_LIB)):
-                    synth_checked(tts, text, tmp, ref_audio=vieneu_ref(spec), params=vn_params, on_wait=waiting)
+                    synth_checked(tts, text, tmp, ref_audio=vieneu_ref(spec), params=vn_params, on_wait=waiting, **chk)
                 elif spec.startswith(VN_TREND):
-                    trend_synth(tts, spec, text, tmp, vn_params, vn_presets, on_wait=waiting)
+                    trend_synth(tts, spec, text, tmp, vn_params, vn_presets, on_wait=waiting, **chk)
                 else:
-                    synth_checked(tts, text, tmp, voice=spec[7:] or None, params=vn_params, on_wait=waiting)
+                    synth_checked(tts, text, tmp, voice=spec[7:] or None, params=vn_params, on_wait=waiting, **chk)
+                if rep.get("babble") == 1:
+                    stats["babble_fixed"] = stats.get("babble_fixed", 0) + 1
+                elif rep.get("babble") == 2:
+                    stats.setdefault("babble_left", []).append(i + 1)
                 sr = read_wav_rate(tmp) or tts.sr
                 if abs(speed - 1) > 0.01:
                     a = _decode(tmp, speed, sr)

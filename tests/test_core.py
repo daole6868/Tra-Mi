@@ -1099,6 +1099,67 @@ def test_omnivoice_short_lines_not_stretched(monkeypatch, tmp_path):
     voices.delete(v["id"])
 
 
+def test_vieneu_short_lines_repeat_guard(monkeypatch, tmp_path):
+    """VieNeu v3 Turbo: câu ≤ 4 tiếng không dừng được -> đọc lặp lời tới đúng trần số khung (13 + 5 mỗi tiếng thêm,
+    0,08 s/khung) – file người dùng gửi: "Được thôi," 1,44 s, "Mất điện rồi," 1,84 s, "Thôi nào, đừng khóc," 2,16 s.
+    Tool nhận ra, đọc lại với thông số lấy mẫu khác; vẫn lặp thì giữ + báo số câu; vế < 5 tiếng không đọc riêng."""
+    import types
+
+    from trami import pipeline, tts
+
+    sr = 48000
+    z = lambda sec: np.zeros(int(sec * sr), np.float32)   # noqa: E731
+    assert tts.vn_cap_hit(z(1.44), sr, "Được thôi,") and tts.vn_cap_hit(z(1.84), sr, "Mất điện rồi,")
+    assert tts.vn_cap_hit(z(2.16), sr, "Thôi nào, đừng khóc,")                  # 27/28 khung
+    assert not tts.vn_cap_hit(z(0.7), sr, "Mất điện rồi,")
+    assert not tts.vn_cap_hit(z(3.0), sr, "Tôi vừa về đã nghe nói anh sắp đi.")   # > 4 tiếng: không có trần riêng
+
+    class Fake:   # n lần đầu đọc lặp (dài tới trần), sau đó đọc đúng
+        sr = 48000
+
+        def __init__(self, bad=0, bad_text=None):
+            self.bad, self.bad_text, self.calls = bad, bad_text, []
+
+        def ensure_started(self, progress=None, cancel=None):
+            pass
+
+        def synth(self, text, out, seed=None, params=None, **kw):
+            self.calls.append((text, dict(params or {})))
+            n = sum(1 for t, _ in self.calls if t == text)
+            hit = (self.bad_text is None or text == self.bad_text) and n <= self.bad
+            cap = (13 + 5 * (len(text.split()) - 1)) * tts.VN_FRAME
+            return tts.write_wav(out, _speech_like(sr, cap if hit else 0.3 + 0.15 * len(text.split())), sr)
+    f, rep = Fake(1), {}
+    tts.synth_checked(f, "Được thôi,", tmp_path / "a.wav", cap_check=True, report=rep, params={"temperature": 0.6})
+    assert rep == {"babble": 1} and len(f.calls) == 2 and f.calls[1][1] == {}     # đọc lại: thông số mặc định VieNeu
+    f, rep = Fake(9), {}
+    tts.synth_checked(f, "Được thôi,", tmp_path / "b.wav", cap_check=True, report=rep, params={"temperature": 0.6})
+    assert rep == {"babble": 2} and len(f.calls) == 3 and f.calls[2][1]["temperature"] == 0.9
+    assert (tmp_path / "b.wav").exists()                                          # vẫn lặp: giữ bản cuối + báo
+    f = Fake(9)
+    tts.synth_checked(f, "Được thôi,", tmp_path / "c.wav")                        # Nano / OmniVoice: 1 lần như cũ
+    assert len(f.calls) == 1
+
+    fake = Fake(1, "Mất điện rồi.")
+    monkeypatch.setattr(tts, "vieneu_available", lambda: True)
+    monkeypatch.setattr(tts, "_vieneu", lambda mode: fake)
+    ct = [[1.0, 1.2], [1.2, 1.4], [1.4, 1.6], [1.6, 1.8], [2.8, 3.0], [3.0, 3.2]]
+    segs = [Segment(1.0, 3.3, "我们走吧，快点。", "Được thôi, nhanh lên nào các bạn ơi.", "S1", {"ct": [list(x) for x in ct]}),
+            Segment(4.0, 6.3, "我们走吧，快点。", "Chúng ta đi thôi nào các bạn, nhanh lên nào các bạn ơi.", "S1",
+                    {"ct": [[a + 3, b + 3] for a, b in ct]}),
+            Segment(8.0, 9.0, "停电了", "Mất điện rồi.", "S1")]
+    st: dict = {}
+    tts.synthesize_dub(segs, tmp_path / "dub.wav", 12, tmp_path / "t", voices={"S1": "vieneu:Ngọc Huyền"}, stats=st,
+                       max_speedup=1.3, settings={"dub_level_match": False})
+    read = [t for t, _ in fake.calls]
+    assert "Được thôi, nhanh lên nào các bạn ơi." in read and "Được thôi," not in read    # vế 2 tiếng: đọc cả câu
+    assert "Chúng ta đi thôi nào các bạn," in read and st["clauses"] == 1                 # vế đủ dài: đọc từng vế
+    assert read.count("Mất điện rồi.") == 2 and st["babble_fixed"] == 1 and not st.get("babble_left")
+    proj = types.SimpleNamespace(data={"dub_stats": dict(st, babble_left=[7, 3])})
+    msg = pipeline.dub_summary(proj)
+    assert "1 câu ngắn VieNeu đọc lặp lời – đã tự đọc lại" in msg and "⚠ câu 3, 7 vẫn đọc lặp lời" in msg
+
+
 def test_dub_placement_no_overlap(tmp_path, monkeypatch):
     """Xếp giọng lồng: không câu nào chồng câu nào; câu quá dài bị đánh dấu 'long' và nằm trong too_long."""
     from trami import tts
