@@ -180,7 +180,12 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `pipeline.clean_asr` (nút "Dọn câu bịa / câu lặp" tab Phụ đề → Công cụ → Lời hát & nghe nhầm, việc "dual"; bỏ câu
   chép `old_prompt` – tiêu đề / mô tả / thẻ `video_meta` + tên – khi có dấu hiệu / là danh sách thẻ / > `ECHO_CPS` 9 chữ/s;
   câu lặp + cặp câu giống: Qwen3 nghe lại đúng đoạn (±0,1 s) -> sửa / gộp / giữ; căn lại mốc, `cleanup_backup` ->
-  "Hoàn tác sửa", xếp lại bản lồng), `clean_asr_note`; "Tích câu nghi lặp".
+  "Hoàn tác sửa", xếp lại bản lồng), `clean_asr_note`; "Tích câu nghi lặp". Nói vấp (2.1.9): `align.false_start` /
+  `drop_false_starts` ("我不管闲，我不管闲事" -> "我不管闲事": lần đầu kết thúc bằng 1 chữ đứng riêng mà lần sau chữ đó dính
+  chữ sau thành 1 từ – từ điển jieba `_dict_tokens` HMM=False; không áp cho con số `NUMERALS`; mốc `ct` bỏ đúng chữ) cuối
+  `recognize` (`p.data["asr_stammer"]`) + trong `clean_asr` (`st["stammer"]`); `repeat_block` thêm cụm 4 chữ dính liền
+  (`_LOOP4_RE`); `align.restarts` (vế trước trùng / là đầu vế sau) -> `match_clauses` không ép đủ vế; luật dịch 11 (Việt +
+  tiếng khác) + `REVIEW_PROMPT` mục 7: nói vấp / lặp vô nghĩa dịch 1 lần, lặp nhấn mạnh giữ.
 - Giờ HIỆN phụ đề (2.0.96): `subtitle.follow_dub(mode="always", lead, hold, min_dur, join)` + `pipeline.follow_params`
   (Cài đặt `sub_follow_mode` / `sub_lead` 0,1 / `sub_hold` 0,3 / `sub_min_dur` 1 / `sub_join_gap` 0,3, công tắc
   `dub_subs_follow`) – xem trước, xuất video, SRT đã dịch (`export_subs`, `_export_sub`); tab Phụ đề → Công cụ → "Giờ
@@ -240,7 +245,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (205 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (206 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1784,7 +1789,16 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   增幅"), 48 câu tô hồng chờ nghe lại; bộ nghe giả: sửa / gộp / giữ đúng, chạy tiếp lần nghe không nghe lại. Chưa chạy Qwen3
   thật (sandbox chặn HF) – phạt lặp 1,2 có làm mất chỗ nói 2 lần thật không chưa đo.
 
+- 2.1.9: "những câu thường dịch ra 'tôi không lo chuyện bao đồng, tôi không lo chuyện bao đồng' có cách xử lý chưa". Câu
+  gốc p03 #1019 "我不管闲，我不管闲事。" (nói vấp / bộ nghe vấp: nói dở rồi nói lại) – cụm 4 chữ nên 2.1.8 (≥ 5 chữ) không
+  bắt; AI dịch đúng như câu gốc, luật 10 (giữ đủ số vế) còn đẩy AI dịch 2 lần. Sửa: bỏ lần nói dở ở chữ gốc khi chắc là vấp
+  (lần đầu cắt giữa 1 từ), cụm 4 chữ dính liền -> nghi lặp vòng (nghe lại như 2.1.8), luật dịch / kiểm tra mới, câu có vế
+  nói lại không bị ép đủ vế. Đo trên 2 file người dùng: p03 sửa đúng #1019 + #2802 ("你还没我一，你还没我一半"), #914 cụm 4
+  chữ lặp; phim cũ 2610 câu 0 câu bị đổi; giữ "来不及，来不及了", "六千，六千五", "让一让，让一让", "积分，积分换食物".
+
 ## Vấn đề đang mở
+- 2.1.9: chờ người dùng bấm lại "Dọn câu bịa / câu lặp" trên dự án p03 (câu #1019 thành "我不管闲事。", đã tích) -> "Dịch câu
+  đã tích" -> "Tạo lại giọng các câu đã tích"; báo câu lặp kiểu khác còn sót (gửi chữ gốc + bản dịch).
 - 2.1.8: chờ người dùng (1) dự án phim p03: tab Phụ đề → Công cụ → Lời hát & nghe nhầm → "Dọn câu bịa / câu lặp" (phải
   bỏ ~165 câu "Tiêu đề…" / "Tóm tắt…", sửa / gộp câu lặp), rồi Dịch câu đã tích + Tạo lại giọng; (2) phim mới: "1. Nghe &
   tách câu" – thông báo có "bỏ N khúc bộ nghe chép lại lời gợi ý" / "sửa N chỗ bộ nghe lặp lời", đếm câu hồng còn lại so

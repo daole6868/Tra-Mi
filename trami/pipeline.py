@@ -1525,6 +1525,11 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
             from .align import mark_breaths
 
             p.data["breaths_marked"] = mark_breaths(segs, float(settings.get("dub_pause_min", 0.3)))
+    if method not in ("ocr", "hybrid") and language in ("zh", "yue", "auto"):
+        from .align import drop_false_starts
+
+        # nói vấp "我不管闲，我不管闲事" -> "我不管闲事" (không thì dịch / lồng tiếng thành 2 lần)
+        p.data["asr_stammer"] = sum(drop_false_starts(x) for x in segs)
     if method != "ocr":
         p.data["asr_repeat"] = mark_repeats(segs)   # câu vẫn còn lặp lời / 2 câu liền giống nhau -> tô màu để kiểm
     segs = normalize(segs)
@@ -1550,6 +1555,8 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         p.data.pop("asr_joined", None)
         p.data.pop("asr_relisten", None)
         p.data.pop("ai_joined", None)
+    if method in ("ocr", "hybrid"):
+        p.data.pop("asr_stammer", None)
     if method == "ocr":
         p.data.pop("asr_warning", None)
         p.data.pop("asr_repeat", None)
@@ -1770,6 +1777,8 @@ def listen_note(p: Project) -> str:
         out.append(f"bỏ {rl['echo']} khúc bộ nghe chép lại lời gợi ý (đoạn nhạc / không ai nói)")
     if rl.get("repeat_fixed"):
         out.append(f"sửa {rl['repeat_fixed']} chỗ bộ nghe lặp lời")
+    if p.data.get("asr_stammer"):
+        out.append(f"bỏ {p.data['asr_stammer']} chỗ nói vấp (nói dở rồi nói lại, VD 我不管闲，我不管闲事 -> 我不管闲事)")
     if p.data.get("asr_repeat"):
         out.append(f"⚠ {p.data['asr_repeat']} câu còn lặp lời / 2 câu liền giống nhau (chữ gốc màu hồng) – nghe lại, "
                    "hoặc tab Phụ đề → Công cụ → Lời hát & nghe nhầm → 'Dọn câu bịa / câu lặp'")
@@ -1810,20 +1819,21 @@ ECHO_CPS = 9.0   # câu trùng tiêu đề / mô tả video mà > 9 chữ Hán /
 
 def clean_asr(p: Project, settings: dict | None = None, progress: Prog | None = None, cancel=None) -> dict:
     """Dọn phụ đề đã nghe xong (2.1.8) – không phải nghe lại cả phim:
-    1. bỏ câu bộ nghe CHÉP lời gợi ý (tiêu đề / mô tả / thẻ video, danh sách tên – đoạn nhạc / không ai nói);
+    1. bỏ câu bộ nghe CHÉP lời gợi ý (tiêu đề / mô tả / thẻ video, danh sách tên – đoạn nhạc / không ai nói); bỏ chỗ nói
+       vấp ("我不管闲，我不管闲事" -> "我不管闲事", `align.drop_false_starts`, 2.1.9);
     2. câu có 1 cụm ≥ 5 chữ lặp liền nhau + 2 câu liền nhau gần giống nhau: Qwen3-ASR nghe lại đúng đoạn đó (không gợi
        ý, phạt lặp): cụm chỉ còn 1 lần -> bỏ lần lặp / gộp 2 câu thành 1; vẫn 2 lần (nói 2 lần thật) -> giữ, tô màu.
     Câu đổi chữ: căn lại mốc từng chữ, bỏ giọng lồng cũ; đã lồng -> xếp lại bản lồng (không đọc lại). Hoàn tác = "Hoàn
-    tác sửa" (cleanup_backup). Trả {"echo", "fixed", "merged", "kept", "changed": [chỉ số câu], "no_asr": bool}."""
+    tác sửa" (cleanup_backup). Trả {"echo", "stammer", "fixed", "merged", "kept", "changed": [chỉ số câu], "no_asr"}."""
     from difflib import SequenceMatcher
 
     from . import asr_qwen
-    from .align import CJK, ECHO_MARKERS, decide_repeat, near_duplicates, prompt_echo, repeat_block
+    from .align import CJK, ECHO_MARKERS, decide_repeat, drop_false_starts, near_duplicates, prompt_echo, repeat_block
 
     settings = dict(settings or load_settings())
     language = p.data.get("language", "zh") or "zh"
     segs = list(p.segments)
-    st: dict = {"echo": 0, "fixed": 0, "merged": 0, "kept": 0, "changed": [], "no_asr": False}
+    st: dict = {"echo": 0, "stammer": 0, "fixed": 0, "merged": 0, "kept": 0, "changed": [], "no_asr": False}
     if not segs:
         return st
     backup = [x.to_dict() for x in segs]
@@ -1843,6 +1853,12 @@ def clean_asr(p: Project, settings: dict | None = None, progress: Prog | None = 
     keep = [x for x in segs if not echo(x)]
     st["echo"] = len(segs) - len(keep)
     segs = keep
+    changed: list = []
+    if language in ("zh", "yue", "auto") and p.data.get("sub_source") not in ("ocr", "hybrid"):
+        for x in segs:
+            if drop_false_starts(x):     # nói vấp: bỏ lần nói dở (mốc từng chữ giữ khớp), không cần nghe lại
+                changed.append(x)
+                st["stammer"] += 1
     reps = [(i, b) for i, x in enumerate(segs) if (b := repeat_block(x.text))]
     pairs = near_duplicates(segs)
     spans = [[max(0.0, segs[i].start - 0.1), segs[i].end + 0.1] for i, _b in reps] + \
@@ -1863,7 +1879,6 @@ def clean_asr(p: Project, settings: dict | None = None, progress: Prog | None = 
             heard = []
     elif spans:
         st["no_asr"] = True
-    changed: list = []
 
     def han(t: str) -> str:
         return "".join(CJK.findall(t or ""))
@@ -1902,9 +1917,10 @@ def clean_asr(p: Project, settings: dict | None = None, progress: Prog | None = 
             changed.append(best)
         st["merged"] += 1
     segs = [x for x in segs if id(x) not in gone]
-    if changed and wav is not None:
+    realign = [x for x in changed if not x.extra.get("ct")]
+    if realign and wav is not None:
         try:
-            asr_qwen.align_qwen(changed, wav, language, settings, _sub(progress, 0.75, 0.95), cancel)
+            asr_qwen.align_qwen(realign, wav, language, settings, _sub(progress, 0.75, 0.95), cancel)
         except ff.Cancelled:
             raise
         except Exception:  # noqa: BLE001 – căn lỗi: câu giữ mốc đầu / cuối như cũ
@@ -1929,6 +1945,8 @@ def clean_asr_note(st: dict, translated: bool = False) -> str:
     parts = []
     if st.get("echo"):
         parts.append(f"bỏ {st['echo']} câu bộ nghe chép lại tiêu đề / mô tả video")
+    if st.get("stammer"):
+        parts.append(f"bỏ chỗ nói vấp trong {st['stammer']} câu (VD 我不管闲，我不管闲事 -> 我不管闲事)")
     if st.get("fixed"):
         parts.append(f"bỏ chỗ lặp lời trong {st['fixed']} câu")
     if st.get("merged"):
@@ -1975,6 +1993,7 @@ def match_clauses(segs, rows, tr, lang: str, min_gap: float = 0.3, cancel=None) 
     (Translator.match_clauses). Chỉ nhận khi ghép được thêm chỗ ngắt và không dài hơn hẳn; bản cũ lưu
     extra["trans_before_clause"]. Bỏ qua câu người dùng tự sửa, câu 🎵. Trả số câu đã sửa (2.1.3)."""
     from . import langs
+    from .align import restarts
     from .tts import clause_texts
 
     todo = []
@@ -1982,8 +2001,8 @@ def match_clauses(segs, rows, tr, lang: str, min_gap: float = 0.3, cancel=None) 
         if not 0 <= i < len(segs):
             continue
         s = segs[i]
-        if not (s.trans or "").strip() or s.extra.get("trans_user") or s.extra.get("song"):
-            continue
+        if not (s.trans or "").strip() or s.extra.get("trans_user") or s.extra.get("song") or restarts(s.text):
+            continue      # câu gốc có vế nói lại ("你，你还没…") -> bản dịch gộp vế là đúng, không ép đủ vế
         bp, n = clause_state(s, lang, min_gap)
         if bp and n < len(bp):
             todo.append((i, clause_texts(s.text, bp), n))

@@ -888,19 +888,28 @@ def _han_pos(text: str) -> list[tuple[int, str]]:
     return [(i, ch) for i, ch in enumerate(text or "") if CJK.match(ch)]
 
 
+_LOOP4_RE = re.compile(r"([㐀-鿿]{4})\1")
+
+
 def repeat_block(text: str) -> str | None:
     """Cụm chữ Hán dài nhất (≥ REPEAT_MIN) lặp lại ngay sau chính nó trong lời nghe (bỏ qua dấu câu) – nghi bộ nghe
-    lặp vòng. Cụm chỉ gồm 1–2 chữ lặp đi lặp lại ("哈哈哈哈哈", "对对对对对") không tính. Không có -> None."""
+    lặp vòng. Cụm 4 chữ chỉ tính khi 2 lần dính liền, không dấu câu ở giữa ("以后所有以后所有的货", 2.1.9 – lặp có dấu
+    phẩy "谢谢老板，谢谢老板" là cách nói thường). Cụm chỉ gồm 1–2 chữ lặp đi lặp lại ("哈哈哈哈哈", "对对对对对") không
+    tính. Không có -> None."""
     h = "".join(ch for _, ch in _han_pos(text))
     pos = 0
     while True:
         m = _REPEAT_RE.search(h, pos)
         if not m:
-            return None
+            break
         blk = m.group(1)
         if not re.fullmatch(r"(.{1,2})\1+.?", blk):
             return blk
         pos = m.start() + 1
+    for m in _LOOP4_RE.finditer(text or ""):
+        if not re.fullmatch(r"(.{1,2})\1+", m.group(1)):
+            return m.group(1)
+    return None
 
 
 def drop_repeat(text: str, block: str) -> str:
@@ -965,6 +974,82 @@ def near_duplicates(segs: list[Segment], ratio: float = 0.8, gap: float = 1.0) -
         if m.size >= REPEAT_MIN:
             out.append((i, ha[m.a:m.a + m.size]))
     return out
+
+
+# ------------------------------------------------------------------ nói vấp: nói dở rồi nói lại (2.1.9)
+# "我不管闲，我不管闲事" (nhân vật / bộ nghe vấp: nói dở "我不管闲" rồi nói lại cả câu) -> dịch thành "tôi không lo chuyện
+# bao đồng, tôi không lo chuyện bao đồng", giọng lồng đọc 2 lần. Cụm 4 chữ – dưới ngưỡng lặp vòng REPEAT_MIN. Chỉ bỏ khi
+# CHẮC là nói vấp: lần đầu bị cắt giữa 1 từ (闲|事, 一|半 – từ cuối của lần đầu chỉ còn 1 chữ, lần sau chữ đó dính với
+# chữ sau thành 1 từ). Nói lại cả từ để nhấn mạnh / sửa lời ("来不及，来不及了", "不是，不是天河倒灌", "六千，六千五",
+# "积分，积分换食物") giữ nguyên.
+NUMERALS = "零〇一二三四五六七八九十百千万亿两几"
+_FS_RE = re.compile(r"([㐀-鿿]{2,8})([，,、…\s]{1,3})\1(?=[㐀-鿿])")
+
+
+def _dict_tokens(text: str) -> list[tuple[int, int]] | None:
+    """Tách từ theo từ điển jieba (không đoán từ mới): [(đầu, cuối)] theo vị trí ký tự. Chưa cài jieba -> None."""
+    try:
+        import jieba
+
+        jieba.setLogLevel(60)
+        return [(a, b) for _w, a, b in jieba.tokenize(text, HMM=False)]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def false_start(text: str) -> tuple[int, int] | None:
+    """Chỗ nói vấp đầu tiên trong lời nghe: (đầu, cuối) đoạn cần bỏ (lần nói dở + dấu câu sau nó). Không có -> None."""
+    if not text or not CJK.search(text):
+        return None
+    pos = 0
+    toks = None
+    while (m := _FS_RE.search(text, pos)):
+        if toks is None:
+            toks = _dict_tokens(text)
+            if toks is None:
+                return None
+        a1, b1 = m.end(1), m.end()
+        frag = (a1 - 1, a1) in toks                        # lần đầu kết thúc bằng 1 chữ đứng riêng ("闲", "一")
+        mid = not any(b == b1 for _a, b in toks)            # lần sau: chữ đó dính chữ sau thành 1 từ ("闲事", "一半")
+        num = m.group(1)[-1] in NUMERALS and text[b1] in NUMERALS   # "六千，六千五" là 2 con số
+        if frag and mid and not num:
+            return m.start(1), m.end(2)
+        pos = m.start() + 1
+    return None
+
+
+def drop_false_starts(s: Segment) -> bool:
+    """Bỏ mọi chỗ nói vấp trong câu (giữ mốc từng chữ khớp lời: bỏ mốc của các chữ bị bỏ). Lời cũ -> extra["src_before"].
+    Trả True nếu có sửa."""
+    from .subtitle import ct_of
+
+    old = s.text or ""
+    text, ct = old, ct_of(s)
+    for _ in range(4):
+        r = false_start(text)
+        if not r:
+            break
+        a, b = r
+        if ct is not None:
+            k = len(CJK.findall(text[:a]))
+            ct = ct[:k] + ct[k + len(CJK.findall(text[a:b])):]
+        text = text[:a] + text[b:]
+    if text == old:
+        return False
+    s.extra.setdefault("src_before", old)
+    s.text = text
+    if ct is not None:
+        s.extra["ct"] = ct
+    else:
+        s.extra.pop("ct", None)
+    return True
+
+
+def restarts(text: str) -> bool:
+    """Câu gốc có vế nói lại / lặp lại (vế trước trùng hoặc là phần đầu của vế sau: "你，你还没…", "让一让，让一让") –
+    bản dịch không bắt buộc đủ số vế (AI có thể dịch 1 lần)."""
+    parts = [p for p in re.split(r"[，,、…。！？!?；;：:\s]+", text or "") if CJK.search(p)]
+    return any(b.startswith(a) for a, b in zip(parts, parts[1:]))
 
 
 def _should_join(grp: list[Segment], nxt: Segment, q: dict, punctuated: bool) -> bool:

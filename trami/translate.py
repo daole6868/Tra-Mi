@@ -60,7 +60,11 @@ Yêu cầu bắt buộc:
    nối tiếp lời thoại trước – sau) thì bắt đầu bản dịch bằng "♪ ". Lời thoại bình thường KHÔNG thêm ♪.
 10. Dấu phẩy / dấu câu GIỮA dòng gốc là chỗ nhân vật ngắt hơi: bản dịch đặt dấu phẩy (hoặc ? ! .) ở chỗ tương ứng, giữ
    ĐÚNG số vế và thứ tự các vế như câu gốc (vế 1 dịch vế 1, vế 2 dịch vế 2…) để giọng lồng ngắt nghỉ khớp nhân vật;
-   chỉ đảo / gộp vế khi tiếng Việt không thể nói khác."""
+   chỉ đảo / gộp vế khi tiếng Việt không thể nói khác.
+11. Chỗ NÓI VẤP / nói dở rồi nói lại (vế trước là vế sau bị bỏ dở: 我不管闲，我不管闲事 = 我不管闲事; 你还没我一，你还没
+   我一半 = 你还没我一半) hoặc 1 cụm bị lặp vô nghĩa (以后所有以后所有的货): chỉ dịch 1 lần, không lặp lại trong bản dịch
+   (luật 10 không áp cho vế bị lặp). Lặp CÓ CHỦ Ý để nhấn mạnh / gọi / giục (让一让，让一让; 龙鳅王，龙鳅王; 快走，快走)
+   thì giữ lặp."""
 
 # Dịch sang Anh / Thái / Nhật / Hàn: lời nhắc tiếng Anh (luật giống bản tiếng Việt, đổi phần xưng hô / tên riêng)
 STYLES_EN = {
@@ -109,7 +113,11 @@ Mandatory rules:
 10. A comma / punctuation mark INSIDE a source line marks where the character pauses for breath: put a comma (or ? ! .)
    at the matching place in the translation, keeping the SAME number and order of clauses (clause 1 translates clause
    1, clause 2 translates clause 2…) so the dubbed voice pauses with the character; reorder or merge clauses only when
-   {L['english']} grammar leaves no other way."""
+   {L['english']} grammar leaves no other way.
+11. A STAMMER / false start (an earlier clause is an unfinished copy of the next one: 我不管闲，我不管闲事 = 我不管闲事;
+   你还没我一，你还没我一半 = 你还没我一半) or a meaningless repeated chunk (以后所有以后所有的货): translate it ONCE, do
+   not repeat it in the translation (rule 10 does not apply to the repeated clause). Deliberate repetition for emphasis /
+   calling / urging (让一让，让一让; 龙鳅王，龙鳅王; 快走，快走) stays repeated."""
 
 
 SYL_PER_SEC = 4.6      # tiếng Việt lồng tiếng tự nhiên ~4–5 tiếng/giây (tiếng khác: langs.INFO[...]["rate"])

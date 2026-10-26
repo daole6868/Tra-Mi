@@ -7948,6 +7948,53 @@ def test_asr_guard_echo_repeat_and_clean(tmp_path, monkeypatch):
         p.delete()
 
 
+def test_false_start_stammer(tmp_path):
+    """2.1.9: nói vấp "我不管闲，我不管闲事" (cụm 4 chữ, dưới ngưỡng lặp vòng) -> dịch / lồng tiếng thành 2 lần. Chỉ bỏ lần
+    nói dở khi lần đầu bị cắt giữa 1 từ; nói lại cả từ / con số / chuỗi đổi ("来不及，来不及了", "六千，六千五",
+    "积分，积分换食物") giữ. Mốc từng chữ vẫn khớp lời. Dọn câu bịa / câu lặp sửa luôn dự án cũ, câu dịch không bị ép đủ vế."""
+    from trami import align, pipeline, skills, translate
+    from trami.project import Project
+
+    pytest.importorskip("jieba")
+    fix = {"我不管闲，我不管闲事。": "我不管闲事。", "你，你还没我一，你还没我一半能钓，省省吧。": "你，你还没我一半能钓，省省吧。",
+           "等一，等一下！": "等一下！"}
+    for src, want in fix.items():
+        s = Segment(0.0, 2.0, src)
+        assert align.drop_false_starts(s) and s.text == want and s.extra["src_before"] == src
+    for keep in ("来不及，来不及了，就是现在！", "六千，六千五，", "金盒能换积分，积分换食物，黄金古董也可以换。", "不是，不是天河倒灌，",
+                 "让一让，让一让！", "高敏敏，高敏敏在不在？", "好好，好好学习", "我们去北京，我们去北京大学", "你怀疑，你怀疑谁？"):
+        assert align.false_start(keep) is None, keep
+    s = Segment(1.0, 3.0, "我不管闲，我不管闲事。", extra={"ct": [[1.0 + k * 0.2, 1.15 + k * 0.2] for k in range(9)]})
+    assert align.drop_false_starts(s) and len(s.extra["ct"]) == 5 and s.extra["ct"][0][0] == pytest.approx(1.8)
+    # cụm 4 chữ lặp dính liền = bộ nghe lặp vòng; có dấu phẩy ở giữa là cách nói thường
+    assert align.repeat_block("他要的是你这个人以后所有以后所有的货。") == "以后所有"
+    assert align.repeat_block("谢谢老板，谢谢老板。") is None and align.repeat_block("对对对对对对") is None
+    assert align.restarts("你，你还没我一半能钓") and align.restarts("让一让，让一让！") and not align.restarts("你少管闲事，")
+    # dịch: luật nói vấp chỉ dịch 1 lần (Việt / tiếng khác / AI kiểm tra)
+    assert "我不管闲，我不管闲事" in translate.system_prompt("vi") and "STAMMER" in translate.system_prompt("en")
+    assert "NÓI VẤP" in skills.REVIEW_PROMPT.format(src="tiếng Trung", lang="tiếng Việt")
+
+    class Tr:
+        def match_clauses(self, items):
+            raise AssertionError("câu nói lại không bị ép đủ vế")
+    vs = Segment(0.0, 2.0, "你，你还没我一半能钓，省省吧。", "Cô còn chẳng câu giỏi bằng nửa tôi, thôi bỏ đi.",
+                 extra={"ct": [[k * 0.15, k * 0.15 + 0.1] for k in range(11)]})
+    assert pipeline.match_clauses([vs], [0], Tr(), "vi") == 0
+
+    p = Project.create("nói vấp")
+    try:
+        p.segments = [Segment(0.0, 2.0, "你少管闲事，", "Cậu đừng lo chuyện bao đồng,", "S1"),
+                      Segment(2.1, 4.0, "我不管闲，我不管闲事。", "tôi không lo chuyện bao đồng, tôi không lo chuyện bao đồng",
+                              "S1")]
+        p.save()
+        res = pipeline.clean_asr(p, {})
+        assert res["stammer"] == 1 and res["changed"] == [1] and [x.text for x in p.segments] == ["你少管闲事，", "我不管闲事。"]
+        assert "nói vấp" in pipeline.clean_asr_note(res, True) and "Dịch câu đã tích" in pipeline.clean_asr_note(res, True)
+        assert pipeline.undo_cleanup(Project(p.id), {}) == 2 and Project(p.id).segments[1].text == "我不管闲，我不管闲事。"
+    finally:
+        p.delete()
+
+
 def test_google_translates_foreign_lines_with_auto_source(monkeypatch):
     """Câu tiếng Anh trong phim Trung (2.1.3): Google dịch riêng với "tự nhận tiếng", câu Trung vẫn nguồn zh-CN."""
     from trami import translate as tr

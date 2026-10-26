@@ -133,6 +133,8 @@ và độ dài nói vừa thời gian câu thoại ("≤N" = tối đa N; "M–N
 4. Còn chữ Hán, sai chính tả, sai dấu câu.
 5. Sai giọng điệu (phim hài mà câu đùa không còn buồn cười…).
 6. Câu gốc là lời bài hát (văn vần, điệp khúc, không ăn nhập với lời thoại) mà bản dịch chưa có "♪ " ở đầu -> thêm "♪ ".
+7. Bản dịch lặp lại 1 vế vì câu gốc NÓI VẤP / nói dở rồi nói lại (我不管闲，我不管闲事) hoặc bộ nghe lặp 1 cụm -> chỉ giữ
+   1 lần. Lặp có chủ ý để nhấn mạnh / gọi / giục (让一让，让一让) thì để nguyên.
 Chỉ trả về JSON: {{"<số>": {{"sua": "bản dịch mới", "ly_do": "lý do ngắn bằng tiếng Việt"}}}}. Câu đã ổn thì KHÔNG ghi."""
 
 

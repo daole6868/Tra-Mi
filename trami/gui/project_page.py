@@ -616,7 +616,8 @@ class ProjectPage(QWidget):
                         "dấu lại", flat=True, on_click=self._voice_ok)),
             flow(_rowlbl("Câu bịa / lặp"),
                  button("Dọn câu bịa / câu lặp", "wand", "Bỏ câu bộ nghe chép lại tiêu đề / mô tả / thẻ video (đoạn nhạc, "
-                        "không ai nói – lỗi bản 2.1.0–2.1.7); câu có 1 cụm lặp liền nhau và 2 câu liền nhau gần giống "
+                        "không ai nói – lỗi bản 2.1.0–2.1.7); bỏ chỗ nói vấp (我不管闲，我不管闲事 -> 我不管闲事 – "
+                        "không thì dịch / lồng tiếng thành 2 lần); câu có 1 cụm lặp liền nhau và 2 câu liền nhau gần giống "
                         "nhau -> Qwen3-ASR nghe lại đúng đoạn đó: chỉ ra 1 lần thì bỏ lần lặp / gộp 2 câu, vẫn ra 2 lần "
                         "(nói 2 lần thật) thì giữ. Không phải nghe lại cả phim. Không ưng: Hoàn tác sửa",
                         on_click=self.run_clean_asr),
