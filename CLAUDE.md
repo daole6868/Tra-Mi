@@ -66,7 +66,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `translate.py` (`LLMClient` gọi HTTP: anthropic / OpenAI-compatible / gemini / deepseek / ollama; Google gtx;
   Hy-MT2 trên máy qua `hymt_worker.py`), `voicefix.py` (đọc số, phát hiện giọng AI hỏng, cân âm lượng),
   `gender.py` (đoán giọng nam/nữ mỗi người nói), `karaoke.py` (thời điểm từng từ cho phụ đề karaoke),
-  `omni_design.py` (23 giọng OmniVoice chọn sẵn tạo theo mô tả), `trend_voices.py` (20 giọng VieNeu theo trend
+  `omni_design.py` (23 giọng OmniVoice chọn sẵn tạo theo mô tả; `omni_worker.fix_short_duration` – câu ngắn
+  không bị kéo dài / đọc lặp, 2.1.5), `trend_voices.py` (20 giọng VieNeu theo trend
   `vieneu:trend:<mã>` = giọng dựng sẵn + kiểu đọc + hiệu ứng) + `voicefx.py` (hiệu ứng giọng chỉ bằng numpy).
 - `trami/audiomix.py` – quy tắc trộn âm thanh dùng chung cho xuất video (`video.build_and_render`) và bộ trộn trực tiếp
   `LiveMix` của trình phát (`player.LiveAudio` + `_Feeder` ở QThread riêng, QAudioSink); cài đặt ở `edit["audio"]`, tab `gui/audio_tab.py`.
@@ -227,7 +228,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (201 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (202 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1718,7 +1719,21 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (~320 MB) – "đã tải" khi có .yaml + đủ file .th (`DEMUCS_FILES`; .yaml chỉ là file cấu hình nhỏ). Chưa làm (người dùng
   chưa chọn): "Kết hợp Mel-RoFormer + Demucs" (thư viện không tự gộp mô hình 4 phần với 2 phần).
 
+- 2.1.5: "giọng lồng lặp lại 2–3 lần dù phụ đề chỉ có 1 câu" (gửi 3 file `tts_*.wav` 24 kHz + `.npy`). Nghe lại bằng máy nghe
+  tiếng Việt (sherpa-onnx zipformer-vi): "Mất điện rồi" -> "mất điện rồi mất điện rồi", "Được thôi" -> x2, "Thôi nào, đừng
+  khóc" -> "đừng khóc" x3 – lỗi nằm ngay trong file bộ đọc tạo ra (không phải ghép / xếp giọng). File 24 kHz = OmniVoice
+  (VieNeu v3 Turbo ghi 48 kHz). OmniVoice 0.2.1 định trước độ dài rồi mới đọc (`RuleDurationEstimator.estimate_duration`:
+  tỉ lệ trọng số chữ với câu mẫu; ước lượng < `low_threshold` 50 khung ≈ 2 s thì nới theo `50·(x/50)^(1/3)`) -> câu Việt
+  ngắn bị kéo gấp 2–2,5 lần (đo bằng chính hàm của gói: "Được thôi." 0,56 -> 1,31 s, file thật 1,25 s; "Mất điện rồi." 0,71
+  -> 1,41 s, file 1,6 s), mô hình lấp chỗ thừa bằng cách đọc lặp. 2.1.3 đọc từng vế -> nhiều đoạn ngắn hơn -> gặp nhiều hơn.
+  Sửa: `omni_worker.fix_short_duration` (gọi sau khi nạp mô hình) thay mức nới: `SHORT_TOKENS` 20 khung (~0,8 s), căn bậc 2
+  (`SHORT_BOOST`) -> "Được thôi" ×1,19, "Mất điện rồi" ×1,06, câu ≥ 1 s không đổi, "Ừ." 0,28 s; bản OmniVoice không có 2
+  tham số đó thì để nguyên. `tts.omni_short` (≤ `OMNI_SHORT_WORDS` 10 tiếng) -> mã file giọng OmniVoice thêm "|dur2" ->
+  bấm Tạo bản lồng tiếng là câu ngắn tự đọc lại, câu dài giữ file cũ. Chưa chạy OmniVoice thật (sandbox chặn HF).
+
 ## Vấn đề đang mở
+- 2.1.5: chờ người dùng bấm "Tạo bản lồng tiếng" (đọc lại câu ngắn OmniVoice) rồi nghe các câu ngắn ("Được thôi", "Mất
+  điện rồi"): hết lặp chưa, câu 1 tiếng ("Ừ", "A") có bị cụt / méo không (mức nới mới: < 0,8 s, căn bậc 2).
 - 2.1.4: chờ người dùng tải HT-Demucs ở tab Tài liệu (máy chủ dl.fbaipublicfiles.com của Meta – sandbox bị chặn, chưa
   tải thật) rồi chọn ở Cài đặt → Mô hình tách giọng, bấm "Tách ngay" (tab Lồng tiếng mục 1) – xem tốc độ, nghe tab Âm thanh.
 - 2.1.3: chờ người dùng chạy lại "1. Nghe & tách câu" trên phim thật (thông báo có "thêm dấu phẩy ở N chỗ…", "bỏ N đoạn

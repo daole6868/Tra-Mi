@@ -1031,6 +1031,74 @@ def test_omnivoice_samples_and_dub(monkeypatch, tmp_path):
     assert voices.list_samples() == []
 
 
+def test_omnivoice_short_lines_not_stretched(monkeypatch, tmp_path):
+    """OmniVoice định trước độ dài theo số chữ, câu < ~2 s bị kéo dài theo hàm mũ 1/3 ("Được thôi" 0,56 s -> 1,31 s) ->
+    mô hình đọc lặp lời ("được thôi được thôi"). Tiến trình OmniVoice thay mức nới nhẹ hơn; câu ngắn đọc trước đó đổi mã
+    file -> đọc lại; câu dài giữ file cũ."""
+    import types
+    import unicodedata
+
+    from trami import omni_design, tts, voices
+    from trami.omni_worker import SHORT_BOOST, fix_short_duration
+
+    class Est:   # cùng công thức với RuleDurationEstimator của OmniVoice 0.2.1 (chữ Latin 1, cách 0,2, dấu câu 0,5)
+        def weight(self, t):
+            return sum(0.2 if c == " " else 0.5 if unicodedata.category(c)[0] in "PS" else
+                       0.0 if unicodedata.category(c)[0] == "M" else 1.0 for c in t)
+
+        def estimate_duration(self, target_text, ref_text, ref_duration, low_threshold=50, boost_strength=3):
+            est = self.weight(target_text) / (self.weight(ref_text) / ref_duration)
+            if low_threshold is not None and est < low_threshold:
+                return low_threshold * (est / low_threshold) ** (1.0 / boost_strength)
+            return est
+
+    model = types.SimpleNamespace(duration_estimator=Est())
+    ref, tok = omni_design.ANCHOR_TEXT, 6.0 * 25          # câu mẫu ~6 s, 25 khung / giây
+
+    def ratio(t):
+        return model.duration_estimator.estimate_duration(t, ref, tok) / Est().estimate_duration(t, ref, tok, None)
+    long = "Hôm nay mình sẽ kể cho các bạn nghe một câu chuyện thật thú vị về chiếc bình cổ."
+    assert ratio("Được thôi.") > 2.2 and ratio("Mất điện rồi.") > 1.9          # lỗi cũ: gấp đôi -> đọc lặp
+    assert fix_short_duration(model) and not fix_short_duration(model)
+    assert ratio("Được thôi.") < 1.25 and ratio("Mất điện rồi.") < 1.1 and abs(ratio(long) - 1) < 1e-9
+    assert ratio("Ừ.") <= 3 * SHORT_BOOST                                    # 1 tiếng vẫn đủ ~0,3 s
+    old = types.SimpleNamespace(duration_estimator=types.SimpleNamespace(estimate_duration=lambda a, b, c: 1.0))
+    assert not fix_short_duration(old) and old.duration_estimator.estimate_duration(1, 2, 3) == 1.0   # bản khác: để nguyên
+    assert tts.omni_short("Được thôi.") and not tts.omni_short(long)
+    real_short = tts.omni_short
+
+    src = tmp_path / "rec.wav"
+    _fake_audio(src, 5, 300)
+    v = voices.add_sample(src, "Giọng B", "Xin chào các bạn")
+    made = []
+
+    class FakeOmni:
+        sr = 24000
+
+        def ensure_started(self, progress=None, cancel=None):
+            pass
+
+        def synth(self, text, out, **kw):
+            made.append((text, Path(out).name))
+            return tts.write_wav(out, _speech_like(24000, 1.0), 24000)
+
+    monkeypatch.setattr(tts, "omnivoice_available", lambda: True)
+    monkeypatch.setattr(tts, "_omni", lambda settings=None: FakeOmni())
+
+    def run(short_fn):
+        monkeypatch.setattr(tts, "omni_short", short_fn)
+        made.clear()
+        segs = [Segment(0.5, 1.5, "好", "Được thôi.", "S1"), Segment(2.0, 8.0, "长", long, "S1")]
+        tts.synthesize_dub(segs, tmp_path / "dub.wav", 9, tmp_path / "t", voices={"S1": f"omni:{v['id']}"},
+                           settings={"dub_by_clause": False})
+        return {t: Path(s.extra["tts_file"]).name for t, s in zip(("short", "long"), segs)}, list(made)
+    before, _ = run(lambda text: False)                                       # file đọc trước 2.1.5
+    after, read = run(real_short)
+    assert after["short"] != before["short"] and after["long"] == before["long"]
+    assert [t for t, _ in read] == ["Được thôi."]                              # chỉ đọc lại câu ngắn
+    voices.delete(v["id"])
+
+
 def test_dub_placement_no_overlap(tmp_path, monkeypatch):
     """Xếp giọng lồng: không câu nào chồng câu nào; câu quá dài bị đánh dấu 'long' và nằm trong too_long."""
     from trami import tts

@@ -11,6 +11,37 @@ import sys
 
 from .vieneu_worker import _reply, _seed
 
+# OmniVoice định trước độ dài file theo số chữ rồi mới đọc; câu ước lượng < 50 khung (~2 s) bị kéo dài thêm theo hàm mũ
+# 1/3 -> "Được thôi" (~0,56 s) thành 1,3 s, mô hình đọc lặp lời cho đủ ("được thôi được thôi"). Giữ phần nới cho câu
+# ngắn nhưng nhẹ hơn hẳn: chỉ câu < 20 khung (~0,8 s), căn bậc 2 (≤ ×1,25 với câu ~0,5 s)
+SHORT_TOKENS = 20
+SHORT_BOOST = 2.0
+
+
+def fix_short_duration(model) -> bool:
+    """Thay mức nới độ dài câu ngắn của bộ ước lượng độ dài OmniVoice (`RuleDurationEstimator.estimate_duration`).
+    Bản OmniVoice không có 2 tham số này -> để nguyên. Trả True khi đã thay."""
+    import inspect
+
+    est = getattr(model, "duration_estimator", None)
+    fn = getattr(est, "estimate_duration", None)
+    if fn is None or getattr(est, "_trami_short", False):
+        return False
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    if "low_threshold" not in params or "boost_strength" not in params:
+        return False
+
+    def estimate_duration(target_text, ref_text, ref_duration, low_threshold=SHORT_TOKENS,
+                          boost_strength=SHORT_BOOST):
+        return fn(target_text, ref_text, ref_duration, low_threshold, boost_strength)
+
+    est.estimate_duration = estimate_duration
+    est._trami_short = True
+    return True
+
 
 def main(repo: str = "k2-fsa/OmniVoice") -> None:
     proto = sys.stdout
@@ -40,6 +71,7 @@ def main(repo: str = "k2-fsa/OmniVoice") -> None:
         with tqdm_progress(prog, 0.0, 1.0, "Đang nạp OmniVoice", download="Đang tải OmniVoice"):
             model = OmniVoice.from_pretrained(repo, **kw)
         sr = int(getattr(model, "sampling_rate", None) or 24000)
+        fix_short_duration(model)
     except Exception as e:  # noqa: BLE001
         _reply(proto, {"error": f"Không nạp được OmniVoice: {type(e).__name__}: {e}"})
         return

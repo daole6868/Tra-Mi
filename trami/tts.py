@@ -768,6 +768,14 @@ def _omni(settings: dict | None = None) -> OmniWorker:
         return _omni_model
 
 
+OMNI_SHORT_WORDS = 10   # câu OmniVoice ≤ 10 tiếng: trước 2.1.5 bị kéo dài gấp 2–2,5 lần (đọc lặp lời)
+
+
+def omni_short(text: str) -> bool:
+    """Câu ngắn mà OmniVoice trước 2.1.5 kéo dài quá mức (ước lượng < ~2 s) – mã file giọng đổi để đọc lại."""
+    return len(re.findall(r"\w+", text)) <= OMNI_SHORT_WORDS
+
+
 def synth_checked(worker: VieneuWorker, text: str, out: Path, **kw) -> Path:  # kw: voice, ref_audio, params, on_wait…
     """Đọc 1 câu rồi kiểm tra file giọng: im lặng / tiếng bíp / tiếng ù -> đọc lại 1 lần (hạt ngẫu nhiên khác).
     Vẫn hỏng thì báo lỗi (câu đó không được ghép vào bản lồng tiếng)."""
@@ -1625,7 +1633,10 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         take = int(s.extra.get("take", 0) or 0)   # "Tạo lại giọng": lần đọc mới của cùng câu
 
         def tts_path(text: str) -> Path:
-            h = hashlib.md5((f"{text}|{spec}|{rate}|{pitch}|{mode}|{extra}" + (f"|take{take}" if take else ""))
+            ex = extra
+            if spec.startswith(("omni:", "omniclone:", "omnid:")) and omni_short(text):
+                ex += "|dur2"   # 2.1.5: câu ngắn đọc trước đó bị OmniVoice kéo dài -> đọc lặp lời -> đọc lại
+            h = hashlib.md5((f"{text}|{spec}|{rate}|{pitch}|{mode}|{ex}" + (f"|take{take}" if take else ""))
                             .encode()).hexdigest()[:14]
             return work / (f"tts_{h}.mp3" if spec.startswith("edge:") else f"tts_{h}.wav")
 
