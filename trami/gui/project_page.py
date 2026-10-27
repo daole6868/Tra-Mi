@@ -332,6 +332,33 @@ class ProjectPage(QWidget):
         self.a_split = f.row("Kiểu tách câu", combo(C.SPLIT_STYLES, s.get("split_style", "dub")), C.SPLIT_HELP)
         self.a_dual = f.row("Nghe 2 bộ rồi so", Switch(bool(s.get("asr_dual", False))),
                             C.DUAL_HELP + ". Cùng 1 công tắc với Cài đặt → Nhận dạng giọng nói")
+        # nghe chính xác hơn (2.1.15): độ dài khúc, nghe lại câu không chắc, nghe kỹ, nghe lại khúc nghi tiếng khác
+        self.a_chunk = QSpinBox()
+        self.a_chunk.setRange(10, 60)
+        self.a_chunk.setSuffix(" s")
+        self.a_chunk.setMaximumWidth(110)
+        self.a_chunk.setValue(int(s.get("asr_chunk_sec", 28) or 28))
+        f.row("Độ dài khúc nghe", self.a_chunk, C.CHUNK_HELP + ". Cùng 1 giá trị với Cài đặt → Nhận dạng giọng nói")
+        self.a_recheck = Switch(bool(s.get("asr_recheck", True)))
+        self.a_pad = QDoubleSpinBox()
+        self.a_pad.setRange(1.0, 10.0)
+        self.a_pad.setSingleStep(0.5)
+        self.a_pad.setDecimals(1)
+        self.a_pad.setPrefix("±")
+        self.a_pad.setSuffix(" s")
+        self.a_pad.setMaximumWidth(110)
+        self.a_pad.setValue(float(s.get("asr_recheck_pad", 5.0) or 5.0))
+        self.a_pad.setToolTip("Khúc nghe lại: câu không chắc nằm giữa, thêm bấy nhiêu giây trước / sau làm ngữ cảnh")
+        self.a_recheck.setToolTip(C.RECHECK_HELP)
+        f.row("Nghe lại câu không chắc", hbox(self.a_recheck, label("nghe kèm mỗi bên", "muted"), self.a_pad, None),
+              C.RECHECK_HELP + ". Mức độ chắc / nghe thêm trên tiếng gốc: Cài đặt → Nhận dạng giọng nói")
+        self.a_overlap = f.row("Nghe kỹ (mọi câu nghe 2 lần)", Switch(bool(s.get("asr_overlap", False))), C.OVERLAP_HELP)
+        self.a_langchk = f.row("Nghe lại khúc nghi tiếng khác", Switch(bool(s.get("asr_lang_check", True))),
+                               C.LANG_CHECK_HELP)
+        for w in (self.a_recheck, self.a_overlap, self.a_langchk):
+            w.toggled.connect(self._audio_opts_changed)
+        self.a_chunk.valueChanged.connect(self._audio_opts_changed)
+        self.a_pad.valueChanged.connect(self._audio_opts_changed)
         self.a_dual.toggled.connect(self._audio_opts_changed)
         self.a_sep.toggled.connect(self._audio_opts_changed)
         self.a_spk.toggled.connect(self._audio_opts_changed)
@@ -2673,6 +2700,11 @@ class ProjectPage(QWidget):
             self.a_asr.setEnabled(pv["method"] in ("asr", "hybrid"))
             self.a_ocrfps.setEnabled(pv["method"] in ("ocr", "hybrid"))
             self.a_dual.setChecked(bool(st.get("asr_dual", False)))
+            self.a_chunk.setValue(int(st.get("asr_chunk_sec", 28) or 28))
+            self.a_recheck.setChecked(bool(st.get("asr_recheck", True)))
+            self.a_pad.setValue(float(st.get("asr_recheck_pad", 5.0) or 5.0))
+            self.a_overlap.setChecked(bool(st.get("asr_overlap", False)))
+            self.a_langchk.setChecked(bool(st.get("asr_lang_check", True)))
         finally:
             self.loading = was
         self._update_engine_label()
@@ -2958,7 +2990,12 @@ class ProjectPage(QWidget):
                                        "sep_model": self.d_sepmodel.currentData() or self.settings.get("sep_model"),
                                        "split_style": self.a_split.currentData() or "dub",
                                        "ai_join_engine": self.a_joinai.currentData() or "auto",
-                                       "asr_dual": self.a_dual.isChecked()})
+                                       "asr_dual": self.a_dual.isChecked(),
+                                       "asr_chunk_sec": int(self.a_chunk.value()),
+                                       "asr_recheck": self.a_recheck.isChecked(),
+                                       "asr_recheck_pad": float(self.a_pad.value()),
+                                       "asr_overlap": self.a_overlap.isChecked(),
+                                       "asr_lang_check": self.a_langchk.isChecked()})
 
     def _engine_changed(self, *_):
         self._update_engine_label()

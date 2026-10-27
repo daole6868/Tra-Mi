@@ -44,22 +44,30 @@ def fit_text(s: Segment) -> str:
     return out
 
 
-ENGINE_LABEL = {"firered": "FireRedASR2", "qwen3": "Qwen3-ASR"}
+ENGINE_LABEL = {"firered": "FireRedASR2", "qwen3": "Qwen3-ASR", "recheck": "Nghe lại với khúc rộng hơn",
+                "recheck_o": "Nghe lại trên tiếng gốc"}
 
 
 def asr_tip(s) -> str:
     """Chú thích chữ gốc: 2 bộ nghe khác nhau / câu bộ nghe thêm (OCR + nghe) / tên đã sửa."""
     lines = []
     if s.extra.get("asr_alt") is not None:
-        who = ENGINE_LABEL.get(s.extra.get("asr_alt_eng", ""), "Bộ nghe 2")
+        eng = str(s.extra.get("asr_alt_eng", ""))
+        who = ENGINE_LABEL.get(eng, "Bộ nghe 2")
         alt = s.extra["asr_alt"] or "(không nghe ra chữ nào – có thể là nhạc / tiếng động)"
-        lines.append(f"2 bộ nghe ra khác nhau – {who}: {alt}")
+        lines.append(f"{who} ra khác: {alt}" if eng.startswith("recheck") else f"2 bộ nghe ra khác nhau – {who}: {alt}")
         pick = s.extra.get("asr_pick")
         if pick:
             lines.append({"A": "AI giữ bản đang có", "B": f"AI chọn bản của {who}",
                           "C": "AI ghép từ 2 bản"}.get(pick[:1], "AI chọn") + (pick[1:] if len(pick) > 1 else ""))
         elif s.extra.get("asr_unsure"):
             lines.append("Chưa chọn được – nghe lại rồi sửa chữ, hoặc tích câu rồi bấm 'Dùng bản bộ nghe 2'")
+    if s.extra.get("asr_recheck"):
+        lines.append("Đã sửa theo lần nghe lại " + ("trên tiếng gốc" if s.extra["asr_recheck"] == "o" else
+                                                   "với khúc rộng hơn (câu nằm giữa, có câu trước / sau)"))
+    conf = s.extra.get("asr_conf")
+    if conf is not None and float(conf) < 0.7:
+        lines.append(f"Bộ nghe không chắc câu này (độ chắc {float(conf):.2f}) – nên nghe lại")
     if s.extra.get("from_asr"):
         lines.append("OCR + nghe: phụ đề in sẵn không có câu này – bộ nghe nghe thêm (nên nghe lại)")
     if s.extra.get("name_fix"):   # [[chữ cũ, tên]] (sửa theo âm đọc) hoặc [tên] (nghe lại ra đúng tên)
@@ -281,7 +289,8 @@ class SubsModel(QAbstractTableModel):
             if c == C_ZH and s.extra.get("ai_song") and s.extra.get("song"):
                 return f"🎵 AI: lời bài hát – {s.extra['ai_song']}\nKhông lồng tiếng câu này. Là lời thoại thật: tích rồi " \
                        "bấm 'Không phải nhạc'"
-            if c == C_ZH and (s.extra.get("asr_alt") is not None or s.extra.get("from_asr") or s.extra.get("name_fix")):
+            if c == C_ZH and (s.extra.get("asr_alt") is not None or s.extra.get("from_asr") or s.extra.get("name_fix")
+                              or s.extra.get("asr_recheck") or float(s.extra.get("asr_conf", 1) or 1) < 0.7):
                 return asr_tip(s)
             if c == C_ZH and (s.extra.get("src_before") or s.extra.get("src_unsure")):
                 tip = f"AI sửa lỗi nghe – trước: {s.extra['src_before']}" if s.extra.get("src_before") else ""

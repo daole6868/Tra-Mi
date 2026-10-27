@@ -151,6 +151,12 @@ DEFAULT_SETTINGS: dict = {
     "ai_join_engine": "auto",                 # AI nối câu theo nghĩa sau khi tách câu: auto (công cụ dịch nếu là AI) / off / tên AI
     "asr_relisten": True,                     # nghe lại chỗ cắt khúc giữa lúc đang nói (bỏ dấu "。" giả bộ nghe tự đặt)
     "asr_lang_check": True,                   # khúc nghe chưa chắc -> nghe lại không ép tiếng (câu tiếng Anh trong phim Trung)
+    "asr_chunk_sec": 28,                      # độ dài tối đa 1 khúc nghe (giây, 10–60; FireRedASR2 ≤ 55) – 2.1.15
+    "asr_recheck": True,                      # câu bộ nghe không chắc -> nghe lại với khúc rộng hơn (câu ở giữa) – 2.1.15
+    "asr_recheck_conf": 0.7,                  # ... câu có độ chắc (xác suất trung bình mỗi chữ) dưới mức này
+    "asr_recheck_pad": 5.0,                   # ... nghe kèm bấy nhiêu giây mỗi bên (câu trước / sau làm ngữ cảnh)
+    "asr_recheck_orig": True,                 # ... nghe thêm trên tiếng gốc chưa tách giọng (bản tách có thể méo)
+    "asr_overlap": False,                     # "Nghe kỹ": mọi câu nghe lần 2 trong khúc lệch (chậm gấp đôi) – 2.1.15
     "asr_guard": True,                        # khúc bộ nghe chép lời gợi ý / lặp 1 cụm -> nghe lại không gợi ý (2.1.8)
     # đăng video (publish.py): Zernio / API riêng YouTube (dự án Google Cloud) / API riêng Facebook (app Meta)
     "zernio_api_key": "", "zernio_profile_id": "",

@@ -177,6 +177,22 @@ def _segment(s: float, e: float, item: dict, simplify: bool) -> Segment | None:
     return seg
 
 
+CHUNK_SEC = 28.0   # khúc nghe mặc định (Cài đặt `asr_chunk_sec`): đủ dài để nghe trọn câu + câu bên cạnh
+CHUNK_RANGE = (10.0, 60.0)
+FIRERED_MAX = 55.0  # FireRedASR2-AED nghe tốt tới ~60 s / khúc (firered_worker.MAX_CLIP 58 s – dài hơn bị cắt)
+
+
+def chunk_len(settings: dict, engine: str = "qwen3") -> float:
+    """Độ dài tối đa 1 khúc nghe (giây) theo Cài đặt `asr_chunk_sec` (2.1.15). Dài hơn: nhiều ngữ cảnh hơn, ít chỗ cắt
+    khúc; nhưng khúc dài dễ bỏ sót câu / lặp lời khi có nhạc và tốn bộ nhớ card hơn."""
+    try:
+        v = float(settings.get("asr_chunk_sec", CHUNK_SEC) or CHUNK_SEC)
+    except (TypeError, ValueError):
+        v = CHUNK_SEC
+    v = min(CHUNK_RANGE[1], max(CHUNK_RANGE[0], v))
+    return min(v, FIRERED_MAX) if engine == "firered" else v
+
+
 STREAM_GROUP = 6   # chế độ vừa tách vừa dịch: nghe từng nhóm 6 khúc (≤ ~3 phút) rồi gửi câu sang bộ dịch ngay
 SAVE_GROUP = 40    # không vừa tách vừa dịch: nghe từng nhóm 40 khúc (≤ ~18 phút), xong nhóm nào lưu tiến độ nhóm đó
 PROGRESS_FILE = "asr_progress.json"   # work/asr_progress_<mã>.json: kết quả nghe + căn từng khúc của lần nghe dở
@@ -251,9 +267,9 @@ def clear_progress(work: str | Path) -> None:
             pass
 
 
-FORCED_GAP = 0.3   # 2 khúc nghe liền nhau (nghỉ < 0,3 s): khúc bị cắt giữa lúc đang nói vì dài quá 28 s
+FORCED_GAP = 0.3   # 2 khúc nghe liền nhau (nghỉ < 0,3 s): khúc bị cắt giữa lúc đang nói vì dài quá độ dài khúc
 RELISTEN_PAD = 6.0  # nghe lại 6 s mỗi bên chỗ cắt khúc để bộ nghe thấy trọn câu
-MERGE_MAX = 56.0    # khúc sau khi nối ≤ 56 s (bộ căn thời gian chạy 1 khúc / lô trên card 8 GB)
+MERGE_MAX = 56.0    # khúc sau khi nối ≤ 56 s (= 2 khúc mặc định; bộ căn thời gian chạy 1 khúc / lô trên card 8 GB)
 
 
 def relisten_cuts(raw: list[tuple[float, float, str]], wav: str | Path, settings: dict, language: str,
@@ -297,8 +313,9 @@ def relisten_cuts(raw: list[tuple[float, float, str]], wav: str | Path, settings
         if not res["end"]:
             merge[k] = res["mark"]
     out: list[tuple[float, float, str]] = []
+    merge_max = max(MERGE_MAX, 2 * chunk_len(settings, engine))
     for k, (s, e, t) in enumerate(raw):
-        if out and (k - 1) in merge and e - out[-1][0] <= MERGE_MAX:
+        if out and (k - 1) in merge and e - out[-1][0] <= merge_max:
             ps, _pe, pt = out[-1]
             core = pt.rstrip(CLOSERS)
             tail = pt[len(core):]
@@ -313,14 +330,18 @@ def relisten_cuts(raw: list[tuple[float, float, str]], wav: str | Path, settings
 def transcribe_qwen(wav: str | Path, settings: dict, language: str = "zh", progress: Prog | None = None,
                     cancel=None, on_chunk: Callable[[list[Segment]], None] | None = None,
                     stats: dict | None = None, engine: str = "qwen3",
-                    spans: list[tuple[float, float]] | None = None) -> list[Segment]:
-    """Nghe cả video: chia đoạn có tiếng -> gộp thành khúc ≤ 28 s (nghe trọn câu) -> Qwen3-ASR -> nghe lại chỗ cắt khúc
+                    spans: list[tuple[float, float]] | None = None,
+                    conf_out: list | None = None) -> list[Segment]:
+    """Nghe cả video: chia đoạn có tiếng -> gộp thành khúc ≤ `chunk_len` (mặc định 28 s, nghe trọn câu) -> Qwen3-ASR ->
+    nghe lại chỗ cắt khúc
     giữa lúc đang nói (`relisten_cuts`) -> mốc từng chữ. Mỗi khúc trả về 1 Segment có extra["ct"]; bước căn thời gian
     (align.refine) tách câu theo dấu câu + chỗ nghỉ.
     on_chunk: nghe theo từng nhóm khúc, nghe xong nhóm nào gọi on_chunk(các khúc đó) ngay (vừa tách vừa dịch).
     stats: nhận {"cuts", "merged", "fixed"} của bước nghe lại chỗ cắt khúc.
     engine: "qwen3" | "firered" (FireRedASR2 trả luôn mốc từng chữ khi nghe – chỉ khúc bị nối mới phải căn lại).
-    spans: nghe đúng các khúc này (bộ nghe thứ 2 nghe lại đúng khúc của bộ thứ nhất) thay vì tự chia đoạn."""
+    spans: nghe đúng các khúc này (bộ nghe thứ 2 nghe lại đúng khúc của bộ thứ nhất) thay vì tự chia đoạn.
+    conf_out: nhận [(giờ chữ, xác suất)] từng chữ Hán đã nghe (2.1.15) – để tính độ chắc từng câu sau khi tách câu
+    (`recheck.assign_conf`) và nghe lại câu không chắc."""
     from .align import chunk_spans, split_params
     from .asr_funasr import load_wav16k
 
@@ -330,7 +351,8 @@ def transcribe_qwen(wav: str | Path, settings: dict, language: str = "zh", progr
         chunks = [(float(a), float(b)) for a, b in spans]
     else:
         audio = load_wav16k(wav)
-        chunks = chunk_spans(_spans(audio, settings), audio, max_gap=split_params(settings)["chunk_gap"], max_len=28.0)
+        chunks = chunk_spans(_spans(audio, settings), audio, max_gap=split_params(settings)["chunk_gap"],
+                             max_len=chunk_len(settings, engine))
         del audio
     if not chunks:
         return []
@@ -363,7 +385,7 @@ def transcribe_qwen(wav: str | Path, settings: dict, language: str = "zh", progr
             r = w.call(dict(req, spans=[list(c) for c in todo], align=False), pr, cancel)
             for c, it in zip(todo, r.get("items") or []):
                 ck.heard[ck.span(*c)] = {"text": (it.get("text") or "").strip(), "words": it.get("words") or [],
-                                         "conf": it.get("conf")}
+                                         "conf": it.get("conf"), "cp": _strip_cp(it)}
             ck.save()
         ck.reused += len(part) - len(todo)
         new = []
@@ -443,8 +465,52 @@ def transcribe_qwen(wav: str | Path, settings: dict, language: str = "zh", progr
             progress(1.0, f"Không căn được thời gian bằng {engine_name(engine)} (" + err[:80] + ") – dùng cách dự phòng")
     if stats is not None:
         stats["resumed"] = ck.reused
+    if conf_out is not None:
+        conf_out.extend(_conf_points(raw, words, ck))
     return [x for (s, e, t), w in zip(raw, words)
             if (x := _segment(s, e, {"text": t, "words": w, "lang": langs_of.get((s, e))}, simplify))]
+
+
+def _strip_cp(it: dict) -> list | None:
+    """Xác suất từng ký tự (bộ nghe trả "cp") – chỉ giữ khi đúng số ký tự của lời đã nghe."""
+    cp, text = it.get("cp"), (it.get("text") or "")
+    if not cp or len(cp) != len(text):
+        return None
+    lead = len(text) - len(text.lstrip())
+    return cp[lead:lead + len(text.strip())]
+
+
+def _conf_points(raw: list[tuple[float, float, str]], words: list, ck: Resume) -> list[tuple[float, float]]:
+    """[(giờ giữa chữ, xác suất)] mọi chữ Hán đã nghe: xác suất từng chữ khi bộ nghe trả về (Qwen3), không thì độ chắc
+    cả khúc cho mọi chữ (FireRedASR2, khúc bị nối / sửa sau khi nghe); giờ theo mốc từng chữ, chưa căn thì rải đều."""
+    from .align import _char_positions, times_from_words
+
+    heard = []
+    for key, it in ck.heard.items():
+        try:
+            a, b = (float(x) for x in key.split("-"))
+        except ValueError:
+            continue
+        if it.get("conf") is not None:
+            heard.append((a, b, float(it["conf"])))
+    out: list[tuple[float, float]] = []
+    for (s, e, t), w in zip(raw, words):
+        pos = _char_positions(t or "")
+        if not pos:
+            continue
+        it = ck.heard.get(ck.span(s, e)) or {}
+        cp = it.get("cp") if (it.get("text") or "").strip() == t else None
+        if cp and len(cp) == len(t):
+            probs = [float(cp[i]) for i in pos]
+        else:
+            near = [c for a, b, c in heard if a < e and b > s]
+            if not near:
+                continue
+            probs = [sum(near) / len(near)] * len(pos)
+        ct = times_from_words(t, w or [], s)
+        mids = [(x + y) / 2 for x, y in ct] if ct else [s + (e - s) * (k + 0.5) / len(pos) for k in range(len(pos))]
+        out.extend(zip(mids, probs))
+    return out
 
 
 REP_PENALTY = 1.2   # nghe lại khúc nghi lặp vòng: phạt chữ đã viết (bộ nghe không lặp lại cụm vừa viết được nữa)

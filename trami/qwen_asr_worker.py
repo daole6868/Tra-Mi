@@ -5,8 +5,10 @@ sập giao diện, tắt tiến trình là trả hết bộ nhớ GPU cho bướ
   vào : {"cmd": "asr", "wav": "x.wav", "spans": [[đầu, cuối], ...], "language": "zh", "prompt": "", "align": true,
          "conf": false, "rep_penalty": 1.2 (tuỳ chọn – nghe lại khúc nghi lặp vòng, 2.1.8)}
         {"cmd": "align", "wav": "x.wav", "items": [[đầu, cuối, "lời"], ...], "language": "zh"}
-  ra  : @@TRAMI@@{"ok": true, "items": [{"text": "...", "words": [[chữ, đầu, cuối], ...], "conf": 0.93}]}
-        (giây, tính từ đầu khúc; "conf" khi hỏi "conf": true = xác suất trung bình của các chữ bộ nghe chọn;
+  ra  : @@TRAMI@@{"ok": true, "items": [{"text": "...", "words": [[chữ, đầu, cuối], ...], "conf": 0.93,
+                                          "cp": [0.99, 0.41, ...]}]}
+        (giây, tính từ đầu khúc; "conf" khi hỏi "conf": true = xác suất trung bình của các chữ bộ nghe chọn; "cp" = xác
+        suất từng ký tự của "text" (2.1.15 – biết đúng chữ nào bộ nghe không chắc);
         "lang" = tiếng bộ nghe tự nhận ra khi "language" là "auto" – VD "English")
         | {"error": "..."} | {"progress": 0.5, "msg": "..."}
 """
@@ -79,6 +81,39 @@ def mean_conf(gen_ids: list[int], logps: list[float], skip: set, start_id: int |
     st = gen_ids.index(start_id) + 1 if start_id is not None and start_id in gen_ids else 0
     vals = [math.exp(lp) for t, lp in zip(gen_ids[st:], logps[st:]) if t not in skip]
     return round(sum(vals) / len(vals), 3) if vals else 0.0
+
+
+def char_probs(decode, ids: list[int], probs: list[float], text: str) -> list[float]:
+    """Xác suất từng ký tự của `text` (lời bộ nghe trả về) từ xác suất từng token đã sinh. 1 chữ Hán có thể nằm vắt qua 2
+    token (BPE theo byte) -> gom token tới khi giải mã ra ký tự trọn vẹn; ký tự lấy xác suất NHỎ NHẤT của các token tạo
+    nên nó. `decode`: danh sách token -> chữ. Ký tự không khớp được (khoảng trắng bị bỏ…) lấy trung bình."""
+    from difflib import SequenceMatcher
+
+    chars: list[str] = []
+    vals: list[float] = []
+    pend: list[int] = []
+    low = 1.0
+    for t, pr in zip(ids, probs):
+        pend.append(t)
+        low = min(low, float(pr))
+        piece = decode(pend)
+        if (not piece or piece.endswith("\ufffd")) and len(pend) < 6:
+            continue           # chưa đủ byte của 1 ký tự
+        piece = piece.replace("\ufffd", "")
+        chars.extend(piece)
+        vals.extend([low] * len(piece))
+        pend, low = [], 1.0
+    if not text:
+        return []
+    mean = sum(vals) / len(vals) if vals else 0.0
+    seq = "".join(chars)
+    if seq == text:
+        return [round(v, 3) for v in vals]
+    out = [mean] * len(text)
+    for a, b, n in SequenceMatcher(None, seq, text, autojunk=False).get_matching_blocks():
+        for k in range(n):
+            out[b + k] = vals[a + k]
+    return [round(v, 3) for v in out]
 
 
 def _load(cls, repo: str, **kw):
@@ -202,6 +237,7 @@ def main(repo: str = "Qwen/Qwen3-ASR-1.7B-hf") -> None:
                    rep: float | None = None) -> tuple[list[str], list]:
         texts = [""] * len(clips)
         confs: list = [None] * len(clips)
+        cps: list = [None] * len(clips)     # xác suất từng ký tự
         found: list = [None] * len(clips)   # tiếng bộ nghe tự nhận ra (khi không ép tiếng)
         done = [0]
         model = get_model()
@@ -224,15 +260,27 @@ def main(repo: str = "Qwen/Qwen3-ASR-1.7B-hf") -> None:
                 texts[k] = (r.get("transcription") or "").strip()
                 found[k] = r.get("language") or None
             if rec is not None and rec.steps:
+                import math
+
                 lp = torch.stack(rec.steps, dim=1).cpu()
                 n = min(lp.shape[1], gen.shape[1])
                 for row, k in enumerate(part):
-                    confs[k] = mean_conf(gen[row, :n].tolist(), lp[row, :n].tolist(), skip_ids, text_id)
+                    ids, lps = gen[row, :n].tolist(), lp[row, :n].tolist()
+                    confs[k] = mean_conf(ids, lps, skip_ids, text_id)
+                    if tok is not None and texts[k]:
+                        st = ids.index(text_id) + 1 if text_id is not None and text_id in ids else 0
+                        keep = [(t, math.exp(v)) for t, v in zip(ids[st:], lps[st:]) if t not in skip_ids]
+                        try:
+                            cps[k] = char_probs(lambda x: tok.decode(x, skip_special_tokens=True),
+                                                [t for t, _ in keep], [v for _, v in keep], texts[k])
+                        except Exception:  # noqa: BLE001 – chỉ để biết chữ nào không chắc: lỗi thì thôi
+                            cps[k] = None
             done[0] += len(part)
             prog(lo + (hi - lo) * done[0] / max(1, len(clips)), f"Qwen3-ASR đang nghe {done[0]}/{len(clips)} khúc")
 
         run_batched(fn, list(range(len(clips))), [len(c) / SR for c in clips])
         state["found"] = found
+        state["cps"] = cps
         return texts, confs
 
     def align(clips, texts, lang, lo: float, hi: float) -> list[list]:
@@ -274,10 +322,12 @@ def main(repo: str = "Qwen/Qwen3-ASR-1.7B-hf") -> None:
             want_align = req.get("cmd") == "align" or bool(req.get("align"))
             confs: list = [None] * len(clips)
             found: list = [None] * len(clips)
+            cps: list = [None] * len(clips)
             if texts is None:
                 texts, confs = transcribe(clips, lang, req.get("prompt") or "", 0.0, 0.75 if want_align else 1.0,
                                           conf=bool(req.get("conf")), rep=req.get("rep_penalty"))
                 found = state.pop("found", found)
+                cps = state.pop("cps", None) or [None] * len(clips)
                 if want_align and dev != "cpu":
                     torch.cuda.empty_cache()   # trả bộ nhớ tạm của bước nghe trước khi nạp bộ căn thời gian
             words, err = [[] for _ in clips], ""
@@ -291,7 +341,7 @@ def main(repo: str = "Qwen/Qwen3-ASR-1.7B-hf") -> None:
                     err = f"{type(e).__name__}: {e}"
             _reply(proto, {"ok": True, "align_error": err,
                            "items": [dict({"text": t, "words": w}, **({} if c is None else {"conf": c}),
-                                          **({"lang": f} if f else {}))
-                                     for t, w, c, f in zip(texts, words, confs, found)]})
+                                          **({"lang": f} if f else {}), **({"cp": q} if q else {}))
+                                     for t, w, c, f, q in zip(texts, words, confs, found, cps)]})
         except Exception as e:  # noqa: BLE001
             _reply(proto, {"error": f"{type(e).__name__}: {e}"})

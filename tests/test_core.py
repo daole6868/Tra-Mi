@@ -7545,7 +7545,7 @@ def test_recognize_firered_engine_and_fallback(monkeypatch, sample_video):
     used = []
 
     def fake_tq(wav, settings, language="zh", progress=None, cancel=None, on_chunk=None, stats=None,
-                engine="qwen3", spans=None):
+                engine="qwen3", spans=None, conf_out=None):
         used.append((engine, settings.get("_asr_context", "")))
         return [Segment(0.5, 2.0, "你好世界。"), Segment(2.5, 4.0, "林北来了。")]
 
@@ -8558,3 +8558,237 @@ def test_list_models_all_pages_newest_first_2114(monkeypatch):
     assert dlg.list.count() == 3                       # + gpt-5.2-pro, gpt-5.1-codex (không dùng để dịch, tô xám)
     dlg._use()
     assert dlg.chosen == "gpt-5.2"
+
+
+def test_recheck_unsure_lines_2115(monkeypatch, tmp_path):
+    """Nghe lại câu không chắc (2.1.15): độ chắc từng câu theo xác suất từng chữ; câu yếu nghe lại trong khúc mới (câu nằm
+    giữa, mép khúc ở khoảng lặng); bản nghe lại chỉ nhận khi chắc hơn, giống bản cũ, không dài thêm (không thêm chữ lạ);
+    câu ngữ cảnh nghe ra khác hẳn -> khúc không ổn, không nhận; nghe ra khác mà chưa chắc -> tô xanh; "Nghe kỹ" nghe mọi câu."""
+    from trami import asr_qwen, recheck
+    from trami.qwen_asr_worker import char_probs
+
+    segs = [Segment(0.0, 2.0, "你好，师兄。"), Segment(3.0, 5.0, "今天吃什么？"), Segment(6.0, 8.0, "我们去吃面吧。"),
+            Segment(20.0, 22.0, "好的。"), Segment(30.0, 31.0, "♪♪", extra={"song": True})]
+    pts = [(0.5, 0.95), (1.5, 0.9), (3.5, 0.4), (4.5, 0.5), (6.5, 0.9), (7.5, 0.97), (20.5, 0.3), (21.5, 0.3)]
+    assert recheck.assign_conf(segs, pts) == 4
+    assert [s.extra.get("asr_conf") for s in segs] == [0.925, 0.45, 0.935, 0.3, None]
+    # khúc: câu cần nghe nằm giữa, ±pad; mép rơi giữa câu -> lấy trọn câu đó
+    w = recheck.windows(segs, [1, 3], 2.5, 28.0, total=40.0)
+    assert w[0][:3] == (0.0, 8.05, [1]) and w[0][3] == [0, 1, 2]
+    assert w[1][2] == [3] and w[1][3] == [3]
+    # chia lời nghe lại cho từng câu trong khúc
+    parts = recheck.map_rows(["你好，师兄。", "今天吃什么？", "我们去吃面吧。"], "你好师兄，今天吃什么呀，我们去吃面吧",
+                             None, 0.8)
+    assert [x[0] for x in parts] == ["你好师兄", "今天吃什么呀", "我们去吃面吧"]
+    # luật nhận
+    assert recheck.decide("今天吃什么？", 0.45, [("v", "今天吃什么呀", 0.8, True)])[0] == ("v", "今天吃什么呀", 0.8)
+    assert recheck.decide("今天吃什么？", 0.45, [("v", "今天吃什么呀", 0.8, False)]) == (None, None)    # khúc không ổn
+    best, other = recheck.decide("今天吃什么？", 0.45, [("v", "今天吃什么呀我们一起去吧", 0.55, True)])
+    assert best is None and other[1] == "今天吃什么呀我们一起去吧"                                   # thêm chữ -> không nhận
+    assert recheck.decide("今天吃什么？", 0.45, [("v", "今天吃什么", 0.9, True), ("o", "今天吃啥", 0.5, True)]) == \
+        (None, None)                                                                         # nghe lại ra y hệt -> xác nhận
+    assert recheck.decide("好的。", 0.3, [("v", "", 0.2, True)])[1] == ("v", "", 0.2)              # không ra chữ: nghi nhạc
+    # chạy với bộ nghe giả: khúc nghe lại trả lời theo khúc
+    calls = []
+
+    class W:
+        def call(self, req, pr=None, cancel=None):
+            calls.append(req)
+            items = []
+            for a, b in req["spans"]:
+                if a < 10:
+                    t = "你好师兄今天吃什么呀我们去吃面吧" if "orig" not in req["wav"] else "你好师兄今天吃啥我们去吃面吧"
+                    items.append({"text": t, "conf": 0.85, "cp": [0.85] * len(t)})
+                else:
+                    items.append({"text": "好", "conf": 0.35, "cp": [0.35]})
+            return {"items": items}
+
+    monkeypatch.setattr(asr_qwen, "asr_worker", lambda eng, st=None: W())
+    monkeypatch.setattr(asr_qwen, "align_qwen", lambda *a, **k: 0)
+    st = recheck.recheck_lines(segs, tmp_path / "v.wav", tmp_path / "orig.wav", "qwen3", "zh",
+                               {"asr_recheck_pad": 2.5}, total=40.0)
+    assert st["weak"] == 2 and st["checked"] == 2 and st["fixed"] == 1
+    assert segs[1].text == "今天吃什么呀？" and segs[1].extra["asr_recheck"] == "v" and "ct" not in segs[1].extra
+    assert segs[1].extra["src_before"] == "今天吃什么？"
+    assert segs[3].text == "好的。" and segs[3].extra.get("asr_unsure") and segs[3].extra["asr_alt"] == "好"
+    assert segs[3].extra["asr_alt_eng"] in ("recheck", "recheck_o")
+    assert segs[0].text == "你好，师兄。" and segs[2].text == "我们去吃面吧。"                     # câu chắc không đụng
+    assert any("orig" in c["wav"] for c in calls) and all(c["conf"] and not c["align"] for c in calls)
+    assert "sửa 1 câu" in recheck.note(st)
+    # Nghe kỹ: mọi câu (trừ 🎵) đều được nghe lần 2
+    calls.clear()
+    st = recheck.recheck_lines(segs, tmp_path / "v.wav", None, "qwen3", "zh", {"asr_overlap": True, "asr_recheck_pad": 2.5},
+                               total=40.0)
+    assert st["overlap"] and st["checked"] == 4 and "nghe kỹ lần 2" in recheck.note(st)
+    # tắt cả 2 -> không nghe gì
+    calls.clear()
+    st = recheck.recheck_lines(segs, tmp_path / "v.wav", None, "qwen3", "zh", {"asr_recheck": False})
+    assert st["checked"] == 0 and not calls
+    # xác suất từng ký tự: 1 chữ Hán vắt qua 2 token (byte) -> lấy xác suất nhỏ nhất
+    toks = {1: "你".encode(), 2: "好".encode()[:2], 3: "好".encode()[2:], 4: "，".encode(), 5: "吗".encode()}
+
+    def decode(ids):
+        return b"".join(toks[i] for i in ids).decode("utf-8", "replace")
+    assert char_probs(decode, [1, 2, 3, 4, 5], [0.9, 0.8, 0.3, 0.99, 0.7], "你好，吗") == [0.9, 0.3, 0.99, 0.7]
+    assert char_probs(decode, [1, 2, 3, 5], [0.9, 0.8, 0.3, 0.7], "你好吗") == [0.9, 0.3, 0.7]
+    # độ dài khúc nghe tuỳ chỉnh (FireRedASR2 ≤ 55 s)
+    assert asr_qwen.chunk_len({}) == 28.0 and asr_qwen.chunk_len({"asr_chunk_sec": 45}) == 45.0
+    assert asr_qwen.chunk_len({"asr_chunk_sec": 5}) == 10.0 and asr_qwen.chunk_len({"asr_chunk_sec": 60}, "firered") == 55.0
+
+
+def test_transcribe_chunk_len_and_conf_points_2115(monkeypatch, tmp_path):
+    """transcribe_qwen chia khúc theo Cài đặt `asr_chunk_sec`; trả điểm độ chắc từng chữ (giờ + xác suất) – khúc có "cp"
+    lấy theo từng chữ, khúc không có (FireRedASR2) lấy độ chắc cả khúc."""
+    from trami import align, asr_qwen
+
+    wav = tmp_path / "a.wav"
+    wav.write_bytes(b"x" * 2000)
+    monkeypatch.setattr(asr_qwen, "_spans", lambda audio, st: [(0.0, 20.0), (20.5, 40.0)])
+    import trami.asr_funasr as af
+
+    monkeypatch.setattr(af, "load_wav16k", lambda w: np.zeros(16000 * 41, np.float32))
+    got_max = []
+    real = align.chunk_spans
+
+    def cs(spans, audio=None, max_gap=1.0, max_len=25.0, min_len=8.0):
+        got_max.append(max_len)
+        return real(spans, None, max_gap, max_len, min_len)
+    monkeypatch.setattr(align, "chunk_spans", cs)
+
+    class W:
+        def call(self, req, pr=None, cancel=None):
+            if req["cmd"] == "align":
+                return {"items": [{"words": [[ch, 0.1 * k, 0.1 * k + 0.08] for k, ch in enumerate(t)]}
+                                  for _a, _b, t in req["items"]]}
+            out = []
+            for k, (a, b) in enumerate(req["spans"]):
+                t = "你好" if k % 2 == 0 else "再见"
+                out.append({"text": t, "conf": 0.6} if k % 2 else {"text": t, "conf": 0.8, "cp": [0.9, 0.7]})
+            return {"items": out}
+
+    monkeypatch.setattr(asr_qwen, "asr_worker", lambda eng, st=None: W())
+    pts: list = []
+    st = {"asr_chunk_sec": 15, "asr_relisten": False, "asr_guard": False, "asr_lang_check": False}
+    segs = asr_qwen.transcribe_qwen(wav, st, "zh", conf_out=pts)
+    assert got_max == [15.0] and segs
+    probs = [p for _t, p in pts]
+    assert probs[:2] == [0.9, 0.7] and 0.6 in probs and all(t >= 0 for t, _p in pts)
+
+
+def test_bandit_v2_pure_2115(tmp_path):
+    """Bandit v2 – phần không cần PyTorch: 64 dải tần phủ kín 0..1025 vạch, cửa sổ trượt phủ đủ mọi mẫu, bộ đọc checkpoint
+    an toàn không chạy mã lạ trong file; có trong danh sách mô hình tách + tab Tài liệu."""
+    import pickle
+
+    from trami import bandit, models, separate
+
+    specs, fw = bandit.band_specs(64, 48000, 2048)
+    assert len(specs) == 64 and specs[0][0] == 0 and specs[-1][1] == 1025
+    assert all(b > a for a, b in specs) and all(specs[i + 1][0] <= specs[i][1] for i in range(63))   # không hở
+    assert all(len(w) == b - a for (a, b), w in zip(specs, fw))
+    pad, end_pad, pos = bandit.plan_windows(100, 16, 4)
+    assert pad == 12 and pos[0] == 0 and pos[-1] + 16 == 100 + pad + end_pad
+    assert all(sum(1 for p in pos if p <= pad + i < p + 16) == 4 for i in range(100))   # mẫu thật nào cũng 4 cửa sổ
+    marker = tmp_path / "pwned.txt"
+
+    class Evil:
+        def __reduce__(self):
+            return (exec, (f"open({str(marker)!r}, 'w').write('x')",))
+    data = pickle.dumps({"state_dict": {"a": 1}, "callbacks": Evil()})
+    import io
+
+    got = bandit._SafeUnpickler(io.BytesIO(data)).load()
+    assert not marker.exists() and got["state_dict"] == {"a": 1} and isinstance(got["callbacks"], bandit._Dummy)
+    assert separate.BANDIT == bandit.NAME and bandit.NAME in dict(separate.SEP_MODELS)
+    assert "sep_bandit" in models.BY_KEY and models.BY_KEY["sep_bandit"].packages == ("torch",)
+    assert models.is_ready("sep_bandit") is False
+
+
+def test_bandit_v2_model_and_separate_2115(sample_video, monkeypatch, tmp_path):
+    """Bandit v2 với PyTorch (mô hình thu nhỏ trọng số ngẫu nhiên): checkpoint kiểu Lightning (khoá "model.", kèm đối tượng
+    lạ) lọc ra trọng số nạp được bằng weights_only; tách 1 đoạn ra 3 phần đúng độ dài; separate() với Bandit ghi
+    vocals / instrumental 44,1 kHz stereo đúng độ dài video + model.txt."""
+    torch = pytest.importorskip("torch")
+    import wave
+
+    from trami import bandit, separate
+
+    monkeypatch.setitem(bandit.CONFIG, "n_bands", 8)
+    monkeypatch.setitem(bandit.CONFIG, "n_sqm_modules", 1)
+    monkeypatch.setitem(bandit.CONFIG, "emb_dim", 16)
+    monkeypatch.setitem(bandit.CONFIG, "rnn_dim", 8)
+    monkeypatch.setitem(bandit.CONFIG, "mlp_dim", 16)
+    monkeypatch.setitem(bandit.CONFIG, "n_fft", 256)
+    monkeypatch.setitem(bandit.CONFIG, "hop_length", 64)
+    monkeypatch.setattr(bandit, "CHUNK_SEC", 0.5)
+    monkeypatch.setattr(bandit, "HOP_SEC", 0.25)
+    monkeypatch.setattr(bandit, "WEIGHTS", tmp_path / "bandit.pt")
+    monkeypatch.setattr(bandit, "ready", lambda: True)
+    monkeypatch.setattr(bandit, "_model", None)
+    m = bandit.build_model()
+
+    class Junk:
+        def __reduce__(self):
+            return (print, ("không được chạy",))
+    raw = tmp_path / "checkpoint-multi.ckpt"
+    torch.save({"state_dict": {"model." + k: v for k, v in m.state_dict().items()}, "epoch": 3, "cb": Junk()}, str(raw))
+    bandit.convert(raw, bandit.WEIGHTS)
+    sd = torch.load(str(bandit.WEIGHTS), weights_only=True)
+    assert set(sd) == set(m.state_dict())
+    mm = bandit.load_model("cpu")
+    x = (np.random.default_rng(0).standard_normal((2, 48000)) * 0.1).astype(np.float32)
+    steps = []
+    est = bandit.separate_array(mm, x, "cpu", None, 3, lambda i, n: steps.append((i, n)))
+    assert est.shape == (3, 2, 48000) and np.isfinite(est).all() and steps[-1][0] == steps[-1][1]
+    out = tmp_path / "stems"
+    v, i = separate.separate(sample_video, out, separate.BANDIT)
+    assert (out / "model.txt").read_text("utf-8") == separate.BANDIT and (out / "timeline.txt").exists()
+    dur = ff.probe(sample_video).duration
+    for f in (v, i):
+        with wave.open(str(f)) as w:
+            assert w.getframerate() == 44100 and w.getnchannels() == 2
+            assert abs(w.getnframes() / 44100 - dur) < 0.1
+    assert not (out / "_sep").exists()
+    # lần 2: đã tách bằng Bandit -> dùng lại, không tách lại
+    monkeypatch.setattr(bandit, "separate_file", lambda *a, **k: (_ for _ in ()).throw(AssertionError("tách lại")))
+    assert separate.separate(sample_video, out, separate.BANDIT) == (v, i)
+
+
+def test_recognize_recheck_in_pipeline_2115(monkeypatch, sample_video):
+    """"1. Nghe & tách câu": điểm độ chắc từng chữ -> độ chắc từng câu (lưu vào câu) -> câu không chắc được nghe lại;
+    thông báo xong có kết quả; tắt "Nghe lại câu không chắc" thì chỉ ghi độ chắc, không nghe lại."""
+    from trami import asr_qwen, pipeline
+    from trami.project import Project
+
+    def fake_tq(wav, settings, language="zh", progress=None, cancel=None, on_chunk=None, stats=None,
+                engine="qwen3", spans=None, conf_out=None):
+        conf_out.extend([(0.8, 0.95), (1.5, 0.9), (2.8, 0.3), (3.5, 0.4)])
+        return [Segment(0.5, 2.0, "你好世界。"), Segment(2.5, 4.0, "林北来了。")]
+
+    heard = []
+
+    class W:
+        def call(self, req, pr=None, cancel=None):
+            heard.append(req["spans"])
+            return {"items": [{"text": "你好世界林北来啦", "conf": 0.9, "cp": [0.9] * 8} for _ in req["spans"]]}
+
+    monkeypatch.setattr(asr_qwen, "transcribe_qwen", fake_tq)
+    monkeypatch.setattr(asr_qwen, "available", lambda: True)
+    monkeypatch.setattr(asr_qwen, "asr_worker", lambda eng, st=None: W())
+    monkeypatch.setattr(asr_qwen, "align_qwen", lambda *a, **k: 0)
+    st = {"asr_engine": "qwen3", "sep_before_asr": False, "diarize": False, "align_words": False,
+          "asr_rescue": False, "song_detect": False, "pitch_check": False, "snap_edges": False, "ai_join_engine": "off",
+          "asr_name_pass": False, "asr_recheck_pad": 2.0}
+    p = Project.create("nghe lại câu không chắc")
+    try:
+        pipeline.attach_source(p, sample_video)
+        assert pipeline.recognize(p, settings=dict(st)) == 2
+        segs = p.segments
+        assert segs[0].extra["asr_conf"] == 0.925 and segs[1].text == "林北来啦。" and heard
+        assert segs[1].extra["asr_recheck"] == "v" and p.data["asr_recheck"]["fixed"] == 1
+        assert "nghe lại câu không chắc 1 câu" in pipeline.listen_note(p)
+        heard.clear()
+        pipeline.recognize(p, settings=dict(st, asr_recheck=False))
+        assert not heard and p.segments[1].extra["asr_conf"] == 0.35 and p.segments[1].text == "林北来了。"
+    finally:
+        p.delete()

@@ -689,6 +689,9 @@ class SettingsPage(QWidget):
         ("asr_max", "asr_max_chars", "i"), ("asr_beam", "asr_beam_size", "i"), ("asr_vad", "asr_vad", "b"),
         ("split_style", "split_style", "c"), ("asr_dual", "asr_dual", "b"), ("asr_ai", "asr_ai", "c"),
         ("asr_context", "asr_context", "b"), ("asr_name_pass", "asr_name_pass", "b"),
+        ("asr_chunk", "asr_chunk_sec", "i"), ("asr_recheck", "asr_recheck", "b"), ("recheck_conf", "asr_recheck_conf", "f"),
+        ("recheck_pad", "asr_recheck_pad", "f"), ("recheck_orig", "asr_recheck_orig", "b"),
+        ("asr_overlap", "asr_overlap", "b"), ("asr_lang_check", "asr_lang_check", "b"),
         ("sep_model", "sep_model", "c"), ("sep_before", "sep_before_asr", "b"), ("diarize", "diarize", "b"),
         ("spk_n", "diarize_speakers", "i"), ("spk_thr", "diarize_threshold", "f"),
         ("engine", "translate_engine", "c"), ("style", "translate_style", "c"), ("ai_join", "ai_join_engine", "c"),
@@ -772,6 +775,19 @@ class SettingsPage(QWidget):
                                    "Nghe xong: câu có chữ đọc giống tên nhân vật mà viết khác (临北 / 林北) -> nghe lại câu "
                                    "đó kèm gợi ý tên; vẫn sai thì sửa theo âm đọc. Chưa có tên nào mà có AI hỗ trợ nghe -> "
                                    "AI đọc lời vừa nghe lập hồ sơ tên nhân vật trước (bước dịch dùng lại)")
+        self.asr_chunk = f.row("Độ dài khúc nghe (giây)", spin(10, 60), C.CHUNK_HELP)
+        self.asr_recheck = f.row("Nghe lại câu không chắc", Switch(), C.RECHECK_HELP)
+        self.recheck_conf = f.row("… khi độ chắc dưới", dspin(0.3, 0.95, 0.05),
+                                  "Bộ nghe tự chấm độ chắc từng chữ (0–1). Câu có độ chắc trung bình dưới mức này được "
+                                  "nghe lại. Cao hơn = nghe lại nhiều câu hơn (chậm hơn)")
+        self.recheck_pad = f.row("… nghe kèm mỗi bên (giây)", dspin(1.0, 10.0, 0.5),
+                                 "Khúc nghe lại: câu cần nghe nằm giữa, thêm bấy nhiêu giây trước / sau (câu bên cạnh làm "
+                                 "ngữ cảnh). Dài hơn = nhiều ngữ cảnh hơn nhưng không vượt Độ dài khúc nghe")
+        self.recheck_orig = f.row("… nghe thêm trên tiếng gốc", Switch(),
+                                  "Đã tách giọng: câu không chắc nghe thêm 1 lần trên tiếng gốc chưa tách (bản tách đôi khi "
+                                  "méo, mất phụ âm) – lấy bản chắc hơn")
+        self.asr_overlap = f.row("Nghe kỹ (mọi câu nghe 2 lần)", Switch(), C.OVERLAP_HELP)
+        self.asr_lang_check = f.row("Nghe lại khúc nghi tiếng khác", Switch(), C.LANG_CHECK_HELP)
         self.asr_max = f.row("Số chữ Hán tối đa / câu", spin(8, 60),
                              "Câu dài hơn mới chia đôi (ở dấu phẩy / chỗ nghỉ gần giữa); dấu phẩy nói liền không tách")
         self.asr_beam = f.row("Beam size (Whisper)", spin(1, 10))

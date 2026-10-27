@@ -26,6 +26,19 @@ LANGS = [("zh", "Tiếng Trung (Phổ thông)"), ("yue", "Tiếng Quảng Đông
 DUAL_HELP = ("Nghe xong bằng bộ chính, bộ còn lại (Qwen3-ASR ↔ FireRedASR2) nghe lại đúng các câu đó rồi so chữ từng "
              "câu: câu 2 bộ nghe khác nhau -> AI hỗ trợ nghe chọn bản đúng theo ngữ cảnh; không chắc -> chữ gốc tô xanh "
              "để bạn nghe lại. Cần tải FireRedASR2 ở tab Tài liệu; lâu hơn ~1,5–2 lần")
+CHUNK_HELP = ("Bộ nghe chia phim thành khúc dài tối đa bấy nhiêu giây rồi nghe cả khúc 1 lần (thấy cả câu trước / sau). "
+              "Mặc định 28. Dài hơn (40–60): nhiều ngữ cảnh hơn, ít chỗ cắt khúc, nhưng chỗ có nhạc dễ sót câu / lặp "
+              "lời và tốn bộ nhớ card hơn. FireRedASR2 tối đa 55")
+RECHECK_HELP = ("Bộ nghe tự chấm độ chắc từng chữ. Câu không chắc (chỗ lẫn nhạc, nói nhanh, câu nằm sát mép khúc) được nghe "
+                "lại trong khúc mới: câu nằm giữa, thêm vài giây trước / sau làm ngữ cảnh; đã tách giọng thì nghe thêm "
+                "trên tiếng gốc. Chỉ nhận bản nghe lại khi chắc hơn, giống bản cũ và không dài thêm (không thêm chữ lạ); "
+                "nghe ra khác mà chưa chắc -> chữ gốc tô xanh. Thêm ~10–30 % thời gian nghe")
+OVERLAP_HELP = ("Mọi câu (không chỉ câu không chắc) được nghe lần 2 trong khúc lệch với khúc lần đầu (câu nằm giữa khúc); "
+                "2 lần ra khác nhau -> lấy bản chắc hơn theo cùng luật như 'Nghe lại câu không chắc'. Chính xác nhất, "
+                "CHẬM GẤP ĐÔI – dùng cho phim khó (nhiều nhạc, nói nhanh)")
+LANG_CHECK_HELP = ("Khúc bộ nghe (Qwen3-ASR) không chắc -> nghe lại không ép tiếng Trung xem có phải câu tiếng Anh / Nhật… "
+                   "không; ra tiếng khác mà chắc hơn thì dùng bản đó. Tắt nếu phim chỉ có tiếng Trung mà thấy câu tiếng "
+                   "Anh / Nhật lạ ở đoạn nhạc (bộ nghe đoán lời bài hát thành tiếng nước ngoài)")
 METHODS = [("asr", "Nhận dạng giọng nói"), ("ocr", "OCR phụ đề cứng có sẵn trên video"),
            ("hybrid", "OCR + nghe – chữ từ phụ đề in sẵn, giờ từ giọng nói (chuẩn nhất khi có phụ đề Trung)")]
 SPLIT_STYLES = [("dub", "Câu trọn ý – hợp lồng tiếng (khuyên dùng)"), ("short", "Câu ngắn – hợp phụ đề đọc nhanh")]

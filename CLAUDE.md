@@ -62,7 +62,16 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   / `asr_name_pass`; `pipeline.listen_note`, `_listen_audio`. `trami/asr.py` (faster-whisper), `asr_funasr.py` (SenseVoice/Paraformer, `mark_songs`), `diarize.py` (ECAPA),
   `separate.py` (audio-separator; phim > ~13 phút tách từng đoạn 10 phút `plan_chunks` / `_Joiner`; Demucs
   `htdemucs` / `htdemucs_ft` 4 phần -> `_find` trộn 3 phần nhạc thành nhạc nền, chạy 1 lượt `DEMUCS_PARAMS` shifts 0,
-  file trọng số `DEMUCS_FILES` -> `models._sep_ready`), `lama.py` + `inpaint.py` (xoá chữ), `ocr.py` (RapidOCR),
+  file trọng số `DEMUCS_FILES` -> `models._sep_ready`; Bandit v2 `separate.BANDIT` = "bandit_v2_multi" ->
+  `_separate_bandit`: mix 48 kHz -> `bandit.separate_file` -> lời thoại = vocals.wav, nhạc + tiếng động = instrumental.wav,
+  đổi về 44,1 kHz; `available(model)` – Bandit chỉ cần PyTorch), `bandit.py` (2.1.15: Bandit v2 lời thoại / nhạc / tiếng
+  động, mã suy luận viết lại từ kwatcharasupat/bandit-v2 Apache-2.0 – không torchaudio / librosa / lightning, tên lớp con
+  như bản gốc để nạp trọng số chính hãng; trọng số Zenodo 12701995 CC BY-SA 4.0 `checkpoint-multi.ckpt` 447 MB, MD5
+  `RAW_MD5`, nguồn 2 bản chép GitHub `URLS`, tải tiếp được (Range) -> `convert` lọc khoá "model." -> data/models/separator/
+  bandit_v2_multi.pt 149 MB; đọc checkpoint bằng weights_only, không được thì `_SafeUnpickler` (lớp lạ -> `_Dummy`, không
+  chạy mã); suy luận mỗi kênh riêng, cửa sổ 8 s trượt `HOP_SEC` 2 s ghép Hann, từng đoạn `BLOCK_SEC` 300 s, card nửa độ
+  chính xác (bf16 / fp16; lỗi -> fp32), lô theo dung lượng card `device_plan`; tab Tài liệu "sep_bandit"),
+  `lama.py` + `inpaint.py` (xoá chữ), `ocr.py` (RapidOCR),
   `skills.py` (kỹ năng dịch AI: sửa lỗi nghe & nối câu, hồ sơ phim, kiểm tra bản dịch, kỹ năng riêng – `gui/skills_dialog.py`),
   `translate.py` (`LLMClient` gọi HTTP: anthropic / OpenAI-compatible / gemini / deepseek / ollama; Google gtx;
   Hy-MT2 trên máy qua `hymt_worker.py`), `voicefix.py` (đọc số, phát hiện giọng AI hỏng, cân âm lượng),
@@ -156,6 +165,21 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (keep=True)`), đi theo `subtitle.merge` / `split` (`ct_of`, `han_cut`) / `align.split_clauses` / kéo khối (`shift_ct`).
   Sóng âm timeline `tl_wave_10ms.npy` (float16, 0,01 s, cùng lần đo `voice_10ms`); dòng Lồng tiếng `tts.ENV_HOP` 0,01 s
   (`<bản lồng>.env10.npy`, `pipeline._dub_env_full` đọc từng khối; file 0,05 s cũ `.env.npy` tự làm lại + xoá – 2.0.97).
+- Nghe lại câu không chắc (2.1.15, `trami/recheck.py`): `qwen_asr_worker` trả thêm "cp" = xác suất TỪNG KÝ TỰ (`char_probs`:
+  gom token BPE tới khi ra ký tự trọn, lấy xác suất nhỏ nhất) -> `asr_qwen.transcribe_qwen(conf_out=)` + `_conf_points`
+  [(giờ chữ, xác suất)] (không có "cp" – FireRedASR2 / khúc bị sửa – thì độ chắc cả khúc) -> `pipeline.recognize` sau căn
+  thời gian: `recheck.assign_conf` -> `extra["asr_conf"]` mỗi câu (tooltip chữ gốc khi < 0,7) -> `recheck_lines`: câu <
+  `asr_recheck_conf` (0,7) gom thành khúc (`windows`: câu cần nghe cách mép ≥ `asr_recheck_pad` 5 s, mép dời vào khoảng
+  lặng, câu cách nhau > 2 × pad thì khúc riêng), nghe lại (conf, không căn) trên giọng đã tách + trên tiếng gốc
+  (`_orig_wav16` = work/audio16k.wav, Cài đặt `asr_recheck_orig`) -> `map_rows` chia lời khúc về từng câu (khớp chữ như
+  dual) -> `ctx_ok` (câu ngữ cảnh giống ≥ 60 %) -> `decide` (chắc hơn ≥ 0,05 và ≥ 0,6, giống ≥ 50 %, dài thêm ≤ 2 chữ – trừ
+  khi chắc hơn ≥ 0,15; có lần nghe ra y hệt = xác nhận; khác mà chưa chắc -> `asr_alt` / `asr_alt_eng` "recheck" |
+  "recheck_o" / `asr_unsure` -> chữ xanh, "Dùng bản bộ nghe 2" dùng được) -> `extra["asr_recheck"]` "v" / "o", đo lại mốc
+  chữ câu đổi (`align_qwen`) -> `p.data["asr_recheck"]` -> `recheck.note` trong `listen_note`. "Nghe kỹ" `asr_overlap`
+  (mặc định tắt): mọi câu nghe lần 2 cùng luật. Độ dài khúc nghe `asr_chunk_sec` (`asr_qwen.chunk_len`, 10–60, FireRedASR2
+  ≤ 55; `relisten_cuts` nối tới 2 × khúc). `asr_lang_check` (nghe lại khúc nghi tiếng khác) có công tắc. GUI: Cài đặt →
+  Nhận dạng giọng nói (7 ô) + tab Tự động nhóm 1 (`a_chunk`, `a_recheck` + `a_pad`, `a_overlap`, `a_langchk`, lưu qua
+  `_audio_opts_changed`, `sync_engine` nạp lại); `C.CHUNK_HELP` / `RECHECK_HELP` / `OVERLAP_HELP` / `LANG_CHECK_HELP`.
 - Nghe chuẩn + nhịp ngắt (2.1.3): A tin cậy – `qwen_asr_worker` hỏi `"conf": true` -> `TokenConf` (LogitsProcessor ghi
   log-xác suất chữ được chọn, không giữ bảng điểm) + `mean_conf` (phần lời sau <asr_text>); FireRed có sẵn `conf`;
   `asr_qwen.conf_tags` / `asr.whisper_conf_tags` -> nhãn "conf=…" / "lowconf" (`asr_rescue_conf` 0,5) -> `align.rescue_missed`
@@ -288,7 +312,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (212 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (217 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1897,7 +1921,22 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   loi.txt); (4) không lọc model không dịch được (giọng nói, ảnh, embedding, codex / pro chỉ chạy Responses API); (5) chọn
   gpt-5.x / o-series để dịch sẽ lỗi 400 "max_tokens không hỗ trợ" 4 lần rồi báo lỗi. Sửa: xem Cấu trúc "Chọn model AI".
 
+- 2.1.15: người dùng hỏi "khúc bộ nghe không chắc thì cho nó tự nhận tiếng có phải nguyên nhân thêm từ không liên quan"
+  (chỉ khi chữ lạ là tiếng Anh / Nhật ở đoạn nhạc – bước này chỉ nhận bản KHÁC tiếng Trung; chữ Trung lạ không do nó) ->
+  thêm công tắc; làm D + F (nghe lại câu không chắc với khúc rộng hơn + trên tiếng gốc), B ("Nghe kỹ"), A (độ dài khúc nghe
+  tuỳ chỉnh), thời gian chỉnh được trong tool; thêm Bandit v2 (tách phim lời thoại / nhạc / tiếng động) + tab Tài liệu.
+  Xem Cấu trúc "Nghe lại câu không chắc (2.1.15)" và `bandit.py`. Đã chạy thật Bandit v2 trên máy thử (PyTorch CPU): tải
+  file gốc 447 MB từ bản chép GitHub (Zenodo bị chặn ở máy thử) + MD5 khớp + lọc trọng số + nạp KHỚP mọi khoá vào mã đã
+  chép; tách giọng đọc LibriSpeech + trống + tiếng tàu (thư viện âm thanh LibreOffice): lời thoại SI-SDR 1,3 -> 13,6 dB,
+  nhạc + tiếng động 10,9 dB; CPU ~15 s / cửa sổ 8 s / kênh (card NVIDIA nhanh hơn nhiều – chưa đo). Nghe lại câu không chắc:
+  chỉ chạy thử với bộ nghe giả (Qwen3 thật chưa chạy – sandbox chặn HF); xác suất từng ký tự thử bằng bộ giải mã byte giả.
+
 ## Vấn đề đang mở
+- 2.1.15: chờ người dùng (1) tab Tài liệu tải "Tách phim – Bandit v2" (Zenodo; chậm / bị chặn thì tự sang bản chép
+  GitHub), chọn Bandit v2 ở Mô hình tách giọng, bấm Tách ngay (tab Lồng tiếng mục 1) – xem tốc độ trên RTX 4060, nghe tab
+  Âm thanh: lời thoại có sạch hơn Kim không, nhạc nền có còn tiếng Trung không; (2) chạy lại "1. Nghe & tách câu": thông
+  báo "nghe lại câu không chắc N câu: sửa k câu…", câu tô xanh có đúng chỗ khó nghe không; thử "Nghe kỹ" trên 1 tập khó;
+  thử độ dài khúc 40 s; (3) nếu vẫn thấy câu tiếng Anh / Nhật lạ ở đoạn nhạc -> tắt "Nghe lại khúc nghi tiếng khác".
 - 2.1.14: chờ người dùng bấm lại nút ☰ cạnh ô Model (Cài đặt → Công cụ dịch → OpenAI / Gemini / Claude / DeepSeek):
   đủ model, mới nhất trên cùng; thử dịch bằng 1 model gpt-5.x xem còn lỗi 400 không.
 - 2.1.13: chờ người dùng chọn "Thể loại phim" (tab Tự động / Phụ đề), bấm "Sửa form…" xem / chỉnh form, dịch lại 1 tập

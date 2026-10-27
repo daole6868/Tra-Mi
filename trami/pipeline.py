@@ -1243,7 +1243,7 @@ def _listen_audio(p: Project, settings: dict, denoise: bool = False, progress: P
     # báo "chưa tách" mà người dùng không biết vì sao)
     audio_in: Path = Path(src)
     p.data.pop("sep_warning", None)
-    if settings.get("sep_before_asr", True) and not sepmod.available():
+    if settings.get("sep_before_asr", True) and not sepmod.available(settings.get("sep_model")):
         p.data["sep_warning"] = ("Chưa tách được giọng khỏi nhạc nền: chưa cài bộ tách giọng (audio-separator, cài AI "
                                  "nâng cao) – đã nghe trên tiếng gốc")
     elif settings.get("sep_before_asr", True):
@@ -1268,6 +1268,18 @@ def _listen_audio(p: Project, settings: dict, denoise: bool = False, progress: P
         args += ["-c:a", "pcm_s16le", str(wav)]
         ff.run(args, info_dur, _sub(progress, 0.3, 0.33), cancel, "Đang chuẩn bị âm thanh")
     return audio_in, wav
+
+
+def _orig_wav16(p: Project, cancel=None) -> Path:
+    """Tiếng gốc (chưa tách giọng) 16 kHz mono theo giờ của hình – để nghe lại câu không chắc trên tiếng gốc."""
+    wav = p.work / "audio16k.wav"
+    if wav.exists() and wav.stat().st_size >= 1000 and p.data.get("timeline") == ff.TIMELINE:
+        return wav
+    src = p.source
+    ff.run(["-i", str(src), "-vn", "-ac", "1", "-ar", "16000"] + ff.af_args(ff.audio_sync(src, 16000)) +
+           ["-c:a", "pcm_s16le", str(wav)], p.data.get("info", {}).get("duration", 0), None, cancel,
+           "Đang chuẩn bị tiếng gốc")
+    return wav
 
 
 def recognize(p: Project, method: str = "asr", language: str = "zh", region: dict | None = None,
@@ -1339,8 +1351,10 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         pr = _sub(progress, 0.33, asr_end)
         segs = None
         streamed = False
+        conf_pts: list = []    # (giờ chữ, xác suất) từng chữ đã nghe – độ chắc từng câu, nghe lại câu không chắc
         p.data.pop("asr_warning", None)
         p.data.pop("asr_relisten", None)
+        p.data.pop("asr_recheck", None)
         if engine == "firered":
             from . import asr_firered, asr_qwen
 
@@ -1354,7 +1368,8 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
                 try:
                     rl: dict = {}
                     segs = asr_qwen.transcribe_qwen(wav, settings, language, pr, cancel,
-                                                    on_chunk=draft if on_draft else None, stats=rl, engine="firered")
+                                                    on_chunk=draft if on_draft else None, stats=rl, engine="firered",
+                                                    conf_out=conf_pts)
                     p.data["asr_relisten"] = rl
                     streamed = True
                 except ff.Cancelled:
@@ -1377,7 +1392,7 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
                 try:
                     rl: dict = {}
                     segs = asr_qwen.transcribe_qwen(wav, settings, language, pr, cancel,
-                                                    on_chunk=draft if on_draft else None, stats=rl)
+                                                    on_chunk=draft if on_draft else None, stats=rl, conf_out=conf_pts)
                     p.data["asr_relisten"] = rl
                     streamed = True
                 except ff.Cancelled:
@@ -1437,10 +1452,27 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         p.data.pop("ct_check", None)
         try:
             if settings.get("align_words", True) and segs:
-                segs = align_segments(segs, wav, language, settings, _sub(progress, asr_end, asr_end + 0.07),
+                segs = align_segments(segs, wav, language, settings, _sub(progress, asr_end, asr_end + 0.05),
                                       cancel, engine=engine)
                 if engine in ("qwen3", "firered") or use_qwen_align(engine, settings):
                     p.data["ct_check"] = _verify_ct_safe(p, segs, wav, language, settings, engine, cancel)
+            # 2b') độ chắc từng câu (xác suất từng chữ bộ nghe chọn) -> nghe lại câu không chắc với khúc rộng hơn, cả
+            # trên tiếng gốc; "Nghe kỹ": mọi câu nghe lần 2 (2.1.15)
+            if segs and conf_pts:
+                from . import recheck
+
+                recheck.assign_conf(segs, conf_pts)
+                if engine in ("qwen3", "firered") and (settings.get("asr_recheck", True) or settings.get("asr_overlap")):
+                    try:
+                        orig = _orig_wav16(p, cancel) if audio_in != Path(src) else None
+                        p.data["asr_recheck"] = recheck.recheck_lines(
+                            segs, wav, orig, engine, language, settings, info_dur,
+                            _sub(progress, asr_end + 0.05, asr_end + 0.07), cancel)
+                    except ff.Cancelled:
+                        raise
+                    except Exception as e:  # noqa: BLE001 – bước phụ: lỗi thì giữ kết quả nghe
+                        log_error("Nghe lại câu không chắc")
+                        p.data["asr_recheck"] = {"error": err_text(e)[:160]}
         finally:
             from .asr_qwen import release
 
@@ -1554,6 +1586,7 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         p.data.pop("name_pass", None)
         p.data.pop("asr_joined", None)
         p.data.pop("asr_relisten", None)
+        p.data.pop("asr_recheck", None)
         p.data.pop("ai_joined", None)
     if method in ("ocr", "hybrid"):
         p.data.pop("asr_stammer", None)
@@ -1759,8 +1792,11 @@ def fix_names_now(p: Project, settings: dict | None = None) -> list[int]:
 
 def listen_note(p: Project) -> str:
     """Kết quả các bước nghe chính xác hơn (2.1.0) cho thông báo xong "1. Nghe & tách câu" / Tự động."""
+    from .recheck import note as recheck_note
+
     out = [x for x in (hybrid_note(p.data.get("hybrid")) if p.data.get("sub_source") == "hybrid" else "",
-                       name_note(p.data.get("name_pass")), dual_note(p.data.get("asr_dual"))) if x]
+                       recheck_note(p.data.get("asr_recheck")), name_note(p.data.get("name_pass")),
+                       dual_note(p.data.get("asr_dual"))) if x]
     if p.data.get("breaths_marked"):
         out.append(f"thêm dấu phẩy ở {p.data['breaths_marked']} chỗ nhân vật ngắt hơi")
     if (p.data.get("asr_relisten") or {}).get("foreign"):
@@ -4029,7 +4065,7 @@ def _auto_steps(p: Project, opts: dict, steps: list, weights: dict, total_w: flo
             if opts.get("separate") and not stems(p):
                 from . import separate as sepmod
 
-                if sepmod.available():
+                if sepmod.available(settings.get("sep_model")):
                     separate_audio(p, settings, _sub(pr, 0, 0.4), cancel)
                     pr = _sub(pr, 0.4, 1.0)
             dub(p, opts.get("voice"), opts.get("rate"), settings, pr, cancel, opts.get("tts_engine"))

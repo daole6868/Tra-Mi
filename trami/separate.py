@@ -6,6 +6,8 @@ Dùng thư viện audio-separator (github.com/nomadkaraoke/python-audio-separato
   - BS-RoFormer: rất tốt (SDR 11,8).  MDX-Net Voc FT (ONNX): nhẹ, dùng được trên CPU.
   - HT-Demucs (Meta, MIT): 1 mô hình nhẹ / bản FT 4 mô hình (SDR giọng 9,9 / 10,8) – học trên nhạc, xuất 4 phần (giọng,
     trống, bass, nhạc khác) -> 3 phần nhạc trộn lại thành nhạc nền.
+  - Bandit v2 (trami/bandit.py, 2.1.15): học trên âm thanh PHIM, tách lời thoại / nhạc / tiếng động – không cần
+    audio-separator (chỉ PyTorch); nhạc + tiếng động thành nhạc nền.
 Mô hình tự tải từ GitHub về thư mục data/models/separator ở lần đầu (hoặc tải trước ở tab Tài liệu).
 """
 from __future__ import annotations
@@ -32,7 +34,9 @@ SEP_MODELS = [
     ("UVR-MDX-NET-Voc_FT.onnx", "MDX-Net Voc FT – nhanh, hợp máy chỉ có CPU"),
     ("htdemucs_ft.yaml", "HT-Demucs FT – ổn định, tách nhiều loại nhạc"),
     ("htdemucs.yaml", "HT-Demucs – nhanh, nhẹ (1 mô hình)"),
+    ("bandit_v2_multi", "Bandit v2 – lời thoại / nhạc / tiếng động (học trên phim)"),
 ]
+BANDIT = "bandit_v2_multi"
 SEP_DIR = MODELS_DIR / "separator"
 # file trọng số của từng mô hình Demucs (thư viện tải từ máy chủ của Meta; .yaml chỉ là file cấu hình nhỏ)
 DEMUCS_FILES = {
@@ -238,15 +242,20 @@ def _average(srcs: list[Path], out: Path, block: int = SR44 * 30) -> None:
             i.close()
 
 
-def available() -> bool:
+def available(model: str | None = None) -> bool:
+    """Đã cài thư viện chạy được mô hình tách (Bandit v2 chỉ cần PyTorch; mô hình khác cần audio-separator)."""
     from .config import installed
 
+    if model == BANDIT:
+        return installed("torch")
     return installed("audio_separator", "torch")
 
 
 def separate(src: str | Path, out_dir: str | Path, model: str | None = None,
              progress: Callable[[float, str], None] | None = None, cancel=None) -> tuple[Path, Path]:
     """Trả về (vocals.wav, instrumental.wav) có cùng độ dài với video gốc."""
+    if model == BANDIT:
+        return _separate_bandit(src, Path(out_dir), progress, cancel)
     if not available():
         raise RuntimeError("Chưa cài bộ tách giọng. Chạy CaiDat_Windows.bat và chọn cài AI nâng cao "
                            "(hoặc: pip install audio-separator).")
@@ -289,6 +298,46 @@ def separate(src: str | Path, out_dir: str | Path, model: str | None = None,
     (out_dir / "timeline.txt").write_text(str(ff.TIMELINE), "utf-8")
     if progress:
         progress(1.0, "Đã tách xong giọng nói và nhạc nền")
+    return vocals, inst
+
+
+def _separate_bandit(src: str | Path, out_dir: Path, progress, cancel) -> tuple[Path, Path]:
+    """Bandit v2 (48 kHz, 3 phần): lời thoại -> vocals.wav, nhạc + tiếng động -> instrumental.wav (44,1 kHz như các mô
+    hình khác – mọi bước sau đọc cùng định dạng)."""
+    from . import bandit
+
+    if not available(BANDIT):
+        raise RuntimeError("Bandit v2 cần PyTorch – chạy CaiDat_Windows.bat và chọn cài AI nâng cao.")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    vocals, inst = out_dir / "vocals.wav", out_dir / "instrumental.wav"
+    stamp = out_dir / "model.txt"
+    if vocals.exists() and inst.exists() and stamp.exists() and stamp.read_text("utf-8") == BANDIT:
+        if not (out_dir / "timeline.txt").exists():
+            retime_stems(src, out_dir, progress)
+        return vocals, inst
+    info = ff.probe(src)
+    if not info.has_audio:
+        raise RuntimeError("Video không có âm thanh để tách.")
+    if progress:
+        progress(0.02, "Đang chuẩn bị âm thanh để tách lời thoại…")
+    tmp = out_dir / "_sep"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir()
+    mix = tmp / "mix48k.wav"
+    ff.run(["-i", str(src), "-vn"] + ff.af_args(ff.audio_sync(src, bandit.SR)) + ["-ac", "2", "-ar", str(bandit.SR),
+           "-c:a", "pcm_s16le", str(mix)], info.duration, None, cancel)
+    if cancel and cancel():
+        raise ff.Cancelled()
+    sp, bg = bandit.separate_file(mix, tmp, progress, cancel)
+    if progress:
+        progress(0.96, "Đang ghi giọng / nhạc nền…")
+    for a, b in ((sp, vocals), (bg, inst)):
+        ff.run(["-i", str(a), "-ac", "2", "-ar", str(SR44), "-c:a", "pcm_s16le", str(b)], cancel=cancel)
+    shutil.rmtree(tmp, ignore_errors=True)
+    stamp.write_text(BANDIT, "utf-8")
+    (out_dir / "timeline.txt").write_text(str(ff.TIMELINE), "utf-8")
+    if progress:
+        progress(1.0, "Đã tách xong lời thoại và nhạc nền + tiếng động")
     return vocals, inst
 
 

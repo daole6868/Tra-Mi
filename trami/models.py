@@ -52,6 +52,10 @@ MODELS = [
               "giọng thoại kém sạch hơn RoFormer", "~80 MB", ("audio_separator",), "layers"),
     ModelInfo("sep_demucs_ft", "Tách giọng – HT-Demucs FT", "4 mô hình Demucs chuyên từng phần: sạch hơn HT-Demucs, chậm "
               "hơn khoảng 4 lần", "~320 MB", ("audio_separator",), "layers"),
+    ModelInfo("sep_bandit", "Tách phim – Bandit v2", "Lời thoại / nhạc / tiếng động. Học trên âm thanh PHIM hơn 30 thứ "
+              "tiếng (có tiếng Trung): lời thoại tách riêng khỏi cả nhạc lẫn tiếng động (mô hình khác học trên bài hát). "
+              "Chọn \"Bandit v2\" ở Mô hình tách giọng; chậm hơn Mel-RoFormer. Giấy phép CC BY-SA 4.0 (Zenodo)",
+              "~450 MB", ("torch",), "layers"),
     ModelInfo("qwen_asr", "Nhận dạng – Qwen3-ASR", "Nghe tiếng Trung chuẩn nhất, tự đặt dấu câu (mặc định; chọn bản "
               "1.7B / 0.6B ở Cài đặt)", "~4,7 GB / 1,9 GB", ("transformers", "torch"), "mic"),
     ModelInfo("qwen_align", "Căn thời gian từng chữ – Qwen3", "Giờ từng chữ lệch ~0,03 s: tách câu đúng chỗ nghỉ, giọng "
@@ -302,6 +306,10 @@ def is_ready(key: str, settings: dict | None = None) -> bool:
     try:
         if key in SEP_KEYS:
             return _sep_ready(_sep_file(key))
+        if key == "sep_bandit":
+            from .bandit import ready
+
+            return ready()
         if key == "qwen_asr":
             return _hf_complete(qwen_repo(settings))
         if key == "qwen_align":
@@ -389,6 +397,10 @@ def download(key: str, progress: Prog | None = None, cancel=None, settings: dict
                 if p.name not in before:
                     p.unlink(missing_ok=True)
             raise
+    elif key == "sep_bandit":
+        from . import bandit
+
+        bandit.download(progress, cancel)
     elif key in ("sensevoice", "paraformer", "align"):
         from modelscope.hub.snapshot_download import snapshot_download
 
