@@ -1774,6 +1774,70 @@ def use_alt(p: Project, rows: list[int]) -> list[int]:
     return out
 
 
+def relisten_engine(p: Project, settings: dict | None = None) -> tuple[str | None, str]:
+    """Bộ nghe cho "Bộ nghe nghe lại câu đã tích": bộ đã nghe dự án này / bộ chọn ở Cài đặt nếu là Qwen3-ASR /
+    FireRedASR2, không thì bộ nào dùng được (cần độ chắc từng chữ). Trả (bộ | None, tên / lý do)."""
+    from . import asr_firered, asr_qwen
+
+    settings = settings or load_settings()
+    language = p.data.get("language", "zh") or "zh"
+    order: list[str] = []
+    for e in (p.data.get("asr_engine_used"), settings.get("asr_engine"), "qwen3", "firered"):
+        if e in ("qwen3", "firered") and e not in order:
+            order.append(e)
+    why = []
+    for e in order:
+        if e == "firered":
+            if language not in asr_firered.LANGS:
+                why.append("FireRedASR2 không nghe tiếng này")
+            elif not asr_firered.ready():
+                why.append(f"FireRedASR2: {asr_firered.why_unavailable()}")
+            else:
+                return e, "FireRedASR2"
+        elif asr_qwen.available():
+            return e, "Qwen3-ASR"
+        else:
+            why.append(f"Qwen3-ASR: {asr_qwen.why_unavailable()}")
+    return None, "; ".join(why)
+
+
+def relisten_lines(p: Project, settings: dict | None = None, rows: list[int] | None = None,
+                   progress: Prog | None = None, cancel=None) -> dict:
+    """Nút "Bộ nghe nghe lại câu đã tích" (2.1.16): bộ nghe nghe lại đúng các câu đó – khúc rộng (câu nằm giữa, có câu
+    trước / sau) trên giọng đã tách + trên tiếng gốc + riêng câu – rồi ĐIỀN LẠI chữ gốc khi đủ chắc
+    (`recheck.decide_manual`); chưa chắc -> chữ xanh + bản nghe lại ("Dùng bản bộ nghe 2"). Chỉ đổi chữ gốc (bản dịch /
+    giọng lồng giữ nguyên – giao diện tích sẵn câu đổi để dịch lại), mốc từng chữ đo lại; Ctrl+Z hoàn tác. Trả thống kê
+    của `recheck_lines` + "changed" (số thứ tự câu đổi chữ)."""
+    from . import recheck
+    from .asr_qwen import release
+
+    settings = dict(settings or load_settings())
+    segs = p.segments
+    if not segs:
+        raise ValueError("Chưa có phụ đề")
+    rows = sorted({r for r in rows or [] if 0 <= r < len(segs)})
+    if not rows:
+        raise ValueError("Tích câu cần nghe lại trước")
+    engine, why = relisten_engine(p, settings)
+    if engine is None:
+        raise RuntimeError("Chưa nghe lại được: " + why)
+    language = p.data.get("language", "zh") or "zh"
+    wav = _voice_wav16(p, _sub(progress, 0.0, 0.04), cancel)
+    orig = _orig_wav16(p, cancel) if stems(p) else None
+    _asr_context(p, settings)
+    before = [x.text for x in segs]
+    try:
+        st = recheck.recheck_lines(segs, wav, orig, engine, language, settings, p.data.get("info", {}).get("duration", 0),
+                                   _sub(progress, 0.05, 1.0), cancel, rows=rows)
+    finally:
+        release()     # trả card cho việc khác
+    st["engine"] = engine
+    st["changed"] = [i for i, (a, x) in enumerate(zip(before, segs)) if a != x.text]
+    p.segments = segs
+    p.save()
+    return st
+
+
 def fix_names_now(p: Project, settings: dict | None = None) -> list[int]:
     """Nút "Sửa tên theo âm đọc": thay chỗ đọc giống tên riêng (bảng tên riêng / hồ sơ phim) mà viết khác."""
     from . import names

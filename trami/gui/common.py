@@ -33,6 +33,12 @@ RECHECK_HELP = ("Bộ nghe tự chấm độ chắc từng chữ. Câu không ch
                 "lại trong khúc mới: câu nằm giữa, thêm vài giây trước / sau làm ngữ cảnh; đã tách giọng thì nghe thêm "
                 "trên tiếng gốc. Chỉ nhận bản nghe lại khi chắc hơn, giống bản cũ và không dài thêm (không thêm chữ lạ); "
                 "nghe ra khác mà chưa chắc -> chữ gốc tô xanh. Thêm ~10–30 % thời gian nghe")
+RELISTEN_HELP = ("Bộ nghe (Qwen3-ASR / FireRedASR2) nghe lại ĐÚNG các câu đã tích rồi tự điền lại chữ gốc: nghe 3 lần – "
+                 "khúc rộng hơn (câu nằm giữa, có câu trước / sau làm ngữ cảnh) trên giọng đã tách, cùng khúc đó trên "
+                 "tiếng gốc, và riêng câu – lấy bản nhiều lần nghe ra giống nhau / chắc nhất. Chưa đủ chắc -> chữ gốc "
+                 "màu xanh (rê chuột xem bản nghe lại, đúng thì 'Dùng bản nghe lại'); không nghe ra lời -> có thể là "
+                 "nhạc / tiếng động, xem rồi Xoá. Bản dịch / giọng lồng giữ nguyên – câu đổi chữ được tích sẵn để "
+                 "'Dịch câu đã tích'. Ctrl+Z hoàn tác")
 OVERLAP_HELP = ("Mọi câu (không chỉ câu không chắc) được nghe lần 2 trong khúc lệch với khúc lần đầu (câu nằm giữa khúc); "
                 "2 lần ra khác nhau -> lấy bản chắc hơn theo cùng luật như 'Nghe lại câu không chắc'. Chính xác nhất, "
                 "CHẬM GẤP ĐÔI – dùng cho phim khó (nhiều nhạc, nói nhanh)")

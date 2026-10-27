@@ -12,7 +12,11 @@ Bản nghe lại chỉ được nhận khi (tránh "thêm chữ không liên qua
   - giống bản cũ ≥ 50 % và không dài thêm quá 2 chữ – trừ khi chắc hơn hẳn (≥ 0,15).
 Không nhận mà nghe ra khác -> câu tô xanh, chú thích có bản nghe lại; tích câu rồi bấm "Dùng bản bộ nghe 2" để dùng.
 
-Hàm thuần (`windows`, `map_rows`, `decide`) + `recheck_lines` gọi tiến trình nghe (asr_qwen.asr_worker).
+Nút "Bộ nghe nghe lại câu đã tích" (2.1.16, `manual`): câu người dùng tích được nghe 3 lần – khúc rộng trên giọng đã
+tách, khúc rộng trên tiếng gốc, riêng câu (±`TIGHT_PAD`) – rồi `decide_manual` chọn bản nhiều lần nghe ra giống nhau /
+chắc nhất và ĐIỀN LUÔN khi đủ chắc (luật nới hơn lúc tự nghe vì người dùng đã chỉ câu sai).
+
+Hàm thuần (`windows`, `map_rows`, `decide`, `decide_manual`) + `recheck_lines` gọi tiến trình nghe (asr_qwen.asr_worker).
 """
 from __future__ import annotations
 
@@ -34,6 +38,9 @@ GROW_MAX = 2          # dài thêm tối đa 2 chữ
 CTX_SAME = 0.6        # câu ngữ cảnh trong khúc nghe lại giống bản cũ ≥ 60 %
 HALLU_CONF = 0.5      # bản cũ < 0,5 mà nghe lại không ra chữ nào -> nghi nhạc / tiếng động bị chép thành lời
 GROUP = 40            # số khúc mỗi lần gửi bộ nghe
+MANUAL_MIN = 0.5      # nghe lại câu đã tích: bản mới tự nó chắc ≥ 0,5 (và không kém bản cũ)
+MANUAL_SIM = 0.3      # ... giống bản cũ ≥ 30 % – trừ khi chắc hơn hẳn / 2 lần nghe ra cùng chữ
+TIGHT_PAD = 0.4       # lần nghe riêng câu: thêm 0,4 s mỗi bên
 
 
 # ------------------------------------------------------------------ độ chắc từng câu
@@ -171,30 +178,80 @@ def decide(old: str, old_conf: float | None, cands: list[tuple[str, str, float, 
     return None, None
 
 
+def decide_manual(old: str, old_conf: float | None, cands: list[tuple[str, str, float, bool]]
+                  ) -> tuple[str | None, tuple[str, str, float] | None]:
+    """Nghe lại câu người dùng đã tích. cands như `decide`. Trả (kết quả, (nguồn, chữ, độ chắc)):
+      "fix"   – điền bản mới: nhiều lần nghe ra cùng chữ nhất (bằng nhau thì chắc nhất), tự nó chắc ≥ MANUAL_MIN, không
+                kém bản cũ; 2 lần nghe ra cùng chữ thì nới GAIN; các lần nghe mỗi lần 1 kiểu thì phải chắc hơn GAIN và
+                giống bản cũ ≥ MANUAL_SIM; khác hẳn bản cũ thì phải chắc hơn hẳn (BIG_GAIN);
+      "same"  – nghe lại vẫn ra như cũ (bản cũ được xác nhận);
+      "alt"   – nghe ra khác mà chưa đủ chắc -> tô xanh, "Dùng bản bộ nghe 2" nếu thấy đúng;
+      "empty" – mọi lần nghe không ra chữ nào (nhạc / tiếng động bị chép thành lời?);
+      None    – không lần nghe nào dùng được."""
+    oc = core(old)
+    good = [(src, new, conf) for src, new, conf, ok in cands if ok]
+    if not good:
+        return None, None
+    heard = [c for c in good if c[1]]
+    if not heard:
+        return "empty", good[0]
+    votes: dict[str, list[tuple[str, float]]] = {}
+    for src, new, conf in heard:
+        votes.setdefault(new, []).append((src, conf))
+
+    def score(t: str) -> tuple[int, float]:
+        return len(votes[t]), max(c for _s, c in votes[t])
+    top = max(votes, key=score)
+    n, conf = score(top)
+    src = max(votes[top], key=lambda x: x[1])[0]
+    if top == oc:
+        return "same", (src, top, conf)
+    if oc in votes and score(oc)[0] >= n:      # bản cũ cũng được nghe lại ra ngần ấy lần -> chưa đủ để đổi
+        return ("same", (src, oc, score(oc)[1])) if score(oc)[1] >= conf else ("alt", (src, top, conf))
+    base = float(old_conf) if old_conf is not None else None
+    need = MIN_ACCEPT if base is None else max(MANUAL_MIN, base)
+    sim = SequenceMatcher(None, oc, top, autojunk=False).ratio()
+    if n >= 2:                   # ≥ 2 lần nghe (khúc khác nhau / âm thanh khác nhau) ra cùng chữ
+        ok = conf >= need - GAIN
+    elif len(votes) > 1:         # các lần nghe ra mỗi lần 1 kiểu -> chỉ điền khi chắc hơn rõ và gần bản cũ
+        ok = conf >= need + GAIN and sim >= MANUAL_SIM
+    else:                        # chỉ 1 lần nghe ra chữ (lần khác không ra chữ / khúc không ổn)
+        ok = conf >= need and (sim >= MANUAL_SIM or conf >= (base if base is not None else MIN_ACCEPT) + BIG_GAIN)
+    return ("fix" if ok else "alt"), (src, top, conf)
+
+
 # ------------------------------------------------------------------ chạy
 
 def recheck_lines(segs, wav: str | Path, orig_wav: str | Path | None, engine: str, language: str, settings: dict,
-                  total: float = 0.0, progress: Prog | None = None, cancel=None) -> dict:
-    """Nghe lại câu không chắc (và mọi câu khi "Nghe kỹ") – sửa `segs` tại chỗ. Trả thống kê."""
+                  total: float = 0.0, progress: Prog | None = None, cancel=None, rows: list[int] | None = None) -> dict:
+    """Nghe lại câu không chắc (và mọi câu khi "Nghe kỹ") – sửa `segs` tại chỗ. Trả thống kê.
+    rows: nghe lại ĐÚNG các câu này (nút "Bộ nghe nghe lại câu đã tích") – thêm lần nghe riêng câu, `decide_manual`;
+    thống kê có "rows_fixed" / "rows_same" / "rows_alt" / "rows_empty" (số thứ tự câu)."""
     from . import asr_qwen, dual
     from .asr import to_simplified
 
     thr = float(settings.get("asr_recheck_conf", RECHECK_CONF) or RECHECK_CONF)
     pad = float(settings.get("asr_recheck_pad", RECHECK_PAD) or RECHECK_PAD)
     every = bool(settings.get("asr_overlap", False))
+    manual = rows is not None
     st = {"overlap": every, "pad": pad, "thr": thr, "checked": 0, "weak": 0, "fixed": 0, "fixed_orig": 0,
           "unsure": 0, "windows": 0}
-    usable = [i for i, s in enumerate(segs) if core(s.text) and not s.extra.get("song")]
-    weak = [i for i in usable if conf_of(segs[i]) is not None and conf_of(segs[i]) < thr]
-    st["weak"] = len(weak)
-    targets = usable if every else (weak if settings.get("asr_recheck", True) else [])
+    if manual:
+        st.update(manual=True, overlap=False, same=0, empty=0, rows_fixed=[], rows_same=[], rows_alt=[], rows_empty=[])
+        targets = sorted(i for i in set(rows) if 0 <= i < len(segs) and core(segs[i].text))
+        weak = list(targets)
+    else:
+        usable = [i for i, s in enumerate(segs) if core(s.text) and not s.extra.get("song")]
+        weak = [i for i in usable if conf_of(segs[i]) is not None and conf_of(segs[i]) < thr]
+        st["weak"] = len(weak)
+        targets = usable if every else (weak if settings.get("asr_recheck", True) else [])
     if not targets:
         return st
     max_len = asr_qwen.chunk_len(settings, engine)
     wins = windows(segs, targets, pad, max_len, total)
     st["windows"] = len(wins)
-    st["checked"] = sum(len(w[2]) for w in wins)
-    if not wins:
+    st["checked"] = len(targets) if manual else sum(len(w[2]) for w in wins)
+    if not wins and not manual:
         return st
     simplify = language in ("zh", "yue", "auto")
     texts = [s.text for s in segs]
@@ -236,22 +293,51 @@ def recheck_lines(segs, wav: str | Path, orig_wav: str | Path | None, engine: st
                 c = sum(probs) / len(probs) if probs else float(conf or 0.0)
                 cands.setdefault(i, []).append((src, nc, round(c, 3), ok))
 
-    with_orig = orig_wav is not None and settings.get("asr_recheck_orig", True)
-    collect(wins, hear(wav, wins, 0.0, 0.6 if with_orig else 0.95, "với khúc rộng hơn"), "v")
-    if with_orig:
+    with_orig = orig_wav is not None and (manual or settings.get("asr_recheck_orig", True))
+    if manual:   # câu người dùng chỉ: nghe khúc rộng (giọng đã tách + tiếng gốc) + nghe riêng từng câu
+        cuts = (0.0, 0.35, 0.65) if with_orig else (0.0, 0.5, 0.5)
+        if wins:
+            collect(wins, hear(wav, wins, cuts[0], cuts[1], "với khúc rộng hơn"), "v")
+            if with_orig:
+                collect(wins, hear(orig_wav, wins, cuts[1], cuts[2], "trên tiếng gốc (chưa tách giọng)"), "o")
+        tight = [(round(max(0.0, segs[i].start - TIGHT_PAD), 3), round(segs[i].end + TIGHT_PAD, 3), [i], [i])
+                 for i in targets]
+        collect(tight, hear(wav, tight, cuts[2], 0.92, "riêng từng câu"), "s")
+    else:
+        collect(wins, hear(wav, wins, 0.0, 0.6 if with_orig else 0.95, "với khúc rộng hơn"), "v")
+    if with_orig and not manual:
         weak_set = set(weak)
         ow = [(a, b, [i for i in tg if i in weak_set], inside) for a, b, tg, inside in wins]
         ow = [x for x in ow if x[2]]
         if ow:
             collect(ow, hear(orig_wav, ow, 0.6, 0.95, "trên tiếng gốc (chưa tách giọng)"), "o")
     realign = []
+    eng_of = {"o": "recheck_o", "s": "recheck_s"}
     for i, cs in sorted(cands.items()):
         s = segs[i]
-        best, other = decide(s.text, conf_of(s), cs)
         if str(s.extra.get("asr_alt_eng", "")).startswith("recheck"):
             for k in ("asr_alt", "asr_alt_eng", "asr_unsure", "asr_pick"):
                 s.extra.pop(k, None)
+        if manual:
+            kind, got = decide_manual(s.text, conf_of(s), cs)
+            best = got if kind == "fix" else None
+            other = got if kind in ("alt", "empty") else None
+            if kind == "same":
+                s.extra["asr_conf"] = round(max(conf_of(s) or 0.0, got[2]), 3)
+                s.extra["asr_same"] = True
+                st["same"] += 1
+                st["rows_same"].append(i)
+            elif kind == "empty":
+                st["empty"] += 1
+                st["rows_empty"].append(i)
+            elif kind == "alt":
+                st["rows_alt"].append(i)
+            elif kind == "fix":
+                st["rows_fixed"].append(i)
+        else:
+            best, other = decide(s.text, conf_of(s), cs)
         if best:
+            s.extra.pop("asr_same", None)
             src, new, conf = best
             old = s.text
             s.text = dual.merge_alt(old, new)
@@ -263,8 +349,9 @@ def recheck_lines(segs, wav: str | Path, orig_wav: str | Path | None, engine: st
             st["fixed_orig" if src == "o" else "fixed"] += 1
         elif other:
             src, new, _conf = other
+            s.extra.pop("asr_same", None)
             s.extra["asr_alt"] = new
-            s.extra["asr_alt_eng"] = "recheck_o" if src == "o" else "recheck"
+            s.extra["asr_alt_eng"] = eng_of.get(src, "recheck")
             s.extra["asr_unsure"] = True
             st["unsure"] += 1
     if realign:   # câu đổi chữ -> đo lại mốc từng chữ (bước bám mép / tách câu sau đó dùng)
@@ -284,6 +371,21 @@ def note(st: dict | None) -> str:
         return ""
     if st.get("error"):
         return f"⚠ bỏ qua bước nghe lại câu không chắc ({st['error']})"
+    if st.get("manual"):
+        if not st.get("checked"):
+            return "Các câu đã tích không có chữ để nghe lại"
+        fixed = int(st.get("fixed", 0)) + int(st.get("fixed_orig", 0))
+        parts = [f"điền lại {fixed} câu" if fixed else "không câu nào phải đổi chữ"]
+        if st.get("same"):
+            parts.append(f"{st['same']} câu nghe lại vẫn ra như cũ")
+        alt = int(st.get("unsure", 0)) - int(st.get("empty", 0))
+        if alt > 0:
+            parts.append(f"{alt} câu nghe ra khác mà chưa chắc – chữ gốc màu xanh, rê chuột xem bản nghe lại, đúng thì "
+                         "bấm 'Dùng bản bộ nghe 2'")
+        if st.get("empty"):
+            parts.append(f"{st['empty']} câu bộ nghe không nghe ra lời nào (nhạc / tiếng động bị chép thành chữ?) – "
+                         "xem rồi Xoá")
+        return f"Bộ nghe nghe lại {st['checked']} câu đã tích: " + ", ".join(parts)
     if not st.get("checked"):
         return ""
     what = "nghe kỹ lần 2" if st.get("overlap") else "nghe lại câu không chắc"

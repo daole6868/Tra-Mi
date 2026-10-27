@@ -45,7 +45,7 @@ def fit_text(s: Segment) -> str:
 
 
 ENGINE_LABEL = {"firered": "FireRedASR2", "qwen3": "Qwen3-ASR", "recheck": "Nghe lại với khúc rộng hơn",
-                "recheck_o": "Nghe lại trên tiếng gốc"}
+                "recheck_o": "Nghe lại trên tiếng gốc", "recheck_s": "Nghe lại riêng câu"}
 
 
 def asr_tip(s) -> str:
@@ -63,8 +63,10 @@ def asr_tip(s) -> str:
         elif s.extra.get("asr_unsure"):
             lines.append("Chưa chọn được – nghe lại rồi sửa chữ, hoặc tích câu rồi bấm 'Dùng bản bộ nghe 2'")
     if s.extra.get("asr_recheck"):
-        lines.append("Đã sửa theo lần nghe lại " + ("trên tiếng gốc" if s.extra["asr_recheck"] == "o" else
-                                                   "với khúc rộng hơn (câu nằm giữa, có câu trước / sau)"))
+        lines.append("Đã sửa theo lần nghe lại " + {"o": "trên tiếng gốc", "s": "riêng câu"}.get(
+            s.extra["asr_recheck"], "với khúc rộng hơn (câu nằm giữa, có câu trước / sau)"))
+    if s.extra.get("asr_same"):
+        lines.append("Bộ nghe đã nghe lại câu này: vẫn ra như cũ")
     conf = s.extra.get("asr_conf")
     if conf is not None and float(conf) < 0.7:
         lines.append(f"Bộ nghe không chắc câu này (độ chắc {float(conf):.2f}) – nên nghe lại")
@@ -338,6 +340,7 @@ class SubsModel(QAbstractTableModel):
                 s.extra.pop("src_unsure", None)   # người dùng đã xem / sửa
                 s.extra.pop("asr_unsure", None)
                 s.extra.pop("asr_repeat", None)
+                s.extra.pop("asr_same", None)
             elif c == C_VI:
                 s.trans = " ".join(v.split())
                 s.extra.pop("fit", None)   # bản dịch đổi -> cần tạo lại bản lồng để đo lại

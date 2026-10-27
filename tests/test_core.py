@@ -8794,9 +8794,90 @@ def test_recognize_recheck_in_pipeline_2115(monkeypatch, sample_video):
         p.delete()
 
 
+def test_relisten_picked_lines_2116(monkeypatch, tmp_path):
+    """Bộ nghe nghe lại câu đã tích (2.1.16): mỗi câu nghe 3 lần (khúc rộng trên giọng đã tách, khúc rộng trên tiếng gốc,
+    riêng câu); ≥ 2 lần ra cùng chữ -> điền; ra như cũ -> xác nhận (độ chắc tăng); các lần ra mỗi lần 1 kiểu -> tô xanh;
+    không ra chữ -> báo nghi nhạc; câu không tích không đụng."""
+    from trami import asr_qwen, pipeline, recheck
+    from trami.project import Project
+
+    D = recheck.decide_manual
+    assert D("今天吃什么？", 0.45, [("v", "今天吃什么呀", 0.7, True), ("o", "今天吃什么呀", 0.66, True),
+                                ("s", "今天吃啥", 0.6, True)]) == ("fix", ("v", "今天吃什么呀", 0.7))
+    assert D("今天吃什么？", 0.45, [("v", "今天吃什么", 0.8, True)])[0] == "same"
+    assert D("今天吃什么？", 0.45, [("v", "今天吃什么", 0.6, True), ("s", "今天吃啥", 0.9, True)])[0] == "alt"
+    assert D("今天吃什么？", 0.45, [("s", "今天吃啥", 0.45, True)])[0] == "alt"                  # chưa đủ chắc
+    assert D("今天吃什么？", 0.45, [("s", "我们走", 0.7, True), ("v", "今天吃什么呀", 0.6, True)])[0] == "alt"
+    assert D("今天吃什么？", 0.45, [("s", "我们走", 0.55, True)])[0] == "alt"                    # khác hẳn mà chưa chắc hơn hẳn
+    assert D("好的。", 0.3, [("s", "", 0.2, True), ("v", "", 0.1, True)])[0] == "empty"
+    assert D("好的。", 0.3, [("s", "好", 0.2, False)]) == (None, None)
+    segs = [Segment(0.0, 2.0, "你好，师兄。", extra={"asr_conf": 0.9}),
+            Segment(3.0, 5.0, "今天吃什么？", extra={"asr_conf": 0.45}),
+            Segment(6.0, 8.0, "我们去吃面吧。", extra={"asr_conf": 0.95}),
+            Segment(20.0, 22.0, "好的。", extra={"asr_conf": 0.3}),
+            Segment(30.0, 32.0, "走吧。", extra={"asr_conf": 0.5})]
+    calls = []
+
+    class W:
+        def call(self, req, pr=None, cancel=None):
+            calls.append(req)
+            orig = "orig" in req["wav"]
+            items = []
+            for a, b in req["spans"]:
+                if a >= 25:   # 3 lần nghe ra 3 kiểu, không lần nào chắc hơn rõ -> tô xanh
+                    t = "走啊" if b - a < 4 else ("走呗" if orig else "走呀")
+                    items.append({"text": t, "conf": 0.52, "cp": [0.52] * len(t)})
+                    continue
+                if a >= 10:
+                    t = ""
+                elif b - a < 4:   # nghe riêng câu
+                    t = "今天吃什么呀" if a > 2 else "你好师兄"
+                else:
+                    t = "你好师兄今天吃啥我们去吃面吧" if orig else "你好师兄今天吃什么呀我们去吃面吧"
+                items.append({"text": t, "conf": 0.85, "cp": [0.85] * len(t)} if t else {"text": "", "conf": 0.1})
+            return {"items": items}
+    aligned = []
+    monkeypatch.setattr(asr_qwen, "asr_worker", lambda eng, st=None: W())
+    monkeypatch.setattr(asr_qwen, "align_qwen", lambda segs, *a, **k: aligned.extend(segs) or 0)
+    st = recheck.recheck_lines(segs, tmp_path / "v.wav", tmp_path / "orig.wav", "qwen3", "zh",
+                               {"asr_recheck_pad": 2.5, "asr_recheck": False}, total=40.0, rows=[0, 1, 3, 4])
+    assert st["manual"] and st["checked"] == 4
+    assert st["rows_fixed"] == [1] and st["rows_same"] == [0] and st["rows_empty"] == [3] and st["rows_alt"] == [4]
+    assert segs[1].text == "今天吃什么呀？" and segs[1].extra["asr_recheck"] in ("v", "s") and aligned == [segs[1]]
+    assert segs[0].text == "你好，师兄。" and segs[0].extra["asr_same"] and segs[0].extra["asr_conf"] == 0.9
+    assert segs[3].extra["asr_unsure"] and segs[3].extra["asr_alt"] == ""
+    assert segs[4].text == "走吧。" and segs[4].extra["asr_unsure"] and segs[4].extra["asr_alt_eng"].startswith("recheck")
+    assert segs[2].text == "我们去吃面吧。" and "asr_same" not in segs[2].extra             # câu không tích không đụng
+    assert any("orig" in c["wav"] for c in calls) and any(
+        all(b - a < 4 for a, b in c["spans"]) for c in calls)                               # có lần nghe riêng câu
+    msg = recheck.note(st)
+    assert "nghe lại 4 câu đã tích" in msg and "điền lại 1 câu" in msg and "không nghe ra lời" in msg
+    # qua pipeline: lưu dự án, trả câu đổi chữ; chưa tích -> lỗi rõ
+    p = Project.create("nghe lại câu tích")
+    try:
+        p.data["info"] = {"duration": 40}
+        p.segments = [Segment(0.0, 2.0, "你好，师兄。", extra={"asr_conf": 0.9}),
+                      Segment(3.0, 5.0, "今天吃什么？", "Hôm nay ăn gì?", extra={"asr_conf": 0.45}),
+                      Segment(6.0, 8.0, "我们去吃面吧。", extra={"asr_conf": 0.95})]
+        p.save()
+        monkeypatch.setattr(pipeline, "_voice_wav16", lambda p, *a, **k: tmp_path / "v.wav")
+        monkeypatch.setattr(pipeline, "stems", lambda p: {})
+        monkeypatch.setattr(pipeline, "relisten_engine", lambda p, s=None: ("qwen3", "Qwen3-ASR"))
+        with pytest.raises(ValueError):
+            pipeline.relisten_lines(p, {}, [])
+        st = pipeline.relisten_lines(p, {"asr_recheck_pad": 2.5}, [1])
+        assert st["changed"] == [1] and st["engine"] == "qwen3"
+        q = Project(p.id)
+        assert q.segments[1].text == "今天吃什么呀？" and q.segments[1].trans == "Hôm nay ăn gì?"
+        assert not any("orig" in c["wav"] for c in calls[-2:])                               # chưa tách giọng: không có lần tiếng gốc
+    finally:
+        p.delete()
+
+
 def test_pick_unsure_lines_gui_2116(monkeypatch):
     """Nút "Tích câu bộ nghe không chắc" (tab Phụ đề → Công cụ → Lời hát & nghe nhầm): tích câu có độ chắc dưới mức ô bên
-    cạnh (bỏ câu 🎵), mở câu kém chắc nhất, mức lưu vào Cài đặt; dự án chưa có độ chắc -> báo, không tích gì."""
+    cạnh (bỏ câu 🎵), mở câu kém chắc nhất, mức lưu vào Cài đặt; dự án chưa có độ chắc -> báo, không tích gì. Nút "Bộ
+    nghe nghe lại câu đã tích" gửi đúng các câu đã tích cho việc nền."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
 
@@ -8830,40 +8911,40 @@ def test_pick_unsure_lines_gui_2116(monkeypatch):
         pp.s_conf.setValue(0.3)
         pp._pick_unsure()
         assert "Không có câu nào" in toasts[-1][0] and set(pp.model.selected) == {1}
-        # nghe lại câu đã tích bằng tiếng gốc: chỉ lớp giọng gốc, dừng ở cuối câu rồi trộn lại như tab Âm thanh
-        from trami.audiomix import LiveMix
+        # "Bộ nghe nghe lại câu đã tích": chưa tích -> báo; chưa có bộ nghe -> báo; có -> việc nền, tích câu vừa sửa
+        from trami import pipeline
 
-        mix = LiveMix()
-        mix.tracks = {"orig": np.zeros((10, 2), np.float32), "voice": np.zeros((10, 2), np.float32),
-                      "dub": np.zeros((10, 2), np.float32)}
-        mix.g = {"orig": 0.0, "voice": 0.0, "dub": 1.0}
-        pp.player.live.mix = mix
-        seen = []
-        monkeypatch.setattr(pp.player, "seek", lambda t: seen.append(round(t, 2)))
-        monkeypatch.setattr(pp.player, "playing", lambda: False)
-        monkeypatch.setattr(pp.player, "toggle", lambda: None)
-        restored = []
-        monkeypatch.setattr(pp, "_apply_audio_now", lambda: restored.append(1))
         pp.model.set_picked(range(len(pp.model.segs)), False)
+        pp.run_relisten()
+        assert toasts[-1][1] == "warn" and "Tích câu cần nghe lại" in toasts[-1][0]
         pp.model.set_picked([1, 2])
-        pp._select_line(0)
-        pp._listen_nav(0)
-        assert pp._selected_row() == 1 and seen[-1] == 2.7 and abs(pp._stop_at - 4.3) < 1e-9
-        assert mix.g == {"voice": 1.0, "voice_song": 1.0} and pp._listen_on and "1/2" in pp.s_listen_lbl.text()
-        pp._listen_nav(1)
-        assert pp._selected_row() == 2 and seen[-1] == 4.7
-        pp._listen_nav(1)
-        assert "cuối cùng" in toasts[-1][0] and pp._selected_row() == 2
-        pp._listen_nav(-1)
-        assert pp._selected_row() == 1
-        pp._listen_state()                       # dừng phát -> về cách trộn của tab Âm thanh
-        assert restored and not pp._listen_on
-        k = [i for i in range(pp.s_listen_src.count()) if pp.s_listen_src.itemData(i) == "orig"][0]
-        pp.s_listen_src.setCurrentIndex(k)
-        assert load_settings()["check_listen"] == "orig"
-        pp._listen_nav(0)
-        assert mix.g == {"orig": 1.0}
-        pp.player.live.mix = None
+        monkeypatch.setattr(pipeline, "relisten_engine", lambda p, s=None: (None, "Qwen3-ASR: chưa cài PyTorch"))
+        pp.run_relisten()
+        assert toasts[-1][1] == "warn" and "chưa cài PyTorch" in toasts[-1][0]
+        monkeypatch.setattr(pipeline, "relisten_engine", lambda p, s=None: ("qwen3", "Qwen3-ASR"))
+        sub = []
+        monkeypatch.setattr(pp, "submit", lambda kind, title, fn, quiet=False: sub.append((kind, title, fn)))
+        pp.run_relisten()
+        assert sub[-1][0] == "dual" and "2 câu" in sub[-1][1]
+        got = {}
+
+        def fake_relisten(p, settings, rows, progress=None, cancel=None):
+            got["rows"] = rows
+            segs = p.segments
+            segs[1].text = "好吧。"
+            segs[1].trans = "Được."
+            p.segments = segs
+            p.save()
+            return {"manual": True, "checked": 2, "fixed": 1, "same": 1, "unsure": 0, "empty": 0, "rows_fixed": [1],
+                    "rows_same": [2], "rows_alt": [], "rows_empty": [], "changed": [1]}
+        monkeypatch.setattr(pipeline, "relisten_lines", fake_relisten)
+
+        class J:
+            update = staticmethod(lambda *a, **k: None)
+            cancelled = staticmethod(lambda: False)
+        res = sub[-1][2](J(), Project(p.id))
+        assert got["rows"] == [1, 2] and res["pick"] == [1]
+        assert "điền lại 1 câu" in res["message"] and "Dịch câu đã tích" in res["message"]
         for s in pp.model.segs:
             s.extra.pop("asr_conf", None)
         pp._pick_unsure()
