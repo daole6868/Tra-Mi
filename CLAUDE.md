@@ -180,6 +180,14 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   ≤ 55; `relisten_cuts` nối tới 2 × khúc). `asr_lang_check` (nghe lại khúc nghi tiếng khác) có công tắc. GUI: Cài đặt →
   Nhận dạng giọng nói (7 ô) + tab Tự động nhóm 1 (`a_chunk`, `a_recheck` + `a_pad`, `a_overlap`, `a_langchk`, lưu qua
   `_audio_opts_changed`, `sync_engine` nạp lại); `C.CHUNK_HELP` / `RECHECK_HELP` / `OVERLAP_HELP` / `LANG_CHECK_HELP`.
+  Tab Phụ đề → Công cụ → Lời hát & nghe nhầm hàng "Không chắc" (2.1.16): nút "Tích câu bộ nghe không chắc"
+  (`project_page._pick_unsure`: câu `asr_conf` < ô `s_conf` = Cài đặt `asr_pick_conf` 0,7, bỏ câu 🎵, mở câu kém chắc
+  nhất; dự án chưa có độ chắc -> báo) – KHÔNG tự xoá câu nào, người dùng nghe lại rồi sửa / Xoá. Hàng "Nghe lại":
+  Câu trước / Nghe câu / Câu sau (`_listen_nav`, đi theo câu đã tích, nhãn `s_listen_lbl` "câu k/n · #số · độ chắc")
+  -> `_listen_orig` đè tạm `LiveMix.g` = chỉ giọng gốc đã tách (`voice` + `voice_song`) hoặc chỉ tiếng gốc (`orig`) theo ô
+  "nghe bằng" (Cài đặt `check_listen`), bỏ mute / solo, phát từ đầu câu − 0,3 s, dừng ở cuối câu + 0,3 s (`_stop_at`);
+  dừng phát (`mp.playbackStateChanged` -> `_listen_state`) / Nghe câu thường / xem chỗ nối -> `_listen_end` ->
+  `_apply_audio_now` trả lại bản trộn tab Âm thanh. Chưa tách giọng -> nghe tiếng gốc + báo.
 - Nghe chuẩn + nhịp ngắt (2.1.3): A tin cậy – `qwen_asr_worker` hỏi `"conf": true` -> `TokenConf` (LogitsProcessor ghi
   log-xác suất chữ được chọn, không giữ bảng điểm) + `mean_conf` (phần lời sau <asr_text>); FireRed có sẵn `conf`;
   `asr_qwen.conf_tags` / `asr.whisper_conf_tags` -> nhãn "conf=…" / "lowconf" (`asr_rescue_conf` 0,5) -> `align.rescue_missed`
@@ -312,7 +320,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (217 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (218 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1931,7 +1939,21 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   nhạc + tiếng động 10,9 dB; CPU ~15 s / cửa sổ 8 s / kênh (card NVIDIA nhanh hơn nhiều – chưa đo). Nghe lại câu không chắc:
   chỉ chạy thử với bộ nghe giả (Qwen3 thật chưa chạy – sandbox chặn HF); xác suất từng ký tự thử bằng bộ giải mã byte giả.
 
+- 2.1.16: người dùng hỏi "tắt Nghe lại câu không chắc được không, chỉ lấy câu chắc chắn" -> tắt được (tab Tự động nhóm 1 /
+  Cài đặt; tắt = giữ nguyên lần nghe đầu, câu không chắc vẫn còn) + làm nút "Tích câu bộ nghe không chắc" có ô mức độ chắc
+  (tab Phụ đề → Công cụ → Lời hát & nghe nhầm) để nghe lại rồi tự sửa / Xoá – không tự xoá (câu không chắc thường là thoại
+  thật ở chỗ có nhạc / hét / nói nhanh); người dùng xin thêm nút nghe lại -> hàng "Nghe lại" (Câu trước / Nghe câu / Câu
+  sau, nghe bằng giọng gốc đã tách hoặc tiếng gốc – không phát giọng lồng) để tự nghe từng câu đã tích rồi sửa chữ gốc ở
+  khung Câu đang chọn. Trước đó tư vấn "tăng âm lượng trước khi nghe": bộ nghe Qwen3-ASR dùng log-mel
+  kiểu Whisper (log10, chặn max − 8, (x + 4) / 4 – đã đọc transformers 5.21 `Qwen3ASRFeatureExtractor`) -> tăng to cả file
+  gần như không giúp, chỉ nâng câu nhỏ (chỉ chỗ có tiếng, ≤ +10 dB) mới có ích; đề xuất A (nghe thêm bản đã nâng âm lượng
+  trong "Nghe lại câu không chắc"), B (công tắc "Cân âm lượng câu nhỏ"), C (báo phim quá nhỏ / vỡ tiếng) – chưa làm.
+
 ## Vấn đề đang mở
+- 2.1.16: chờ người dùng nghe xong 1 phim (bản 2.1.15+), bấm "Tích câu bộ nghe không chắc" ở mức 0,7: câu tích có đúng là
+  câu nghe sai / nhạc bị chép thành chữ không, bao nhiêu câu là thoại đúng (nhiều quá -> hạ mức); hàng "Nghe lại" có dễ
+  dùng không (cần phím tắt / tự nhảy câu sau khi sửa?); chưa chọn A / B / C
+  (nâng âm lượng câu nhỏ).
 - 2.1.15: chờ người dùng (1) tab Tài liệu tải "Tách phim – Bandit v2" (Zenodo; chậm / bị chặn thì tự sang bản chép
   GitHub), chọn Bandit v2 ở Mô hình tách giọng, bấm Tách ngay (tab Lồng tiếng mục 1) – xem tốc độ trên RTX 4060, nghe tab
   Âm thanh: lời thoại có sạch hơn Kim không, nhạc nền có còn tiếng Trung không; (2) chạy lại "1. Nghe & tách câu": thông

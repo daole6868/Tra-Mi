@@ -8792,3 +8792,82 @@ def test_recognize_recheck_in_pipeline_2115(monkeypatch, sample_video):
         assert not heard and p.segments[1].extra["asr_conf"] == 0.35 and p.segments[1].text == "林北来了。"
     finally:
         p.delete()
+
+
+def test_pick_unsure_lines_gui_2116(monkeypatch):
+    """Nút "Tích câu bộ nghe không chắc" (tab Phụ đề → Công cụ → Lời hát & nghe nhầm): tích câu có độ chắc dưới mức ô bên
+    cạnh (bỏ câu 🎵), mở câu kém chắc nhất, mức lưu vào Cài đặt; dự án chưa có độ chắc -> báo, không tích gì."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from trami.config import load_settings
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow()
+    p = Project.create("câu không chắc")
+    try:
+        p.data["info"] = {"duration": 20}
+        p.segments = [Segment(1, 2, "你好。", "", "S1", {"asr_conf": 0.95}),
+                      Segment(3, 4, "好的。", "", "S1", {"asr_conf": 0.42}),
+                      Segment(5, 6, "走吧。", "", "S1", {"asr_conf": 0.66}),
+                      Segment(7, 8, "啦啦啦。", "", "S1", {"asr_conf": 0.2, "song": True}),
+                      Segment(9, 10, "嗯。", "", "S1")]
+        p.save()
+        win.open_project(p.id)
+        app.processEvents()
+        pp = win.project_page
+        toasts = []
+        monkeypatch.setattr(win, "toast", lambda msg, kind="ok": toasts.append((msg, kind)))
+        pp.s_conf.setValue(0.7)
+        pp._pick_unsure()
+        assert set(pp.model.selected) == {1, 2} and pp._selected_row() == 1 and "2 câu" in toasts[-1][0]
+        pp.s_conf.setValue(0.5)
+        assert load_settings()["asr_pick_conf"] == 0.5
+        pp._pick_unsure()
+        assert set(pp.model.selected) == {1}
+        pp.s_conf.setValue(0.3)
+        pp._pick_unsure()
+        assert "Không có câu nào" in toasts[-1][0] and set(pp.model.selected) == {1}
+        # nghe lại câu đã tích bằng tiếng gốc: chỉ lớp giọng gốc, dừng ở cuối câu rồi trộn lại như tab Âm thanh
+        from trami.audiomix import LiveMix
+
+        mix = LiveMix()
+        mix.tracks = {"orig": np.zeros((10, 2), np.float32), "voice": np.zeros((10, 2), np.float32),
+                      "dub": np.zeros((10, 2), np.float32)}
+        mix.g = {"orig": 0.0, "voice": 0.0, "dub": 1.0}
+        pp.player.live.mix = mix
+        seen = []
+        monkeypatch.setattr(pp.player, "seek", lambda t: seen.append(round(t, 2)))
+        monkeypatch.setattr(pp.player, "playing", lambda: False)
+        monkeypatch.setattr(pp.player, "toggle", lambda: None)
+        restored = []
+        monkeypatch.setattr(pp, "_apply_audio_now", lambda: restored.append(1))
+        pp.model.set_picked(range(len(pp.model.segs)), False)
+        pp.model.set_picked([1, 2])
+        pp._select_line(0)
+        pp._listen_nav(0)
+        assert pp._selected_row() == 1 and seen[-1] == 2.7 and abs(pp._stop_at - 4.3) < 1e-9
+        assert mix.g == {"voice": 1.0, "voice_song": 1.0} and pp._listen_on and "1/2" in pp.s_listen_lbl.text()
+        pp._listen_nav(1)
+        assert pp._selected_row() == 2 and seen[-1] == 4.7
+        pp._listen_nav(1)
+        assert "cuối cùng" in toasts[-1][0] and pp._selected_row() == 2
+        pp._listen_nav(-1)
+        assert pp._selected_row() == 1
+        pp._listen_state()                       # dừng phát -> về cách trộn của tab Âm thanh
+        assert restored and not pp._listen_on
+        k = [i for i in range(pp.s_listen_src.count()) if pp.s_listen_src.itemData(i) == "orig"][0]
+        pp.s_listen_src.setCurrentIndex(k)
+        assert load_settings()["check_listen"] == "orig"
+        pp._listen_nav(0)
+        assert mix.g == {"orig": 1.0}
+        pp.player.live.mix = None
+        for s in pp.model.segs:
+            s.extra.pop("asr_conf", None)
+        pp._pick_unsure()
+        assert toasts[-1][1] == "warn" and "chưa có độ chắc" in toasts[-1][0]
+    finally:
+        p.delete()
+        win.close()

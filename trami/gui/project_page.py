@@ -165,6 +165,7 @@ class ProjectPage(QWidget):
         # ---------------- giữa: khung xem trước (trình phát) + tiến độ tác vụ
         self.player = Player()
         self.player.positionChanged.connect(self._on_pos)
+        self.player.mp.playbackStateChanged.connect(self._listen_state)
         self.player.mediaError.connect(self._media_error)
         self.player.subtitleEdited.connect(self._sub_edited)
         self.player.regionsEdited.connect(self._regions_edited)
@@ -673,6 +674,24 @@ class ProjectPage(QWidget):
         self.s_ptol.setToolTip("Lệch cao độ cho phép ngoài khoảng giọng thường của người nói. Nhỏ = lọc chặt (dễ đánh "
                                "dấu nhầm câu kêu / hét), lớn = lọc lỏng (chỉ bắt nhạc cụ / giọng hát cao hẳn)")
         self.s_ptol.valueChanged.connect(self._ptol_changed)
+        # câu bộ nghe không chắc (độ chắc từng câu – 2.1.15): tích để nghe lại, câu là nhạc / tiếng ồn thì Xoá (2.1.16)
+        self.s_conf = QDoubleSpinBox()
+        self.s_conf.setRange(0.3, 0.95)
+        self.s_conf.setSingleStep(0.05)
+        self.s_conf.setDecimals(2)
+        self.s_conf.setValue(float(self.settings.get("asr_pick_conf", 0.7) or 0.7))
+        self.s_conf.setToolTip("Bộ nghe tự chấm độ chắc từng chữ (0–1). Câu có độ chắc trung bình dưới mức này được tích. "
+                               "Cao hơn = tích nhiều câu hơn")
+        self.s_conf.valueChanged.connect(self._pick_conf_changed)
+        # nghe lại câu đã tích bằng TIẾNG GỐC (không phải giọng lồng) để tự sửa chữ gốc cho đúng (2.1.16)
+        self.s_listen_src = combo([("voice", "Giọng đã tách"), ("orig", "Tiếng gốc")],
+                                  self.settings.get("check_listen", "voice"))
+        self.s_listen_src.setMinimumContentsLength(13)
+        self.s_listen_src.setToolTip("Nghe câu bằng gì: giọng gốc đã tách khỏi nhạc (rõ lời nhất – cần đã tách giọng) "
+                                     "hoặc tiếng gốc nguyên bản. Không phát giọng lồng tiếng Việt")
+        self.s_listen_src.currentIndexChanged.connect(self._listen_src_changed)
+        self.s_listen_lbl = label("", "muted")
+        self._listen_on = False
         pg_song = [
             "Nhạc / lời bài hát / tiếng động bị nghe thành lời thoại: đánh 🎵 (không lồng tiếng) hoặc đánh dấu để "
             "nghe lại rồi xoá",
@@ -688,6 +707,21 @@ class ProjectPage(QWidget):
             flow(button("Tích câu nghi nghe nhầm", "check", flat=True, on_click=lambda: self._pick_flag("noise")),
                  button("Không phải nhạc", "x", "Bỏ đánh dấu các câu đã tích (câu thoại thật) – lần lọc sau không đánh "
                         "dấu lại", flat=True, on_click=self._voice_ok)),
+            flow(_rowlbl("Không chắc"),
+                 button("Tích câu bộ nghe không chắc", "check", "Tích các câu bộ nghe chấm độ chắc thấp (thường là chỗ lẫn "
+                        "nhạc, tiếng hét, nói nhanh – hoặc nhạc / tiếng ồn bị chép thành chữ). Nghe lại từng câu: sai chữ "
+                        "thì sửa, không phải lời thoại thì Xoá. Rê chuột vào chữ gốc xem độ chắc. Không xoá câu nào tự "
+                        "động", flat=True, on_click=self._pick_unsure),
+                 hbox(label("độ chắc dưới", "muted"), self.s_conf)),
+            flow(_rowlbl("Nghe lại"),
+                 button("Câu trước", "chev_left", "Câu đã tích phía trước – phát tiếng gốc câu đó", flat=True,
+                        on_click=lambda: self._listen_nav(-1)),
+                 button("Nghe câu", "play", "Phát tiếng Trung gốc của câu đang chọn (trong các câu đã tích) từ đầu tới "
+                        "cuối câu rồi dừng – nghe xong sửa chữ gốc ở khung Câu đang chọn / bảng câu, hoặc Xoá câu",
+                        on_click=lambda: self._listen_nav(0)),
+                 button("Câu sau", "chev_right", "Câu đã tích tiếp theo – phát tiếng gốc câu đó", flat=True,
+                        on_click=lambda: self._listen_nav(1)),
+                 hbox(label("nghe bằng", "muted"), self.s_listen_src), self.s_listen_lbl),
             flow(_rowlbl("Câu bịa / lặp"),
                  button("Dọn câu bịa / câu lặp", "wand", "Bỏ câu bộ nghe chép lại tiêu đề / mô tả / thẻ video (đoạn nhạc, "
                         "không ai nói – lỗi bản 2.1.0–2.1.7); bỏ chỗ nói vấp (我不管闲，我不管闲事 -> 我不管闲事 – "
@@ -2705,6 +2739,7 @@ class ProjectPage(QWidget):
             self.a_pad.setValue(float(st.get("asr_recheck_pad", 5.0) or 5.0))
             self.a_overlap.setChecked(bool(st.get("asr_overlap", False)))
             self.a_langchk.setChecked(bool(st.get("asr_lang_check", True)))
+            self.s_conf.setValue(float(st.get("asr_pick_conf", 0.7) or 0.7))
         finally:
             self.loading = was
         self._update_engine_label()
@@ -4296,6 +4331,7 @@ class ProjectPage(QWidget):
     def _play_junction(self, it: dict):
         """▶ Xem chỗ nối: phát từ 2 s trước đoạn cắt, nhảy qua đoạn cắt, dừng 2 s sau."""
         a, b = it["cut"]
+        self._listen_end()
         self._junction_cut = [a, b]
         self._apply_live()
         self.player.seek(max(0.0, a - 2.0))
@@ -5058,6 +5094,94 @@ class ProjectPage(QWidget):
         self.win.toast(f"Đã sửa tên riêng ở {len(rows)} câu (rê chuột vào chữ gốc xem chỗ sửa)" +
                        (" – bấm 'Dịch câu đã tích' để dịch lại" if tr else ""), "ok")
 
+    def _pick_unsure(self):
+        """Tích câu bộ nghe không chắc (độ chắc < ô "độ chắc dưới"), xếp từ câu kém chắc nhất – nghe lại rồi sửa / Xoá."""
+        thr = float(self.s_conf.value())
+        segs = self.model.segs
+        known = [i for i, s in enumerate(segs) if s.extra.get("asr_conf") is not None]
+        if not known:
+            return self.win.toast("Phụ đề này chưa có độ chắc của bộ nghe (nghe bằng bản trước 2.1.15, OCR, nạp SRT hoặc "
+                                  "SenseVoice / Whisper) – bấm '1. Nghe & tách câu' bằng Qwen3-ASR / FireRedASR2 để có",
+                                  "warn")
+        rows = [i for i in known if float(segs[i].extra["asr_conf"]) < thr and not segs[i].extra.get("song")]
+        if not rows:
+            return self.win.toast(f"Không có câu nào độ chắc dưới {thr:.2f} – tăng mức ở ô bên cạnh để tích thêm", "ok")
+        self.model.set_picked(range(len(segs)), False)
+        self.model.set_picked(rows)
+        worst = min(rows, key=lambda i: float(segs[i].extra["asr_conf"]))
+        self._select_line(worst, seek=True)
+        self.win.toast(f"Đã tích {len(rows)} câu bộ nghe không chắc (độ chắc dưới {thr:.2f}) – đang mở câu kém chắc "
+                       f"nhất ({float(segs[worst].extra['asr_conf']):.2f}). Nghe lại: sai chữ thì sửa, nhạc / tiếng ồn bị "
+                       "chép thành chữ thì Xoá", "ok")
+
+    def _listen_nav(self, step: int):
+        """Nghe lại câu đã tích bằng tiếng gốc: 0 = câu đang chọn (không thuộc câu đã tích -> câu tích đầu tiên),
+        1 / -1 = câu tích kế tiếp / phía trước. Phát từ đầu tới cuối câu rồi dừng."""
+        rows = sorted(self.model.selected)
+        if not rows:
+            return self.win.toast("Tích câu cần nghe trước (VD 'Tích câu bộ nghe không chắc')", "warn")
+        cur = self._selected_row()
+        if step == 0:
+            row = cur if cur in rows else rows[0]
+        elif step > 0:
+            nxt = [r for r in rows if r > cur]
+            if not nxt:
+                return self.win.toast("Đã tới câu tích cuối cùng", "ok")
+            row = nxt[0]
+        else:
+            prv = [r for r in rows if r < cur]
+            if not prv:
+                return self.win.toast("Đây là câu tích đầu tiên", "ok")
+            row = prv[-1]
+        self._select_line(row)
+        s = self.model.segs[row]
+        conf = s.extra.get("asr_conf")
+        self.s_listen_lbl.setText(f"câu {rows.index(row) + 1}/{len(rows)} đã tích · #{row + 1}"
+                                  + (f" · độ chắc {float(conf):.2f}" if conf is not None else ""))
+        self._listen_orig(s.start, s.end)
+
+    def _listen_orig(self, a: float, b: float):
+        """Phát đoạn [a, b] chỉ bằng tiếng gốc (giọng đã tách hoặc tiếng gốc cả nhạc), không giọng lồng / nhạc thêm;
+        dừng phát -> trộn lại như tab Âm thanh."""
+        mix = self.player.live.mix
+        if mix is not None:
+            src = self.s_listen_src.currentData() or "voice"
+            if src == "voice" and "voice" not in mix.tracks:
+                src = "orig"
+                self.win.toast("Chưa tách giọng – nghe bằng tiếng gốc (cả nhạc)", "ok")
+            mix.g = {"voice": 1.0, "voice_song": 1.0} if src == "voice" else {"orig": 1.0}
+            mix.mute = []
+            mix.solo = None
+            self._listen_on = True
+        self._stop_at = b + 0.3
+        self.player.seek(max(0.0, a - 0.3))
+        if not self.player.playing():
+            self.player.toggle()
+
+    def _listen_state(self, *_):
+        """Dừng phát (hết câu / bấm dừng) sau khi nghe lại tiếng gốc -> về cách trộn của tab Âm thanh."""
+        if self._listen_on and not self.player.playing():
+            self._listen_end()
+
+    def _listen_end(self):
+        if self._listen_on:
+            self._listen_on = False
+            self._apply_audio_now()
+
+    def _listen_src_changed(self, *_):
+        if not self.loading:
+            from ..config import save_settings
+
+            save_settings({"check_listen": self.s_listen_src.currentData() or "voice"})
+            self.settings = load_settings()
+
+    def _pick_conf_changed(self, v: float):
+        if not self.loading:
+            from ..config import save_settings
+
+            save_settings({"asr_pick_conf": round(float(v), 2)})
+            self.settings = load_settings()
+
     def _ptol_changed(self, v: float):
         if not self.loading:
             from ..config import save_settings
@@ -5189,6 +5313,7 @@ class ProjectPage(QWidget):
         self._relayout(f"Đã đặt {what} cho {len(rows)} câu", rows[0])
 
     def _play_line(self, row: int | None = None):
+        self._listen_end()
         rows = [row] if row is not None else self._dub_current_rows()
         if not rows or not (0 <= rows[0] < len(self.model.segs)):
             return self.win.toast("Chọn 1 câu trong bảng trước", "warn")
