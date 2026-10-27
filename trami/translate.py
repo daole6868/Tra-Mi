@@ -422,6 +422,9 @@ class LLMClient:
         self.ki = _KEY_POS.get(engine, 0) % len(self.keys)
         self.rpm = 0 if engine == "ollama" else engine_rpm(settings, engine)
         self._json_mode = True
+        # model OpenAI đời mới (gpt-5…, o1/o3/o4…) chỉ nhận max_completion_tokens; model khác / API khác: max_tokens
+        self._max_key = ("max_completion_tokens" if engine == "openai" and "api.openai.com" in self.base
+                         and re.match(r"(gpt-5|o\d)", self.model or "") else "max_tokens")
         # Các model Claude đời mới (và một số model OpenAI) không nhận tham số temperature -> không gửi
         self._send_temp = engine != "anthropic"
 
@@ -522,8 +525,12 @@ class LLMClient:
                     if r.status_code == 200:
                         return "".join(b.get("text", "") for b in r.json().get("content", []) if b.get("type") == "text")
                 else:
-                    body = {"model": self.model, "max_tokens": max_tokens,
+                    body = {"model": self.model,
                             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+                    if self._max_key == "max_tokens":
+                        body["max_tokens"] = max_tokens
+                    else:   # model suy luận (gpt-5, o-series): phần suy nghĩ tính vào giới hạn -> chừa chỗ
+                        body["max_completion_tokens"] = max(max_tokens, 16000)
                     if self._send_temp:
                         body["temperature"] = temperature
                     if self._json_mode:
@@ -532,6 +539,9 @@ class LLMClient:
                                  {"Authorization": f"Bearer {self.api_key}"}, body)
                     if r.status_code == 400 and self._json_mode and "response_format" in r.text:
                         self._json_mode = False
+                        continue
+                    if r.status_code == 400 and self._max_key == "max_tokens" and "max_completion_tokens" in r.text:
+                        self._max_key = "max_completion_tokens"   # gpt-5 / o-series không nhận max_tokens
                         continue
                     if r.status_code == 200:
                         return r.json()["choices"][0]["message"]["content"] or ""
@@ -580,24 +590,75 @@ class LLMClient:
         raise ApiError(f"Không gọi được API dịch {self.engine} ({self.model}): {str(last_err)[:250]}. {hint}.")
 
 
-def list_models(settings: dict, engine: str, key: str = "") -> list[str]:
-    """Các model key này dùng được (nút 'Chọn model' ở Cài đặt) – Gemini: model gọi được generateContent."""
+# model KHÔNG dùng để dịch được (giọng nói, chép lời, ảnh / video, embedding, kiểm duyệt, đời cũ chỉ completions, chỉ có
+# ở Responses API…) – ẩn khỏi danh sách chọn model (2.1.14; nút "Hiện cả model không dùng để dịch" vẫn xem được)
+_NOT_CHAT = re.compile(r"embed|tts|transcri|whisper|dall-e|image|imagen|veo-|sora|moderation|realtime|audio|speech|"
+                       r"rerank|diarize|search|computer-use|aqa|lyria|robotics|native-audio|-live|guard|^babbage|"
+                       r"^davinci|^text-|^omni-|-instruct", re.I)
+# chỉ API chính hãng OpenAI: model chỉ gọi được qua Responses API (tool gọi /chat/completions)
+_OPENAI_RESPONSES_ONLY = re.compile(r"codex|(^|-)pro($|-)|deep-research", re.I)
+MODEL_PAGE = 1000
+
+
+def chat_model(name: str, engine: str = "openai", base: str = "") -> bool:
+    """Model này có dùng để dịch được không (theo tên)."""
+    if _NOT_CHAT.search(name or ""):
+        return False
+    if engine == "openai" and "api.openai.com" in (base or "https://api.openai.com/v1"):
+        return not _OPENAI_RESPONSES_ONLY.search(name)
+    return True
+
+
+def list_models(settings: dict, engine: str, key: str = "", hidden: list | None = None) -> list[str]:
+    """Các model key này dùng được để dịch (nút 'Chọn model' ở Cài đặt), MỚI NHẤT TRƯỚC. Lấy hết mọi trang (Claude trả 20
+    model / trang, Gemini 50). hidden: danh sách nhận các model bị ẩn (giọng nói, ảnh, embedding…)."""
     key = key or (api_keys(settings, engine) or [""])[0]
+    items: list[tuple[str, float]] = []      # (tên, thứ tự: càng lớn càng mới)
+    base = ""
     if engine == "gemini":
-        r = net.session().get("https://generativelanguage.googleapis.com/v1beta/models",
-                              params={"key": key, "pageSize": 200}, timeout=(10, 30))
+        token = ""
+        for _ in range(20):
+            r = net.session().get("https://generativelanguage.googleapis.com/v1beta/models",
+                                  params={"pageSize": MODEL_PAGE, **({"pageToken": token} if token else {})},
+                                  headers={"x-goog-api-key": key}, timeout=(10, 30))   # key ở header, không ở link
+            r.raise_for_status()
+            d = r.json()
+            items += [(m["name"].split("/", 1)[-1], 0.0) for m in d.get("models", [])
+                      if "generateContent" in (m.get("supportedGenerationMethods") or [])]
+            token = d.get("nextPageToken") or ""
+            if not token:
+                break
+        items.sort(key=lambda x: x[0], reverse=True)     # gemini-3… trước gemini-2.5…
+    elif engine == "anthropic":
+        after = ""
+        for _ in range(20):
+            r = net.session().get("https://api.anthropic.com/v1/models", timeout=(10, 30),
+                                  params={"limit": MODEL_PAGE, **({"after_id": after} if after else {})},
+                                  headers={"x-api-key": key, "anthropic-version": "2023-06-01"})
+            r.raise_for_status()
+            d = r.json()
+            items += [(m["id"], 0.0) for m in d.get("data", [])]      # API trả mới nhất trước
+            after = d.get("last_id") or ""
+            if not d.get("has_more") or not after:
+                break
+    else:
+        c = LLMClient(dict(settings, **{f"{engine}_api_keys": [key] if key else []}), engine)
+        base = c.base
+        r = net.session().get(f"{c.base}/models", headers={"Authorization": f"Bearer {c.api_key}"}, timeout=(10, 30))
         r.raise_for_status()
-        return sorted({m["name"].split("/", 1)[-1] for m in r.json().get("models", [])
-                       if "generateContent" in (m.get("supportedGenerationMethods") or [])}, reverse=True)
-    if engine == "anthropic":
-        r = net.session().get("https://api.anthropic.com/v1/models", timeout=(10, 30),
-                              headers={"x-api-key": key, "anthropic-version": "2023-06-01"})
-        r.raise_for_status()
-        return [m["id"] for m in r.json().get("data", [])]
-    c = LLMClient(dict(settings, **{f"{engine}_api_keys": [key] if key else []}), engine)
-    r = net.session().get(f"{c.base}/models", headers={"Authorization": f"Bearer {c.api_key}"}, timeout=(10, 30))
-    r.raise_for_status()
-    return sorted(m["id"] for m in r.json().get("data", []))
+        data = r.json().get("data", [])
+        items = [(m["id"], float(m.get("created") or 0)) for m in data if m.get("id")]
+        items.sort(key=lambda x: (x[1], x[0]), reverse=True)     # model mới ra trước
+    seen, out = set(), []
+    for name, _ in items:
+        if name in seen:
+            continue
+        seen.add(name)
+        if chat_model(name, engine, base):
+            out.append(name)
+        elif hidden is not None:
+            hidden.append(name)
+    return out
 
 
 def check_key(settings: dict, engine: str, key: str) -> str:

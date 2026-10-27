@@ -1079,25 +1079,27 @@ class SettingsPage(QWidget):
                       lambda m, i=i: w["keys"].set_status(i, "✗ " + m))
 
     def _pick_model(self, eng: str):
-        """Lấy danh sách model mà key dùng được rồi cho chọn (tên model của nhà cung cấp hay đổi)."""
-        from PySide6.QtGui import QCursor
-        from PySide6.QtWidgets import QMenu
-
-        from ..translate import list_models
+        """Lấy danh sách model mà key dùng được rồi cho chọn (tên model của nhà cung cấp hay đổi): đủ mọi model, mới nhất
+        trước, có ô tìm (2.1.14 – trước chỉ hiện 60 model đầu theo ABC)."""
+        from ..translate import ENGINE_NAMES, list_models
+        from .model_picker import ModelPicker
 
         w = self.eng_w[eng]
         st = dict(load_settings(), **self.collect())
         w["out"].setText("Đang lấy danh sách model…")
+        hidden: list[str] = []
 
         def show(models):
-            if not models:
+            if not models and not hidden:
                 return w["out"].setText("Không lấy được model nào")
-            w["out"].setText(f"{len(models)} model – chọn trong danh sách")
-            m = QMenu(self)
-            for name in models[:60]:
-                m.addAction(name, lambda n=name: w["model"].setText(n))
-            m.exec(QCursor.pos())
-        run_async(lambda: list_models(st, eng), show, lambda e: w["out"].setText("✗ Không lấy được danh sách: " + e))
+            w["out"].setText(f"{len(models)} model dùng để dịch" + (f" (ẩn {len(hidden)} model giọng nói / ảnh / "
+                                                                       "embedding…)" if hidden else ""))
+            dlg = ModelPicker(self, f"Model {ENGINE_NAMES.get(eng, eng)}", models, hidden, w["model"].text().strip())
+            if dlg.exec() and dlg.chosen:
+                w["model"].setText(dlg.chosen)
+            dlg.deleteLater()
+        run_async(lambda: list_models(st, eng, hidden=hidden), show,
+                  lambda e: w["out"].setText("✗ Không lấy được danh sách: " + e))
 
 
 class KeyList(QWidget):

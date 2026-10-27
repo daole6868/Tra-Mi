@@ -8469,3 +8469,92 @@ def test_genres_dialog_2113(monkeypatch):
     dlg._use()
     assert load_settings()["translate_style"] == "he_thong" and dlg.chosen == "he_thong"
     save_settings({"translate_style": "auto"})
+
+
+def test_list_models_all_pages_newest_first_2114(monkeypatch):
+    """2.1.14: lấy ĐỦ model (Claude / Gemini nhiều trang), mới nhất trước, ẩn model không dịch được; key Gemini ở header
+    (không ở link); gpt-5 / o-series dùng max_completion_tokens; hộp chọn model có ô tìm."""
+    from trami import net
+    from trami import translate as tr
+
+    calls = []
+
+    class R:
+        def __init__(self, data, code=200, text=""):
+            self.status_code, self._d, self.text = code, data, text
+
+        def json(self):
+            return self._d
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+
+    oa = [{"id": f"gpt-old-{i}", "created": i} for i in range(100)] + [
+        {"id": "gpt-5.2", "created": 900}, {"id": "o3", "created": 800}, {"id": "gpt-5.2-pro", "created": 901},
+        {"id": "gpt-5.1-codex", "created": 850}, {"id": "tts-1", "created": 5}, {"id": "whisper-1", "created": 6},
+        {"id": "text-embedding-3-large", "created": 7}, {"id": "babbage-002", "created": 8},
+        {"id": "gpt-4o-mini-transcribe", "created": 600}, {"id": "gpt-image-1", "created": 700}]
+
+    class S:
+        def get(self, url, params=None, headers=None, timeout=None):
+            calls.append((url, dict(params or {}), dict(headers or {})))
+            if "anthropic" in url:
+                if not (params or {}).get("after_id"):
+                    return R({"data": [{"id": f"claude-{i}"} for i in range(20)], "has_more": True, "last_id": "claude-19"})
+                return R({"data": [{"id": "claude-old"}], "has_more": False, "last_id": "claude-old"})
+            if "generativelanguage" in url:
+                if not (params or {}).get("pageToken"):
+                    return R({"models": [{"name": "models/gemini-2.5-flash", "supportedGenerationMethods":
+                                          ["generateContent"]},
+                                         {"name": "models/gemini-embedding-001", "supportedGenerationMethods":
+                                          ["embedContent"]}], "nextPageToken": "p2"})
+                return R({"models": [{"name": "models/gemini-3-pro-preview", "supportedGenerationMethods":
+                                      ["generateContent"]},
+                                     {"name": "models/gemini-2.5-flash-preview-tts", "supportedGenerationMethods":
+                                      ["generateContent"]}]})
+            return R({"data": oa})
+
+    monkeypatch.setattr(net, "session", lambda: S())
+    hidden: list = []
+    got = tr.list_models({"openai_api_keys": ["sk-x"]}, "openai", hidden=hidden)
+    assert len(got) + len(hidden) == len(oa) and got[:2] == ["gpt-5.2", "o3"]        # mới nhất trước, đủ hết
+    assert {"gpt-5.2-pro", "gpt-5.1-codex", "tts-1", "whisper-1", "gpt-image-1"} <= set(hidden)
+    assert "gpt-old-0" in got                                                          # không còn cắt ở 60
+    cl = tr.list_models({"anthropic_api_keys": ["k"]}, "anthropic")
+    assert len(cl) == 21 and cl[-1] == "claude-old"                                    # trang 2 của Claude
+    gh: list = []
+    ge = tr.list_models({"gemini_api_keys": ["AIzaSECRET"]}, "gemini", hidden=gh)
+    assert ge == ["gemini-3-pro-preview", "gemini-2.5-flash"] and gh == ["gemini-2.5-flash-preview-tts"]
+    gcalls = [c for c in calls if "generativelanguage" in c[0]]
+    assert all("key" not in c[1] and c[2].get("x-goog-api-key") == "AIzaSECRET" for c in gcalls)
+    # gpt-5 / o-series: max_completion_tokens; model / API khác báo không nhận max_tokens -> tự đổi
+    assert tr.LLMClient({"openai_api_keys": ["k"], "openai_model": "gpt-5.2"}, "openai")._max_key == "max_completion_tokens"
+    assert tr.LLMClient({"openai_api_keys": ["k"], "openai_model": "gpt-4o"}, "openai")._max_key == "max_tokens"
+    bodies = []
+
+    def post(self, url, headers, body):
+        bodies.append(dict(body))
+        if "max_tokens" in body:
+            return R({}, 400, "Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens' instead.")
+        return R({"choices": [{"message": {"content": '{"1": "ok"}'}}]})
+
+    monkeypatch.setattr(tr.LLMClient, "_http", post)
+    c = tr.LLMClient({"openai_api_keys": ["k"], "openai_model": "my-model", "openai_base_url": "https://x/v1",
+                      "openai_rpm": 0}, "openai")
+    assert c.chat("s", "u") == '{"1": "ok"}' and "max_completion_tokens" in bodies[-1]
+    # hộp chọn model
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from trami.gui.model_picker import ModelPicker
+
+    QApplication.instance() or QApplication([])
+    dlg = ModelPicker(None, "Model OpenAI", got, hidden, "o3")
+    assert dlg.list.count() == len(got) and dlg.list.currentItem().text() == "o3"
+    dlg.search.setText("gpt-5")
+    assert [dlg.list.item(i).text() for i in range(dlg.list.count())] == ["gpt-5.2"]
+    dlg.show_all.setChecked(True)
+    assert dlg.list.count() == 3                       # + gpt-5.2-pro, gpt-5.1-codex (không dùng để dịch, tô xám)
+    dlg._use()
+    assert dlg.chosen == "gpt-5.2"

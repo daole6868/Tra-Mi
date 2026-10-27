@@ -212,6 +212,14 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `gui/genres_dialog.GenresDialog` (nút "Sửa form…" cạnh ô "Thể loại phim" tab Tự động + ✎ tab Phụ đề). Kiểm tra bản dịch
   `skills.review_lines(ctx=, genre=)`: khoá = số thứ tự câu trong phim, câu ±`REVIEW_CTX` 2 ngoài lô -> mục NGỮ CẢNH;
   REVIEW_PROMPT: không sửa câu đúng chỉ vì muốn hay hơn, bỏ phần AI tự thêm.
+- Chọn model AI (2.1.14): `translate.list_models(settings, engine, hidden=)` lấy ĐỦ mọi trang (Claude `limit` 1000 +
+  `after_id` – mặc định API chỉ trả 20; Gemini `pageSize` 1000 + `nextPageToken`, key ở header `x-goog-api-key` không ở
+  link), mới nhất trước (OpenAI-compatible theo `created`, Claude theo thứ tự API, Gemini tên giảm dần), ẩn model không
+  dịch được (`chat_model`: `_NOT_CHAT` giọng nói / chép lời / ảnh / embedding / kiểm duyệt / tìm kiếm…; API chính hãng
+  OpenAI thêm `_OPENAI_RESPONSES_ONLY` codex / -pro / deep-research vì tool gọi /chat/completions) -> `hidden`. Hộp
+  `gui/model_picker.ModelPicker` (ô tìm, "Hiện cả model không dùng để dịch", bấm đúp chọn) thay menu cũ cắt 60 mục đầu
+  theo ABC. `LLMClient._max_key`: OpenAI chính hãng + model gpt-5… / o1–o4 -> `max_completion_tokens` (≥ 16000, phần suy
+  nghĩ tính vào); API khác báo 400 "max_completion_tokens" -> tự đổi.
 - Dấu câu bản dịch (2.1.11): `translate.punct_fix` = `fix_commas` (bỏ dấu phẩy ngay sau `COMMA_GLUE` lượng từ / "của" khi
   chữ sau viết thường, trừ dãy số; dấu phẩy giữa các tiếng của tên trong bảng thuật ngữ `Translator.names`) + `end_punct`
   (thiếu dấu câu cuối -> theo câu gốc: ？/吗/么 -> ?, ！ -> !, … , dấu phẩy -> ",", còn lại "."; Nhật 。？！、, Thái không
@@ -280,7 +288,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (211 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (212 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1882,7 +1890,16 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   đọc kèm 2 câu trước / sau + form thể loại. Thử với AI giả: gộp dòng 3 + 4 -> dòng 4, 5 được hỏi lại kèm 2 dòng trước, ra
   đúng 5 dòng. Chưa dịch thử bằng API thật (sandbox) – AI có chép đúng "dau" không cần xem trên Gemini / DeepSeek thật.
 
+- 2.1.14: "Chọn model báo 134 model mà danh sách ít vậy, xem ở tất cả API lỗi ở đâu" (ảnh: menu model OpenAI 60 mục,
+  babbage / davinci / tts / transcribe… lẫn vào, hết ở gpt-5.2-codex). Lỗi: (1) `_pick_model` chỉ thêm `models[:60]` vào
+  menu, danh sách xếp ABC tăng dần -> mất o1 / o3 / o4-mini / gpt-5.2-pro…; (2) Claude `/v1/models` mặc định 20 model / trang
+  -> chỉ thấy 20; (3) Gemini `pageSize` 200 không đọc trang sau, key gửi trong link (lỗi HTTP in cả link -> key có thể vào
+  loi.txt); (4) không lọc model không dịch được (giọng nói, ảnh, embedding, codex / pro chỉ chạy Responses API); (5) chọn
+  gpt-5.x / o-series để dịch sẽ lỗi 400 "max_tokens không hỗ trợ" 4 lần rồi báo lỗi. Sửa: xem Cấu trúc "Chọn model AI".
+
 ## Vấn đề đang mở
+- 2.1.14: chờ người dùng bấm lại nút ☰ cạnh ô Model (Cài đặt → Công cụ dịch → OpenAI / Gemini / Claude / DeepSeek):
+  đủ model, mới nhất trên cùng; thử dịch bằng 1 model gpt-5.x xem còn lỗi 400 không.
 - 2.1.13: chờ người dùng chọn "Thể loại phim" (tab Tự động / Phụ đề), bấm "Sửa form…" xem / chỉnh form, dịch lại 1 tập
   bằng AI: câu có còn bị thêm từ không, có đúng số câu không (thông báo "N câu AI lỗi phải dùng Google" phải ~0), câu đáp
   có khớp câu hỏi trước không. Gửi câu dịch sai để chỉnh form / luật.
