@@ -8,14 +8,14 @@ from PySide6.QtCore import QCoreApplication, QEvent, QObject, QRunnable, Qt, QTh
 import shiboken6
 from PySide6.QtWidgets import QAbstractScrollArea, QAbstractSlider, QAbstractSpinBox, QComboBox, QScrollBar, QWidget
 
+from .. import genres
+
 ENGINES = [("google", "Google Dịch (miễn phí)"),
            ("hymt", "Hy-MT2 – dịch trên máy, miễn phí, không cần mạng (tải ở tab Tài liệu)"),
            ("deepseek", "DeepSeek AI (giỏi tiếng Trung, rẻ)"),
            ("openai", "OpenAI GPT / API tương thích"), ("anthropic", "Claude (Anthropic)"),
            ("gemini", "Google Gemini"), ("ollama", "Ollama (offline trên máy)")]
-STYLES = [("auto", "Tự nhận biết"), ("co_trang", "Cổ trang / tiên hiệp / kiếm hiệp"),
-          ("hien_dai", "Hiện đại / ngôn tình / đô thị"), ("review", "Review / tóm tắt phim"),
-          ("hoat_hinh", "Hoạt hình / donghua"), ("tai_lieu", "Tài liệu / hướng dẫn / bán hàng")]
+STYLES = genres.choices()     # thể loại phim = form dịch theo thể loại (trami/genres.py, sửa được ở hộp "Sửa form")
 ASR_ENGINES = [("qwen3", "Qwen3-ASR – nghe chuẩn nhất, căn giờ từng chữ (khuyên dùng, cần GPU)"),
                ("firered", "FireRedASR2 – rất chuẩn tiếng Phổ thông + giọng địa phương, lời hát (tải ở tab Tài liệu)"),
                ("sensevoice", "SenseVoice – nhanh, nhẹ"),

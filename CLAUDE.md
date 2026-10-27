@@ -198,6 +198,20 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `recognize` (`p.data["asr_stammer"]`) + trong `clean_asr` (`st["stammer"]`); `repeat_block` thêm cụm 4 chữ dính liền
   (`_LOOP4_RE`); `align.restarts` (vế trước trùng / là đầu vế sau) -> `match_clauses` không ép đủ vế; luật dịch 11 (Việt +
   tiếng khác) + `REVIEW_PROMPT` mục 7: nói vấp / lặp vô nghĩa dịch 1 lần, lặp nhấn mạnh giữ.
+- Form dịch AI (2.1.13): `translate.SYSTEM_PROMPT` / `system_prompt(target, source, fill, genre)` – luật 1 đúng số dòng
+  (không gộp / tách / bỏ / để trống / chuyển ý sang dòng khác), 2 đọc ≥ 2 dòng trước + 2 dòng sau, 3 sát nghĩa KHÔNG thêm
+  từ / từ đệm / ý, 8 độ dài (⟪M–N⟫ chỉ khi Cài đặt `translate_fill` – mặc định TẮT từ 2.1.13, `FILL_RULE_VI/EN`), 13 JSON
+  {"1": {"dau": 3 ký tự đầu dòng gốc, "dich": …}} (tiếng khác "head" / "text"; vẫn nhận dạng cũ {"1": "…"}).
+  `_answers` + `shifted_lines` ("dau" khớp dòng bên cạnh ±3 mà không khớp dòng mình -> lệch; không khớp dòng nào -> bỏ qua)
+  -> dòng thiếu / lệch hỏi lại từng cụm (`_runs`) kèm `CTX_BEFORE` 6 / `CTX_AFTER` 4 dòng ngay trước / sau CỦA CỤM; chia
+  đôi lô thì mỗi nửa có ngữ cảnh nửa kia. `Translator.system()` = luật + form thể loại + kỹ năng. Form THỂ LOẠI PHIM
+  `trami/genres.py` (`GENRES` 26 mục id / name / vi / en: tu_tien, huyen_huyen, he_thong, hoat_hinh, kiem_hiep, co_trang,
+  cung_dau, trach_dau, xuyen_khong, tong_tai, hien_dai, phim_ngan, hoc_duong, gia_dinh, trinh_tham, kinh_di, mat_the,
+  khoa_huyen, vong_du, quan_su, hai, thieu_nhi, review, vlog, tai_lieu + auto; mã cũ giữ nguyên = ô `translate_style`),
+  `form(id, target, settings)` (bản sửa Cài đặt `genre_forms` [{"id","text"}] – danh sách vì dict bị `_deep_merge`),
+  `gui/genres_dialog.GenresDialog` (nút "Sửa form…" cạnh ô "Thể loại phim" tab Tự động + ✎ tab Phụ đề). Kiểm tra bản dịch
+  `skills.review_lines(ctx=, genre=)`: khoá = số thứ tự câu trong phim, câu ±`REVIEW_CTX` 2 ngoài lô -> mục NGỮ CẢNH;
+  REVIEW_PROMPT: không sửa câu đúng chỉ vì muốn hay hơn, bỏ phần AI tự thêm.
 - Dấu câu bản dịch (2.1.11): `translate.punct_fix` = `fix_commas` (bỏ dấu phẩy ngay sau `COMMA_GLUE` lượng từ / "của" khi
   chữ sau viết thường, trừ dãy số; dấu phẩy giữa các tiếng của tên trong bảng thuật ngữ `Translator.names`) + `end_punct`
   (thiếu dấu câu cuối -> theo câu gốc: ？/吗/么 -> ?, ！ -> !, … , dấu phẩy -> ",", còn lại "."; Nhật 。？！、, Thái không
@@ -266,7 +280,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (209 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (211 test; 2 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1858,7 +1872,20 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `stats["long_fixed"]` / `["long_left"]` -> `dub_summary`. Tab Lồng tiếng: "… Edge đọc từng vế". Câu đã đọc từng vế
   trước đây: bấm "Tạo bản lồng tiếng" là đọc lại cả câu (mã file khác). Chưa chạy VieNeu thật (sandbox chặn HF).
 
+- 2.1.13: "các form gửi AI dịch là gì – sửa cho chuẩn: không cho AI tự thêm từ, câu dịch đúng nghĩa với câu trước / sau
+  (đọc 2 câu trước / sau), không cắt / bỏ câu, đúng số câu; thêm nhiều form theo thể loại (tu tiên, hoạt hình, hệ thống…)".
+  Trước: luật 8 + kỹ năng "Lồng tiếng" + AI kiểm tra khuyên THÊM từ đệm (à, nhé, đấy…) cho câu ngắn (mặc định bật từ
+  2.0.74); "Văn phong" chỉ 1 dòng / thể loại (6 thể loại); dòng AI trả thiếu được hỏi lại 1 mình với ngữ cảnh của CẢ lô
+  (mất 2 dòng sát bên), nửa sau khi chia đôi lô mất ngữ cảnh trước; AI gộp / bỏ 1 dòng làm các dòng sau trượt lên mà tool
+  không biết (chỉ đếm khoá). Sửa: luật chung mới + kiểm tra lệch dòng bằng "dau" + hỏi lại kèm ngữ cảnh (xem Cấu trúc "Form
+  dịch AI"), "Câu ngắn nói đầy đủ hơn" mặc định tắt và không còn từ đệm, 26 form thể loại sửa được, AI kiểm tra bản dịch
+  đọc kèm 2 câu trước / sau + form thể loại. Thử với AI giả: gộp dòng 3 + 4 -> dòng 4, 5 được hỏi lại kèm 2 dòng trước, ra
+  đúng 5 dòng. Chưa dịch thử bằng API thật (sandbox) – AI có chép đúng "dau" không cần xem trên Gemini / DeepSeek thật.
+
 ## Vấn đề đang mở
+- 2.1.13: chờ người dùng chọn "Thể loại phim" (tab Tự động / Phụ đề), bấm "Sửa form…" xem / chỉnh form, dịch lại 1 tập
+  bằng AI: câu có còn bị thêm từ không, có đúng số câu không (thông báo "N câu AI lỗi phải dùng Google" phải ~0), câu đáp
+  có khớp câu hỏi trước không. Gửi câu dịch sai để chỉnh form / luật.
 - 2.1.12: chờ người dùng bấm "Tạo bản lồng tiếng" (đầy đủ) trên dự án đã lồng bằng VieNeu: các câu trước đây đọc từng vế
   được đọc lại cả câu; nghe các câu có dấu phẩy xem còn lặp không, chỗ nghỉ giữa câu có đúng lúc nhân vật nói tiếp không;
   thông báo xong có "N câu VieNeu đọc dài bất thường – đã tự đọc lại" (nhiều quá -> ngưỡng 1,5 × cần nới).

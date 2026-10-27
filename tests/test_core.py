@@ -2348,7 +2348,7 @@ def test_target_language_detect_and_translate(monkeypatch):
     assert langs.units("สวัสดีครับ", "th") == 7          # 10 ký tự, 3 dấu ั ี ั không tính riêng
     assert langs.units("I am fine, thanks", "en") == 4 and langs.budget(2.0, "th") > langs.budget(2.0, "en")
     assert langs.edge_voice("en", "male") == "edge:en-US-GuyNeural"
-    assert translate.system_prompt("vi") == translate.SYSTEM_PROMPT
+    assert translate.system_prompt("vi") == translate.SYSTEM_PROMPT.replace("{fill}", "")
     sp = translate.system_prompt("ko")
     assert "Korean" in sp and "Korean syllables" in sp and "Hán" not in sp
     assert translate.untranslated("你好世界", "ja") and not translate.untranslated("大丈夫です", "ja")
@@ -4845,7 +4845,7 @@ def test_ai_song_filter_before_translate(monkeypatch):
 
     monkeypatch.setattr(tr.LLMClient, "chat", fake_chat)
     st_ = {"translate_engine": "openai", "openai_api_key": "x", "openai_base_url": "https://api.example.com/v1",
-           "ai_clean_before_translate": False, "ai_review_after_translate": True}
+           "ai_clean_before_translate": False, "ai_review_after_translate": True, "translate_fill": True}
     p = Project.create("loc_loi_hat")
     p.segments = [Segment(0, 1, "你好"), Segment(1.2, 3.5, "你去哪儿我爱你到永远"), Segment(4, 8, "我爱你到永远"),
                   Segment(9, 10, "走吧"), Segment(11, 13, "请不吝点赞订阅转发")]
@@ -8218,7 +8218,7 @@ def test_punct_wrap_and_title_echo_2111():
     assert "trọn nghĩa" in translate.CLAUSE_PROMPT.lower() or "TRỌN NGHĨA" in translate.CLAUSE_PROMPT
     assert "thiếu dấu câu cuối" in skills.REVIEW_PROMPT
     short = next(x for x in skills.BUILTIN if x["id"] == "dub_short")["text"]
-    assert "GIỮ / thêm từ đệm" in short and "lược từ đệm (thì, là, mà, cái, ấy) nếu không mất ý" not in short
+    assert "KHÔNG thêm từ đệm" in short and "lược từ đệm (thì, là, mà, cái, ấy) nếu không mất ý" not in short
     # dự án đã dịch (bản trước 2.1.11 bị bỏ dấu chấm cuối): nút Sửa dấu câu, không gọi AI
     p = Project.create("dấu câu")
     try:
@@ -8370,3 +8370,102 @@ def test_dub_by_clause_joins_parts_on_original_timing(tmp_path, monkeypatch):
     b = tts._decode(tmp_path / "o5.wav")
     assert len(b) == len(full) and float(np.abs(b - full).max()) < 2e-4
     assert tab == st5["placed_tab"]
+
+
+def test_translate_forms_2113(monkeypatch):
+    """2.1.13: luật chung (đúng số dòng, đọc 2 dòng trước / sau, không thêm từ), form thể loại phim (sửa được), AI trả
+    "dau" -> phát hiện dòng bị lệch rồi hỏi lại kèm các dòng ngay trước / sau; kiểm tra bản dịch kèm ngữ cảnh ±2."""
+    from trami import genres, skills
+    from trami import translate as tr
+
+    ids = [g for g, _ in genres.choices()]
+    assert len(ids) >= 25 and len(set(ids)) == len(ids)
+    for old in ("auto", "co_trang", "hien_dai", "review", "hoat_hinh", "tai_lieu"):   # mã cũ của dự án / bộ nhớ dịch
+        assert old in ids
+    assert {"tu_tien", "he_thong", "cung_dau", "phim_ngan", "trinh_tham"} <= set(ids)
+    assert "Trúc Cơ" in genres.form("tu_tien") and "ký chủ" in genres.form("he_thong")
+    assert "Hán Việt" not in genres.form("tu_tien", "en") and genres.form("khong_co") == genres.form("auto")
+    own = {"genre_forms": genres.to_setting({"tu_tien": "- form của tôi"})}
+    assert genres.form("tu_tien", "vi", own) == "- form của tôi" and genres.form("tu_tien", "en", own) != "- form của tôi"
+    assert genres.edited({"genre_forms": [{"id": "khong_co", "text": "x"}, {"id": "auto", "text": " "}]}) == {}
+    # lời nhắc: luật mới, không còn khuyến khích từ đệm khi tắt "nói đầy đủ hơn"
+    sp = tr.system_prompt("vi")
+    assert "ĐÚNG SỐ DÒNG" in sp and "2 dòng TRƯỚC và 2 dòng SAU" in sp and "KHÔNG THÊM" in sp and '"dau"' in sp
+    assert "⟪M–N" not in sp and "à, ạ, nhé" not in sp and "{fill}" not in sp
+    assert "⟪M–N tiếng⟫" in tr.system_prompt("vi", fill=True)
+    assert tr.system_prompt("vi", genre="- abc").endswith("- abc") and "THỂ LOẠI PHIM" in tr.system_prompt("vi", genre="x")
+    en = tr.system_prompt("en", genre="Xianxia")
+    assert "EXACT LINE COUNT" in en and '"head"' in en and en.endswith("Xianxia") and "⟪M–N" not in en
+    t = tr.Translator({"openai_api_key": "x", "translate_style": "tu_tien"}, "openai", target="vi")
+    assert "Trúc Cơ" in t.system() and not t.fill_short
+    # phát hiện lệch dòng
+    lines = ["你好啊", "师父来了", "快跑", "他是谁", "我不知道"]
+    assert tr.shifted_lines(["你好啊", "师父来", "快跑", "我不知", ""], lines) == {3}
+    assert tr.shifted_lines(["xin", "", "lạ", "abc", "我不"], lines) == set()   # không chép đúng -> không kết luận
+    # AI bỏ dòng 3 (gộp) -> dòng 4, 5 trượt lên; tool hỏi lại 2 dòng đó kèm ngữ cảnh ngay trước / sau
+    asked = []
+
+    def fake_chat(self, system, user, max_tokens=8000, temperature=0.3):
+        payload = json.loads(user[user.rindex("{"):])
+        asked.append((user, list(payload.values())))
+        good = {"你好啊": "Chào.", "师父来了": "Sư phụ tới rồi.", "快跑": "Chạy mau!", "他是谁": "Hắn là ai?",
+                "我不知道": "Ta không biết."}
+        src = [tr.BUDGET_RE.sub(" ", v).strip() for v in payload.values()]
+        if len(asked) == 1:   # lần đầu: gộp dòng 3 + 4, các dòng sau trượt lên
+            return json.dumps({"1": {"dau": "你好啊", "dich": "Chào."}, "2": {"dau": "师父来", "dich": "Sư phụ tới rồi."},
+                               "3": {"dau": "快跑", "dich": "Chạy mau! Hắn là ai?"},
+                               "4": {"dau": "我不知", "dich": "Ta không biết."}}, ensure_ascii=False)
+        return json.dumps({str(k + 1): {"dau": s[:3], "dich": good[s]} for k, s in enumerate(src)}, ensure_ascii=False)
+
+    monkeypatch.setattr(tr.LLMClient, "chat", fake_chat)
+    t = tr.Translator({"openai_api_key": "x"}, "openai", target="vi")
+    out = t.translate_lines(lines)
+    assert out[3] == "Hắn là ai?" and out[4] == "Ta không biết." and out[1] == "Sư phụ tới rồi."
+    retry_user, retry_lines = asked[1]
+    assert retry_lines == ["他是谁", "我不知道"]
+    assert "NGỮ CẢNH TRƯỚC" in retry_user and "师父来了" in retry_user and "快跑" in retry_user   # 2 dòng ngay trước
+    assert t.fallback_lines == 0
+    # kiểm tra bản dịch: câu kiểm tra kèm 2 câu trước / sau; khoá = số thứ tự câu trong phim
+    seen = {}
+
+    class L:
+        def chat(self, system, user, max_tokens=8000, temperature=0.2):
+            seen["sys"], seen["user"] = system, user
+            return json.dumps({"6": {"sua": "Câu sáu sửa.", "ly_do": "sai nghĩa"}}, ensure_ascii=False)
+
+    ctx = [(f"句{i}", f"Câu {i}.") for i in range(10)]
+    res = skills.review_lines(L(), [(5, "句5", "Câu 5.", 9)], "", "", "tiếng Trung", "tiếng Việt", "tiếng",
+                              ctx=ctx, genre="- form thể loại")
+    assert res == {5: ("Câu sáu sửa.", "sai nghĩa")}
+    for j in (4, 5, 7, 8):
+        assert f"{j}: 句{j - 1} => Câu {j - 1}." in seen["user"]
+    assert '"6"' in seen["user"] and "- form thể loại" in seen["sys"] and "KHÔNG sửa chỉ vì muốn hay hơn" in seen["sys"]
+    assert "KHÔNG thêm từ đệm" in next(x for x in skills.BUILTIN if x["id"] == "dub_short")["text"]
+
+
+def test_genres_dialog_2113(monkeypatch):
+    """Hộp sửa form thể loại: lưu bản sửa, Về mặc định xoá bản sửa, Dùng thể loại này đặt Cài đặt."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from trami import genres
+    from trami.config import load_settings, save_settings
+    from trami.gui.genres_dialog import GenresDialog
+
+    QApplication.instance() or QApplication([])
+    save_settings({"genre_forms": [], "translate_style": "auto"})
+    dlg = GenresDialog(None, "he_thong")
+    assert dlg._cur() == "he_thong" and "ký chủ" in dlg.text.toPlainText()
+    dlg.text.setPlainText("- Hệ thống của tôi")
+    dlg._save()
+    assert genres.form("he_thong", "vi", load_settings()) == "- Hệ thống của tôi"
+    assert dlg.list.currentItem().text().startswith("✎ ")
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    dlg._reset()
+    assert genres.edited(load_settings()) == {} and "ký chủ" in dlg.text.toPlainText()
+    dlg.text.setPlainText(genres.default_text("he_thong"))
+    dlg._save()                                         # giống mặc định -> không lưu
+    assert genres.edited(load_settings()) == {}
+    dlg._use()
+    assert load_settings()["translate_style"] == "he_thong" and dlg.chosen == "he_thong"
+    save_settings({"translate_style": "auto"})

@@ -34,14 +34,14 @@ class AutoSettingsDialog(QDialog):
         self.joinai = f.row("AI nối câu theo nghĩa", combo(pipeline.join_engine_choices(s), s.get("ai_join_engine", "auto")))
         self.engine = f.row("Công cụ dịch", combo(C.ENGINES, s.get("translate_engine")))
         self.target = f.row("Dịch sang", combo(C.TARGETS, s.get("target_lang", "vi")))
-        self.style = f.row("Thể loại / văn phong", combo(C.STYLES, s.get("translate_style")))
+        self.style = f.row("Thể loại phim", combo(C.STYLES, s.get("translate_style")))
         self.skill = f.row("Kỹ năng dịch AI", combo([("", "Không dùng")] + [
             (x["id"], ("🔒 " if x.get("builtin") else "✎ ") + x["name"]) for x in skills.all_skills(s)],
             s.get("translate_skill", "")))
         self.clean = f.row("AI sửa lỗi nghe & nối câu trước khi dịch", Switch(bool(s.get("ai_clean_before_translate", True))))
         self.songai = f.row("AI lọc lời bài hát trước khi dịch", Switch(bool(s.get("ai_song_filter", True))))
         self.review = f.row("AI kiểm tra lại bản dịch", Switch(bool(s.get("ai_review_after_translate", False))))
-        self.fill = f.row("Câu ngắn thêm từ đệm cho vừa thời gian", Switch(bool(s.get("translate_fill", True))))
+        self.fill = f.row("Câu ngắn nói đầy đủ hơn cho vừa thời gian", Switch(bool(s.get("translate_fill", False))))
         self.split_long = f.row("Tách câu dịch dài", Switch(bool(s.get("split_long_trans", True))),
                                 "Dịch xong hết -> tách câu dịch dài ở dấu ? ! . / dấu phẩy -> tách xong hết mới lồng tiếng")
         self.hardsub = f.row("Phụ đề Trung cũ", combo(C.HARDSUB, pv["hardsub_mode"]))

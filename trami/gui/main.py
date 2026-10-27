@@ -806,7 +806,7 @@ class SettingsPage(QWidget):
         self.engine = f.row("Công cụ dịch mặc định", combo(C.ENGINES))
         self.target = f.row("Dịch sang (dự án mới)", combo(C.TARGETS),
                             "Tiếng đích mặc định cho dự án mới. Mỗi dự án đổi riêng ở tab Tự động → 'Dịch sang'")
-        self.style = f.row("Văn phong mặc định", combo(C.STYLES))
+        self.style = f.row("Thể loại phim mặc định", combo(C.STYLES))
         from ..pipeline import join_engine_choices
 
         self.ai_join = f.row("AI nối câu theo nghĩa", combo(join_engine_choices(load_settings())),

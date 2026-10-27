@@ -33,9 +33,9 @@ BUILTIN = [
         "- Tiếng cảm thán: 嗯 -> Ừm; 啊 -> Á / À / Ơ; 哦 -> Ờ; 嘎 -> Quác; 哈哈 -> Haha.\n"
         "- Bạn bè ngang hàng xưng tớ – cậu (hoặc tao – mày nếu cãi nhau), con – bố với người tạo ra / bố mẹ.")},
     {"id": "dub_short", "name": "Lồng tiếng – vừa thời gian, dễ đọc", "builtin": True, "text": (
-        "- Bản dịch để LỒNG TIẾNG: câu nói tự nhiên, độ dài theo ký hiệu ⟪…⟫ của từng dòng. Dài hơn mức tối đa -> lược "
-        "từ thừa (thì, là, mà, cái, ấy) nếu không mất ý; ngắn hơn hẳn mức tối thiểu (⟪M–N tiếng⟫) -> GIỮ / thêm từ đệm, "
-        "xưng hô cho đủ dài như luật 8 – đừng lược tới mức câu cụt, giọng lồng xong sớm rồi im.\n"
+        "- Bản dịch để LỒNG TIẾNG: câu nói tự nhiên, độ dài theo ký hiệu ⟪…⟫ của từng dòng. Dài hơn mức tối đa -> chọn "
+        "từ / cách nói ngắn hơn mà vẫn đủ ý (không bỏ ý); câu ngắn thì để ngắn – KHÔNG thêm từ đệm, tiếng cảm thán hay ý "
+        "mới cho dài ra; đừng lược tới mức câu cụt.\n"
         "- Tránh chuỗi số dài, ký hiệu, viết tắt khó đọc; số nhỏ viết bằng chữ.\n"
         "- Không thêm dấu ngoặc / chú thích trong câu; giữ dấu câu cuối (? ! .) để giọng đọc lên / xuống đúng.")},
     {"id": "co_trang_kn", "name": "Cổ trang – tiên hiệp (chuẩn truyện convert)", "builtin": True, "text": (
@@ -51,15 +51,15 @@ STD_SKILL = {"id": STD_ID, "name": "Dịch chuẩn – giữ đúng số câu, t
     "dòng, KHÔNG chuyển chữ sang dòng bên cạnh – kể cả khi 1 câu bị cắt ngang giữa 2 dòng: phần nào ở dòng nào thì dịch "
     "ở dòng đó sao cho đọc liền mạch.\n"
     "- Dòng chỉ có tiếng cảm thán (嗯, 啊, 哦, 哈哈) vẫn dịch (Ừm, À, Ờ, Haha) – không để trống dòng nào.\n"
-    "- Dịch theo NGỮ CẢNH: đọc cả các dòng trước / sau để hiểu ai đang nói với ai, đang nói chuyện gì; câu nghe nhầm chữ "
-    "đồng âm thì dịch theo ý đúng của ngữ cảnh.\n"
+    "- Dịch theo NGỮ CẢNH: đọc ít nhất 2 dòng trước và 2 dòng sau mỗi dòng để hiểu ai đang nói với ai, đang nói chuyện "
+    "gì; câu dịch phải khớp nghĩa với các dòng đó; câu nghe nhầm chữ đồng âm thì dịch theo ý đúng của ngữ cảnh.\n"
     "- TÊN RIÊNG: tên người, biệt danh, môn phái, tổ chức, chiêu thức, pháp bảo -> phiên âm Hán Việt chuẩn (李逍遥 -> Lý "
     "Tiêu Dao). ĐỊA DANH: có tên tiếng Việt quen dùng thì dùng tên đó (北京 -> Bắc Kinh, 上海 -> Thượng Hải, 长安 -> Trường "
     "An, 日本 -> Nhật Bản), không thì Hán Việt. Tên thương hiệu / công nghệ / người nước ngoài: đúng tên quốc tế (微信 -> "
     "WeChat, 抖音 -> Douyin, 马斯克 -> Musk).\n"
     "- Một tên dịch MỘT cách trong cả phim; theo đúng bảng thuật ngữ và hồ sơ phim nếu có.\n"
     "- Xưng hô theo quan hệ, tuổi tác, địa vị và giữ nhất quán.\n"
-    "- Không thêm chú thích, ngoặc, giải thích; không bỏ ý; không thêm ý.")}
+    "- Dịch SÁT NGHĨA: không thêm từ, tiếng cảm thán, từ đệm, chú thích, ngoặc, giải thích; không bỏ ý; không thêm ý.")}
 
 FILTER_RULES = """LỌC CHỮ KHÔNG PHẢI LỜI THOẠI – máy nghe chép cả nhạc nền, tiếng hát, tiếng động thành chữ. Chỉ dựa vào NỘI DUNG
 chữ và GIỜ của dòng (không đoán theo âm lượng):
@@ -125,13 +125,17 @@ Việt cho người dịch sang {lang}. Chỉ trả về JSON:
  "nghe_nham": ["chữ máy nghe có thể sai -> chữ đúng (nếu thấy)", ...],
  "ghi_chu": "những điều người dịch cần biết để dịch đúng ngữ cảnh (câu đùa, bối cảnh, ẩn ý)"}}"""
 
-REVIEW_PROMPT = """Bạn là biên tập viên kiểm tra bản dịch phụ đề {src} -> {lang} để LỒNG TIẾNG. Mỗi mục có câu gốc, bản dịch
-và độ dài nói vừa thời gian câu thoại ("≤N" = tối đa N; "M–N" = từ M tới N). Kiểm tra và CHỈ sửa câu có lỗi thật:
-1. Dịch sai nghĩa, sót ý, tự thêm ý; câu vắt qua 2 dòng đọc không liền mạch.
+REVIEW_PROMPT = """Bạn là biên tập viên kiểm tra bản dịch phụ đề {src} -> {lang} để LỒNG TIẾNG. Mỗi mục (khoá = số thứ tự câu
+trong phim) có câu gốc, bản dịch và độ dài nói vừa thời gian câu thoại ("≤N" = tối đa N; "M–N" = từ M tới N). Mỗi câu
+đọc kèm ít nhất 2 câu trước và 2 câu sau nó (trong danh sách hoặc phần NGỮ CẢNH) để biết ai nói với ai, câu nào trả lời
+câu nào. Kiểm tra và CHỈ sửa câu có lỗi thật – câu đã đúng nghĩa thì KHÔNG sửa chỉ vì muốn hay hơn; chỉ sửa trong
+từng câu, không gộp / chuyển ý sang câu khác:
+1. Dịch sai nghĩa, sót ý, không khớp nghĩa với câu trước / sau; TỰ THÊM từ, tiếng cảm thán, từ đệm hay ý không có trong
+   câu gốc -> bỏ phần thêm; câu vắt qua 2 dòng đọc không liền mạch.
 2. Xưng hô, tên riêng, thuật ngữ không thống nhất với HỒ SƠ PHIM / các câu khác.
 3. Độ dài: đếm số tiếng (âm tiết; số đếm theo cách đọc). Dài hơn N -> rút gọn, giữ ý (bỏ từ thừa, dùng từ ngắn hơn).
-   Ngắn hơn M -> nói đầy đủ, tự nhiên hơn bằng phụ từ / từ đệm / xưng hô (à, ấy, nhé, đấy, thì, mà, cơ, nhỉ, chứ, vậy,
-   thật là, đúng là…) – KHÔNG thêm ý mới, không thêm tên / thông tin. Dư / thiếu 1–2 tiếng thì để nguyên.
+   Ngắn hơn M -> có thể dùng câu đủ thành phần (chủ ngữ, xưng hô, từ nối) – KHÔNG thêm từ đệm, tiếng cảm thán, ý mới,
+   tên / thông tin. Câu chỉ có "≤N": ngắn thì để nguyên. Dư / thiếu 1–2 tiếng thì để nguyên.
 4. Còn chữ Hán, sai chính tả, sai dấu câu: dấu phẩy chen giữa 1 cụm từ ("một món, đồ tốt", "Thiên Kiếm, Tông") -> chuyển về
    ranh giới tự nhiên; thiếu dấu câu cuối (câu hỏi thiếu "?", câu kể thiếu ".") -> thêm.
 5. Sai giọng điệu (phim hài mà câu đùa không còn buồn cười…).
@@ -388,31 +392,47 @@ REVIEW_CHUNK = 60
 _HAN = re.compile(r"[㐀-鿿]")
 
 
+REVIEW_CTX = 2     # mỗi câu kiểm tra kèm 2 câu trước / sau (câu không nằm trong danh sách -> phần NGỮ CẢNH)
+
+
 def review_lines(llm, items: list[tuple[int, str, str, int | str]], profile: str, skill: str, src_name: str,
-                 target_name: str, unit: str, lang: str = "vi", progress=None, cancel=None) -> dict[int, tuple[str, str]]:
-    """items: (chỉ số câu, câu gốc, bản dịch, độ dài: số tối đa hoặc chữ "M–N tiếng"). Trả về {chỉ số: (bản dịch mới,
-    lý do)}."""
+                 target_name: str, unit: str, lang: str = "vi", progress=None, cancel=None,
+                 ctx: list[tuple[str, str]] | None = None, genre: str = "") -> dict[int, tuple[str, str]]:
+    """items: (chỉ số câu, câu gốc, bản dịch, độ dài: số tối đa hoặc chữ "M–N tiếng"). ctx: (câu gốc, bản dịch) của MỌI
+    câu trong phim – câu ±2 quanh câu kiểm tra mà không có trong lô được gửi kèm làm ngữ cảnh. genre: form thể loại phim.
+    Trả về {chỉ số: (bản dịch mới, lý do)}."""
     from .ffmpeg import Cancelled
     from .translate import punct_fix
 
     out: dict[int, tuple[str, str]] = {}
+    sysp = REVIEW_PROMPT.format(src=src_name, lang=target_name)
+    if (genre or "").strip():
+        sysp += "\n\nTHỂ LOẠI PHIM (xưng hô, thuật ngữ, giọng văn):\n" + genre.strip()
     for a in range(0, len(items), REVIEW_CHUNK):
         if cancel and cancel():
             raise Cancelled()
         chunk = items[a:a + REVIEW_CHUNK]
-        payload = {str(k + 1): {"goc": zh, "dich": tr, "do_dai": mx if isinstance(mx, str) else f"≤{mx} {unit}"}
-                   for k, (_, zh, tr, mx) in enumerate(chunk)}
-        user = (("HỒ SƠ PHIM:\n" + profile + "\n\n") if profile else "") + \
-            "KIỂM TRA CÁC CÂU SAU:\n" + json.dumps(payload, ensure_ascii=False, indent=0)
+        by_no = {i + 1: (i, zh, tr, mx) for i, zh, tr, mx in chunk}   # khoá = số thứ tự câu trong phim
+        payload = {str(i + 1): {"goc": zh, "dich": tr, "do_dai": mx if isinstance(mx, str) else f"≤{mx} {unit}"}
+                   for i, zh, tr, mx in chunk}
+        near = []
+        if ctx:
+            have = {i for i, *_ in chunk}
+            near = sorted({j for i in have for j in range(i - REVIEW_CTX, i + REVIEW_CTX + 1)
+                           if 0 <= j < len(ctx) and j not in have})
+        user = (("HỒ SƠ PHIM:\n" + profile + "\n\n") if profile else "")
+        if near:
+            user += ("NGỮ CẢNH (câu trước / sau – chỉ để hiểu nghĩa, KHÔNG sửa):\n"
+                     + "\n".join(f"{j + 1}: {ctx[j][0]} => {ctx[j][1]}" for j in near) + "\n\n")
+        user += "KIỂM TRA CÁC CÂU SAU:\n" + json.dumps(payload, ensure_ascii=False, indent=0)
         try:
-            d = _json(llm.chat(with_skill(REVIEW_PROMPT.format(src=src_name, lang=target_name), skill), user,
-                               max_tokens=8000, temperature=0.2))
+            d = _json(llm.chat(with_skill(sysp, skill), user, max_tokens=8000, temperature=0.2))
         except ValueError:
             d = {}
         for k, v in d.items():
-            if not str(k).isdigit() or not (1 <= int(k) <= len(chunk)) or not isinstance(v, dict):
+            if not str(k).isdigit() or int(k) not in by_no or not isinstance(v, dict):
                 continue
-            i, zh, old, _ = chunk[int(k) - 1]
+            i, zh, old, _ = by_no[int(k)]
             new = punct_fix(str(v.get("sua") or "").strip(), zh, lang)       # dấu phẩy chen sai / thiếu dấu câu cuối
             if new and new != old and (lang == "ja" or len(_HAN.findall(new)) < 2):   # tiếng Nhật có chữ Hán
                 out[i] = (new, str(v.get("ly_do") or "")[:200])

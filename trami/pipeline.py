@@ -2361,17 +2361,20 @@ def ai_review(p: Project, settings: dict | None = None, engine: str | None = Non
     segs = p.segments
     target = target_lang(p, settings)
     L = langs.INFO[target]
-    fill = bool(settings.get("translate_fill", True))
-    # độ dài theo thời gian câu thoại: "≤N tiếng" hoặc "M–N tiếng" (câu ngắn hơn M thì thêm từ đệm cho vừa giọng lồng)
+    fill = bool(settings.get("translate_fill", False))
+    # độ dài theo thời gian câu thoại: "≤N tiếng" hoặc "M–N tiếng" (bật "Câu ngắn nói đầy đủ hơn": câu ngắn hơn M)
     items = [(i, x.text, x.trans, length_marker(x.duration, target, L["unit_vi"], fill).strip("⟪⟫"))
              for i, x in enumerate(segs)
              if x.trans.strip() and x.text.strip() and not x.extra.get("trans_user") and (rows is None or i in rows)]
     if not items:
         return []
     src = {"zh": "tiếng Trung", "yue": "tiếng Quảng Đông"}.get(source_lang(p), "tiếng gốc")
+    from . import genres
+
     fixes = skills.review_lines(LLMClient(settings, eng), items, p.data.get("film_profile", ""),
                                 skills.skill_text(settings), src, L["name"].lower(), L["unit_vi"], target,
-                                progress, cancel)
+                                progress, cancel, ctx=[(x.text, x.trans) for x in segs],
+                                genre=genres.form(settings.get("translate_style"), target, settings))
     for i, (new, why) in fixes.items():
         segs[i].extra["trans_before_review"] = segs[i].trans
         segs[i].extra["review_note"] = why

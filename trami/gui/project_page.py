@@ -352,7 +352,13 @@ class ProjectPage(QWidget):
                               "Tiếng đích của dự án này: bản dịch, phụ đề ghép vào video và giọng lồng tiếng đều theo "
                               "tiếng này. Edge / OmniVoice đọc được cả 5 tiếng; VieNeu chỉ đọc tiếng Việt")
         self.a_target.currentIndexChanged.connect(self._target_changed)
-        self.a_style = f.row("Thể loại / văn phong", combo(C.STYLES, s.get("translate_style")))
+        self.a_style = combo(C.STYLES, s.get("translate_style"))
+        st_row = hbox(self.a_style, button("Sửa form…", "wand", "Xem / sửa form dịch của từng thể loại phim (xưng hô, "
+                                           "thuật ngữ, giọng văn)", on_click=self._edit_genres))
+        st_row.setStretch(0, 1)
+        f.row("Thể loại phim", st_row,
+              "Form dịch theo thể loại: xưng hô, thuật ngữ chuẩn (tu tiên, hệ thống, cung đấu…), giọng văn – gắn vào lời "
+              "nhắc của công cụ dịch AI. Luật chung luôn áp dụng: đúng số dòng, đọc 2 câu trước / sau, không thêm bớt ý")
         self.a_skill = combo(self._skill_items(s), s.get("translate_skill", ""))
         self.a_skill.currentIndexChanged.connect(self._skill_changed)
         sk_row = hbox(self.a_skill, button("Sửa / thêm…", "wand", "Xem, thêm, sửa kỹ năng dịch của bạn",
@@ -372,10 +378,10 @@ class ProjectPage(QWidget):
         self.a_review = f.row("AI kiểm tra lại bản dịch", Switch(bool(s.get("ai_review_after_translate", False))),
                               "Sau khi dịch cả phim: AI soát sai nghĩa, xưng hô / tên không thống nhất, câu quá dài, còn "
                               "chữ Hán rồi sửa (tốn thêm ~1 lần gọi AI)")
-        self.a_fill = f.row("Câu ngắn thêm từ đệm cho vừa thời gian", Switch(bool(s.get("translate_fill", True))),
-                            "Dịch bằng AI: câu dịch ngắn hơn hẳn thời gian nhân vật nói thì nói đầy đủ hơn – thêm từ "
-                            "đệm / phụ từ (à, nhé, đấy, cơ, mà, thế…), xưng hô – không thêm ý, không dài quá → giọng "
-                            "lồng không hụt so với miệng nhân vật. Tắt = chỉ giới hạn độ dài tối đa")
+        self.a_fill = f.row("Câu ngắn nói đầy đủ hơn cho vừa thời gian", Switch(bool(s.get("translate_fill", False))),
+                            "Dịch bằng AI: câu dịch ngắn hơn hẳn thời gian nhân vật nói thì dùng câu đủ thành phần "
+                            "(chủ ngữ, xưng hô, từ nối) – vẫn KHÔNG thêm ý, không thêm từ đệm / tiếng cảm thán. Tắt "
+                            "(mặc định) = dịch sát nghĩa, chỉ giới hạn độ dài tối đa")
         # 2.1.10: các mục AI chỉ chạy khi Công cụ dịch là AI – chọn Google / Hy-MT2 thì làm mờ + ghi rõ (trước: công tắc
         # vẫn bật mà không có tác dụng gì, người dùng tưởng tool bỏ sót bước)
         self.a_ai_note = label("Các mục AI ở trên chỉ chạy khi Công cụ dịch là AI (Gemini / DeepSeek / Claude / GPT / "
@@ -538,7 +544,9 @@ class ProjectPage(QWidget):
         g.setHorizontalSpacing(10)
         g.setVerticalSpacing(8)
         for i, (t, w) in enumerate((("Dịch bằng", self.s_engine), ("Dịch sang", self.s_target),
-                                    ("Văn phong", self.s_style),
+                                    ("Thể loại", hbox(self.s_style, button(
+                                        "", "wand", "Xem / sửa form dịch theo thể loại phim", flat=True,
+                                        on_click=self._edit_genres))),
                                     ("Kỹ năng AI", hbox(self.s_skill, button(
                                         "", "wand", "Xem, thêm, sửa kỹ năng dịch AI của bạn", flat=True,
                                         on_click=self._edit_skills))))):
@@ -549,6 +557,7 @@ class ProjectPage(QWidget):
         for cb in (self.s_engine, self.s_target, self.s_style, self.s_skill):
             cb.setMinimumWidth(150)
         self.s_skill.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.s_style.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         tr_card.add(g)
         self.s_tr_card = tr_card
         # ---- các trang của khung "Công cụ" (mỗi lúc hiện 1 trang)
@@ -2636,7 +2645,7 @@ class ProjectPage(QWidget):
             self.a_clean.setChecked(bool(st.get("ai_clean_before_translate", True)))
             self.a_review.setChecked(bool(st.get("ai_review_after_translate", False)))
             self.a_songai.setChecked(bool(st.get("ai_song_filter", True)))
-            self.a_fill.setChecked(bool(st.get("translate_fill", True)))
+            self.a_fill.setChecked(bool(st.get("translate_fill", False)))
             on = bool(st.get("split_long_trans", True))
             self.a_split_long.setChecked(on)
             self.s_split.setChecked(on)
@@ -2716,6 +2725,15 @@ class ProjectPage(QWidget):
                                        "ai_review_after_translate": self.a_review.isChecked(),
                                        "ai_song_filter": self.a_songai.isChecked(),
                                        "translate_fill": self.a_fill.isChecked()})
+
+    def _edit_genres(self):
+        from .genres_dialog import GenresDialog
+
+        dlg = GenresDialog(self, self.a_style.currentData() or "auto")
+        if dlg.exec():
+            set_combo(self.a_style, dlg.chosen)
+        dlg.deleteLater()
+        self.settings = load_settings()
 
     def _edit_skills(self):
         from .skills_dialog import SkillsDialog

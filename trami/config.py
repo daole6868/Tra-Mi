@@ -144,6 +144,7 @@ DEFAULT_SETTINGS: dict = {
     # Kỹ năng dịch AI (skills.py) – dùng với mọi công cụ dịch AI
     "translate_skill": "chuan",               # kỹ năng đang dùng ("" = không; "chuan" = Dịch chuẩn – giữ đúng số câu)
     "translate_skills": [],                   # kỹ năng của bạn: [{"id", "name", "text"}]
+    "genre_forms": [],                        # form thể loại phim bạn đã sửa: [{"id", "text"}] (trami/genres.py)
     "ai_clean_before_translate": False,       # AI sửa lỗi nghe & nối câu bị cắt trước khi dịch cả phim lần đầu
     "ai_review_after_translate": False,       # AI kiểm tra lại bản dịch sau khi dịch cả phim (tốn thêm ~1 lần gọi AI)
     "ai_song_filter": True,                   # trước khi dịch cả phim lần đầu: AI lọc lời bài hát (🎵) + chữ không phải thoại
@@ -180,7 +181,7 @@ DEFAULT_SETTINGS: dict = {
     "pitch_check": True,              # khi nghe: đánh dấu câu nghi là nhạc / tiếng động bị chép thành lời (cao độ giọng)
     "pitch_tol": 4.0,                 #   lệch cao độ cho phép ngoài khoảng giọng thường của người nói (nửa cung)
     "pitch_trim": True,               #   thu đầu / cuối câu thừa sang nhạc / tiếng động theo đoạn có giọng thật
-    "translate_fill": True,           # dịch AI: câu ngắn hơn hẳn chỗ trống -> thêm từ đệm / phụ từ cho vừa thời gian
+    "translate_fill": False,          # dịch AI: câu ngắn hơn hẳn chỗ trống -> nói đầy đủ hơn (2.1.13: mặc định tắt – không thêm từ)
     # Xoá phụ đề
     "inpaint_backend": "lama",        # lama (AI, đẹp) / opencv (nhanh)
     # Phụ đề mặc định khi ghép vào video

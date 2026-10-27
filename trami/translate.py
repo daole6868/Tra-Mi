@@ -22,40 +22,44 @@ from typing import Callable
 
 import requests
 
-from . import langs, net
+from . import genres, langs, net
 from .ffmpeg import Cancelled
 from .subtitle import Segment
 from .tts import VieneuWorker
 
 ProgressCB = Callable[[float, str], None]
 
-STYLES = {
-    "auto": "Tự nhận biết thể loại từ nội dung và dịch cho phù hợp.",
-    "co_trang": ("Phim cổ trang/tiên hiệp/kiếm hiệp: dùng văn phong cổ trang Việt Nam, xưng hô ta - ngươi, "
-                 "huynh - đệ, tỷ - muội, sư phụ - đồ nhi, bổn vương, thần, trẫm, nô tỳ...; tên người, địa danh, "
-                 "môn phái, chiêu thức dịch sang Hán Việt."),
-    "hien_dai": ("Phim hiện đại/ngôn tình/đô thị: văn phong tự nhiên đời thường, xưng hô anh - em, tôi - cậu, "
-                 "chị - em, bố - con... theo quan hệ nhân vật; tên người dịch Hán Việt."),
-    "review": ("Video review/tóm tắt phim/kể chuyện: văn phong kể chuyện lôi cuốn, mạch lạc, dùng ngôi thứ ba, "
-               "câu ngắn gọn dễ đọc; tên nhân vật dịch Hán Việt."),
-    "hoat_hinh": "Phim hoạt hình/donghua: văn phong sinh động, dễ hiểu; tên riêng dịch Hán Việt.",
-    "tai_lieu": "Phóng sự/tài liệu/hướng dẫn/bán hàng: văn phong trang trọng, chính xác thuật ngữ, rõ ràng.",
-}
+# Thể loại phim (form dịch theo thể loại) nằm ở trami/genres.py – mã cũ giữ nguyên (auto / co_trang / hien_dai / review /
+# hoat_hinh / tai_lieu). STYLES giữ để mã cũ tra tên / chữ.
+STYLES = {g["id"]: g["vi"] for g in genres.GENRES}
+STYLES_EN = {g["id"]: g["en"] for g in genres.GENRES}
 
-SYSTEM_PROMPT = """Bạn là chuyên gia biên dịch phụ đề phim từ tiếng Trung sang tiếng Việt với hơn 15 năm kinh nghiệm.
-Yêu cầu bắt buộc:
-1. Dịch sát nghĩa, tự nhiên, trôi chảy như người Việt nói; KHÔNG dịch word-by-word, KHÔNG bỏ sót ý.
-2. Hiểu đúng thành ngữ, tiếng lóng, từ mạng Trung Quốc và chuyển sang cách diễn đạt tương đương tiếng Việt.
-3. Chọn đại từ xưng hô đúng theo quan hệ, tuổi tác, địa vị nhân vật và giữ nhất quán trong toàn bộ phim.
-4. Tên người, địa danh, tổ chức, chiêu thức: phiên âm Hán Việt (VD: 李逍遥 -> Lý Tiêu Dao, 北京 -> Bắc Kinh). Tuân thủ tuyệt đối BẢNG THUẬT NGỮ nếu có.
-5. Câu phụ đề ngắn gọn, dễ đọc nhanh; mỗi dòng đầu vào tương ứng đúng MỘT dòng đầu ra, không gộp, không tách, giữ nguyên số thứ tự.
-6. Dòng gốc có thể bị nhận dạng sai vài chữ đồng âm: dựa vào ngữ cảnh để hiểu và dịch đúng ý.
-7. Chỉ trả về JSON hợp lệ dạng {"1": "bản dịch", "2": "bản dịch", ...} không kèm giải thích.
-8. Dòng có ký hiệu ⟪≤N tiếng⟫ ở cuối là giới hạn độ dài để LỒNG TIẾNG khớp thời gian nhân vật nói: bản dịch KHÔNG được
-   vượt N tiếng (âm tiết). Ưu tiên cách nói gọn, tự nhiên; lược từ đệm, giữ đủ ý chính. Ký hiệu ⟪M–N tiếng⟫: nên dài
-   khoảng M tới N tiếng (nhân vật nói lâu) – bản dịch tự nhiên mà ngắn hơn hẳn M thì nói đầy đủ hơn cho vừa: thêm từ đệm /
-   phụ từ hợp ngữ cảnh (à, ạ, nhé, nhỉ, đấy, cơ, mà, thế, vậy, chứ, đi, này, ơi, nào), chủ ngữ / xưng hô, "thì", "là",
-   cách nói đầy đủ thay cách nói tắt – KHÔNG thêm ý mới, không đổi nghĩa, không lặp từ vô nghĩa, không vượt N.
+# 2.1.13: luật chung viết lại theo yêu cầu người dùng – đúng số dòng, đọc 2 dòng trước / sau để dịch đúng nghĩa, KHÔNG tự
+# thêm từ / ý (trước đây luật 8 khuyến khích thêm từ đệm "à, nhé, đấy…" cho đủ dài), kiểm tra đúng dòng bằng "dau".
+SYSTEM_PROMPT = """Bạn là chuyên gia biên dịch phụ đề phim từ tiếng Trung sang tiếng Việt với hơn 15 năm kinh nghiệm. Bản dịch
+dùng làm phụ đề và để LỒNG TIẾNG.
+Luật bắt buộc:
+1. ĐÚNG SỐ DÒNG: mỗi dòng gốc dịch thành đúng MỘT dòng, cùng số thứ tự. KHÔNG gộp dòng, KHÔNG tách dòng, KHÔNG bỏ dòng,
+   KHÔNG để trống dòng nào, KHÔNG chuyển chữ / ý của dòng này sang dòng khác. Một câu bị cắt ngang thành 2 dòng: phần nào
+   ở dòng nào thì dịch ở dòng đó (dòng trước kết thúc dở dang bằng dấu phẩy), đọc nối 2 dòng vẫn liền mạch. Dòng chỉ có
+   tiếng cảm thán (嗯, 啊, 哦, 哈哈) vẫn dịch (Ừm, À, Ờ, Haha).
+2. ĐỌC NGỮ CẢNH: trước khi dịch mỗi dòng, đọc ít nhất 2 dòng TRƯỚC và 2 dòng SAU nó (dùng cả phần NGỮ CẢNH TRƯỚC / SAU)
+   để biết ai đang nói với ai, đâu là câu hỏi – câu đáp, "nó / cái này / chuyện đó" chỉ cái gì, nhân vật đang vui / giận /
+   sợ. Bản dịch phải khớp nghĩa với các dòng đó: câu đáp trả lời đúng câu hỏi, xưng hô khớp dòng trước – sau, không mâu
+   thuẫn mạch chuyện.
+3. SÁT NGHĨA – KHÔNG THÊM, KHÔNG BỚT: dịch đủ mọi ý của dòng gốc, không bỏ ý. KHÔNG tự thêm từ, cụm từ, tiếng cảm thán, từ
+   đệm, lời giải thích, chú thích, ngoặc hay ý nào mà dòng gốc không có. Chỉ được thêm chủ ngữ / xưng hô / từ nối khi
+   tiếng Việt bắt buộc phải có cho đúng ngữ pháp và ý đó đã ngầm có trong câu gốc. Không dịch word-by-word: câu tự nhiên
+   như người Việt nói, đúng sắc thái của câu gốc (lịch sự, mỉa mai, giận dữ, đùa…).
+4. Thành ngữ, tiếng lóng, từ mạng: dùng cách nói tiếng Việt tương đương, cùng nghĩa, cùng sắc thái.
+5. Xưng hô đúng quan hệ, tuổi tác, địa vị, tình huống; nhất quán cả phim (theo THỂ LOẠI PHIM và THÔNG TIN PHIM).
+6. Tên người, địa danh, tổ chức, chiêu thức: phiên âm Hán Việt chuẩn (李逍遥 -> Lý Tiêu Dao); địa danh có tên tiếng Việt quen
+   dùng thì dùng tên đó (北京 -> Bắc Kinh); thương hiệu / người nước ngoài: tên quốc tế (微信 -> WeChat). Một tên chỉ một cách
+   dịch. Tuân thủ tuyệt đối BẢNG THUẬT NGỮ. Thuật ngữ trong THỂ LOẠI PHIM chỉ dùng khi dòng gốc có đúng chữ đó.
+7. Dòng gốc do máy nghe có thể sai vài chữ đồng âm: hiểu theo ngữ cảnh (luật 2) và dịch đúng ý.
+8. ĐỘ DÀI: ký hiệu ⟪≤N tiếng⟫ cuối dòng là giới hạn để giọng LỒNG TIẾNG vừa thời gian nhân vật nói: bản dịch KHÔNG vượt N
+   tiếng (âm tiết). Dài quá thì chọn từ / cách nói ngắn hơn mà VẪN ĐỦ Ý – không bỏ ý để cho ngắn. Câu dịch ngắn thì để
+   ngắn, KHÔNG thêm từ cho dài ra.{fill}
    KHÔNG chép ký hiệu ⟪⟫ vào bản dịch.
 9. Dòng chắc chắn là LỜI BÀI HÁT (nhạc phim, nhân vật đang hát – câu văn vần, điệp khúc lặp lại, không trả lời / không
    nối tiếp lời thoại trước – sau) thì bắt đầu bản dịch bằng "♪ ". Lời thoại bình thường KHÔNG thêm ♪.
@@ -72,17 +76,19 @@ Yêu cầu bắt buộc:
    thì giữ lặp.
 12. GIỮ DẤU CÂU CUỐI: mỗi bản dịch kết thúc bằng dấu câu hợp nghĩa – câu hỏi "?" (kể cả câu gốc hỏi bằng 吗 / 呢 / 吧 /
    难道 mà thiếu dấu ？), cảm thán / ra lệnh "!", câu kể ".", bỏ lửng "…"; dòng gốc dừng ở dấu phẩy (câu nói tiếp ở dòng
-   sau) thì kết thúc bằng ",". Dấu câu cuối giúp giọng lồng lên / xuống giọng đúng."""
+   sau) thì kết thúc bằng ",". Dấu câu cuối giúp giọng lồng lên / xuống giọng đúng.
+13. Chỉ trả về JSON hợp lệ, không giải thích: {"1": {"dau": "…", "dich": "bản dịch"}, "2": {"dau": "…", "dich": "…"}, …}
+   đủ MỌI số dòng được yêu cầu. "dau" = chép y nguyên 3 ký tự đầu của dòng gốc đó (bỏ dấu câu, khoảng trắng) – để kiểm
+   tra bản dịch nằm đúng dòng."""
 
-# Dịch sang Anh / Thái / Nhật / Hàn: lời nhắc tiếng Anh (luật giống bản tiếng Việt, đổi phần xưng hô / tên riêng)
-STYLES_EN = {
-    "auto": "Infer the genre from the content and translate accordingly.",
-    "co_trang": "Ancient / xianxia / wuxia drama: period, slightly formal tone; consistent titles and honorifics.",
-    "hien_dai": "Modern / romance / urban drama: natural everyday speech that fits each relationship.",
-    "review": "Movie recap / storytelling video: engaging narrative tone, third person, short clear sentences.",
-    "hoat_hinh": "Animation / donghua: lively, easy to understand.",
-    "tai_lieu": "Documentary / tutorial / sales: formal, precise terminology, clear.",
-}
+FILL_RULE_VI = """
+   Ký hiệu ⟪M–N tiếng⟫: nhân vật nói lâu – bản dịch nên dài khoảng M tới N tiếng; nếu bản dịch sát nghĩa ngắn hơn hẳn M
+   thì được nói đầy đủ hơn bằng câu đủ thành phần (chủ ngữ, xưng hô, từ nối, cách nói đầy đủ thay cách nói tắt) – vẫn
+   KHÔNG thêm ý, KHÔNG thêm tiếng cảm thán / từ đệm vô nghĩa, không vượt N."""
+FILL_RULE_EN = """
+   ⟪M–N {unit}⟫: the character speaks for a while – aim for about M to N {unit}; if the faithful translation is much
+   shorter than M you may use a fuller sentence (subject, form of address, connectives, full instead of clipped
+   phrasing) – still NO new information, NO meaningless fillers or interjections, never above N."""
 _ADDRESS = {"en": "", "th": " (use ครับ / ค่ะ and pronouns that fit each character)",
             "ja": " (choose keigo or casual speech to fit each relationship)",
             "ko": " (choose 존댓말 or 반말 to fit each relationship)"}
@@ -94,27 +100,40 @@ SRC_NAMES = {"zh": ("tiếng Trung", "Chinese"), "yue": ("tiếng Quảng Đông
              "ja": ("tiếng Nhật", "Japanese"), "ko": ("tiếng Hàn", "Korean"), "auto": ("tiếng gốc", "the source language")}
 
 
-def system_prompt(target: str, source: str = "zh") -> str:
-    """Lời nhắc hệ thống cho AI theo ngôn ngữ đích (tiếng Việt: giữ nguyên bản chuẩn có luật Hán Việt)."""
+def system_prompt(target: str, source: str = "zh", fill: bool = False, genre: str = "") -> str:
+    """Lời nhắc hệ thống cho AI theo ngôn ngữ đích. fill: có ký hiệu ⟪M–N⟫ (Cài đặt "Câu ngắn nói đầy đủ hơn…"); genre:
+    form thể loại phim (genres.form) gắn cuối."""
     target = langs.norm(target)
     src_vi, src_en = SRC_NAMES.get(source, SRC_NAMES["zh"])
     if target == "vi":
-        return SYSTEM_PROMPT.replace("từ tiếng Trung sang", f"từ {src_vi} sang", 1)
+        sp = SYSTEM_PROMPT.replace("từ tiếng Trung sang", f"từ {src_vi} sang", 1).replace("{fill}", FILL_RULE_VI if fill else "")
+        return sp + (f"\n\nTHỂ LOẠI PHIM (xưng hô, thuật ngữ, giọng văn):\n{genre.strip()}" if (genre or "").strip() else "")
     L = langs.INFO[target]
-    return f"""You are an expert film subtitle translator with 15+ years of experience, translating {src_en} dialogue into {L['english']}.
+    fill_en = FILL_RULE_EN.format(unit=L["unit_ai"]) if fill else ""
+    sp = f"""You are an expert film subtitle translator with 15+ years of experience, translating {src_en} dialogue into {L['english']}.
+The translation is used for subtitles and for DUBBING.
 Mandatory rules:
-1. Translate faithfully and naturally, the way a native {L['english']} speaker talks; never word-by-word, never drop meaning.
-2. Render idioms, slang and internet expressions with natural {L['english']} equivalents.
-3. Keep forms of address consistent with the characters' relationships, age and status for the whole film{_ADDRESS[target]}.
-4. Names of people, places, organizations and techniques: use {_NAMES[target]}. ALWAYS follow the GLOSSARY if given.
-5. Subtitles must be short and easy to read; each input line maps to exactly ONE output line; never merge or split lines; keep the numbering.
-6. Source lines may contain speech-recognition errors (homophones): use the context to understand the intended meaning.
-7. Return ONLY valid JSON like {{"1": "translation", "2": "translation", ...}} with no explanation.
-8. A line ending with ⟪≤N {L['unit_ai']}⟫ is a length limit so the DUBBED voice fits the character's speaking time: the
-   translation must NOT exceed N {L['unit_ai']}. Prefer short natural phrasing, drop filler words, keep the core meaning.
-   ⟪M–N {L['unit_ai']}⟫ means the line should be about M to N {L['unit_ai']} long (the character speaks for a while): if
-   the natural translation is much shorter than M, say it more fully – natural particles / filler words, subject and
-   forms of address, fuller phrasing – WITHOUT adding new information or changing the meaning, never exceeding N.
+1. EXACT LINE COUNT: each source line becomes exactly ONE output line with the same number. NEVER merge, split, drop or
+   leave a line empty, never move words / meaning to another line. A sentence cut across 2 lines: translate each part on
+   its own line (the first may end unfinished with a comma) so the 2 lines still read as one. Interjection-only lines
+   (嗯, 啊, 哦, 哈哈) are translated too.
+2. READ THE CONTEXT: before translating each line, read at least the 2 lines BEFORE and the 2 lines AFTER it (including the
+   PREVIOUS / FOLLOWING CONTEXT) to know who speaks to whom, which line answers which question, what "it / this / that"
+   refers to and the mood. The translation must fit those lines: answers match the questions, forms of address match the
+   surrounding lines, no contradiction with the story.
+3. FAITHFUL – ADD NOTHING, DROP NOTHING: keep every piece of meaning; NEVER add words, phrases, interjections, fillers,
+   explanations, notes, brackets or ideas that are not in the source line. Only add a subject / form of address /
+   connective when {L['english']} grammar requires it and it is implied by the source. Not word-by-word: natural speech
+   with the same tone as the source (polite, sarcastic, angry, joking…).
+4. Render idioms, slang and internet expressions with natural {L['english']} equivalents of the same meaning and tone.
+5. Keep forms of address consistent with the characters' relationships, age and status for the whole film{_ADDRESS[target]}
+   (follow the FILM GENRE and FILM NOTES).
+6. Names of people, places, organizations and techniques: use {_NAMES[target]}. One name, one rendering. ALWAYS follow
+   the GLOSSARY. Terms listed in the FILM GENRE apply only when the source line contains that exact term.
+7. Source lines may contain speech-recognition errors (homophones): use the context (rule 2) to get the intended meaning.
+8. LENGTH: a line ending with ⟪≤N {L['unit_ai']}⟫ is a limit so the DUBBED voice fits the character's speaking time: the
+   translation must NOT exceed N {L['unit_ai']}. If too long, choose shorter wording that STILL keeps all the meaning –
+   never drop meaning to save length. A short translation stays short – never add words to make it longer.{fill_en}
    NEVER copy the ⟪⟫ marker into the translation.
 9. A line that is clearly SONG LYRICS (theme song, a character singing – verse, not dialogue) must start with "♪ ".
    Never add ♪ to normal dialogue.
@@ -132,7 +151,11 @@ Mandatory rules:
 12. KEEP THE FINAL PUNCTUATION: every translation ends with the fitting mark – "?" for questions (also when the source
    asks with 吗 / 呢 / 吧 / 难道 but lacks ？), "!" for exclamations / orders, a full stop for statements, "…" when it
    trails off; a source line that stops at a comma (the sentence continues on the next line) ends with a comma. The
-   final mark lets the dubbed voice rise / fall correctly{" (Thai: no full stop, keep ? and !)" if target == "th" else ""}."""
+   final mark lets the dubbed voice rise / fall correctly{" (Thai: no full stop, keep ? and !)" if target == "th" else ""}.
+13. Return ONLY valid JSON, no explanation: {{"1": {{"head": "…", "text": "translation"}}, "2": {{"head": "…", "text": "…"}}, …}}
+   with EVERY requested line number. "head" = copy exactly the first 3 characters of that source line (without
+   punctuation or spaces) – used to check that each translation sits on the right line."""
+    return sp + (f"\n\nFILM GENRE (forms of address, terminology, tone):\n{genre.strip()}" if (genre or "").strip() else "")
 
 
 SYL_PER_SEC = 4.6      # tiếng Việt lồng tiếng tự nhiên ~4–5 tiếng/giây (tiếng khác: langs.INFO[...]["rate"])
@@ -246,8 +269,8 @@ FILL_FROM = 4       # chỉ nhắc độ dài tối thiểu khi chỗ trống đ
 
 
 def length_marker(duration: float, lang: str, unit: str, fill: bool = True) -> str:
-    """Ký hiệu độ dài gắn sau câu gửi AI: ⟪≤N⟫ (tối đa, cho phép nhanh 10 %) hoặc ⟪M–N⟫ khi bật "thêm từ đệm" – câu
-    dịch ngắn hơn hẳn thời gian nói thì AI nói đầy đủ hơn (từ đệm, phụ từ) để giọng lồng không hụt so với miệng nhân vật."""
+    """Ký hiệu độ dài gắn sau câu gửi AI: ⟪≤N⟫ (tối đa, cho phép nhanh 10 %) hoặc ⟪M–N⟫ khi bật "Câu ngắn nói đầy đủ
+    hơn" – câu dịch ngắn hơn hẳn thời gian nói thì AI dùng câu đủ thành phần (không thêm ý, không thêm từ đệm)."""
     n = budget_for(duration, 1.1, lang)
     m = int(budget_for(duration, 1.0, lang) * FILL_MIN)
     if fill and m >= FILL_FROM and m < n:
@@ -637,6 +660,55 @@ def hymt_worker(settings: dict | None = None) -> HymtWorker:
 
 # ======================================================================= Translator
 
+CTX_BEFORE = 6     # số dòng ngay trước lô gửi kèm (đã dịch) – luật 2: đọc ≥ 2 dòng trước / sau mỗi dòng
+CTX_AFTER = 4      # số dòng ngay sau lô gửi kèm
+_HEAD_DROP = re.compile(r"[\W_]+")
+
+
+def _head(text: str) -> str:
+    """Vài ký tự đầu của dòng (bỏ ký hiệu độ dài, dấu câu, khoảng trắng) – để so với "dau" AI chép lại."""
+    return _HEAD_DROP.sub("", BUDGET_RE.sub(" ", text or "")).lower()
+
+
+def _answers(d: dict, n: int) -> tuple[list[str], list[str]]:
+    """JSON của AI -> (bản dịch, "dau" từng dòng). Nhận cả dạng cũ {"1": "bản dịch"}."""
+    res, heads = [], []
+    for i in range(n):
+        v = d.get(str(i + 1))
+        h = ""
+        if isinstance(v, dict):
+            h = str(v.get("dau") or v.get("head") or v.get("src") or "")
+            v = v.get("dich", v.get("text", v.get("translation")))
+        res.append(v.strip() if isinstance(v, str) else "")
+        heads.append(h)
+    return res, heads
+
+
+def shifted_lines(heads: list[str], lines: list[str]) -> set[int]:
+    """Dòng bị LỆCH (AI gộp / bỏ 1 dòng làm các bản dịch sau trượt lên): "dau" của dòng i không khớp dòng i mà khớp đầu
+    1 dòng bên cạnh (±3). "dau" trống / không khớp dòng nào -> không kết luận (AI không chép đúng thì thôi)."""
+    hs = [_head(x) for x in lines]
+    bad = set()
+    for i, h in enumerate(heads):
+        e = _head(h)[:3]
+        if not e or i >= len(hs) or hs[i].startswith(e) or e in hs[i][:6]:
+            continue
+        if any(j != i and hs[j].startswith(e) for j in range(max(0, i - 3), min(len(hs), i + 4))):
+            bad.add(i)
+    return bad
+
+
+def _runs(idx: list[int]) -> list[list[int]]:
+    """[2, 3, 7] -> [[2, 3], [7]]"""
+    out: list[list[int]] = []
+    for i in sorted(idx):
+        if out and i == out[-1][-1] + 1:
+            out[-1].append(i)
+        else:
+            out.append([i])
+    return out
+
+
 class Translator:
     def __init__(self, settings: dict, engine: str | None = None, style: str | None = None,
                  glossary: dict[str, str] | None = None, cache: dict | None = None, target: str | None = None,
@@ -655,7 +727,9 @@ class Translator:
         self.batch = engine_batch(settings, self.engine)   # số câu mỗi lần gửi (khung riêng từng công cụ ở Cài đặt)
         self.llm = None if self.engine in LOCAL_ENGINES else LLMClient(settings, self.engine)
         self.fit_dub = bool(settings.get("dub_fit", True))   # dịch vừa thời lượng để lồng tiếng khớp
-        self.fill_short = bool(settings.get("translate_fill", True))   # câu ngắn hơn hẳn chỗ trống -> thêm từ đệm
+        # câu ngắn hơn hẳn chỗ trống -> nói đầy đủ hơn (2.1.13: mặc định TẮT – người dùng không muốn AI tự thêm từ)
+        self.fill_short = bool(settings.get("translate_fill", False))
+        self.genre = genres.form(self.style, self.target, settings)   # form thể loại phim (sửa được) -> lời nhắc hệ thống
         self.fallback_lines = 0   # số câu AI trả lỗi định dạng, phải dùng Google bù
 
     # ------------------------------------------------------------- public
@@ -782,8 +856,8 @@ class Translator:
                 if cancel and cancel():
                     raise Cancelled()
                 ids = todo[b:b + self.batch]
-                ctx_before = [(lines[k], out[k] or "") for k in range(max(0, ids[0] - 6), ids[0])]
-                ctx_after = [lines[k] for k in range(ids[-1] + 1, min(len(lines), ids[-1] + 4))]
+                ctx_before = [(lines[k], out[k] or "") for k in range(max(0, ids[0] - CTX_BEFORE), ids[0])]
+                ctx_after = [lines[k] for k in range(ids[-1] + 1, min(len(lines), ids[-1] + 1 + CTX_AFTER))]
                 res = self._llm_batch([lines[i] for i in ids], ctx_before, ctx_after, summary)
                 for gi, r in zip(ids, res):
                     out[gi] = r
@@ -843,30 +917,41 @@ class Translator:
                 notes.append(f"Thể loại: {g}. Quan hệ/xưng hô: {r}")
         return "\n".join(notes[:2])
 
+    def system(self) -> str:
+        """Lời nhắc hệ thống khi dịch: luật chung + form thể loại phim + kỹ năng của bạn."""
+        return with_skill(system_prompt(self.target, self.source, self.fit_dub and self.fill_short, self.genre),
+                          self.skill)
+
     def _llm_batch(self, lines: list[str], ctx_before, ctx_after, summary: str, depth: int = 0) -> list[str]:
+        """Dịch 1 lô. ctx_before: [(câu gốc, bản dịch)] các dòng ngay trước lô; ctx_after: [câu gốc] các dòng ngay sau.
+        Dòng thiếu / còn chữ Hán / bị LỆCH DÒNG ("dau" khớp dòng bên cạnh) được hỏi lại KÈM 2+ dòng trước / sau của chính
+        nó (2.1.13 – trước đây hỏi lại 1 dòng lẻ với ngữ cảnh của cả lô, mất nghĩa)."""
         gl = {k: v for k, v in self.glossary.items() if any(k in l for l in lines)}
         vi = self.target == "vi"
-        lab = (("PHONG CÁCH", "THÔNG TIN PHIM", "BẢNG THUẬT NGỮ (bắt buộc dùng)",
-                "NGỮ CẢNH TRƯỚC (đã dịch, chỉ để tham khảo, KHÔNG dịch lại)", "NGỮ CẢNH SAU (chỉ tham khảo)") if vi else
-               ("STYLE", "FILM NOTES", "GLOSSARY (must use)", "PREVIOUS CONTEXT (already translated, reference only, "
-                "do NOT translate again)", "FOLLOWING CONTEXT (reference only)"))
-        parts = [f"{lab[0]}: {(STYLES if vi else STYLES_EN).get(self.style, (STYLES if vi else STYLES_EN)['auto'])}"]
+        lab = (("THÔNG TIN PHIM", "BẢNG THUẬT NGỮ (bắt buộc dùng)",
+                "NGỮ CẢNH TRƯỚC (các dòng ngay trước, đã dịch – chỉ để hiểu nghĩa, KHÔNG dịch lại)",
+                "NGỮ CẢNH SAU (các dòng ngay sau – chỉ để hiểu nghĩa, KHÔNG dịch)") if vi else
+               ("FILM NOTES", "GLOSSARY (must use)", "PREVIOUS CONTEXT (the lines right before, already translated – "
+                "for meaning only, do NOT translate again)", "FOLLOWING CONTEXT (the lines right after – for meaning "
+                "only, do NOT translate)"))
+        parts = []
         if summary:
-            parts.append(f"{lab[1]}:\n{summary}")
+            parts.append(f"{lab[0]}:\n{summary}")
         if gl:
-            parts.append(f"{lab[2]}:\n" + glossary_text(gl))
+            parts.append(f"{lab[1]}:\n" + glossary_text(gl))
         if ctx_before:
-            parts.append(f"{lab[3]}:\n" + "\n".join(f"- {a} => {b}" for a, b in ctx_before))
+            parts.append(f"{lab[2]}:\n" + "\n".join(f"- {BUDGET_RE.sub(' ', a).strip()} => {b}" for a, b in ctx_before))
         if ctx_after:
-            parts.append(f"{lab[4]}:\n" + "\n".join(f"- {a}" for a in ctx_after))
+            parts.append(f"{lab[3]}:\n" + "\n".join(f"- {BUDGET_RE.sub(' ', a).strip()}" for a in ctx_after))
         payload = {str(i + 1): l for i, l in enumerate(lines)}
-        ask = (f"DỊCH {len(lines)} DÒNG SAU sang tiếng Việt, trả về JSON với đúng các khoá 1..{len(lines)}:" if vi else
-               f"TRANSLATE THE FOLLOWING {len(lines)} LINES into {langs.INFO[self.target]['english']}, return JSON with "
-               f"exactly the keys 1..{len(lines)}:")
+        n = len(lines)
+        ask = (f"DỊCH {n} DÒNG SAU sang tiếng Việt – đúng {n} dòng, trả về JSON với đủ các khoá 1..{n}:" if vi else
+               f"TRANSLATE THE FOLLOWING {n} LINES into {langs.INFO[self.target]['english']} – exactly {n} lines, "
+               f"return JSON with every key 1..{n}:")
         parts.append(ask + "\n" + json.dumps(payload, ensure_ascii=False, indent=0))
         user = "\n\n".join(parts)
         try:
-            d = _extract_json(self.llm.chat(with_skill(system_prompt(self.target, self.source), self.skill), user))
+            d = _extract_json(self.llm.chat(self.system(), user))
         except (Cancelled, net.NetworkDown):
             raise
         except (PermissionError, ApiError, ValueError) as e:
@@ -876,30 +961,38 @@ class Translator:
                 raise     # lỗi kết nối / key / model: báo rõ, KHÔNG tự đổi sang Google
         except Exception:
             d = None
-        if d is not None:
-            res = [(d.get(str(i + 1)) or "").strip() if isinstance(d.get(str(i + 1)), str) else "" for i in range(len(lines))]
-            miss = [i for i, r in enumerate(res) if (not r or untranslated(r, self.target)) and lines[i].strip()]
+        if isinstance(d, dict):
+            res, heads = _answers(d, n)
+            bad = shifted_lines(heads, lines)
+            miss = [i for i, r in enumerate(res)
+                    if lines[i].strip() and (i in bad or not r or untranslated(r, self.target))]
             if not miss:
                 return res
-            if len(miss) <= max(2, len(lines) // 8) and depth < 4:
-                fill = self._llm_batch([lines[i] for i in miss], ctx_before, ctx_after, summary, depth + 1)
-                for i, f in zip(miss, fill):
-                    res[i] = f
+            for i in miss:
+                res[i] = ""
+            if len(miss) <= max(2, n // 8) and depth < 4:
+                for grp in _runs(miss):   # hỏi lại từng cụm dòng thiếu, kèm các dòng ngay trước / sau của cụm
+                    a, b = grp[0], grp[-1]
+                    cb = (list(ctx_before) + [(lines[k], res[k]) for k in range(a)])[-CTX_BEFORE:]
+                    ca = ([lines[k] for k in range(b + 1, n)] + list(ctx_after))[:CTX_AFTER]
+                    for i, f in zip(grp, self._llm_batch([lines[i] for i in grp], cb, ca, summary, depth + 1)):
+                        res[i] = f
                 return res
-        # lỗi hoặc thiếu nhiều dòng -> chia đôi lô rồi thử lại
-        if len(lines) > 1 and depth < 4:
-            mid = len(lines) // 2
-            a = self._llm_batch(lines[:mid], ctx_before, [], summary, depth + 1)
-            b = self._llm_batch(lines[mid:], [], ctx_after, summary, depth + 1)
+        # lỗi hoặc thiếu nhiều dòng -> chia đôi lô rồi thử lại (mỗi nửa vẫn có ngữ cảnh của nửa kia)
+        if n > 1 and depth < 4:
+            mid = n // 2
+            a = self._llm_batch(lines[:mid], ctx_before, (lines[mid:] + list(ctx_after))[:CTX_AFTER], summary, depth + 1)
+            b = self._llm_batch(lines[mid:], (list(ctx_before) + list(zip(lines[:mid], a)))[-CTX_BEFORE:], ctx_after,
+                                summary, depth + 1)
             return a + b
         # cuối cùng dùng Google để không bị trống (đếm lại để cảnh báo người dùng)
         try:
-            self.fallback_lines += len(lines)
+            self.fallback_lines += n
             return self._google(lines)
         except (Cancelled, net.NetworkDown):
             raise
         except Exception:
-            return [""] * len(lines)
+            return [""] * n
 
     # ------------------------------------------------------------- Hy-MT2 (trên máy)
     def _hymt(self, lines: list[str], todo: list[int], progress: ProgressCB | None, cancel, done0: int) -> list[str]:
