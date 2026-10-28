@@ -8794,6 +8794,69 @@ def test_recognize_recheck_in_pipeline_2115(monkeypatch, sample_video):
         p.delete()
 
 
+def test_subs_delete_button_and_reveal_2118(monkeypatch):
+    """Tab Phụ đề (2.1.18): nút Xoá ngay trên bảng câu – xoá ĐÚNG các câu đã tích (kể cả chỉ 1 câu, hỏi lại), chưa tích thì
+    câu đang chọn (không hỏi), nhãn nút đếm câu đã tích; nút Xoá trang Sửa câu dùng chung; bảng câu cao ≥ 460 px; chọn
+    câu trên timeline -> tab tự cuộn tới dòng đó (dòng tô cam nhìn thấy được)."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QRect
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow()
+    win.resize(1600, 1000)
+    win.show()
+    p = Project.create("xoá câu")
+    try:
+        p.data["info"] = {"duration": 80}
+        p.segments = [Segment(i * 1.5, i * 1.5 + 1.0, f"第{i}句。", f"Câu {i}.", "S1") for i in range(40)]
+        p.save()
+        win.open_project(p.id)
+        pp = win.project_page
+        pp.tabs.set_current(1)
+        for _ in range(5):
+            app.processEvents()
+        assert pp.table.minimumHeight() >= 460
+        asked = []
+
+        def yes(*a, **k):
+            asked.append(a[2] if len(a) > 2 else "")
+            return QMessageBox.StandardButton.Yes
+        monkeypatch.setattr(QMessageBox, "question", yes)
+        # tích 1 câu, đang chọn câu khác -> xoá đúng câu đã tích (trước 2.1.18 nút Xoá xoá nhầm câu đang chọn)
+        pp._select_line(5)
+        pp.model.set_picked([20])
+        assert pp.s_del.text() == "Xoá 1 câu đã tích"
+        pp._delete_lines()
+        texts = [x.text for x in pp.model.segs]
+        assert "第20句。" not in texts and "第5句。" in texts and len(texts) == 39 and asked and "1 câu đã tích" in asked[-1]
+        assert len(Project(p.id).segments) == 39
+        # chưa tích: xoá câu đang chọn, không hỏi
+        asked.clear()
+        pp.model.set_picked(range(len(pp.model.segs)), False)
+        assert pp.s_del.text() == "Xoá"
+        pp._select_line(3)
+        pp._seg_op("delete")                 # nút Xoá ở trang Sửa câu = cùng 1 cách xoá
+        assert "第3句。" not in [x.text for x in pp.model.segs] and not asked
+        # chọn câu trên timeline -> tab cuộn tới dòng đó
+        pp.subs_scroll.verticalScrollBar().setValue(0)
+        pp.tracks.lineClicked.emit(33)
+        for _ in range(5):
+            app.processEvents()
+        pi = pp.proxy.mapFromSource(pp.model.index(33, 0))
+        assert pp.table.selectionModel().isRowSelected(pi.row())
+        r = pp.table.visualRect(pi)
+        tl = pp.table.viewport().mapTo(pp.subs_scroll.viewport(), r.topLeft())
+        assert QRect(0, 0, pp.subs_scroll.viewport().width(), pp.subs_scroll.viewport().height()).contains(
+            tl.x() + 5, tl.y() + r.height() // 2)
+    finally:
+        p.delete()
+        win.close()
+
+
 def test_relisten_picked_lines_2116(monkeypatch, tmp_path):
     """Bộ nghe nghe lại câu đã tích (2.1.16): mỗi câu nghe 3 lần (khúc rộng trên giọng đã tách, khúc rộng trên tiếng gốc,
     riêng câu); ≥ 2 lần ra cùng chữ -> điền; ra như cũ -> xác nhận (độ chắc tăng); các lần ra mỗi lần 1 kiểu -> tô xanh;

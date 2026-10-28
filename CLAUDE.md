@@ -192,6 +192,12 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   nâng) / "alt" (tô xanh, `asr_alt_eng` recheck / recheck_o / recheck_s) / "empty" (không ra chữ – nghi nhạc); câu đổi chữ
   đo lại mốc; chỉ đổi chữ gốc (bản dịch / giọng lồng giữ), tích sẵn câu điền / xanh / không ra chữ; `recheck.note` báo
   kết quả. "Dùng bản nghe lại" = `_use_alt`.
+- Xoá câu ở tab Phụ đề (2.1.18): nút Xoá ngay trên bảng câu (`s_del`, hàng ô tìm kiếm; nhãn "Xoá N câu đã tích" theo
+  `_update_count`) + phím Delete trên bảng (`QShortcut` WidgetShortcut) + nút Xoá trang Sửa câu (`_seg_op("delete")`) =
+  `project_page._delete_lines`: câu đã tích (kể cả 1 câu, hỏi lại) > các dòng đang bôi chọn (≥ 2 câu hỏi lại) > câu đang
+  chọn (không hỏi) -> `_sub_op("delete")` (bản lồng xếp lại) + lưu ngay. Bảng câu cao ≥ 460 px (`tv.setMinimumHeight`); cả
+  tab cuộn dọc (`subs_scroll`) -> `_select_line` từ timeline / khung câu / nút tích khi đang ở tab Phụ đề gọi
+  `_reveal_subs_row` (cuộn tab tới dòng tô cam).
 - Nghe chuẩn + nhịp ngắt (2.1.3): A tin cậy – `qwen_asr_worker` hỏi `"conf": true` -> `TokenConf` (LogitsProcessor ghi
   log-xác suất chữ được chọn, không giữ bảng điểm) + `mean_conf` (phần lời sau <asr_text>); FireRed có sẵn `conf`;
   `asr_qwen.conf_tags` / `asr.whisper_conf_tags` -> nhãn "conf=…" / "lowconf" (`asr_rescue_conf` 0,5) -> `align.rescue_missed`
@@ -324,7 +330,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (219 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (220 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1958,7 +1964,15 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   chắc -> chữ xanh + "Dùng bản nghe lại", không ra chữ -> báo nghi nhạc) – xem Cấu trúc. Thử với bộ nghe giả (Qwen3 thật
   chưa chạy – sandbox chặn HF).
 
+- 2.1.18: "tích xong xoá ở đâu" – nút Xoá chỉ có ở trang Sửa câu (người dùng đang ở trang Lời hát & nghe nhầm) và khi
+  tích đúng 1 câu nút đó xoá câu ĐANG CHỌN (không phải câu đã tích, không hỏi). Thêm nút Xoá trên bảng câu, bảng cao hơn,
+  chọn câu trên timeline thì tab Phụ đề tự cuộn tới dòng đó (bảng vẫn tô đúng câu nhưng nằm dưới khung Công cụ, chỉ cao
+  182 px nên không thấy) – xem Cấu trúc "Xoá câu ở tab Phụ đề". Xoá ở tab Phụ đề = xoá luôn ở tab Lồng tiếng (chung 1 danh
+  sách câu, giọng câu đó bỏ khỏi bản lồng) và SRT xuất sau.
+
 ## Vấn đề đang mở
+- 2.1.18: chờ người dùng thử nút Xoá trên bảng câu / phím Delete, xem bảng 460 px có vừa màn không (màn thấp phải cuộn),
+  bấm câu trên timeline xem tab Phụ đề có tự cuộn tới dòng tô cam không (có làm khó bấm nút ở khung Công cụ không).
 - 2.1.16/17: chờ người dùng nghe xong 1 phim (bản 2.1.15+), bấm "Tích câu bộ nghe không chắc" ở mức 0,7 rồi "Bộ nghe nghe
   lại câu đã tích": điền đúng bao nhiêu câu, có điền sai câu nào không (Ctrl+Z hoàn tác), bao nhiêu câu còn xanh / không ra
   chữ; câu tích nhiều quá (thoại đúng) -> hạ mức; chưa chọn A / B / C

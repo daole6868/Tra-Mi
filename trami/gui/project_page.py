@@ -540,6 +540,9 @@ class ProjectPage(QWidget):
             tv.setColumnHidden(c, True)
         tv.clicked.connect(self._row_clicked)
         self.table = tv
+        # phím Delete trên bảng câu (khi không đang sửa chữ trong ô) = nút Xoá
+        QShortcut(QKeySequence(Qt.Key.Key_Delete), tv, activated=self._delete_lines,
+                  context=Qt.ShortcutContext.WidgetShortcut)
         tv.verticalScrollBar().valueChanged.connect(self._fit_visible)   # đo chiều cao dòng khi cuộn tới
         self._refit_timer = QTimer(self, singleShot=True, interval=120)
         self._refit_timer.timeout.connect(self._fit_rows)
@@ -554,6 +557,9 @@ class ProjectPage(QWidget):
         self.search.textChanged.connect(self.proxy.set_query)
         self.follow = Switch(True)
         self.seg_count = label("", "muted")
+        self.s_del = button("Xoá", "trash", "Xoá các câu đã tích (cột Chọn); chưa tích thì xoá câu đang chọn – cả phụ đề "
+                            "lẫn giọng lồng của câu đó (tab Lồng tiếng, SRT xuất sau cũng mất câu này). Phím Delete trên "
+                            "bảng cũng xoá. Ctrl+Z / ↶ hoàn tác", danger=True, on_click=self._delete_lines)
         # cách dịch: cùng giá trị với tab Tự động / Cài đặt (đổi ở đây = đổi ở đó)
         self.s_engine, self.s_target = self._mirror(self.a_engine), self._mirror(self.a_target)
         self.s_style, self.s_skill = self._mirror(self.a_style), self._mirror(self.a_skill)
@@ -806,7 +812,7 @@ class ProjectPage(QWidget):
         more = hbox(col1, col2, spacing=theme.GAP)
         self.sk_more.setLayout(more)
         sk.add(self.sk_more)
-        tv.setMinimumHeight(170)   # màn thấp: cả tab cuộn dọc thay vì ép bảng câu còn 1 dòng
+        tv.setMinimumHeight(460)   # bảng câu luôn đủ cao (~10 câu); màn thấp: cả tab cuộn dọc
         split = QSplitter(Qt.Orientation.Vertical)
         split.setHandleWidth(theme.GAP)
         split.addWidget(tv)
@@ -869,9 +875,10 @@ class ProjectPage(QWidget):
         v.setSpacing(theme.GAP)
         v.addWidget(tr_card)
         v.addWidget(tools)
-        v.addLayout(hbox(self.search, self.seg_count, label("Tự cuộn", "muted"), self.follow))
+        v.addLayout(hbox(self.search, self.seg_count, self.s_del, label("Tự cuộn", "muted"), self.follow))
         v.addWidget(split, 1)
-        return scroll(w)
+        self.subs_scroll = scroll(w)
+        return self.subs_scroll
 
     def _subs_tools(self, page: int | None = None, open_: bool | None = None, save: bool = True):
         """Khung Công cụ ở tab Phụ đề: mỗi lúc hiện 1 trang (Sửa câu / Nối – tách câu / Lời hát / Nhập – xuất SRT);
@@ -3423,8 +3430,19 @@ class ProjectPage(QWidget):
                     table.selectRow(pi.row())
                     # chọn từ timeline / khung câu / bảng kia: đưa câu ra GIỮA bảng (tô cam) cho dễ thấy
                     table.scrollTo(pi, QAbstractItemView.ScrollHint.PositionAtCenter)
+                    if name == "subs" and self.stack.currentIndex() == 1:
+                        self._reveal_subs_row(pi)
         if seek:
             self.player.seek(segs[row].start + 0.01)
+
+    def _reveal_subs_row(self, pi):
+        """Bảng câu tab Phụ đề nằm dưới khung Dịch / Công cụ (cả tab cuộn dọc): câu được chọn từ timeline / khung Câu
+        đang chọn / nút tích -> cuộn tab tới đúng dòng đó cho thấy dòng tô cam."""
+        r = self.table.visualRect(pi)
+        if not r.isValid():
+            return
+        pt = self.table.viewport().mapTo(self.subs_scroll.widget(), r.center())
+        self.subs_scroll.ensureVisible(pt.x(), pt.y(), 0, r.height() // 2 + 40)
 
     def _line_action(self, name: str, row: int):
         if name == "play":
@@ -3760,6 +3778,31 @@ class ProjectPage(QWidget):
         k = len(self.model.selected)
         self.seg_count.setText(f"{n} câu · đã dịch {sum(1 for s in segs if s.trans)}" + (f" · {spk} người nói" if spk else "")
                                + (f" · đã tích {k}" if k else ""))
+        self.s_del.setText(f"Xoá {k} câu đã tích" if k else "Xoá")
+
+    def _delete_lines(self):
+        """Nút Xoá trên bảng câu tab Phụ đề (+ phím Delete, nút Xoá trang Sửa câu): xoá ĐÚNG các câu đã tích (kể cả chỉ 1
+        câu) sau khi hỏi lại; chưa tích -> các dòng đang bôi chọn / câu đang chọn. Phụ đề + giọng lồng của câu đó đều mất
+        (bản lồng tự xếp lại), Ctrl+Z hoàn tác."""
+        segs = self.model.segs
+        if self._live_draft:
+            return self.win.toast("Đang hiện câu nháp lúc dịch tự động – chờ việc chạy xong rồi xoá", "warn")
+        rows = [r for r in sorted(self.model.selected) if 0 <= r < len(segs)]
+        picked = bool(rows)
+        if not rows:
+            rows = sorted({self.proxy.mapToSource(i).row() for i in self.table.selectionModel().selectedRows()})
+            rows = [r for r in rows if 0 <= r < len(segs)]
+            cur = self._selected_row()
+            if not rows and 0 <= cur < len(segs):
+                rows = [cur]
+        if not rows:
+            return self.win.toast("Tích câu cần xoá ở cột Chọn (hoặc bấm vào 1 câu trong bảng) trước", "warn")
+        if (picked or len(rows) > 1) and QMessageBox.question(
+                self, "Xoá câu", f"Xoá {len(rows)} câu {'đã tích' if picked else 'đang chọn'} – cả phụ đề lẫn giọng lồng "
+                "của các câu này? (Ctrl+Z / ↶ để lấy lại)") != QMessageBox.StandardButton.Yes:
+            return
+        self._sub_op("delete", rows)
+        self._save_segs_now()
 
     def _multi_rows(self) -> list[int]:
         """Các câu cho Gộp / Xoá ở tab Phụ đề: câu đã tích (≥ 2), không thì các dòng đang bôi chọn (Ctrl / Shift)."""
@@ -3772,18 +3815,16 @@ class ProjectPage(QWidget):
     def _seg_op(self, op: str):
         from .. import subtitle as st
 
-        rows = self._multi_rows() if op in ("merge", "delete") else []
+        if op == "delete":
+            return self._delete_lines()
+        rows = self._multi_rows() if op == "merge" else []
         if op == "merge" and rows:
             if rows[-1] - rows[0] + 1 != len(rows):
                 return self.win.toast("Chỉ gộp được các câu liền nhau – bỏ tích câu nằm xa", "warn")
             return self._sub_op("merge", rows)
-        if op == "delete" and rows:
-            if QMessageBox.question(self, "Xoá câu", f"Xoá {len(rows)} câu đã chọn?") != QMessageBox.StandardButton.Yes:
-                return
-            return self._sub_op("delete", rows)
         i = self._selected_row()
         segs = self.model.segs
-        if op in ("merge", "delete") and i >= 0:
+        if op == "merge" and i >= 0:
             # 1 câu: cùng đường với timeline -> bản lồng được xếp lại / câu gộp được đọc lại giọng
             return self._sub_op(op, [i])
         if op == "insert":
@@ -3800,8 +3841,6 @@ class ProjectPage(QWidget):
                 self.model.set_picked([i])
         elif op == "split":
             st.split(segs, i, self.player.position())
-        elif op == "delete":
-            del segs[i]
         self.model.set_segments(segs)
         self._fit_rows()
         self._segs_edited()
