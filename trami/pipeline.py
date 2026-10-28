@@ -1050,6 +1050,10 @@ def dual_listen(p: Project, segs, wav: Path, primary: str, language: str, settin
         for i in rows:
             segs[i].extra["asr_alt"] = alts[i]
             segs[i].extra["asr_alt_eng"] = second
+            segs[i].extra.pop("asr_same", None)
+        for i, a in alts.items():   # bộ thứ 2 nghe ra giống hệt -> câu đã được xác nhận (không bị coi là không chắc)
+            if a and i not in rows:
+                segs[i].extra["asr_same"] = "dual"
         st["differ"] = len(rows)
         picked: dict = {}
         eng, why = join_engine(settings, "asr_ai")
@@ -1564,6 +1568,11 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         p.data["asr_stammer"] = sum(drop_false_starts(x) for x in segs)
     if method != "ocr":
         p.data["asr_repeat"] = mark_repeats(segs)   # câu vẫn còn lặp lời / 2 câu liền giống nhau -> tô màu để kiểm
+    # 2i) lớp lọc CUỐI CÙNG trước khi dịch (2.1.19): bỏ hẳn câu bộ nghe không chắc – sau mọi bước nghe lại / 2 bộ nghe
+    p.data.pop("unsure_dropped", None)
+    p.data.pop("unsure_removed", None)
+    if segs and method != "ocr" and settings.get("asr_drop_unsure"):
+        segs = drop_unsure(p, segs, settings)
     segs = normalize(segs)
     one_spk = want_spk and int(settings.get("diarize_speakers", 0) or 0) == 1
     if one_spk:   # đặt "1 người nói": gán hết S1, không đo giọng / không tách câu theo chỗ đổi giọng
@@ -1882,7 +1891,67 @@ def listen_note(p: Project) -> str:
     if p.data.get("asr_repeat"):
         out.append(f"⚠ {p.data['asr_repeat']} câu còn lặp lời / 2 câu liền giống nhau (chữ gốc màu hồng) – nghe lại, "
                    "hoặc tab Phụ đề → Công cụ → Lời hát & nghe nhầm → 'Dọn câu bịa / câu lặp'")
+    if note := unsure_note(p.data.get("unsure_dropped")):
+        out.append(note)
     return " · ".join(out)
+
+
+UNSURE_CONF = 0.7    # mức mặc định "độ chắc dưới" (Cài đặt asr_pick_conf – chung tab Tự động / tab Phụ đề)
+
+
+def unsure_rows(segs, thr: float = UNSURE_CONF) -> list[int]:
+    """Câu bộ nghe KHÔNG CHẮC (dùng chung: nút "Tích câu bộ nghe không chắc" tab Phụ đề và bước "Xoá câu không chắc"):
+    độ chắc `asr_conf` dưới mức `thr`. Bỏ qua câu 🎵, câu chưa có độ chắc (OCR, SRT, SenseVoice / Whisper) và câu đã có
+    lần nghe khác xác nhận (`asr_same`: nghe lại ra y hệt / 2 bộ nghe ra giống nhau)."""
+    out = []
+    for i, s in enumerate(segs):
+        c = s.extra.get("asr_conf")
+        if c is None or s.extra.get("song") or s.extra.get("asr_same"):
+            continue
+        if float(c) < thr:
+            out.append(i)
+    return out
+
+
+def drop_unsure(p: Project, segs, settings: dict) -> list:
+    """Bước cuối "1. Nghe & tách câu" / Tự động khi bật "Xoá câu không chắc" (Cài đặt `asr_drop_unsure`, mức
+    `asr_pick_conf`): bỏ hẳn các câu `unsure_rows` để không gửi đi dịch / lồng tiếng. Câu bỏ cất vào
+    p.data["unsure_removed"] (nút "Khôi phục câu đã xoá" tab Phụ đề). Trả danh sách câu còn lại."""
+    thr = float(settings.get("asr_pick_conf", UNSURE_CONF) or UNSURE_CONF)
+    rows = set(unsure_rows(segs, thr))
+    known = sum(1 for s in segs if s.extra.get("asr_conf") is not None)
+    p.data["unsure_dropped"] = {"n": len(rows), "thr": thr, "known": known}
+    if not rows:
+        return segs
+    p.data["unsure_removed"] = [segs[i].to_dict() for i in sorted(rows)]
+    return [s for i, s in enumerate(segs) if i not in rows]
+
+
+def unsure_note(st: dict | None) -> str:
+    if not st:
+        return ""
+    thr = f"{float(st.get('thr', UNSURE_CONF)):.2f}".replace(".", ",")
+    if not st.get("known", 1):
+        return "chưa lọc được câu không chắc: bộ nghe này không chấm độ chắc (chỉ Qwen3-ASR / FireRedASR2 có)"
+    if not st.get("n"):
+        return f"lọc câu không chắc: không có câu nào độ chắc dưới {thr}"
+    return (f"xoá {st['n']} câu bộ nghe không chắc (độ chắc dưới {thr}) – lấy lại: tab Phụ đề → Công cụ → Lời hát & "
+            "nghe nhầm → 'Khôi phục câu đã xoá'")
+
+
+def restore_unsure(p: Project) -> list[int]:
+    """Đưa lại các câu bước "Xoá câu không chắc" đã bỏ vào đúng chỗ theo thời gian. Trả số thứ tự các câu vừa đưa lại."""
+    from .subtitle import Segment
+
+    back = [Segment.from_dict(d) for d in p.data.pop("unsure_removed", []) or []]
+    p.data.pop("unsure_dropped", None)
+    if not back:
+        return []
+    segs = sorted(p.segments + back, key=lambda s: (s.start, s.end))
+    p.segments = segs
+    p.save()
+    ids = {id(s) for s in back}
+    return [i for i, s in enumerate(segs) if id(s) in ids]
 
 
 def mark_repeats(segs) -> int:

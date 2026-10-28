@@ -336,6 +336,12 @@ def recheck_lines(segs, wav: str | Path, orig_wav: str | Path | None, engine: st
                 st["rows_fixed"].append(i)
         else:
             best, other = decide(s.text, conf_of(s), cs)
+            oc = core(s.text)
+            same = [c for _src, new, c, ok in cs if ok and new == oc]
+            if not best and not other and same:   # nghe lại ra y hệt -> câu đã được xác nhận (2.1.19)
+                s.extra["asr_conf"] = round(max(conf_of(s) or 0.0, max(same)), 3)
+                s.extra["asr_same"] = True
+                st["confirmed"] = st.get("confirmed", 0) + 1
         if best:
             s.extra.pop("asr_same", None)
             src, new, conf = best

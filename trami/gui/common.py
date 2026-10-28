@@ -39,6 +39,13 @@ RELISTEN_HELP = ("Bộ nghe (Qwen3-ASR / FireRedASR2) nghe lại ĐÚNG các câ
                  "màu xanh (rê chuột xem bản nghe lại, đúng thì 'Dùng bản nghe lại'); không nghe ra lời -> có thể là "
                  "nhạc / tiếng động, xem rồi Xoá. Bản dịch / giọng lồng giữ nguyên – câu đổi chữ được tích sẵn để "
                  "'Dịch câu đã tích'. Ctrl+Z hoàn tác")
+DROP_UNSURE_HELP = ("Lớp lọc CUỐI CÙNG của Nghe & tách câu, trước khi dịch: sau mọi bước nghe lại câu không chắc / nghe kỹ / "
+                    "nghe 2 bộ, câu nào bộ nghe vẫn chấm độ chắc dưới mức đặt thì XOÁ hẳn (không dịch, không lồng "
+                    "tiếng) – thường là nhạc / tiếng ồn / tiếng hét bị chép thành chữ. Không xoá: câu 🎵, câu đã được "
+                    "lần nghe khác xác nhận (nghe lại ra y hệt / 2 bộ nghe ra giống nhau), câu chưa có độ chắc (OCR, "
+                    "SenseVoice / Whisper). Chạy khi bấm '1. Nghe & tách câu' và 'Bắt đầu dịch tự động' (cả Trang chủ / "
+                    "Hàng loạt). Mức độ chắc chung với tab Phụ đề. Lấy lại câu đã xoá: tab Phụ đề → Công cụ → Lời hát & "
+                    "nghe nhầm → 'Khôi phục câu đã xoá'")
 OVERLAP_HELP = ("Mọi câu (không chỉ câu không chắc) được nghe lần 2 trong khúc lệch với khúc lần đầu (câu nằm giữa khúc); "
                 "2 lần ra khác nhau -> lấy bản chắc hơn theo cùng luật như 'Nghe lại câu không chắc'. Chính xác nhất, "
                 "CHẬM GẤP ĐÔI – dùng cho phim khó (nhiều nhạc, nói nhanh)")

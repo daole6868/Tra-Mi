@@ -7513,7 +7513,8 @@ def test_name_pass_and_dual_listen_pipeline(monkeypatch, tmp_path):
         assert d["unsure"] == 1 and released
         assert segs[1].text == "我们去吃饭。" and segs[1].extra["asr_pick"].startswith("B")
         assert segs[2].extra["asr_unsure"] and segs[2].extra["asr_alt"] == "好吧"
-        assert "asr_alt" not in segs[0].extra
+        assert "asr_alt" not in segs[0].extra and segs[0].extra["asr_same"] == "dual"   # 2 bộ giống nhau = xác nhận
+        assert "asr_same" not in segs[2].extra
         assert ("firered", "align", "", 1) in calls     # câu đổi số chữ -> đo lại mốc bằng chính bộ 2
         note = pipeline.dual_note(d)
         assert "2/3 câu khác nhau" in note and "sửa 1" in note and "1 câu cần nghe lại" in note
@@ -8792,6 +8793,102 @@ def test_recognize_recheck_in_pipeline_2115(monkeypatch, sample_video):
         assert not heard and p.segments[1].extra["asr_conf"] == 0.35 and p.segments[1].text == "林北来了。"
     finally:
         p.delete()
+
+
+def test_drop_unsure_last_filter_2119(monkeypatch, sample_video, tmp_path):
+    """"Xoá câu không chắc" (2.1.19): lớp lọc cuối của Nghe & tách câu – sau mọi bước nghe lại, bỏ câu độ chắc dưới mức
+    chung (asr_pick_conf); không bỏ câu 🎵 / câu đã được xác nhận (nghe lại ra y hệt, 2 bộ nghe giống nhau) / câu chưa có
+    độ chắc; cất để khôi phục; thông báo có kết quả."""
+    from trami import asr_qwen, pipeline, recheck
+    from trami.project import Project
+
+    segs = [Segment(0, 1, "一。", extra={"asr_conf": 0.9}), Segment(1, 2, "二。", extra={"asr_conf": 0.4}),
+            Segment(2, 3, "三。", extra={"asr_conf": 0.4, "song": True}),
+            Segment(3, 4, "四。", extra={"asr_conf": 0.4, "asr_same": "dual"}), Segment(4, 5, "五。")]
+    assert pipeline.unsure_rows(segs, 0.7) == [1] and pipeline.unsure_rows(segs, 0.3) == []
+
+    def fake_tq(wav, settings, language="zh", progress=None, cancel=None, on_chunk=None, stats=None,
+                engine="qwen3", spans=None, conf_out=None):
+        conf_out.extend([(0.8, 0.95), (1.5, 0.9), (2.8, 0.3), (3.5, 0.4)])
+        return [Segment(0.5, 2.0, "你好世界。"), Segment(2.5, 4.0, "林北来了。")]
+
+    monkeypatch.setattr(asr_qwen, "transcribe_qwen", fake_tq)
+    monkeypatch.setattr(asr_qwen, "available", lambda: True)
+    st = {"asr_engine": "qwen3", "sep_before_asr": False, "diarize": False, "align_words": False,
+          "asr_rescue": False, "song_detect": False, "pitch_check": False, "snap_edges": False, "ai_join_engine": "off",
+          "asr_name_pass": False, "asr_recheck": False, "asr_pick_conf": 0.7}
+    p = Project.create("xoá câu không chắc")
+    try:
+        pipeline.attach_source(p, sample_video)
+        assert pipeline.recognize(p, settings=dict(st)) == 2                       # tắt: không xoá gì
+        assert "unsure_dropped" not in p.data and "câu bộ nghe không chắc" not in pipeline.listen_note(p)
+        assert pipeline.recognize(p, settings=dict(st, asr_drop_unsure=True)) == 1
+        assert [x.text for x in p.segments] == ["你好世界。"] and p.data["unsure_dropped"]["n"] == 1
+        assert "xoá 1 câu bộ nghe không chắc (độ chắc dưới 0,70)" in pipeline.listen_note(p)
+        assert pipeline.restore_unsure(p) == [1]
+        q = Project(p.id)
+        assert [x.text for x in q.segments] == ["你好世界。", "林北来了。"] and "unsure_removed" not in q.data
+        assert pipeline.recognize(p, settings=dict(st, asr_drop_unsure=True, asr_pick_conf=0.3)) == 2
+        assert "không có câu nào độ chắc dưới 0,30" in pipeline.listen_note(p)
+    finally:
+        p.delete()
+    # nghe lại tự động ra y hệt -> câu được xác nhận (độ chắc nâng, không bị coi là không chắc)
+    rs = [Segment(0.0, 2.0, "你好，师兄。", extra={"asr_conf": 0.95}), Segment(3.0, 5.0, "今天吃什么？", extra={"asr_conf": 0.4}),
+          Segment(6.0, 8.0, "我们去吃面吧。", extra={"asr_conf": 0.95})]
+
+    class W:
+        def call(self, req, pr=None, cancel=None):
+            t = "你好师兄今天吃什么我们去吃面吧"
+            return {"items": [{"text": t, "conf": 0.55, "cp": [0.55] * len(t)} for _ in req["spans"]]}
+    monkeypatch.setattr(asr_qwen, "asr_worker", lambda eng, st=None: W())
+    monkeypatch.setattr(asr_qwen, "align_qwen", lambda *a, **k: 0)
+    out = recheck.recheck_lines(rs, tmp_path / "v.wav", None, "qwen3", "zh", {"asr_recheck_pad": 2.5}, total=20.0)
+    assert out["confirmed"] == 1 and rs[1].extra["asr_same"] is True and rs[1].extra["asr_conf"] == 0.55
+    assert pipeline.unsure_rows(rs, 0.7) == []
+
+
+def test_drop_unsure_gui_2119(monkeypatch):
+    """Tab Tự động: công tắc "Xoá câu không chắc" lưu Cài đặt; ô "độ chắc dưới" chung với tab Phụ đề (đổi bên nào đổi bên
+    kia); nút "Khôi phục câu đã xoá" (tab Phụ đề) đưa lại câu + tích sẵn; nút tích câu không chắc bỏ câu đã xác nhận."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from trami.config import load_settings
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow()
+    p = Project.create("lọc câu không chắc")
+    try:
+        p.data["info"] = {"duration": 20}
+        p.segments = [Segment(1, 2, "你好。", "", "S1", {"asr_conf": 0.95}),
+                      Segment(5, 6, "走吧。", "", "S1", {"asr_conf": 0.4, "asr_same": True})]
+        p.data["unsure_removed"] = [Segment(3, 4, "啦啦。", "", "S1", {"asr_conf": 0.2}).to_dict()]
+        p.save()
+        win.open_project(p.id)
+        app.processEvents()
+        pp = win.project_page
+        toasts = []
+        monkeypatch.setattr(win, "toast", lambda msg, kind="ok": toasts.append((msg, kind)))
+        pp.a_drop.setChecked(True)
+        assert load_settings()["asr_drop_unsure"] is True
+        pp.a_conf.setValue(0.55)
+        assert pp.s_conf.value() == 0.55 and load_settings()["asr_pick_conf"] == 0.55
+        pp.s_conf.setValue(0.8)
+        assert pp.a_conf.value() == 0.8 and load_settings()["asr_pick_conf"] == 0.8
+        pp._pick_unsure()                                   # câu "走吧" đã được xác nhận -> không tích
+        assert "Không có câu nào" in toasts[-1][0]
+        pp._restore_unsure()
+        assert [x.text for x in pp.model.segs] == ["你好。", "啦啦。", "走吧。"] and sorted(pp.model.selected) == [1]
+        assert "unsure_removed" not in Project(p.id).data
+        pp._restore_unsure()
+        assert "Không có câu nào" in toasts[-1][0]
+        pp.a_drop.setChecked(False)
+        assert load_settings()["asr_drop_unsure"] is False
+    finally:
+        p.delete()
+        win.close()
 
 
 def test_subs_delete_button_and_reveal_2118(monkeypatch):

@@ -66,9 +66,10 @@ def asr_tip(s) -> str:
         lines.append("Đã sửa theo lần nghe lại " + {"o": "trên tiếng gốc", "s": "riêng câu"}.get(
             s.extra["asr_recheck"], "với khúc rộng hơn (câu nằm giữa, có câu trước / sau)"))
     if s.extra.get("asr_same"):
-        lines.append("Bộ nghe đã nghe lại câu này: vẫn ra như cũ")
+        lines.append("2 bộ nghe ra giống nhau – câu đã được xác nhận" if s.extra["asr_same"] == "dual" else
+                     "Bộ nghe đã nghe lại câu này: vẫn ra như cũ – câu đã được xác nhận")
     conf = s.extra.get("asr_conf")
-    if conf is not None and float(conf) < 0.7:
+    if conf is not None and float(conf) < 0.7 and not s.extra.get("asr_same"):
         lines.append(f"Bộ nghe không chắc câu này (độ chắc {float(conf):.2f}) – nên nghe lại")
     if s.extra.get("from_asr"):
         lines.append("OCR + nghe: phụ đề in sẵn không có câu này – bộ nghe nghe thêm (nên nghe lại)")
@@ -292,7 +293,8 @@ class SubsModel(QAbstractTableModel):
                 return f"🎵 AI: lời bài hát – {s.extra['ai_song']}\nKhông lồng tiếng câu này. Là lời thoại thật: tích rồi " \
                        "bấm 'Không phải nhạc'"
             if c == C_ZH and (s.extra.get("asr_alt") is not None or s.extra.get("from_asr") or s.extra.get("name_fix")
-                              or s.extra.get("asr_recheck") or float(s.extra.get("asr_conf", 1) or 1) < 0.7):
+                              or s.extra.get("asr_recheck") or s.extra.get("asr_same")
+                              or float(s.extra.get("asr_conf", 1) or 1) < 0.7):
                 return asr_tip(s)
             if c == C_ZH and (s.extra.get("src_before") or s.extra.get("src_unsure")):
                 tip = f"AI sửa lỗi nghe – trước: {s.extra['src_before']}" if s.extra.get("src_before") else ""

@@ -55,6 +55,20 @@ def scroll(w: QWidget) -> QScrollArea:
 
 
 
+def _conf_spin(value: float) -> QDoubleSpinBox:
+    """Ô "độ chắc dưới" (câu bộ nghe không chắc) – tab Tự động + tab Phụ đề, cùng 1 giá trị Cài đặt asr_pick_conf."""
+    sp = QDoubleSpinBox()
+    sp.setRange(0.3, 0.95)
+    sp.setSingleStep(0.05)
+    sp.setDecimals(2)
+    sp.setMaximumWidth(110)
+    sp.setValue(value)
+    sp.setToolTip("Bộ nghe tự chấm độ chắc từng chữ (0–1). Câu có độ chắc trung bình dưới mức này = câu không chắc. "
+                  "Cao hơn = nhiều câu hơn. Cùng 1 mức ở tab Tự động (Xoá câu không chắc) và tab Phụ đề (Tích câu bộ "
+                  "nghe không chắc)")
+    return sp
+
+
 def _rowlbl(text: str) -> QWidget:
     """Nhãn đầu hàng (bề rộng cố định -> các hàng nút thẳng cột)."""
     lb = label(text, "muted")
@@ -369,6 +383,14 @@ class ProjectPage(QWidget):
                               "được (\"这笔账。\" | \"你自己算。\"). Chọn AI trong danh sách đã nhập key ở Cài đặt → Công cụ "
                               "dịch. Tắt = chỉ dùng luật nối câu (không tốn lượt AI)")
         self.a_joinai.currentIndexChanged.connect(self._audio_opts_changed)
+        # lớp lọc cuối cùng trước khi dịch (2.1.19): xoá câu bộ nghe không chắc; mức chung với tab Phụ đề
+        self.a_drop = Switch(bool(s.get("asr_drop_unsure", False)))
+        self.a_drop.setToolTip(C.DROP_UNSURE_HELP)
+        self.a_conf = _conf_spin(float(s.get("asr_pick_conf", 0.7) or 0.7))
+        f.row("Xoá câu không chắc", hbox(self.a_drop, label("độ chắc dưới", "muted"), self.a_conf, None),
+              C.DROP_UNSURE_HELP)
+        self.a_drop.toggled.connect(self._audio_opts_changed)
+        self.a_conf.valueChanged.connect(self._conf_changed)
         self.a_denoise = f.row("Lọc nhiễu âm thanh", Switch(False))
         self.a_force = f.row("Nhận dạng lại từ đầu", Switch(False))
         f.addRow(_group("2 · Dịch", "globe"))
@@ -680,14 +702,8 @@ class ProjectPage(QWidget):
                                "dấu nhầm câu kêu / hét), lớn = lọc lỏng (chỉ bắt nhạc cụ / giọng hát cao hẳn)")
         self.s_ptol.valueChanged.connect(self._ptol_changed)
         # câu bộ nghe không chắc (độ chắc từng câu – 2.1.15): tích để nghe lại, câu là nhạc / tiếng ồn thì Xoá (2.1.16)
-        self.s_conf = QDoubleSpinBox()
-        self.s_conf.setRange(0.3, 0.95)
-        self.s_conf.setSingleStep(0.05)
-        self.s_conf.setDecimals(2)
-        self.s_conf.setValue(float(self.settings.get("asr_pick_conf", 0.7) or 0.7))
-        self.s_conf.setToolTip("Bộ nghe tự chấm độ chắc từng chữ (0–1). Câu có độ chắc trung bình dưới mức này được tích. "
-                               "Cao hơn = tích nhiều câu hơn")
-        self.s_conf.valueChanged.connect(self._pick_conf_changed)
+        self.s_conf = _conf_spin(float(self.settings.get("asr_pick_conf", 0.7) or 0.7))
+        self.s_conf.valueChanged.connect(self._conf_changed)
         pg_song = [
             "Nhạc / lời bài hát / tiếng động bị nghe thành lời thoại: đánh 🎵 (không lồng tiếng) hoặc đánh dấu để "
             "nghe lại rồi xoá",
@@ -706,9 +722,13 @@ class ProjectPage(QWidget):
             flow(_rowlbl("Không chắc"),
                  button("Tích câu bộ nghe không chắc", "check", "Tích các câu bộ nghe chấm độ chắc thấp (thường là chỗ lẫn "
                         "nhạc, tiếng hét, nói nhanh – hoặc nhạc / tiếng ồn bị chép thành chữ) rồi bấm 'Bộ nghe nghe lại "
-                        "câu đã tích' để bộ nghe điền lại chữ. Rê chuột vào chữ gốc xem độ chắc. Không xoá câu nào tự "
-                        "động", flat=True, on_click=self._pick_unsure),
-                 hbox(label("độ chắc dưới", "muted"), self.s_conf)),
+                        "câu đã tích' để bộ nghe điền lại chữ. Rê chuột vào chữ gốc xem độ chắc. Câu đã được lần nghe "
+                        "khác xác nhận (nghe lại ra y hệt / 2 bộ nghe ra giống nhau) không tính", flat=True,
+                        on_click=self._pick_unsure),
+                 hbox(label("độ chắc dưới", "muted"), self.s_conf),
+                 button("Khôi phục câu đã xoá", "refresh", "Đưa lại các câu bước 'Xoá câu không chắc' (tab Tự động) đã "
+                        "bỏ ở lần Nghe & tách câu gần nhất vào đúng chỗ – được tích sẵn để nghe lại", flat=True,
+                        on_click=self._restore_unsure)),
             flow(_rowlbl("Nghe lại"),
                  button("Bộ nghe nghe lại câu đã tích", "mic", C.RELISTEN_HELP, on_click=self.run_relisten),
                  button("Dùng bản nghe lại", "refresh", "Câu đã tích (chữ gốc màu xanh – nghe lại ra khác mà bộ nghe chưa "
@@ -2732,7 +2752,9 @@ class ProjectPage(QWidget):
             self.a_pad.setValue(float(st.get("asr_recheck_pad", 5.0) or 5.0))
             self.a_overlap.setChecked(bool(st.get("asr_overlap", False)))
             self.a_langchk.setChecked(bool(st.get("asr_lang_check", True)))
-            self.s_conf.setValue(float(st.get("asr_pick_conf", 0.7) or 0.7))
+            for w in (self.s_conf, self.a_conf):
+                w.setValue(float(st.get("asr_pick_conf", 0.7) or 0.7))
+            self.a_drop.setChecked(bool(st.get("asr_drop_unsure", False)))
         finally:
             self.loading = was
         self._update_engine_label()
@@ -3023,7 +3045,8 @@ class ProjectPage(QWidget):
                                        "asr_recheck": self.a_recheck.isChecked(),
                                        "asr_recheck_pad": float(self.a_pad.value()),
                                        "asr_overlap": self.a_overlap.isChecked(),
-                                       "asr_lang_check": self.a_langchk.isChecked()})
+                                       "asr_lang_check": self.a_langchk.isChecked(),
+                                       "asr_drop_unsure": self.a_drop.isChecked()})
 
     def _engine_changed(self, *_):
         self._update_engine_label()
@@ -5127,7 +5150,7 @@ class ProjectPage(QWidget):
             return self.win.toast("Phụ đề này chưa có độ chắc của bộ nghe (nghe bằng bản trước 2.1.15, OCR, nạp SRT hoặc "
                                   "SenseVoice / Whisper) – bấm '1. Nghe & tách câu' bằng Qwen3-ASR / FireRedASR2 để có",
                                   "warn")
-        rows = [i for i in known if float(segs[i].extra["asr_conf"]) < thr and not segs[i].extra.get("song")]
+        rows = pipeline.unsure_rows(segs, thr)
         if not rows:
             return self.win.toast(f"Không có câu nào độ chắc dưới {thr:.2f} – tăng mức ở ô bên cạnh để tích thêm", "ok")
         self.model.set_picked(range(len(segs)), False)
@@ -5160,12 +5183,35 @@ class ProjectPage(QWidget):
             return {"message": msg, "pick": sorted(set(pick))}
         self.submit("dual", f"Nghe lại {len(rows)} câu đã tích", fn)
 
-    def _pick_conf_changed(self, v: float):
+    def _conf_changed(self, v: float):
+        """Mức "độ chắc dưới" – 1 giá trị chung (Cài đặt asr_pick_conf) cho ô ở tab Tự động (Xoá câu không chắc) và tab
+        Phụ đề (Tích câu bộ nghe không chắc): đổi bên nào cũng đổi bên kia."""
+        for w in (self.a_conf, self.s_conf):
+            if abs(w.value() - v) > 1e-9:
+                w.blockSignals(True)
+                w.setValue(v)
+                w.blockSignals(False)
         if not self.loading:
             from ..config import save_settings
 
-            save_settings({"asr_pick_conf": round(float(v), 2)})
-            self.settings = load_settings()
+            self.settings = save_settings({"asr_pick_conf": round(float(v), 2)})
+
+    def _restore_unsure(self):
+        """Đưa lại các câu bước "Xoá câu không chắc" đã bỏ (lần Nghe & tách câu gần nhất), tích sẵn để nghe lại."""
+        if not self.p:
+            return
+        if not self.p.data.get("unsure_removed"):
+            return self.win.toast("Không có câu nào bị bước 'Xoá câu không chắc' bỏ ở lần Nghe & tách câu gần nhất", "ok")
+        self.flush()
+        self._undo_mark()
+        rows = pipeline.restore_unsure(self.p)
+        self.reload()
+        self.model.set_picked(range(len(self.model.segs)), False)
+        self.model.set_picked(rows)
+        if rows:
+            self._select_line(rows[0], seek=False)
+        self.win.toast(f"Đã đưa lại {len(rows)} câu (đã tích sẵn) – nghe lại: đúng thì giữ, sai thì 'Bộ nghe nghe lại câu "
+                       "đã tích' hoặc Xoá", "ok")
 
     def _ptol_changed(self, v: float):
         if not self.loading:

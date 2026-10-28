@@ -192,6 +192,16 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   nâng) / "alt" (tô xanh, `asr_alt_eng` recheck / recheck_o / recheck_s) / "empty" (không ra chữ – nghi nhạc); câu đổi chữ
   đo lại mốc; chỉ đổi chữ gốc (bản dịch / giọng lồng giữ), tích sẵn câu điền / xanh / không ra chữ; `recheck.note` báo
   kết quả. "Dùng bản nghe lại" = `_use_alt`.
+- Xoá câu không chắc (2.1.19): lớp lọc CUỐI CÙNG của `pipeline.recognize` (bước 2i, sau nghe lại câu không chắc / nghe kỹ /
+  tên riêng / 2 bộ nghe / câu hát / nghe nhầm / nói vấp / mark_repeats, trước normalize + phân biệt người nói) khi Cài đặt
+  `asr_drop_unsure` (tab Tự động nhóm 1 `a_drop`, mặc định tắt) -> `drop_unsure`: bỏ câu `unsure_rows(segs, asr_pick_conf)`
+  (độ chắc < mức; KHÔNG bỏ câu 🎵, câu chưa có `asr_conf` – OCR / SenseVoice / Whisper –, câu `asr_same` đã được lần nghe
+  khác xác nhận), cất `p.data["unsure_removed"]` + `unsure_dropped` {n, thr, known} -> `unsure_note` trong `listen_note`;
+  `restore_unsure` (nút "Khôi phục câu đã xoá" hàng "Không chắc" tab Phụ đề, tích sẵn). Chạy với "1. Nghe & tách câu",
+  "Bắt đầu dịch tự động" (cả Trang chủ / Hàng loạt – cùng Cài đặt). Mức "độ chắc dưới" 1 giá trị chung: ô `a_conf` (tab
+  Tự động) = ô `s_conf` (tab Phụ đề) qua `_conf_changed` (`_conf_spin`). Xác nhận câu (`asr_same`): nghe lại tự động ra y
+  hệt (`recheck_lines` – nâng độ chắc, `st["confirmed"]`), 2 bộ nghe ra giống nhau (`dual_listen` – "dual"), nút nghe lại
+  câu đã tích ra như cũ. `_pick_unsure` dùng chung `unsure_rows`.
 - Xoá câu ở tab Phụ đề (2.1.18): nút Xoá ngay trên bảng câu (`s_del`, hàng ô tìm kiếm; nhãn "Xoá N câu đã tích" theo
   `_update_count`) + phím Delete trên bảng (`QShortcut` WidgetShortcut) + nút Xoá trang Sửa câu (`_seg_op("delete")`) =
   `project_page._delete_lines`: câu đã tích (kể cả 1 câu, hỏi lại) > các dòng đang bôi chọn (≥ 2 câu hỏi lại) > câu đang
@@ -330,7 +340,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (220 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (222 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -1970,7 +1980,16 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   182 px nên không thấy) – xem Cấu trúc "Xoá câu ở tab Phụ đề". Xoá ở tab Phụ đề = xoá luôn ở tab Lồng tiếng (chung 1 danh
   sách câu, giọng câu đó bỏ khỏi bản lồng) và SRT xuất sau.
 
+- 2.1.19: "thêm ở tab Tự động nút xoá những câu không chắc – lớp sau cùng lọc câu rác trước khi gửi tới bộ dịch, dù bật nghe
+  lại / nghe 2 lần vẫn phải qua bước này; mức tuỳ chỉnh thông với tab Phụ đề; chạy với Bắt đầu dịch tự động và Nghe & tách
+  câu" -> xem Cấu trúc "Xoá câu không chắc". Câu đã được lần nghe khác xác nhận không bị xoá (nghe lại ra y hệt / 2 bộ
+  nghe giống nhau là bằng chứng câu đúng dù điểm thấp). Khi bật "Vừa tách vừa dịch" câu nháp có thể đã được dịch trước khi
+  lọc (vẫn bị bỏ ở cuối).
+
 ## Vấn đề đang mở
+- 2.1.19: chờ người dùng bật "Xoá câu không chắc" (tab Tự động nhóm 1) rồi chạy "1. Nghe & tách câu" trên phim thật:
+  thông báo "xoá N câu bộ nghe không chắc", bấm "Khôi phục câu đã xoá" nghe lại xem có xoá nhầm câu thoại thật không (nhiều
+  -> hạ mức 0,7 xuống 0,5–0,6).
 - 2.1.18: chờ người dùng thử nút Xoá trên bảng câu / phím Delete, xem bảng 460 px có vừa màn không (màn thấp phải cuộn),
   bấm câu trên timeline xem tab Phụ đề có tự cuộn tới dòng tô cam không (có làm khó bấm nút ở khung Công cụ không).
 - 2.1.16/17: chờ người dùng nghe xong 1 phim (bản 2.1.15+), bấm "Tích câu bộ nghe không chắc" ở mức 0,7 rồi "Bộ nghe nghe
