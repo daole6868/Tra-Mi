@@ -858,9 +858,16 @@ class SettingsPage(QWidget):
                           on_click=lambda _=False, e=eng: self._pick_model(e))
             ff.row("Model", hbox(mrow, pick))
             w["model"] = mrow
-            w["batch"] = ff.row("Số câu mỗi lần gửi", spin(1, 200),
+            w["batch"] = ff.row("Số câu mỗi lần gửi", spin(1, 1000),
                                 "Mỗi lần gửi AI bao nhiêu câu. Gói miễn phí giới hạn số LẦN gửi -> gửi nhiều câu / lần "
-                                "thì ít lần hơn; AI trả thiếu / lỗi thì giảm xuống 20–30")
+                                "thì ít lần hơn; AI trả thiếu / lỗi thì giảm xuống 20–30. Model trả lời ngắn hơn lô "
+                                "(API báo giới hạn) -> tool tự chia nhỏ")
+            w["parallel"] = ff.row("Gửi tất cả cùng lúc", Switch(),
+                                   "Gói trả phí không giới hạn: mọi lần gửi đi CÙNG LÚC (tối đa 16), không chờ lần "
+                                   "trước trả lời xong -> dịch cả phim / AI kiểm tra bản dịch nhanh gấp nhiều lần. Mỗi "
+                                   "lần vẫn gửi đúng 'Số câu mỗi lần gửi' ở trên (1 lần trả lời của AI có giới hạn độ "
+                                   "dài). Gói miễn phí: để tắt (gửi quá nhanh bị chặn – tool tự chờ theo 'Số lần gửi "
+                                   "tối đa / phút')")
             w["rpm"] = ff.row("Số lần gửi tối đa / phút (mỗi key)", spin(0, 1000),
                               "0 = không giới hạn. Gói miễn phí: đặt thấp hơn giới hạn của nhà cung cấp một chút "
                               "(tool tự chờ cho đủ, nhiều key thì dùng xen kẽ)")
@@ -974,13 +981,14 @@ class SettingsPage(QWidget):
                 w.setPlainText(val or "")
             else:
                 w.setText(val or "")
-        from ..translate import api_keys, engine_batch, engine_rpm
+        from ..translate import api_keys, engine_batch, engine_parallel, engine_rpm
 
         raw = load_settings()
         for eng, w in self.eng_w.items():
             if "keys" in w:
                 w["keys"].set_keys(api_keys(raw, eng))
             w["batch"].setValue(engine_batch(raw, eng))
+            w["parallel"].setChecked(engine_parallel(raw, eng))
             w["rpm"].setValue(engine_rpm(raw, eng))
         self.pub.refresh()
         self.refresh_status()
@@ -1049,6 +1057,7 @@ class SettingsPage(QWidget):
                 d[f"{eng}_api_keys"] = keys
                 d[f"{eng}_api_key"] = keys[0] if keys else ""
             d[f"{eng}_batch"] = int(w["batch"].value())
+            d[f"{eng}_parallel"] = w["parallel"].isChecked()
             d[f"{eng}_rpm"] = int(w["rpm"].value())
         cur = load_settings()
         for k in list(d):

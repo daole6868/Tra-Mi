@@ -309,6 +309,17 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `gui/model_picker.ModelPicker` (ô tìm, "Hiện cả model không dùng để dịch", bấm đúp chọn) thay menu cũ cắt 60 mục đầu
   theo ABC. `LLMClient._max_key`: OpenAI chính hãng + model gpt-5… / o1–o4 -> `max_completion_tokens` (≥ 16000, phần suy
   nghĩ tính vào); API khác báo 400 "max_completion_tokens" -> tự đổi.
+- Số câu mỗi lần gửi / gửi cùng lúc (2.1.23): `translate.engine_batch` ≤ `BATCH_MAX` 1000 (trước 200); `engine_parallel`
+  (Cài đặt `<công cụ>_parallel`, công tắc "Gửi tất cả cùng lúc" mỗi khung công cụ dịch – `SettingsPage.eng_w[...]
+  ["parallel"]`) -> `run_parallel` (ThreadPoolExecutor ≤ `PARALLEL_MAX` 16, mỗi luồng `net.task` giữ nút Huỷ / dòng trạng
+  thái; 1 lô lỗi không mất kết quả lô khác – xong hết mới ném lỗi) cho `Translator.translate_lines` (lô song song: ngữ cảnh
+  trước chỉ câu gốc, không "=>") + `skills.review_lines(parallel=)` (`pipeline.ai_review`); `_pace` qua `_PACE_LOCK`.
+  Độ dài trả lời: `_llm_batch` xin `TOK_BASE` 1500 + `TOK_LINE` 60 × số dòng (trước cố định 8000 – lô 200 câu bị cắt giữa
+  chừng -> chia đôi gửi lại); model suy luận + `THINK_TOK` 12000; chờ đọc max(300, token / 20 + 120) s; API báo 400 giới
+  hạn (`_token_cap`: "at most 16384", "[1, 8192]", "40000 > 32000") -> `_OUT_CAP[(công cụ, model)]` + gửi lại, lô sau
+  `Translator._size` vừa sức; trả lời bị cắt (`finish_reason` length / `stop_reason` max_tokens -> `LLMClient._tl.cut`
+  theo luồng) -> giữ dòng đã trả (`_extract_json` nhặt cả dòng {"dau","dich"} trọn trong JSON dở), dịch tiếp phần sau 1 lô
+  (không tính 1 lần thử). Vừa tách vừa dịch (`stream`) lô ≤ 200.
 - Dấu câu bản dịch (2.1.11): `translate.punct_fix` = `fix_commas` (bỏ dấu phẩy ngay sau `COMMA_GLUE` lượng từ / "của" khi
   chữ sau viết thường, trừ dãy số; dấu phẩy giữa các tiếng của tên trong bảng thuật ngữ `Translator.names`) + `end_punct`
   (thiếu dấu câu cuối -> theo câu gốc: ？/吗/么 -> ?, ！ -> !, … , dấu phẩy -> ",", còn lại "."; Nhật 。？！、, Thái không
@@ -377,7 +388,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (234 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (237 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2051,8 +2062,18 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Sau sửa 24/24: kể cả câu không có mốc chữ (SRT), bộ nghe nghe nhầm 2 chữ đồng âm, "ừm" của người thứ 3 chen giữa, câu
   giữa 2 chữ, đếm chậm; giữ nguyên khi sau câu là tiếng thở / câu bị bỏ sót, 2 người nói chồng nhau, ranh giới đúng mà
   bộ căn ép chữ. Giới hạn: 2 người nói ĐÈ lên nhau mà câu trước bị cắt -> giữ nguyên (nghe gộp ra chữ lẫn lộn).
+- 2.1.23: "Số câu mỗi lần gửi thêm lựa chọn gửi tất cả – gói trả phí không bị giới hạn, cứ gửi ít một rất lâu" (ảnh
+  khung OpenAI: 200 câu / lần, 0 lần / phút). Không gửi cả phim trong 1 lần: 1 lần trả lời của AI có giới hạn độ dài
+  (8k–128k token tuỳ model) và AI viết lần lượt từng chữ -> 1 lần thật dài không nhanh hơn, dễ bị cắt / quá thời gian chờ.
+  Làm "Gửi tất cả cùng lúc" (các lần gửi đi song song) + tìm ra lỗi làm chậm: mỗi lần chỉ xin 8000 token trả lời trong khi
+  200 câu cần ~8–12k (tiếng Việt có dấu tốn token, JSON "dau"/"dich") -> câu trả lời bị cắt, JSON hỏng, chia đôi lô gửi lại
+  (tốn gấp 2–3 lần). Xem Cấu trúc "Số câu mỗi lần gửi / gửi cùng lúc". Thử với AI giả: 50 câu / 5 lô 0,25 s mỗi lô -> gửi
+  cùng lúc ~0,3 s (lần lượt 1,25 s), kết quả giống hệt; API thật chưa gọi (sandbox).
 
 ## Vấn đề đang mở
+- 2.1.23: chờ người dùng bật "Gửi tất cả cùng lúc" (Cài đặt → Công cụ dịch → khung OpenAI), dịch lại 1 phim: thời gian
+  dịch, có bị báo gửi quá nhanh (429 – giới hạn token / phút của gói) không, thông báo "N câu AI lỗi phải dùng Google"
+  phải ~0; thử "Số câu mỗi lần gửi" 300–500.
 - 2.1.22: chờ người dùng chạy lại "1. Nghe & tách câu" (hoặc tích các câu quanh chỗ sai -> tab Phụ đề → Công cụ → Sửa
   câu → "Căn mép theo giọng"): thông báo có "chia lại ranh giới N cặp câu liền nhau", xem các câu kẹp giữa có đúng lúc
   nói không; chậm thêm bao nhiêu (mỗi câu nghi thêm vài khúc nghe ngắn).

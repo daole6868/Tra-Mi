@@ -9658,3 +9658,161 @@ def test_sandwiched_lines_fix_2122(monkeypatch):
     segs[0].extra["ct"][-1] = [segs[0].extra["ct"][-1][0], segs[0].extra["ct"][-1][0] + 0.03]
     st = w.run(monkeypatch, segs, with_ct=False)
     assert st["fixed"] == 0 and _near(segs[0], _wspan(A), 0.001) and _near(segs[1], _wspan(B), 0.001)
+
+
+def test_ai_reply_limit_and_cut_reply_2123(monkeypatch):
+    """Số câu mỗi lần gửi (2.1.23): tới 1000 câu; độ dài trả lời xin theo số câu của lô (trước cố định 8000 token – lô 200
+    câu bị cắt giữa chừng); API báo model trả lời ngắn hơn -> tự hạ đúng giới hạn rồi gửi lại, lô sau nhỏ lại; câu trả lời
+    bị cắt vì hết chỗ -> giữ các dòng đã trả, chỉ dịch tiếp phần sau (không chia đôi gửi lại cả lô)."""
+    from trami import net
+    from trami import translate as tr
+
+    monkeypatch.setattr(tr, "_OUT_CAP", {})
+    assert tr.engine_batch({"openai_batch": 5000}, "openai") == 1000
+    assert tr.engine_parallel({"openai_parallel": True}, "openai") and not tr.engine_parallel({}, "openai")
+    assert not tr.engine_parallel({"google_parallel": True}, "google")
+    cap = tr._token_cap
+    assert cap("max_tokens is too large: 13500. This model supports at most 8,192 completion tokens", 13500) == 8192
+    assert cap("Invalid max_tokens value, the valid range of max_tokens is [1, 8192]", 13500) == 8192
+    assert cap("max_tokens: 40000 > 32000, which is the maximum allowed number of output tokens for claude", 40000) == 32000
+    assert cap("Unsupported value: 'temperature'", 13500) is None
+    # API thật: lần 1 báo giới hạn 8192 -> gửi lại với 8192; trả lời bị cắt -> đánh dấu cut
+    sent = []
+
+    class R:
+        def __init__(self, code, body):
+            self.status_code, self._b, self.headers = code, body, {}
+            self.text = json.dumps(body)
+
+        def json(self):
+            return self._b
+
+    class S:
+        def post(self, url, headers=None, json=None, timeout=None):
+            sent.append((json.get("max_tokens"), timeout))
+            if len(sent) == 1:
+                return R(400, {"error": {"message": "Invalid max_tokens value, the valid range of max_tokens is "
+                                                    "[1, 8192]"}})
+            return R(200, {"choices": [{"finish_reason": "length", "message": {"content": '{"1": "Một'}}]})
+    monkeypatch.setattr(net, "session", lambda: S())
+    c = tr.LLMClient({"deepseek_api_key": "k"}, "deepseek")
+    c.chat("sys", "user", max_tokens=13500)
+    assert [m for m, _t in sent] == [13500, 8192] and c.out_cap() == 8192 and c._tl.cut is True
+    assert sent[0][1][1] > 300                                       # lô dài: chờ AI viết lâu hơn 5 phút
+    # Translator: lô cắt giữa chừng -> chỉ dịch tiếp phần sau; lô sau nhỏ lại theo giới hạn đã biết
+    calls = []
+
+    def fake_chat(self, system, user, max_tokens=8000, temperature=0.3):
+        payload = json.loads(user[user.rindex("{"):])
+        calls.append((len(payload), max_tokens))
+        keys = list(payload)[:6] if len(payload) > 6 else list(payload)
+        self._tl.cut = len(keys) < len(payload)
+        out = ",".join(f'"{k}": {{"dau": "{payload[k][:3]}", "dich": "Câu {payload[k][3:]}"}}' for k in keys)
+        return "{" + out + (', "' + str(len(keys) + 1) + '": {"dau": "第' if self._tl.cut else "}")
+    monkeypatch.setattr(tr.LLMClient, "chat", fake_chat)
+    t = tr.Translator({"translate_engine": "deepseek", "deepseek_api_key": "k", "deepseek_batch": 200}, "deepseek")
+    lines = [f"第一句{i}号" for i in range(20)]
+    got = t.translate_lines(lines)
+    assert got == [f"Câu {i}号." for i in range(20)] and t.fallback_lines == 0
+    assert [n for n, _m in calls] == [20, 14, 8, 2]                 # 6 dòng mỗi lần trả, phần sau gửi tiếp
+    assert calls[0][1] == tr.TOK_BASE + tr.TOK_LINE * 20
+    monkeypatch.setitem(tr._OUT_CAP, ("deepseek", t.llm.model), 2700)
+    assert t._size() == 20                                           # (2700 − 1500) / 60
+    assert not t.llm.thinking and tr.LLMClient({"gemini_api_key": "k", "gemini_model": "gemini-2.5-pro"},
+                                                "gemini").thinking   # Gemini 2.5: phần suy nghĩ tính vào giới hạn
+    # JSON bị cắt giữa chừng vẫn lấy được các dòng đã trả trọn
+    d = tr._extract_json('{"1": {"dau": "我们", "dich": "Chúng ta"}, "2": {"dau": "走", "dich": "Đi"}, "3": {"da')
+    assert d == {"1": {"dau": "我们", "dich": "Chúng ta"}, "2": {"dau": "走", "dich": "Đi"}}
+
+
+def test_ai_send_all_at_once_2123(monkeypatch):
+    """"Gửi tất cả cùng lúc" (2.1.23): các lô dịch / AI kiểm tra bản dịch đi song song (giữ nút Huỷ của việc đang chạy,
+    lô sau chưa có bản dịch lô trước -> ngữ cảnh chỉ câu gốc), kết quả đúng thứ tự như gửi lần lượt; 1 lô lỗi không mất
+    kết quả các lô khác. Cài đặt: công tắc mỗi khung công cụ dịch."""
+    import threading
+    import time
+
+    from trami import net, skills
+    from trami import translate as tr
+
+    monkeypatch.setattr(tr, "_OUT_CAP", {})
+    live, peak, seen = [0], [0], []
+    lock = threading.Lock()
+
+    def fake_chat(self, system, user, max_tokens=8000, temperature=0.3):
+        with lock:
+            live[0] += 1
+            peak[0] = max(peak[0], live[0])
+        seen.append((user, net.current()[0] is not None))
+        time.sleep(0.25)
+        with lock:
+            live[0] -= 1
+        payload = json.loads(user[user.rindex("{"):])
+        return json.dumps({k: "VI " + v[-2:] for k, v in payload.items()}, ensure_ascii=False)
+    monkeypatch.setattr(tr.LLMClient, "chat", fake_chat)
+    lines = [f"他说第{i:02d}" for i in range(50)]
+    base = {"translate_engine": "openai", "openai_api_key": "k", "openai_batch": 10}
+    t0 = time.time()
+    with net.task(lambda: False, None):
+        par = tr.Translator(dict(base, openai_parallel=True), "openai").translate_lines(lines)
+    fast = time.time() - t0
+    assert peak[0] == 5 and fast < 1.0 and all(ok for _u, ok in seen)
+    assert any("NGỮ CẢNH TRƯỚC" in u and "=>" not in u.split("NGỮ CẢNH TRƯỚC")[1].split("DỊCH")[0] for u, _ok in seen)
+    seen.clear()
+    peak[0] = 0
+    seq = tr.Translator(base, "openai").translate_lines(lines)
+    assert seq == par == [f"VI {i:02d}." for i in range(50)] and peak[0] == 1
+    # 1 lô lỗi: các lô khác vẫn dịch xong (vào bộ nhớ dịch), rồi mới báo lỗi
+    def flaky(self, system, user, max_tokens=8000, temperature=0.3):
+        payload = json.loads(user[user.rindex("{"):])
+        if any("第07" in v for v in payload.values()):
+            raise tr.ApiError("hết tiền")
+        return json.dumps({k: "VI " + v[-2:] for k, v in payload.items()}, ensure_ascii=False)
+    monkeypatch.setattr(tr.LLMClient, "chat", flaky)
+    t = tr.Translator(dict(base, openai_parallel=True), "openai")
+    with pytest.raises(tr.ApiError):
+        t.translate_lines(lines)
+    assert len(t.cache) == 40
+    # AI kiểm tra bản dịch: gửi cùng lúc = cùng kết quả
+    class L:
+        def chat(self, system, user, max_tokens=8000, temperature=0.2):
+            time.sleep(0.1)
+            payload = json.loads(user.split("KIỂM TRA CÁC CÂU SAU:\n")[1])
+            return json.dumps({k: {"sua": v["dich"] + " nhé", "ly_do": "x"} for k, v in payload.items()
+                               if int(k) % 3 == 0}, ensure_ascii=False)
+    items = [(i, f"第{i}句", f"Câu {i}.", 10) for i in range(130)]
+    t0 = time.time()
+    a = skills.review_lines(L(), items, "", "", "tiếng Trung", "tiếng việt", "tiếng", parallel=True)
+    fast = time.time() - t0
+    b = skills.review_lines(L(), items, "", "", "tiếng Trung", "tiếng việt", "tiếng")
+    assert a == b and len(a) == 43 and fast < 0.25
+
+
+def test_send_all_switch_gui_2123(monkeypatch):
+    """Cài đặt → Công cụ dịch: mỗi khung có "Gửi tất cả cùng lúc", "Số câu mỗi lần gửi" tới 1000."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+
+    from trami.config import load_settings, save_settings
+    from trami.gui.main import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    old = load_settings()
+    win = MainWindow()
+    try:
+        sp = win.settings_page
+        sp.load()
+        w = sp.eng_w["openai"]
+        assert w["batch"].maximum() == 1000 and not w["parallel"].isChecked()
+        w["batch"].setValue(600)
+        w["parallel"].setChecked(True)
+        d = sp.collect()
+        assert d["openai_parallel"] is True and d["openai_batch"] == 600 and d["gemini_parallel"] is False
+        save_settings(dict(load_settings(), **d))
+        sp.load()
+        assert sp.eng_w["openai"]["parallel"].isChecked() and sp.eng_w["openai"]["batch"].value() == 600
+        app.processEvents()
+    finally:
+        win.close()
+        save_settings(old)

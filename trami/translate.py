@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 import unicodedata
 from typing import Callable
@@ -344,10 +345,15 @@ def _extract_json(txt: str) -> dict:
             return json.loads(m.group(0))
         except Exception:
             pass
-    # dự phòng: "1": "..." từng dòng
+    # dự phòng (AI trả thiếu ngoặc / bị cắt giữa chừng): lấy các dòng đã trả trọn – "1": "..." hoặc "1": {"dau", "dich"}
     out = {}
     for m in re.finditer(r'"(\d+)"\s*:\s*"((?:[^"\\]|\\.)*)"', txt):
         out[m.group(1)] = json.loads('"' + m.group(2) + '"')
+    for m in re.finditer(r'"(\d+)"\s*:\s*(\{[^{}]*\})', txt):
+        try:
+            out[m.group(1)] = json.loads(m.group(2))
+        except Exception:
+            pass
     if out:
         return out
     raise ValueError("Phản hồi không phải JSON hợp lệ")
@@ -374,9 +380,63 @@ def api_keys(settings: dict, engine: str) -> list[str]:
     return out
 
 
+BATCH_MAX = 1000    # "Số câu mỗi lần gửi" tối đa (2.1.23 – trước 200)
+PARALLEL_MAX = 16   # "Gửi tất cả cùng lúc": tối đa 16 lần gửi chạy song song
+TOK_LINE = 60       # token AI trả lời ước cho mỗi dòng dịch (JSON {"dau", "dich"}; tiếng Việt có dấu tốn token)
+TOK_BASE = 1500     # ... + phần chung của câu trả lời
+THINK_TOK = 12000   # model suy luận (gpt-5, o-series): phần suy nghĩ tính vào giới hạn trả lời -> chừa thêm
+
+
 def engine_batch(settings: dict, engine: str) -> int:
     """Số câu mỗi lần gửi AI của công cụ này (khung riêng ở Cài đặt; chưa đặt -> 'Số câu mỗi lần gửi AI' cũ)."""
-    return max(1, int(settings.get(f"{engine}_batch") or settings.get("translate_batch") or 40))
+    return min(BATCH_MAX, max(1, int(settings.get(f"{engine}_batch") or settings.get("translate_batch") or 40)))
+
+
+def engine_parallel(settings: dict, engine: str) -> bool:
+    """"Gửi tất cả cùng lúc" (2.1.23): mọi lần gửi của 1 lượt dịch / kiểm tra đi song song, không chờ lần trước trả lời
+    xong – gói trả phí không giới hạn dịch cả phim nhanh gấp nhiều lần."""
+    return bool(settings.get(f"{engine}_parallel")) and engine not in ("google", "hymt", "none")
+
+
+def run_parallel(fn: Callable, items: list, workers: int = PARALLEL_MAX):
+    """Gọi fn(item) cho mọi item, tối đa `workers` lần cùng lúc; mỗi luồng giữ nút Huỷ + dòng trạng thái của tác vụ
+    đang chạy (`net.task`). Trả dần (item, kết quả) theo thứ tự xong trước. 1 lần gửi lỗi không làm mất kết quả các lần
+    khác: chờ xong hết rồi mới ném lỗi đầu tiên."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    cancel, report = net.current()
+
+    def run(it):
+        with net.task(cancel, report):
+            return fn(it)
+    err = None
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(items))), thread_name_prefix="trami-ai") as ex:
+        futs = {ex.submit(run, it): it for it in items}
+        for f in as_completed(futs):
+            try:
+                res = f.result()
+            except BaseException as e:  # noqa: BLE001 – Huỷ / lỗi API: các lần khác vẫn chạy xong, giữ kết quả
+                err = err or e
+                continue
+            yield futs[f], res
+    if err is not None:
+        raise err
+
+
+_OUT_CAP: dict[tuple[str, str], int] = {}   # (công cụ, model) -> giới hạn token trả lời mà API báo (học trong phiên)
+_PACE_LOCK = threading.Lock()
+
+
+def _token_cap(text: str, asked: int) -> int | None:
+    """API từ chối vì xin trả lời dài quá giới hạn của model -> giới hạn đó ("supports at most 16384 completion tokens",
+    "valid range of max_tokens is [1, 8192]", "max_tokens: 40000 > 32000, which is the maximum…")."""
+    t = (text or "").lower()
+    if not any(x in t for x in ("max_tokens", "max_completion_tokens", "max_output_tokens", "maxoutputtokens",
+                                "output tokens", "completion tokens")):
+        return None
+    nums = [int(x) for x in re.findall(r"\d{3,7}", re.sub(r"(?<=\d),(?=\d{3})", "", t))]
+    nums = [x for x in nums if 256 <= x < asked]
+    return max(nums) if nums else None
 
 
 def engine_rpm(settings: dict, engine: str) -> int:
@@ -427,6 +487,18 @@ class LLMClient:
                          and re.match(r"(gpt-5|o\d)", self.model or "") else "max_tokens")
         # Các model Claude đời mới (và một số model OpenAI) không nhận tham số temperature -> không gửi
         self._send_temp = engine != "anthropic"
+        self._tl = threading.local()    # .cut: lần trả lời gần nhất của luồng này bị cắt vì hết giới hạn độ dài
+
+    def out_cap(self) -> int | None:
+        """Giới hạn token trả lời của model (API đã báo trong phiên này), chưa biết -> None."""
+        return _OUT_CAP.get((self.engine, self.model))
+
+    @property
+    def thinking(self) -> bool:
+        """Model suy luận: phần suy nghĩ tính vào giới hạn trả lời (gpt-5 / o-series, Gemini 2.5+, DeepSeek reasoner)."""
+        m = (self.model or "").lower()
+        return (self._max_key == "max_completion_tokens" or (self.engine == "gemini" and bool(
+            re.search(r"gemini-(2\.5|[3-9])", m))) or (self.engine == "deepseek" and "reasoner" in m))
 
     @property
     def api_key(self) -> str:
@@ -460,7 +532,12 @@ class LLMClient:
         return True
 
     def _pace(self):
-        """Gói miễn phí: không gửi quá `rpm` lần / phút / key – key này hết lượt phút này thì dùng key khác, không có thì chờ."""
+        """Gói miễn phí: không gửi quá `rpm` lần / phút / key – key này hết lượt phút này thì dùng key khác, không có thì chờ.
+        Nhiều lần gửi cùng lúc ("Gửi tất cả cùng lúc"): lần lượt xét qua khoá để không vượt giới hạn."""
+        with _PACE_LOCK:
+            self._pace_one()
+
+    def _pace_one(self):
         if not self._alive(self.ki):
             self._switch(f"{_key_tag(self.engine, self.ki, len(self.keys))} đang bị chặn")
         wait = self._room(self.ki)
@@ -502,41 +579,53 @@ class LLMClient:
             return "hết lượt miễn phí hôm nay"
         return None
 
-    def _http(self, url: str, headers: dict, body: dict):
-        # chờ AI viết xong có thể lâu (không có dữ liệu) -> chờ đọc tới 5 phút; rớt mạng thì keepalive báo trong ~40 s
-        return net.session().post(url, headers=headers, json=body, timeout=(15, 300))
+    def _http(self, url: str, headers: dict, body: dict, read: float = 300):
+        # chờ AI viết xong có thể lâu (không có dữ liệu) -> chờ đọc tới 5 phút (lô dài: lâu hơn); rớt mạng thì keepalive
+        # báo trong ~40 s
+        return net.session().post(url, headers=headers, json=body, timeout=(15, read))
 
     def chat(self, system: str, user: str, max_tokens: int = 8000, temperature: float = 0.3) -> str:
+        """Gửi 1 lần. max_tokens: độ dài trả lời cần (lô dịch dài xin nhiều hơn – 2.1.23); model có giới hạn thấp hơn (API
+        báo 400) -> tự hạ theo đúng giới hạn đó. Trả lời bị cắt vì hết giới hạn -> `self._tl.cut` = True (theo luồng)."""
         last_err = None
         fails = 0
         waits = 0
         name = ENGINE_NAMES.get(self.engine, self.engine)
+        self._tl.cut = False
         while fails < 4:
             try:
                 self._pace()
+                cap = self.out_cap()
                 if self.engine == "anthropic":
-                    body = {"model": self.model, "max_tokens": max(max_tokens, 16000),  # chừa chỗ cho phần suy nghĩ
+                    ask = max(max_tokens, 16000)     # chừa chỗ cho phần suy nghĩ
+                elif self.thinking:   # model suy luận: phần suy nghĩ tính vào giới hạn -> chừa chỗ
+                    ask = max(16000, max_tokens + THINK_TOK)
+                else:
+                    ask = max_tokens
+                ask = min(ask, cap) if cap else ask
+                read = max(300.0, ask / 20 + 120)    # AI viết ~20+ token / giây: lô dài chờ lâu hơn 5 phút
+                if self.engine == "anthropic":
+                    body = {"model": self.model, "max_tokens": ask,
                             "system": system, "messages": [{"role": "user", "content": user}]}
                     if self._send_temp:
                         body["temperature"] = temperature
                     r = net.call(self._http, "https://api.anthropic.com/v1/messages",
                                  {"x-api-key": self.api_key, "anthropic-version": "2023-06-01",
-                                  "content-type": "application/json"}, body)
+                                  "content-type": "application/json"}, body, read)
                     if r.status_code == 200:
-                        return "".join(b.get("text", "") for b in r.json().get("content", []) if b.get("type") == "text")
+                        d = r.json()
+                        self._tl.cut = d.get("stop_reason") == "max_tokens"
+                        return "".join(b.get("text", "") for b in d.get("content", []) if b.get("type") == "text")
                 else:
                     body = {"model": self.model,
                             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
-                    if self._max_key == "max_tokens":
-                        body["max_tokens"] = max_tokens
-                    else:   # model suy luận (gpt-5, o-series): phần suy nghĩ tính vào giới hạn -> chừa chỗ
-                        body["max_completion_tokens"] = max(max_tokens, 16000)
+                    body[self._max_key] = ask
                     if self._send_temp:
                         body["temperature"] = temperature
                     if self._json_mode:
                         body["response_format"] = {"type": "json_object"}
                     r = net.call(self._http, f"{self.base}/chat/completions",
-                                 {"Authorization": f"Bearer {self.api_key}"}, body)
+                                 {"Authorization": f"Bearer {self.api_key}"}, body, read)
                     if r.status_code == 400 and self._json_mode and "response_format" in r.text:
                         self._json_mode = False
                         continue
@@ -544,7 +633,12 @@ class LLMClient:
                         self._max_key = "max_completion_tokens"   # gpt-5 / o-series không nhận max_tokens
                         continue
                     if r.status_code == 200:
-                        return r.json()["choices"][0]["message"]["content"] or ""
+                        ch = r.json()["choices"][0]
+                        self._tl.cut = ch.get("finish_reason") in ("length", "max_tokens")
+                        return ch["message"]["content"] or ""
+                if r.status_code == 400 and (_token_cap(r.text, ask) or 0) > 0:
+                    _OUT_CAP[(self.engine, self.model)] = _token_cap(r.text, ask)   # model trả lời ngắn hơn -> hạ, gửi lại
+                    continue
                 if r.status_code == 400 and self._send_temp and "temperature" in r.text:
                     self._send_temp = False  # model không hỗ trợ temperature -> gửi lại không có nó
                     continue
@@ -786,6 +880,7 @@ class Translator:
             self.glossary.update(glossary)
         self.cache = cache if cache is not None else {}
         self.batch = engine_batch(settings, self.engine)   # số câu mỗi lần gửi (khung riêng từng công cụ ở Cài đặt)
+        self.parallel = engine_parallel(settings, self.engine)   # gửi tất cả các lần cùng lúc (2.1.23)
         self.llm = None if self.engine in LOCAL_ENGINES else LLMClient(settings, self.engine)
         self.fit_dub = bool(settings.get("dub_fit", True))   # dịch vừa thời lượng để lồng tiếng khớp
         # câu ngắn hơn hẳn chỗ trống -> nói đầy đủ hơn (2.1.13: mặc định TẮT – người dùng không muốn AI tự thêm từ)
@@ -913,20 +1008,42 @@ class Translator:
                 if progress:
                     progress(done / len(lines), f"Đang dịch {done}/{len(lines)} câu (Google)")
         else:
-            for b in range(0, len(todo), self.batch):
-                if cancel and cancel():
-                    raise Cancelled()
-                ids = todo[b:b + self.batch]
+            def one(ids):
                 ctx_before = [(lines[k], out[k] or "") for k in range(max(0, ids[0] - CTX_BEFORE), ids[0])]
                 ctx_after = [lines[k] for k in range(ids[-1] + 1, min(len(lines), ids[-1] + 1 + CTX_AFTER))]
-                res = self._llm_batch([lines[i] for i in ids], ctx_before, ctx_after, summary)
+                return self._llm_batch([lines[i] for i in ids], ctx_before, ctx_after, summary)
+
+            def keep(ids, res):
                 for gi, r in zip(ids, res):
                     out[gi] = r
                     if r and not untranslated(r, self.target):
                         self.cache[cache_key(self.engine, self.style, self.target, lines[gi])] = r
-                done += len(ids)
+            size = self._size()
+            if self.parallel and len(todo) > size:
+                # gửi tất cả cùng lúc: các lô đi song song; lô sau chưa có bản dịch của lô trước -> ngữ cảnh chỉ có câu gốc
+                groups = [todo[b:b + size] for b in range(0, len(todo), size)]
                 if progress:
-                    progress(done / len(lines), f"AI đang dịch {done}/{len(lines)} câu ({self.engine})")
+                    progress(done / len(lines), f"AI đang dịch {len(todo)} câu – gửi {len(groups)} lần cùng lúc "
+                                                f"({self.engine})")
+                c0, report = net.current()
+                with net.task(cancel or c0, report):     # nút Huỷ dừng được mọi lần gửi đang chạy
+                    for ids, res in run_parallel(one, groups):
+                        keep(ids, res)
+                        done += len(ids)
+                        if progress:
+                            progress(done / len(lines), f"AI đang dịch {done}/{len(lines)} câu – gửi cùng lúc "
+                                                        f"({self.engine})")
+            else:
+                pos = 0
+                while pos < len(todo):
+                    if cancel and cancel():
+                        raise Cancelled()
+                    ids = todo[pos:pos + self._size()]   # model trả lời ngắn hơn lô (đã biết) -> lô sau nhỏ lại
+                    keep(ids, one(ids))
+                    pos += len(ids)
+                    done += len(ids)
+                    if progress:
+                        progress(done / len(lines), f"AI đang dịch {done}/{len(lines)} câu ({self.engine})")
         return [self._post(o or "", BUDGET_RE.sub(" ", lines[k])) for k, o in enumerate(out)]
 
     # ------------------------------------------------------------- AI
@@ -978,6 +1095,14 @@ class Translator:
                 notes.append(f"Thể loại: {g}. Quan hệ/xưng hô: {r}")
         return "\n".join(notes[:2])
 
+    def _size(self) -> int:
+        """Số câu mỗi lần gửi: theo Cài đặt, nhưng không quá sức trả lời của model (API đã báo giới hạn token)."""
+        cap = self.llm.out_cap() if self.llm else None
+        if not cap:
+            return self.batch
+        room = cap - TOK_BASE - (THINK_TOK if self.llm.thinking else 0)
+        return max(10, min(self.batch, room // TOK_LINE))
+
     def system(self) -> str:
         """Lời nhắc hệ thống khi dịch: luật chung + form thể loại phim + kỹ năng của bạn."""
         return with_skill(system_prompt(self.target, self.source, self.fit_dub and self.fill_short, self.genre),
@@ -1000,8 +1125,9 @@ class Translator:
             parts.append(f"{lab[0]}:\n{summary}")
         if gl:
             parts.append(f"{lab[1]}:\n" + glossary_text(gl))
-        if ctx_before:
-            parts.append(f"{lab[2]}:\n" + "\n".join(f"- {BUDGET_RE.sub(' ', a).strip()} => {b}" for a, b in ctx_before))
+        if ctx_before:   # gửi cùng lúc: dòng trước chưa dịch xong -> chỉ có câu gốc
+            parts.append(f"{lab[2]}:\n" + "\n".join(f"- {BUDGET_RE.sub(' ', a).strip()}" + (f" => {b}" if b else "")
+                                                     for a, b in ctx_before))
         if ctx_after:
             parts.append(f"{lab[3]}:\n" + "\n".join(f"- {BUDGET_RE.sub(' ', a).strip()}" for a in ctx_after))
         payload = {str(i + 1): l for i, l in enumerate(lines)}
@@ -1011,8 +1137,11 @@ class Translator:
                f"return JSON with every key 1..{n}:")
         parts.append(ask + "\n" + json.dumps(payload, ensure_ascii=False, indent=0))
         user = "\n\n".join(parts)
-        try:
-            d = _extract_json(self.llm.chat(self.system(), user))
+        tl = getattr(self.llm, "_tl", None)
+        if tl is not None:
+            tl.cut = False
+        try:   # xin đủ chỗ trả lời cho cả lô (trước 2.1.23 cố định 8000 token: lô 200 câu bị cắt giữa chừng)
+            d = _extract_json(self.llm.chat(self.system(), user, max_tokens=TOK_BASE + TOK_LINE * n))
         except (Cancelled, net.NetworkDown):
             raise
         except (PermissionError, ApiError, ValueError) as e:
@@ -1031,12 +1160,18 @@ class Translator:
                 return res
             for i in miss:
                 res[i] = ""
-            if len(miss) <= max(2, n // 8) and depth < 4:
-                for grp in _runs(miss):   # hỏi lại từng cụm dòng thiếu, kèm các dòng ngay trước / sau của cụm
+            k = n   # AI hết chỗ trả lời giữa chừng (lô dài hơn giới hạn của model): giữ phần đã trả, dịch tiếp phần sau
+            if tl is not None and getattr(tl, "cut", False):
+                k = max((i + 1 for i, r in enumerate(res) if r), default=0)
+            head = [i for i in miss if i < k]
+            if k and len(head) <= max(2, k // 8) and depth < 4:
+                # hỏi lại từng cụm dòng thiếu, kèm các dòng ngay trước / sau của cụm; phần sau chỗ bị cắt = 1 lô ngắn hơn
+                for grp in _runs(head) + ([list(range(k, n))] if k < n else []):
                     a, b = grp[0], grp[-1]
-                    cb = (list(ctx_before) + [(lines[k], res[k]) for k in range(a)])[-CTX_BEFORE:]
-                    ca = ([lines[k] for k in range(b + 1, n)] + list(ctx_after))[:CTX_AFTER]
-                    for i, f in zip(grp, self._llm_batch([lines[i] for i in grp], cb, ca, summary, depth + 1)):
+                    cb = (list(ctx_before) + [(lines[j], res[j]) for j in range(a)])[-CTX_BEFORE:]
+                    ca = ([lines[j] for j in range(b + 1, n)] + list(ctx_after))[:CTX_AFTER]
+                    sub = depth if a == k else depth + 1
+                    for i, f in zip(grp, self._llm_batch([lines[i] for i in grp], cb, ca, summary, sub)):
                         res[i] = f
                 return res
         # lỗi hoặc thiếu nhiều dòng -> chia đôi lô rồi thử lại (mỗi nửa vẫn có ngữ cảnh của nửa kia)

@@ -2853,7 +2853,7 @@ def ai_review(p: Project, settings: dict | None = None, engine: str | None = Non
     """Kỹ năng 3: AI kiểm tra bản dịch (sai nghĩa, xưng hô / tên không thống nhất, quá dài, còn chữ Hán…) và sửa. Câu bạn
     sửa tay không đụng tới. Bản cũ giữ ở extra["trans_before_review"], lý do ở extra["review_note"]. Trả về câu đã sửa."""
     from . import langs, skills
-    from .translate import LLMClient, length_marker
+    from .translate import LLMClient, engine_parallel, length_marker
 
     settings = settings or load_settings()
     eng = ai_engine(settings, engine)
@@ -2873,7 +2873,8 @@ def ai_review(p: Project, settings: dict | None = None, engine: str | None = Non
     fixes = skills.review_lines(LLMClient(settings, eng), items, p.data.get("film_profile", ""),
                                 skills.skill_text(settings), src, L["name"].lower(), L["unit_vi"], target,
                                 progress, cancel, ctx=[(x.text, x.trans) for x in segs],
-                                genre=genres.form(settings.get("translate_style"), target, settings))
+                                genre=genres.form(settings.get("translate_style"), target, settings),
+                                parallel=engine_parallel(settings, eng))
     for i, (new, why) in fixes.items():
         segs[i].extra["trans_before_review"] = segs[i].trans
         segs[i].extra["review_note"] = why

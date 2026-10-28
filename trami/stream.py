@@ -71,7 +71,7 @@ class LivePipeline:
                              dict(p.data.get("cache") or {}), target=target, source=pipeline.source_lang(p),
                              skill=skills.skill_text(settings) if is_ai else "")
         # đủ "Số câu mỗi lần gửi" của công cụ dịch đang chọn (Cài đặt → Công cụ dịch) thì gửi
-        self.batch = max(1, int(self.tr.batch))
+        self.batch = max(1, min(200, int(self.tr.batch)))   # vừa nghe vừa dịch: lô ≤ 200 câu để bản dịch hiện dần
         self.summary = p.data.get("film_profile", "") or p.data.get("summary", "")
         self.dub = dub   # {"voice", "rate", "settings", "lang", "drop_interj"} hoặc None = không đọc trước
         self.threads = [threading.Thread(target=self._translate_loop, daemon=True, name="trami-live-tr")]

@@ -397,20 +397,21 @@ REVIEW_CTX = 2     # mỗi câu kiểm tra kèm 2 câu trước / sau (câu khô
 
 def review_lines(llm, items: list[tuple[int, str, str, int | str]], profile: str, skill: str, src_name: str,
                  target_name: str, unit: str, lang: str = "vi", progress=None, cancel=None,
-                 ctx: list[tuple[str, str]] | None = None, genre: str = "") -> dict[int, tuple[str, str]]:
+                 ctx: list[tuple[str, str]] | None = None, genre: str = "",
+                 parallel: bool = False) -> dict[int, tuple[str, str]]:
     """items: (chỉ số câu, câu gốc, bản dịch, độ dài: số tối đa hoặc chữ "M–N tiếng"). ctx: (câu gốc, bản dịch) của MỌI
     câu trong phim – câu ±2 quanh câu kiểm tra mà không có trong lô được gửi kèm làm ngữ cảnh. genre: form thể loại phim.
-    Trả về {chỉ số: (bản dịch mới, lý do)}."""
+    parallel: gửi tất cả các lô cùng lúc ("Gửi tất cả cùng lúc" của công cụ dịch, 2.1.23). Trả về {chỉ số: (bản dịch mới,
+    lý do)}."""
     from .ffmpeg import Cancelled
-    from .translate import punct_fix
+    from .translate import punct_fix, run_parallel
 
     out: dict[int, tuple[str, str]] = {}
     sysp = REVIEW_PROMPT.format(src=src_name, lang=target_name)
     if (genre or "").strip():
         sysp += "\n\nTHỂ LOẠI PHIM (xưng hô, thuật ngữ, giọng văn):\n" + genre.strip()
-    for a in range(0, len(items), REVIEW_CHUNK):
-        if cancel and cancel():
-            raise Cancelled()
+
+    def one(a: int) -> dict[int, tuple[str, str]]:
         chunk = items[a:a + REVIEW_CHUNK]
         by_no = {i + 1: (i, zh, tr, mx) for i, zh, tr, mx in chunk}   # khoá = số thứ tự câu trong phim
         payload = {str(i + 1): {"goc": zh, "dich": tr, "do_dai": mx if isinstance(mx, str) else f"≤{mx} {unit}"}
@@ -429,14 +430,36 @@ def review_lines(llm, items: list[tuple[int, str, str, int | str]], profile: str
             d = _json(llm.chat(with_skill(sysp, skill), user, max_tokens=8000, temperature=0.2))
         except ValueError:
             d = {}
+        got: dict[int, tuple[str, str]] = {}
         for k, v in d.items():
             if not str(k).isdigit() or int(k) not in by_no or not isinstance(v, dict):
                 continue
             i, zh, old, _ = by_no[int(k)]
             new = punct_fix(str(v.get("sua") or "").strip(), zh, lang)       # dấu phẩy chen sai / thiếu dấu câu cuối
             if new and new != old and (lang == "ja" or len(_HAN.findall(new)) < 2):   # tiếng Nhật có chữ Hán
-                out[i] = (new, str(v.get("ly_do") or "")[:200])
+                got[i] = (new, str(v.get("ly_do") or "")[:200])
+        return got
+
+    starts = list(range(0, len(items), REVIEW_CHUNK))
+    done = 0
+    if parallel and len(starts) > 1:
+        from . import net
+
         if progress:
-            progress(min(1.0, (a + len(chunk)) / max(1, len(items))),
-                     f"AI đang kiểm tra bản dịch {min(len(items), a + len(chunk))}/{len(items)}")
+            progress(0.0, f"AI đang kiểm tra {len(items)} câu dịch – gửi {len(starts)} lần cùng lúc")
+        c0, report = net.current()
+        with net.task(cancel or c0, report):     # nút Huỷ dừng được mọi lần gửi đang chạy
+            for a, got in run_parallel(one, starts):
+                out.update(got)
+                done += len(items[a:a + REVIEW_CHUNK])
+                if progress:
+                    progress(done / max(1, len(items)), f"AI đang kiểm tra bản dịch {done}/{len(items)} – gửi cùng lúc")
+        return out
+    for a in starts:
+        if cancel and cancel():
+            raise Cancelled()
+        out.update(one(a))
+        done += len(items[a:a + REVIEW_CHUNK])
+        if progress:
+            progress(min(1.0, done / max(1, len(items))), f"AI đang kiểm tra bản dịch {done}/{len(items)}")
     return out
