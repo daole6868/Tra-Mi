@@ -192,21 +192,23 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   nâng) / "alt" (tô xanh, `asr_alt_eng` recheck / recheck_o / recheck_s) / "empty" (không ra chữ – nghi nhạc); câu đổi chữ
   đo lại mốc; chỉ đổi chữ gốc (bản dịch / giọng lồng giữ), tích sẵn câu điền / xanh / không ra chữ; `recheck.note` báo
   kết quả. "Dùng bản nghe lại" = `_use_alt`.
-- Nói ngắt quãng / người khác chen ngang (2.1.20): `snap.open_pauses(segs, env)` – đoạn lặng ≥ `dub_pause_min` TRONG câu
-  (giọng đã tách, `_clusters`) mà mốc từng chữ không có khe (bộ căn kéo chữ qua đoạn lặng) -> ranh giới 2 chữ gần nhất
-  (≤ `OPEN_NEAR` 0,25 s; lặng nằm giữa 1 chữ -> chữ đó ở phía có tiếng nhiều hơn) = [hết tiếng, có tiếng lại]; chữ đầu /
-  cuối kéo qua lặng ở mép câu -> co, mép câu theo. Chạy ở `recognize` bước 2h0 (trước `mark_breaths`, có giọng đã tách,
-  Cài đặt `snap_edges`, `p.data["pauses_opened"]` -> `listen_note`) + `snap_edges` (nút "Căn mép theo giọng": + dấu phẩy
-  câu đổi, đã lồng thì xếp lại – `stats["opened"]` -> `snap_note`). Số đếm: `align.count_step` / `_is_count_run` /
-  `_split_counts` – jieba gộp "一二三四五" thành 1 từ -> tách từng số trong `_word_info` / `_word_ends` (con số 三十五 /
-  十一 giữ); `_pull_tail(text=, pos=)` không kéo chữ cuối qua dấu câu / bước đếm. `align.PAUSE_ZH` = `CLAUSE_ZH` + "、" cho
-  `pause_points` / `breath_points` (`_pair_cuts(zh_clauses=)`; tách câu dịch dài vẫn `CLAUSE_ZH`). `tts.plan_pauses` chọn
-  chỗ lặng theo thứ tự (`last_j`). Chen ngang: `diarize.split_interjections` (sau gom cụm, Cài đặt
-  `split_speaker_changes`): vế ≤ `INTERJ_CHARS` 6 chữ, 0,3–1,5 s, có chỗ ngừng ≥ 0,3 s (mốc chữ), phần còn lại ≥ 0,8 s,
-  giọng giống người nói của câu < 0,3 và giống 1 người khác ≥ 0,4 hơn ≥ 0,2 (`centroids`) -> câu riêng của người đó
-  (`extra["interject"]` = người nói cũ, tooltip chữ gốc; Gộp bỏ cờ); `short_speakers`: câu 0,3–0,8 s (chưa đo giọng, trước
-  lấy người nói câu gần nhất) theo giọng giống nhất cùng ngưỡng. `p.data["speaker_interject"]` / `speaker_short` ->
-  `speaker_note`.
+- Giờ nói khi nhân vật nói chậm / ngắt quãng (2.1.20): (1) `snap.retime_by_voice(segs, env)` – bộ căn đặt SAI GIỜ cả
+  khúc: ≥ `BAD_SIL` 30 % số chữ nằm trong chỗ lặng (< 20 % thời gian chữ là tiếng) VÀ ≥ `BAD_UNCOVERED` 1 s (≥ 30 % phần có
+  tiếng) tiếng nói không chữ nào phủ (trừ phần thuộc chữ / giờ câu khác) -> chia lại chữ theo cụm có tiếng
+  (`align.alloc_chars`: mỗi cụm ≥ 1 chữ, theo thời lượng, ranh giới ưu tiên dấu câu); chỉ nhận khi chữ mới < 15 % trong
+  lặng và phủ thêm ≥ 1/2 phần bỏ sót; `extra["ct_voice"]`. Cửa sổ = khúc đã nghe `extra["chunk"]` (`asr_qwen._segment`,
+  tạm – `drop_char_times` bỏ) hoặc tới câu bên cạnh ≤ `RE_WIN` 8 s. Chạy ở `recognize` bước 2a' (sau nghe lại đoạn sót,
+  trước căn + tách câu; có giọng đã tách; Cài đặt `snap_edges`; `p.data["ct_revoiced"]` -> `listen_note`) + `snap_edges`
+  (`stats["revoiced"]`). (2) `snap.open_pauses` – đoạn lặng ≥ `dub_pause_min` TRONG câu mà mốc chữ không có khe (bộ căn kéo
+  chữ qua lặng) -> ranh giới 2 chữ gần nhất (≤ `OPEN_NEAR` 0,25 s; lặng giữa 1 chữ -> chữ đó ở phía có tiếng nhiều hơn) =
+  [hết tiếng, có tiếng lại]; chữ đầu / cuối kéo qua lặng ở mép câu -> co, mép câu theo; `recognize` bước 2h0 (trước
+  `mark_breaths`, `pauses_opened`) + `snap_edges` (+ dấu phẩy câu đổi, đã lồng thì xếp lại – `stats["opened"]`).
+  (3) Không đo được mốc chữ mà nói ngắt quãng (≥ 2 cụm tiếng, < 2 chữ / cụm): `align.char_times_voice` trong `refine` –
+  mốc theo cụm tiếng, GIỮ làm ct (`ct_voice`; trước chia đều theo khung có tiếng, không lưu). (4) Số đếm:
+  `align.count_step` / `_is_count_run` / `_split_counts` – jieba gộp "一二三四五" thành 1 từ -> tách từng số trong
+  `_word_info` / `_word_ends` (三十五 / 十一 giữ); `_pull_tail(text=, pos=)` không kéo chữ cuối qua dấu câu / bước đếm.
+  (5) `align.PAUSE_ZH` = `CLAUSE_ZH` + "、" cho `pause_points` / `breath_points` (`_pair_cuts(zh_clauses=)`; tách câu dịch
+  dài vẫn `CLAUSE_ZH`); `tts.plan_pauses` chọn chỗ lặng theo thứ tự (`last_j`).
 - Xoá câu không chắc (2.1.19): lớp lọc CUỐI CÙNG của `pipeline.recognize` (bước 2i, sau nghe lại câu không chắc / nghe kỹ /
   tên riêng / 2 bộ nghe / câu hát / nghe nhầm / nói vấp / mark_repeats, trước normalize + phân biệt người nói) khi Cài đặt
   `asr_drop_unsure` (tab Tự động nhóm 1 `a_drop`, mặc định tắt) -> `drop_unsure`: bỏ câu `unsure_rows(segs, asr_pick_conf)`
@@ -355,7 +357,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (227 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (229 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2002,20 +2004,22 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   lọc (vẫn bị bỏ ở cuối).
 
 - 2.1.20: "nhân vật đếm chậm 'một … hai … ba…', người khác chen 'tìm chết' giữa chừng – nghe đúng chữ mà thời gian lệch
-  nhiều, lồng tiếng thành nói liền 1 mạch". Giọng lồng chỉ nghỉ giữa câu khi (1) mốc từng chữ có khe ≥ 0,3 s, (2) câu gốc có
-  dấu câu ở đó, (3) câu dịch có dấu câu tương ứng. Thử lại 3 kiểu bộ nghe có thể chép ("一二找死三四…" / "一、二、找死！…" /
-  "一，二，找死！…") × bộ căn có / không chừa khe: chỉ đúng 1/6 trường hợp – jieba gộp "一二三四五六七八九十" thành 1 từ nên
-  không thêm dấu phẩy giữa các số, "、" không được coi là chỗ nghỉ, bộ căn kéo chữ qua đoạn lặng thì khe = 0, chữ cuối
-  "十" cách "九" > 0,8 s bị kéo về sát; "找死" của người khác nằm chung câu với người đếm, câu ngắn < 0,8 s lấy người nói
-  câu gần nhất. Sửa: xem Cấu trúc "Nói ngắt quãng / người khác chen ngang". Sau sửa: 6/6 trường hợp có đủ chỗ nghỉ; giọng
-  lồng câu "一、二、三、四" (bộ đọc đọc liền 1,6 s) chèn 3 khoảng nghỉ, mỗi số vào lệch ≤ 0,2 s lúc nhân vật nói. Ngưỡng
-  giọng chen ngang (0,3 / 0,4 / 0,2) chưa đo trên ECAPA thật (sandbox không tải được mô hình) – đặt chặt để không tách nhầm.
+  nhiều, lồng tiếng thành nói liền 1 mạch" + "lỗi là bộ nghe xác định không đúng thời gian nói, không phải chỗ chen ngang".
+  Giờ nói của từng chữ = bộ căn thời gian (Qwen3-ForcedAligner) trên khúc ≤ 28 s; KHÔNG bước nào so lại với giọng thật
+  (chỉ mép câu – bám mép 2.0.96 – và chữ kéo dài > 1,2 s). Mô phỏng 3 kiểu bộ nghe chép ("一二找死三四…" / "一、二、找死！…"
+  / "一，二，找死！…") × 3 kiểu bộ căn sai (kéo chữ qua đoạn lặng / chữ sau vào sớm giữa đoạn lặng / dồn chữ vào vài giây
+  đầu): trước chỉ đúng khi bộ căn đúng VÀ có dấu phẩy; jieba gộp dãy số thành 1 từ (không thêm dấu phẩy), "、" không được coi
+  là chỗ nghỉ, chữ cuối "十" cách "九" > 0,8 s bị kéo về sát, bộ căn lỗi -> chia đều theo khung có tiếng + không lưu mốc.
+  Sửa: xem Cấu trúc "Giờ nói khi nhân vật nói chậm / ngắt quãng". Sau sửa mọi trường hợp đều có mốc đúng từng số; giọng
+  lồng câu "一、二、三、四" (bộ đọc đọc liền 1,6 s) chèn 3 khoảng nghỉ, mỗi số vào lệch ≤ 0,2 s lúc nhân vật nói. Đã thử
+  thêm tách câu người khác chen ngang theo giọng (ECAPA) – bỏ theo ý người dùng (không phải lỗi đó). Chưa chạy Qwen3 thật
+  (sandbox chặn HF) – không biết chắc bộ căn sai theo kiểu nào trên phim người dùng.
 
 ## Vấn đề đang mở
-- 2.1.20: chờ người dùng chạy lại "1. Nghe & tách câu" trên đoạn đếm số (hoặc dự án cũ: tab Phụ đề → Công cụ → Sửa câu →
-  "Căn mép theo giọng") rồi nghe giọng lồng: mỗi số có vào đúng lúc nhân vật đếm không; thông báo có "mở chỗ ngừng giữa
-  câu ở N câu", "tách N chỗ người khác nói chen ngang". Câu chen ngang không tự tách (cùng giới tính, giọng gần nhau) ->
-  dùng Tách trên timeline + chọn người nói; tách nhầm -> Gộp. Câu dịch thiếu dấu phẩy giữa các số -> sửa tay / Dịch lại.
+- 2.1.20: chờ người dùng chạy lại "1. Nghe & tách câu" (hoặc dự án cũ: tab Phụ đề → Công cụ → Sửa câu → "Căn mép theo
+  giọng") trên đoạn đếm số: khối phụ đề có khớp sóng âm Tiếng gốc không, mỗi số giọng lồng có vào đúng lúc không; thông
+  báo có "căn lại theo giọng N khúc / câu", "mở chỗ ngừng giữa câu ở N câu". Vẫn lệch -> xin project.json của dự án +
+  work\voice_10ms.npy + giờ đoạn đó để xem bộ căn sai kiểu gì. Câu dịch thiếu dấu phẩy giữa các số -> sửa tay / Dịch lại.
 - 2.1.19: chờ người dùng bật "Xoá câu không chắc" (tab Tự động nhóm 1) rồi chạy "1. Nghe & tách câu" trên phim thật:
   thông báo "xoá N câu bộ nghe không chắc", bấm "Khôi phục câu đã xoá" nghe lại xem có xoá nhầm câu thoại thật không (nhiều
   -> hạ mức 0,7 xuống 0,5–0,6).

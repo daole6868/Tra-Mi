@@ -168,6 +168,7 @@ def _segment(s: float, e: float, item: dict, simplify: bool) -> Segment | None:
     if not text or is_hallucination(text):
         return None
     seg = Segment(round(s, 3), round(e, 3), text)
+    seg.extra["chunk"] = [round(s, 3), round(e, 3)]   # khúc đã nghe (kiểm tra mốc chữ theo giọng – tạm, không lưu)
     if item.get("lang"):
         seg.extra["lang"] = item["lang"]    # khúc nói tiếng khác tiếng chính của phim (2.1.3)
     ct = times_from_words(text, item.get("words") or [], s)

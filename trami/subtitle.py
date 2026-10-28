@@ -642,7 +642,6 @@ def merge(segs: list[Segment], i: int) -> list[Segment]:
             a.extra.pop("ct", None)
         if sa or sb:     # bám mép: đầu theo câu trước, cuối theo câu sau
             a.extra["snap"] = [bool((sa or [0, 0])[0]), bool((sb or [0, 0])[1])]
-        a.extra.pop("interject", None)
         del segs[i + 1]
     return segs
 

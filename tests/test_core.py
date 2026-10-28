@@ -9232,41 +9232,87 @@ def test_counting_dub_follows_each_number_2120(tmp_path):
     assert segs[0].extra["dub_at"][1] > 4.0
 
 
-def test_interjection_split_and_short_speakers_2120():
-    """Người khác nói chen ngang giữa câu ("一，二，找死！三，四" – 找死 giọng S2) -> tách thành câu riêng của S2 (câu
-    trước / sau giữ S1, mốc từng chữ đi theo); vế cùng giọng / vế dài / chỉ 1 người nói -> giữ nguyên. Câu ngắn < 0,8 s
-    gán theo giọng giống nhất (trước: theo câu gần nhất)."""
-    from trami import diarize
 
-    sr = diarize.SR
-    audio = np.zeros(10 * sr, np.float32)
+def test_retime_by_voice_wrong_aligner_2120():
+    """Bộ căn đặt SAI GIỜ cả khúc (2.1.20): nhân vật đếm chậm 1 số / 1 s mà mốc 10 chữ dồn vào 3 s đầu -> phần lớn chữ
+    rơi vào chỗ lặng, 6 s tiếng nói không chữ nào phủ -> chia lại chữ theo cụm có tiếng (mỗi số đúng cụm của nó). Mốc
+    đúng / khúc có tiếng cười không ai chép lời / tiếng thuộc câu khác -> giữ nguyên."""
+    from trami import align, snap
 
-    def put(a, b, v):
-        audio[int(a * sr):int(b * sr)] = v
-    for a, b in [(0.0, 0.3), (1.0, 1.3), (2.5, 2.8), (3.5, 3.8), (6.0, 6.5)]:
-        put(a, b, 1.0)              # S1
-    put(1.6, 2.0, 2.0)             # S2 chen ngang
-    put(8.0, 8.5, 2.0)             # câu ngắn của S2
+    voiced = [(k * 1.0, k * 1.0 + 0.3) for k in range(10)]
+    env = _voice_env_db(voiced, 14)
+    text = "一，二，三，四，五，六，七，八，九，十。"
+    squeezed = [[0.3 * k, 0.3 * k + 0.3] for k in range(10)]
+    s = Segment(0.0, 3.05, text, "", "", {"ct": [list(x) for x in squeezed], "chunk": [0.0, 9.4]})
+    assert snap.retime_by_voice([s], env) == [0]
+    assert [round(a, 2) for a, _b in s.extra["ct"]] == [float(k) for k in range(10)]
+    assert s.extra["ct_voice"] and s.start == 0.0 and abs(s.end - 9.35) < 0.01
+    good = Segment(0.0, 9.35, text, "", "", {"ct": [list(x) for x in voiced], "chunk": [0.0, 9.4]})
+    assert snap.retime_by_voice([good], env) == [] and good.extra["ct"] == [list(x) for x in voiced]
+    # khúc có 5 s tiếng cười không ai chép lời: mốc chữ vẫn đúng -> không đụng
+    env2 = _voice_env_db(voiced[:3] + [(4.0, 9.0)], 14)
+    ok = Segment(0.0, 2.35, "一，二，三。", "", "", {"ct": [list(x) for x in voiced[:3]], "chunk": [0.0, 9.0]})
+    assert snap.retime_by_voice([ok], env2) == []
+    # tiếng sau đó thuộc câu khác (đã có mốc) -> không lấy
+    a = Segment(0.0, 0.95, "一二三四", "", "", {"ct": [[0.0, 0.2], [0.2, 0.4], [0.4, 0.6], [0.6, 0.9]],
+                                                "chunk": [0.0, 9.4]})
+    others = [Segment(1.0 + k, 1.35 + k, "好", "", "", {"ct": [[1.0 + k, 1.3 + k]]}) for k in range(9)]
+    assert snap.retime_by_voice([a] + others, env) == []
+    # chia chữ theo cụm: mỗi cụm ≥ 1 chữ, ranh giới ưu tiên dấu câu
+    assert align.alloc_chars([(0, 1), (2, 3)], "一二", [0, 1]) == [(0, 1), (2, 3)]
+    assert align.alloc_chars([(0, 1)] * 3, "一二", [0, 1]) is None
+    t = align.alloc_chars([(0.0, 0.3), (1.0, 2.0)], "好，我们走吧", [0, 2, 3, 4, 5])
+    assert t[0] == (0.0, 0.3) and t[1][0] == 1.0
 
-    def emb(clip):
-        x = clip[np.abs(clip) > 0]
-        v = float(np.median(x)) if len(x) else 0.0
-        return np.array([1.0, 0.1, 0.0]) if v < 1.5 else np.array([0.1, 1.0, 0.0])
-    cents = {"S1": np.array([1.0, 0.1, 0.0]) / np.linalg.norm([1.0, 0.1, 0.0]),
-             "S2": np.array([0.1, 1.0, 0.0]) / np.linalg.norm([0.1, 1.0, 0.0])}
-    ct = [[0.0, 0.3], [1.0, 1.3], [1.6, 1.8], [1.8, 2.0], [2.5, 2.8], [3.5, 3.8]]
-    s = Segment(0.0, 3.85, "一，二，找死！三，四。", "", "S1", {"ct": [list(x) for x in ct]})
-    segs = [s]
-    assert diarize.split_interjections(segs, audio, emb, cents) == 1
-    assert [(x.text, x.speaker) for x in segs] == [("一，二，", "S1"), ("找死！", "S2"), ("三，四。", "S1")]
-    assert segs[1].extra["interject"] == "S1" and segs[1].extra["ct"] == [[1.6, 1.8], [1.8, 2.0]]
-    assert segs[0].start == 0.0 and segs[2].end == 3.85 and segs[0].end <= segs[1].start < 1.6
-    assert segs[1].end <= segs[2].start and segs[1].end > 2.0
-    put(1.6, 2.0, 1.0)             # cùng giọng -> giữ
-    s2 = Segment(0.0, 3.85, "一，二，找死！三，四。", "", "S1", {"ct": [list(x) for x in ct]})
-    keep = [s2]
-    assert diarize.split_interjections(keep, audio, emb, cents) == 0 and keep == [s2]
-    assert diarize.split_interjections(keep, audio, emb, {"S1": cents["S1"]}) == 0
-    short = [Segment(6.0, 6.5, "好", "", "S1"), Segment(8.0, 8.5, "嗯", "", "S1")]
-    assert diarize.short_speakers(short, audio, emb, cents, set()) == 1
-    assert [x.speaker for x in short] == ["S1", "S2"]
+
+def test_sparse_speech_without_aligner_keeps_pauses_2120():
+    """Không đo được mốc từng chữ (bộ căn lỗi / bị loại vì vô lý) mà nhân vật nói ngắt quãng: trước đây chia đều cả câu
+    theo khung có tiếng, mốc vắt qua chỗ ngừng và không lưu -> giọng lồng đọc liền. Giờ mỗi cụm tiếng nhận chữ của nó, mốc
+    được giữ (extra["ct_voice"]) -> dấu phẩy + chỗ nghỉ đúng."""
+    from trami import align, tts
+
+    sr = align.SR
+    audio = np.zeros(8 * sr, np.float32)
+    rng = np.random.default_rng(0)
+    for k in range(5):
+        a = int((1.0 + k) * sr)
+        audio[a:a + int(0.3 * sr)] = rng.standard_normal(int(0.3 * sr)).astype(np.float32) * 0.3
+    s = Segment(0.9, 5.4, "一二三四五", "", "S1")
+    out = align.refine([s], audio, use_fa=False, max_chars=28, params=align.split_params({}))
+    assert len(out) == 1 and out[0].extra.get("ct_voice")
+    ct = out[0].extra["ct"]
+    assert all(abs(ct[k][0] - (1.0 + k)) < 0.06 for k in range(5)), ct
+    assert align.mark_breaths(out, 0.3) == 4 and out[0].text == "一，二，三，四，五"
+    out[0].trans = "Một, hai, ba, bốn, năm."
+    assert len(tts.pause_points(out[0], "vi", 0.3)) == 4
+
+
+def test_snap_edges_retimes_old_project_2120(monkeypatch):
+    """Dự án đã nghe (câu đã tách, không còn khúc): nút "Căn mép theo giọng" tìm phần tiếng nói bị bỏ sót tới câu bên
+    cạnh -> câu đếm bị dồn vào 3 s đầu được căn lại theo giọng, thêm dấu phẩy, xếp lại bản lồng."""
+    from trami import pipeline, silence
+    from trami.project import Project
+
+    p = Project.create("can_lai_theo_giong")
+    p.data["info"] = {"duration": 14}
+    p.data["language"] = "zh"
+    p.segments = [Segment(0.0, 3.05, "一二三四五六七八九十", "Một, hai, ba, bốn, năm, sáu, bảy, tám, chín, mười.", "S1",
+                          {"ct": [[0.3 * k, 0.3 * k + 0.3] for k in range(10)]}),
+                  Segment(12.0, 13.0, "好的", "Được.", "S2", {"ct": [[12.0, 12.4], [12.4, 12.9]]})]
+    p.save()
+    env = _voice_env_db([(k * 1.0, k * 1.0 + 0.3) for k in range(10)] + [(12.0, 12.9)], 14)
+    monkeypatch.setattr(pipeline, "stems", lambda pr: {"vocals": "v.wav", "instrumental": "i.wav"})
+    monkeypatch.setattr(silence, "loudness", lambda *a, **k: env)
+    relaid = []
+    monkeypatch.setattr(pipeline, "has_dub", lambda pr: True)
+    monkeypatch.setattr(pipeline, "relayout", lambda pr, st=None, pg=None, c=None: relaid.append(1))
+    try:
+        st = pipeline.snap_edges(p, {})
+        q = Project(p.id).segments
+        assert st["revoiced"] == 1 and relaid == [1]
+        assert [round(a, 2) for a, _b in q[0].extra["ct"]] == [float(k) for k in range(10)]
+        assert q[0].text == "一，二，三，四，五，六，七，八，九，十" and 9.28 <= q[0].end <= 9.36
+        assert q[1].extra["ct"] == [[12.0, 12.4], [12.4, 12.9]]
+        assert "căn lại theo giọng 1 câu" in pipeline.snap_note(st)
+    finally:
+        p.delete()

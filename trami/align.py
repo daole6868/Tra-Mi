@@ -196,6 +196,59 @@ def char_times_runs(mask: np.ndarray, hop: float, text: str, pos: list[int]) -> 
     return out if len(out) == n else char_times_energy(mask, hop, n)
 
 
+def alloc_chars(groups: list[tuple[float, float]], text: str, pos: list[int]) -> list[tuple[float, float]] | None:
+    """Chia n chữ Hán (theo thứ tự) vào các cụm có tiếng [(đầu, cuối) giây]: mỗi cụm ≥ 1 chữ, số chữ theo thời lượng
+    cụm, ranh giới cụm dời ±1 chữ cho trùng dấu câu nếu được; trong cụm chia đều. None nếu ít chữ hơn số cụm (2.1.20)."""
+    n, g = len(pos), len(groups)
+    if g == 0 or n < g:
+        return None
+    durs = np.array([max(0.01, b - a) for a, b in groups], float)
+    share = durs / durs.sum() * n
+    cnt = np.maximum(1, np.floor(share)).astype(int)
+    while cnt.sum() > n:
+        j = int(np.argmax(np.where(cnt > 1, cnt - share, -1e9)))
+        cnt[j] -= 1
+    while cnt.sum() < n:
+        j = int(np.argmax(share - cnt))
+        cnt[j] += 1
+    punct = {k for k in range(n - 1) if any(not CJK.match(ch) and not ch.isspace()
+                                             for ch in text[pos[k] + 1:pos[k + 1]])}
+    cuts = [int(c) - 1 for c in np.cumsum(cnt)[:-1]]     # cắt SAU chữ thứ c
+    for j, c in enumerate(cuts):
+        if c in punct:
+            continue
+        lo = cuts[j - 1] + 1 if j > 0 else 0
+        hi = cuts[j + 1] - 1 if j + 1 < len(cuts) else n - 2
+        for d in (-1, 1):
+            if lo <= c + d <= hi and c + d in punct:
+                cuts[j] = c + d
+                break
+    bounds = [0] + [c + 1 for c in cuts] + [n]
+    out: list[tuple[float, float]] = []
+    for (a, b), x, y in zip(groups, bounds, bounds[1:]):
+        per = (b - a) / max(1, y - x)
+        out += [(round(a + q * per, 3), round(a + (q + 1) * per, 3)) for q in range(y - x)]
+    return out if len(out) == n else None
+
+
+def char_times_voice(mask: np.ndarray, hop: float, text: str, pos: list[int]) -> list[tuple[float, float]] | None:
+    """Nói ngắt quãng ("一……二……三", mỗi cụm tiếng chỉ 1–2 chữ) mà không có mốc từng chữ: mỗi cụm có tiếng (cách nhau
+    ≥ GAP_SPLIT) nhận chữ theo thứ tự (`alloc_chars`) – mép cụm là chỗ nhân vật thật sự ngừng nên giữ được làm mốc
+    (trước: chia đều cả câu theo khung có tiếng -> mốc chữ vắt qua chỗ ngừng). Chỉ khi ≥ 2 cụm và trung bình < 2 chữ /
+    cụm; còn lại None (dùng `char_times_runs`)."""
+    n = len(pos)
+    gap_k = int(GAP_SPLIT / hop)
+    groups: list[list[int]] = []
+    for a, b in _runs(mask, True):
+        if groups and a - groups[-1][1] < gap_k:
+            groups[-1][1] = b
+        else:
+            groups.append([a, b])
+    if len(groups) < 2 or not len(groups) <= n < 2 * len(groups):
+        return None
+    return alloc_chars([(a * hop, b * hop) for a, b in groups], text, pos)
+
+
 def char_times_energy(mask: np.ndarray, hop: float, n: int) -> list[tuple[float, float]] | None:
     """Dự phòng: chia đều n chữ theo các khung có tiếng."""
     idx = np.where(mask)[0]
@@ -497,7 +550,7 @@ def refine(segs: list[Segment], audio: np.ndarray, use_fa: bool = True, progress
         clip = audio[int(a0 * SR):int(a1 * SR)]
         pos = _char_positions(s.text)
         mask, hop = voiced_mask(clip)
-        times, exact = None, False
+        times, exact, by_voice = None, False, False
         if fa_ok and pos and len(clip) > SR * 0.3:
             times = char_times_fa(clip, "".join(s.text[i] for i in pos))
             exact = times is not None
@@ -507,7 +560,11 @@ def refine(segs: list[Segment], audio: np.ndarray, use_fa: bool = True, progress
             lo, hi = int((s.start - a0) / hop) - 3, int((s.end - a0) / hop) + 3
             m2[:max(0, lo)] = False
             m2[max(0, hi):] = False
-            times = char_times_runs(m2, hop, s.text, pos)
+            times = char_times_voice(m2, hop, s.text, pos)
+            if times is not None:      # nói ngắt quãng: mép cụm tiếng là chỗ ngừng thật -> giữ làm mốc (2.1.20)
+                exact = by_voice = True
+            else:
+                times = char_times_runs(m2, hop, s.text, pos)
         if not times:
             # không có chữ Hán / không thấy tiếng: chỉ thu mốc theo độ to
             vi = np.where(mask)[0]
@@ -524,7 +581,11 @@ def refine(segs: list[Segment], audio: np.ndarray, use_fa: bool = True, progress
                 continue
             out.append(s)
             continue
-        out += split_timed(s, [(a0 + a, a0 + b) for a, b in times], exact, max_chars, total, params)
+        pieces = split_timed(s, [(a0 + a, a0 + b) for a, b in times], exact, max_chars, total, params)
+        if by_voice:
+            for x in pieces:
+                x.extra["ct_voice"] = True
+        out += pieces
         if progress and k % 10 == 0:
             progress(k / max(1, len(segs)), f"Đang căn thời gian và tách câu {k}/{len(segs)}")
     return fix_overlaps(out)
@@ -1201,8 +1262,10 @@ def drop_char_times(segs: list[Segment], keep: bool = True) -> None:
 
     for s in segs:
         s.extra.pop("chunked", None)
+        s.extra.pop("chunk", None)
         if not keep or ("ct" in s.extra and not ct_ok(s)):
             s.extra.pop("ct", None)
+            s.extra.pop("ct_voice", None)
 
 
 # ------------------------------------------------------------------ nghe lại câu bị sót

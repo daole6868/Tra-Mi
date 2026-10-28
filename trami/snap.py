@@ -282,6 +282,86 @@ def open_pauses(segs: list, env: np.ndarray, hop: float = HOP, min_gap: float = 
     return changed
 
 
+SIL_CHAR = 0.2       # chữ có < 20 % thời gian là tiếng = chữ bị đặt vào chỗ lặng
+BAD_SIL = 0.3        # ≥ 30 % số chữ nằm trong chỗ lặng ...
+BAD_UNCOVERED = 1.0  # ... và ≥ 1 s tiếng nói (≥ 30 % phần có tiếng) không chữ nào phủ -> bộ căn đặt sai giờ
+RE_WIN = 8.0         # câu đã tách: tìm phần tiếng nói bị bỏ sót tới câu bên cạnh, tối đa 8 s mỗi bên
+
+
+def _overlap(a: float, b: float, spans: list) -> float:
+    return sum(max(0.0, min(b, y) - max(a, x)) for x, y in spans)
+
+
+def _sil_frac(ct: list, env: np.ndarray, hop: float, thr: float) -> float:
+    bad = sum(1 for a, b in ct if _voiced_len(env, hop, a, b, thr) < SIL_CHAR * max(b - a, hop))
+    return bad / max(1, len(ct))
+
+
+def _uncovered(cl: list, spans: list) -> float:
+    return sum(max(0.0, (b - a) - _overlap(a, b, spans)) for a, b in cl)
+
+
+def retime_by_voice(segs: list, env: np.ndarray, hop: float = HOP, rows=None) -> list[int]:
+    """Bộ căn thời gian đặt SAI GIỜ cả khúc (2.1.20) – hay gặp khi nhân vật nói chậm, ngắt quãng ("一……二……三……"): mốc
+    chữ dồn vào vài giây đầu / rơi vào chỗ lặng, phần nhân vật nói thật thì không chữ nào phủ -> phụ đề sai chỗ, giọng
+    lồng đọc liền 1 mạch. So mốc từng chữ với độ to giọng đã tách trong khúc đã nghe (extra["chunk"]; câu đã tách: tới
+    câu bên cạnh, ≤ RE_WIN giây – dự án cũ, nút "Căn mép theo giọng"; `segs` theo thứ tự giờ): ≥ 30 % số chữ
+    nằm trong chỗ lặng VÀ ≥ 1 s tiếng nói không chữ nào phủ (không tính phần thuộc chữ của câu khác) -> chia lại chữ
+    theo các cụm có tiếng (`align.alloc_chars`); chỉ nhận khi chữ mới hầu hết nằm trong tiếng và phủ được phần lớn
+    tiếng nói. extra["ct_voice"] = True. Trả các câu đã căn lại."""
+    from .align import GAP_SPLIT, PAD, _char_positions, alloc_chars
+
+    env = np.asarray(env, np.float32)
+    n = len(segs)
+    pick = range(n) if rows is None else sorted({int(r) for r in rows if 0 <= int(r) < n})
+    if not len(env):
+        return []
+    floor = _floor(env)
+    spans_of = [[(float(a), float(b)) for a, b in x.extra["ct"]] if ct_ok(x) else [(x.start, x.end)] for x in segs]
+    changed: list[int] = []
+    for i in pick:
+        s = segs[i]
+        ct = spans_of[i] if ct_ok(s) else []
+        if len(ct) < 3:
+            continue
+        if s.extra.get("chunk"):      # ngay sau khi nghe: cả khúc đã nghe
+            w0, w1 = (float(v) for v in s.extra["chunk"])
+        else:                         # câu đã tách: tới câu bên cạnh (≤ RE_WIN giây)
+            w0 = max(s.start - RE_WIN, segs[i - 1].end if i > 0 else 0.0)
+            w1 = min(s.end + RE_WIN, segs[i + 1].start if i + 1 < n else s.end + RE_WIN)
+        w0, w1 = min(w0, ct[0][0]), max(w1, ct[-1][1])
+        thr = _thr(env, hop, w0, w1, floor)
+        if thr is None:
+            continue
+        cl = _clusters(env, hop, w0, w1, thr, gap=0.1)
+        voiced = sum(b - a for a, b in cl)
+        others = [x for j, sp in enumerate(spans_of) if j != i for x in sp if x[1] > w0 and x[0] < w1]
+        f0, u0 = _sil_frac(ct, env, hop, thr), _uncovered(cl, ct + others)
+        if f0 < BAD_SIL or u0 < max(BAD_UNCOVERED, 0.3 * voiced):
+            continue
+        groups: list[list[float]] = []
+        for a, b in cl:
+            if _overlap(a, b, others) > 0.5 * (b - a):
+                continue      # tiếng của câu khác
+            if groups and a - groups[-1][1] < GAP_SPLIT:
+                groups[-1][1] = b
+            else:
+                groups.append([a, b])
+        new = alloc_chars([tuple(g) for g in groups], s.text, _char_positions(s.text))
+        if not new:
+            continue
+        new = [list(x) for x in new]
+        if _sil_frac(new, env, hop, thr) >= 0.15 or _uncovered(cl, new + others) > 0.5 * u0:
+            continue
+        s.extra["ct"] = new
+        s.extra["ct_voice"] = True
+        s.start = round(max(0.0, new[0][0] - PAD), 3)
+        s.end = round(new[-1][1] + PAD, 3)
+        spans_of[i] = [tuple(x) for x in new]
+        changed.append(i)
+    return changed
+
+
 def snap(segs: list, env: np.ndarray, hop: float = HOP, rows=None, total: float = 0.0) -> dict:
     """Dời đầu / cuối các câu (tại chỗ) về đúng lúc nhân vật bắt đầu / thôi nói. rows: chỉ các câu này (số thứ tự
     trong segs đã sắp theo giờ). Trả {"moved": số câu dời, "start": số đầu câu dời, "end": số cuối câu dời,

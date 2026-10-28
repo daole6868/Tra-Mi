@@ -151,135 +151,6 @@ def cluster(embs: np.ndarray, threshold: float = 0.62, n_speakers: int = 0,
     return labels
 
 
-INTERJ_GAP = 0.3       # vế chen ngang: nhân vật ngừng ≥ 0,3 s ở chỗ tách (mốc từng chữ)
-INTERJ_CHARS = 6       # vế ≤ 6 chữ, dài 0,3–1,5 s ("找死！", "住手！", "你敢？")
-INTERJ_DUR = (0.3, 1.5)
-INTERJ_REST = 0.8      # phần còn lại của câu ≥ 0,8 s (đủ để biết giọng chính của câu)
-INTERJ_OWN = 0.3       # giống giọng người nói của câu < 0,3 ...
-INTERJ_OTHER = 0.4     # ... và giống 1 người nói khác ≥ 0,4, hơn ≥ 0,2 -> người khác nói chen ngang
-INTERJ_MARGIN = 0.2
-SHORT_MIN = 0.3        # câu ngắn 0,3–0,8 s (không đủ để gom cụm): gán theo giọng giống nhất khi chắc chắn
-
-
-def _unit(e: np.ndarray) -> np.ndarray | None:
-    e = np.asarray(e, np.float32).reshape(-1)
-    n = float(np.linalg.norm(e))
-    return e / n if n > 0 else None
-
-
-def centroids(segs: list[Segment], idx: list[int], embs: np.ndarray) -> dict[str, np.ndarray]:
-    """Giọng trung bình của từng người nói (từ các câu đủ dài đã đo)."""
-    out: dict[str, list] = {}
-    for i, e in zip(idx, embs):
-        if segs[i].speaker:
-            out.setdefault(segs[i].speaker, []).append(e)
-    cents = {}
-    for k, v in out.items():
-        u = _unit(np.mean(v, axis=0))
-        if u is not None:
-            cents[k] = u
-    return cents
-
-
-def _sims(clip: np.ndarray, emb_fn, cents: dict[str, np.ndarray]) -> dict[str, float]:
-    e = _unit(emb_fn(clip))
-    return {} if e is None else {k: float(c @ e) for k, c in cents.items()}
-
-
-def _clip(audio: np.ndarray, a: float, b: float) -> np.ndarray:
-    return audio[max(0, int((a - 0.05) * SR)):max(0, int((b + 0.05) * SR))]
-
-
-def short_speakers(segs: list[Segment], audio: np.ndarray, emb_fn, cents: dict[str, np.ndarray],
-                   known: set[int]) -> int:
-    """Câu ngắn (0,3–0,8 s) chưa đo giọng – trước đây lấy người nói của câu gần nhất (câu đáp "好。" ngay sau lời người
-    khác thành sai người): đo giọng, giống hẳn 1 người nói khác (≥ 0,4 và hơn ≥ 0,2) thì gán người đó (2.1.20)."""
-    if len(cents) < 2:
-        return 0
-    n = 0
-    for i, s in enumerate(segs):
-        if i in known or s.duration < SHORT_MIN:
-            continue
-        sims = _sims(_clip(audio, s.start, s.end), emb_fn, cents)
-        if not sims:
-            continue
-        best = max(sims, key=sims.get)
-        if best != s.speaker and sims[best] >= INTERJ_OTHER and sims[best] - sims.get(s.speaker, -1.0) >= INTERJ_MARGIN:
-            s.speaker = best
-            n += 1
-    return n
-
-
-def _interjection(s: Segment, audio: np.ndarray, emb_fn, cents: dict[str, np.ndarray]) -> list[Segment] | None:
-    from .align import PAD, _char_positions, _split_text
-    from .snap import ct_ok
-
-    if s.speaker not in cents or not ct_ok(s) or s.extra.get("song"):
-        return None
-    ct = [(float(a), float(b)) for a, b in s.extra["ct"]]
-    pos = _char_positions(s.text)
-    if len(ct) != len(pos) or len(ct) < 3:
-        return None
-    groups, st = [], 0
-    for k in range(len(ct) - 1):
-        if ct[k + 1][0] - ct[k][1] >= INTERJ_GAP:
-            groups.append((st, k))
-            st = k + 1
-    groups.append((st, len(ct) - 1))
-    if len(groups) < 2:
-        return None
-    total = sum(ct[b][1] - ct[a][0] for a, b in groups)
-    who = []
-    for a, b in groups:
-        dur = ct[b][1] - ct[a][0]
-        spk = s.speaker
-        if b - a + 1 <= INTERJ_CHARS and INTERJ_DUR[0] <= dur <= INTERJ_DUR[1] and total - dur >= INTERJ_REST:
-            sims = _sims(_clip(audio, ct[a][0], ct[b][1]), emb_fn, cents)
-            if sims:
-                own = sims.get(s.speaker, -1.0)
-                other = max((k for k in sims if k != s.speaker), key=sims.get)
-                if own < INTERJ_OWN and sims[other] >= INTERJ_OTHER and sims[other] - own >= INTERJ_MARGIN:
-                    spk = other
-        who.append(spk)
-    if all(w == s.speaker for w in who) or all(w != s.speaker for w in who):
-        return None
-    pieces: list[list] = []          # [chữ đầu, chữ cuối, người nói]
-    for (a, b), w in zip(groups, who):
-        if pieces and pieces[-1][2] == w:
-            pieces[-1][1] = b
-        else:
-            pieces.append([a, b, w])
-    texts = _split_text(s.text, pos, [b for _a, b, _w in pieces[:-1]])
-    out = []
-    for j, ((a, b, w), t) in enumerate(zip(pieces, texts)):
-        st_t = s.start if j == 0 else round(max(ct[a][0] - PAD, (ct[a - 1][1] + ct[a][0]) / 2), 3)
-        en_t = s.end if j == len(pieces) - 1 else round(min(ct[b][1] + PAD, (ct[b][1] + ct[b + 1][0]) / 2), 3)
-        ex = {k: v for k, v in s.extra.items() if k not in ("ct", "breaths")}
-        ex["ct"] = [list(x) for x in s.extra["ct"][a:b + 1]]
-        if w != s.speaker:
-            ex["interject"] = s.speaker      # tách từ câu của người nói này (người khác nói chen ngang)
-        out.append(Segment(st_t, en_t, t, "", w, ex))
-    return out
-
-
-def split_interjections(segs: list[Segment], audio: np.ndarray, emb_fn, cents: dict[str, np.ndarray]) -> int:
-    """Người khác nói CHEN NGANG giữa câu ("一，二，找死！三…" – 找死 là người khác): vế ngắn có chỗ ngừng ở 2 bên (mốc
-    từng chữ) mà giọng không giống người nói của câu, giống hẳn 1 người nói khác -> tách thành câu riêng của người đó
-    (lồng tiếng đúng giọng, đúng lúc). Phần trước / sau giữ người nói cũ. Sửa thẳng `segs`, trả số câu được tách (2.1.20)."""
-    if len(cents) < 2:
-        return 0
-    out, n = [], 0
-    for s in segs:
-        pieces = _interjection(s, audio, emb_fn, cents)
-        if pieces:
-            out += pieces
-            n += 1
-        else:
-            out.append(s)
-    segs[:] = out
-    return n
-
-
 def _emb_fn():
     import torch
 
@@ -299,7 +170,6 @@ def assign_speakers(audio_path: str | Path, segs: list[Segment], threshold: floa
     split_changes: trước khi gán, tách các câu dài có 2 người nói liền nhau (sửa thẳng danh sách `segs`)."""
     from .asr_funasr import load_wav16k
 
-    assign_speakers.short_fixed = assign_speakers.interjections = 0
     if not segs:
         return 0
     if progress:
@@ -329,19 +199,6 @@ def assign_speakers(audio_path: str | Path, segs: list[Segment], threshold: floa
     for s in segs:
         if not s.speaker:
             s.speaker = min(known, key=lambda k: abs(k[0] - s.start))[1]
-    cents = centroids(segs, idx, embs)
-    if len(cents) >= 2:   # 2.1.20: câu ngắn theo giọng giống nhất, người khác nói chen ngang giữa câu -> câu riêng
-        try:
-            f = _emb_fn()
-            assign_speakers.short_fixed = short_speakers(segs, audio, f, cents, set(idx))
-            if split_changes:
-                assign_speakers.interjections = split_interjections(segs, audio, f, cents)
-        except Cancelled:
-            raise
-        except Exception:  # noqa: BLE001 – bước phụ: giữ kết quả gom cụm
-            from .config import log_error
-
-            log_error("Câu ngắn / câu chen ngang theo giọng")
     if progress:
         progress(1.0, f"Tìm thấy {len(set(labels.tolist()))} người nói")
     return len(set(labels.tolist()))
