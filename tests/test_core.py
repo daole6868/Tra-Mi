@@ -9485,3 +9485,176 @@ def test_edge_fix_switch_gui_2121(monkeypatch):
     finally:
         p.delete()
         win.close()
+
+
+def _words(text, t0, dur=0.25, gap=0.05):
+    """Chữ nói thật [(chữ, đầu, cuối)] liền nhau từ t0."""
+    out, t = [], t0
+    for ch in text:
+        out.append((ch, round(t, 3), round(t + dur, 3)))
+        t += dur + gap
+    return out
+
+
+def _wspan(ws):
+    return (round(ws[0][1] - 0.05, 3), round(ws[-1][2] + 0.05, 3))
+
+
+class _SpeechWorld:
+    """Phim giả cho thử sửa đầu / cuối câu: giọng đã tách có tiếng đúng lúc mỗi chữ được nói; bộ nghe giả nghe ra đúng
+    chữ có trong khúc (confuse: chữ luôn nghe nhầm); bộ căn giả đặt chữ đúng giờ nếu tiếng nằm trong khúc, chữ có tiếng
+    ngoài khúc bị ép sát mép như bộ căn thật."""
+
+    def __init__(self, speech, extra_voice=(), confuse=None):
+        self.speech, self.confuse = speech, confuse or {}
+        self.env = np.full(4000, -70.0, np.float32)
+        for _c, a, b in speech:
+            self.env[int(round(a / 0.01)):int(round(b / 0.01))] = -18.0
+        for a, b in extra_voice:
+            self.env[int(round(a / 0.01)):int(round(b / 0.01))] = -24.0
+
+    def hear(self, a, b):
+        return "".join(self.confuse.get(c, c) for c, x, y in self.speech if a - 0.05 <= (x + y) / 2 <= b + 0.05)
+
+    def times(self, text, a, b):
+        out, j = [], 0
+        for ch in text:
+            if not "一" <= ch <= "鿿":
+                continue
+            while j < len(self.speech) and self.speech[j][0] != ch:
+                j += 1
+            if j >= len(self.speech):
+                return None
+            _c, x, y = self.speech[j]
+            j += 1
+            if x >= a - 0.05 and y <= b + 0.05:
+                out.append([x, y])
+            else:
+                t = out[-1][1] if out else a
+                out.append([min(t + 0.01, b - 0.02), min(t + 0.03, b)])
+        return out
+
+    def run(self, monkeypatch, segs, with_ct=True):
+        from trami import asr_qwen, pipeline
+
+        if with_ct:
+            for s in segs:
+                s.extra["ct"] = self.times(s.text, s.start - 0.05, s.end + 0.05)
+        world = self
+
+        class W:
+            def call(self, req, progress=None, cancel=None):
+                assert req["cmd"] == "asr"
+                return {"items": [{"text": world.hear(a, b), "conf": 0.9} for a, b in req["spans"]]}
+
+        def fake_align(sub, wav, language, settings, progress=None, cancel=None, engine="qwen3", pad=0.3):
+            for s in sub:
+                ct = world.times(s.text, s.start - pad, s.end + pad)
+                if ct:
+                    s.extra["ct"] = ct
+            return len(sub)
+        monkeypatch.setattr(asr_qwen, "asr_worker", lambda engine, settings=None: W())
+        monkeypatch.setattr(asr_qwen, "align_qwen", fake_align)
+        return pipeline.fix_line_edges(segs, Path("v.wav"), "qwen3", "zh", {}, self.env, 0.01, total=40)
+
+
+def _near(seg, want, tol=0.12):
+    return abs(seg.start - want[0]) <= tol and abs(seg.end - want[1]) <= tol
+
+
+def test_edge_steps_and_pair_checks_2122():
+    """Câu kẹp giữa 2 câu (2.1.22): mỗi bên nới vài nấc (dừng ở từng chỗ ngừng, nấc xa nhất = edge_candidates như
+    2.1.21); nghe gộp cặp câu nhận khi ra đúng lời 2 câu nối nhau (sai ≤ 2 chữ đồng âm), không thêm chữ lạ; cặp nghi chia
+    sai ranh giới = mép bị bộ căn ép chữ / có tiếng không chữ nào phủ / nới không qua được vì nghe ra chữ câu bên cạnh."""
+    from trami import snap
+
+    env = _voice_env_db([(0.0, 1.0), (1.5, 1.8), (2.4, 2.8), (4.5, 5.0)], 8)
+    got = snap.edge_steps([Segment(0.0, 1.05, "一二三四", "", "S1")], env, total=8)
+    assert got[0][0] == 0 and got[0][1] == [] and [round(x, 2) for x in got[0][2]] == [1.85, 2.85]
+    assert snap.edge_candidates([Segment(0.0, 1.05, "一二三四", "", "S1")], env, total=8)[0][2] == got[0][2][-1]
+    late = snap.edge_steps([Segment(2.35, 2.85, "三四", "", "S1")], env, total=8)
+    assert [round(x, 2) for x in late[0][1]] == [1.45, 0.02]          # đầu câu: gần -> xa
+    ok = snap.pair_heard_ok
+    assert ok("我们一起走吧", "你先回去吧", "我们一起走吧你先回去吧。")
+    assert ok("我们一起走吧。", "你先回去吧", "我们一齐走吧你鲜回去吧")     # 2 chữ nghe nhầm đồng âm
+    assert ok("我们一起走吧", "你先回去吧", "我们一起走吧嗯你先回去吧")      # thêm 1 trợ từ của người khác
+    assert not ok("我们一起走吧", "你先回去吧", "我们一起走吧什么你先回去吧")  # có câu khác chen giữa
+    assert not ok("我们一起走吧", "你先回去吧", "我们一起你先")
+    assert not ok("好", "的", "不对")
+    # mép bị ép chữ -> nghi; mép đúng -> không; nới không qua được -> nghi dù cách > 1 s
+    A, B = Segment(0.95, 2.2, "我们一起走吧"), Segment(3.6, 5.0, "你先回去吧")
+    A.extra["ct"] = [[1.0, 1.25], [1.3, 1.55], [1.6, 1.85], [1.9, 2.15], [2.16, 2.18], [2.19, 2.2]]
+    B.extra["ct"] = [[3.65, 3.9], [3.95, 4.2], [4.25, 4.5], [4.55, 4.7], [4.75, 4.95]]
+    env2 = _voice_env_db([(1.0, 2.15), (3.65, 4.95)], 8)
+    assert snap.pair_suspects([A, B], env2) == []                     # cách 1,4 s
+    assert snap.pair_suspects([A, B], env2, extra=[(0, 1)]) == [(0, 1)]
+    B.start = 2.6
+    assert snap.pair_suspects([A, B], env2) == [(0, 1)]
+    A.extra["ct"][-2:] = [[2.16, 2.4], [2.45, 2.7]]
+    A.end, B.start = 2.75, 2.8
+    env3 = _voice_env_db([(1.0, 2.7), (2.85, 4.95)], 8)
+    B.extra["ct"][0] = [2.85, 3.9]
+    assert snap.pair_suspects([A, B], env3) == []
+    env4 = _voice_env_db([(1.0, 2.7), (2.85, 3.5), (3.65, 4.95)], 8)
+    B.extra["ct"][0] = [3.65, 3.9]                                     # đầu câu B có 0,65 s tiếng không chữ nào phủ
+    assert snap.pair_suspects([A, B], env4) == [(0, 1)]
+
+
+def test_sandwiched_lines_fix_2122(monkeypatch):
+    """Câu kẹp giữa 2 câu (2.1.22) – mô phỏng bộ nghe + bộ căn thời gian: 2 câu liền nhau cùng bị cắt (giữa có chỗ
+    ngừng / nói liền không ngừng), câu giữa bị cắt cả 2 đầu, câu bên cạnh chiếm mất chữ (bắt đầu quá sớm / kết thúc quá
+    muộn, có / không có mốc chữ), bộ nghe nghe nhầm chữ đồng âm -> đúng giờ nói; tiếng thở / câu bị bỏ sót / ranh giới
+    đúng mà bộ căn ép chữ -> giữ nguyên."""
+    from trami import pipeline
+
+    # 2 câu cùng bị cắt, giữa đuôi câu trước và đầu câu sau ngừng 0,45 s: nấc gần nhất nghe đúng
+    A, At, Bh, B = _words("我们一起", 1.0), _words("走吧", 2.4), _words("你先", 3.4), _words("回去吧", 4.4)
+    segs = [Segment(*_wspan(A), "我们一起走吧", "", "S1"), Segment(*_wspan(B), "你先回去吧", "", "S2")]
+    st = _SpeechWorld(A + At + Bh + B).run(monkeypatch, segs)
+    assert st["tail"] == 1 and st["head"] == 1 and st["pair"] == 0
+    assert _near(segs[0], (0.95, _wspan(At)[1])) and _near(segs[1], (_wspan(Bh)[0], _wspan(B)[1]))
+    assert segs[0].extra["edge_fix"] == list(_wspan(A)) and segs[0].end < segs[1].start
+    # ... nói liền không ngừng (+ bộ nghe nghe nhầm 2 chữ đồng âm): nghe gộp cả cặp, chia lại theo chữ
+    A, At, Bh, B = (_words("我们一起", 1.0), _words("走吧", 2.2, gap=0.0), _words("你先", 2.7, gap=0.0),
+                    _words("回去吧", 3.6))
+    for conf in ({}, {"起": "齐", "先": "鲜"}):
+        segs = [Segment(*_wspan(A), "我们一起走吧", "", "S1"), Segment(*_wspan(B), "你先回去吧", "", "S2")]
+        st = _SpeechWorld(A + At + Bh + B, confuse=conf).run(monkeypatch, segs)
+        assert st["pair"] == 1 and st["extended"] == 0
+        assert _near(segs[0], (0.95, 2.75)) and _near(segs[1], (2.65, _wspan(B)[1]))
+        assert segs[0].end < segs[1].start and len(segs[0].extra["ct"]) == 6 and len(segs[1].extra["ct"]) == 5
+        assert "chia lại ranh giới 1 cặp câu liền nhau" in pipeline.edge_note(st)
+    # câu giữa bị cắt cả 2 đầu: nới cuối xong xét lại đầu với khúc đã nới
+    P, Mh, M, Mt, N = (_words("好的", 0.5), _words("那就", 2.0), _words("这么定了", 3.0), _words("明天见", 5.0),
+                       _words("再见", 6.6))
+    segs = [Segment(*_wspan(P), "好的", "", "S1"), Segment(*_wspan(M), "那就这么定了明天见", "", "S2"),
+            Segment(*_wspan(N), "再见", "", "S1")]
+    st = _SpeechWorld(P + Mh + M + Mt + N).run(monkeypatch, segs)
+    assert st["head"] == 1 and st["tail"] == 1 and st["rows"] == [1]
+    assert _near(segs[1], (_wspan(Mh)[0], _wspan(Mt)[1])) and _near(segs[0], _wspan(P)) and _near(segs[2], _wspan(N))
+    assert "nới 1 câu bị cắt sớm theo giọng (1 cuối câu, 1 đầu câu)" in pipeline.edge_note(st)
+    # câu sau bắt đầu quá sớm (chiếm đuôi câu trước) – có / không có mốc chữ; câu trước kết thúc quá muộn
+    A, At, B = _words("我们一起", 1.0), _words("走吧", 2.3), _words("你先回去吧", 3.2)
+    for with_ct in (True, False):
+        segs = [Segment(*_wspan(A), "我们一起走吧", "", "S1"), Segment(_wspan(At)[0], _wspan(B)[1], "你先回去吧", "", "S2")]
+        st = _SpeechWorld(A + At + B).run(monkeypatch, segs, with_ct)
+        assert st["pair"] == 1 and _near(segs[0], (0.95, _wspan(At)[1])) and _near(segs[1], _wspan(B))
+    A, Bh, B = _words("我们一起走吧", 1.0), _words("你先", 3.2), _words("回去吧", 4.0)
+    segs = [Segment(_wspan(A)[0], _wspan(Bh)[1], "我们一起走吧", "", "S1"), Segment(*_wspan(B), "你先回去吧", "", "S2")]
+    st = _SpeechWorld(A + Bh + B).run(monkeypatch, segs)
+    assert st["pair"] == 1 and _near(segs[0], _wspan(A)) and _near(segs[1], (_wspan(Bh)[0], _wspan(B)[1]))
+    # giữ nguyên: sau câu chỉ là tiếng thở; sau câu là câu khác bị bỏ sót; ranh giới đúng mà bộ căn ép chữ cuối câu
+    A, B = _words("我们一起走吧", 1.0), _words("好的", 6.0)
+    segs = [Segment(*_wspan(A), "我们一起走吧", "", "S1"), Segment(*_wspan(B), "好的", "", "S2")]
+    assert _SpeechWorld(A + B, extra_voice=[(2.9, 3.6)]).run(monkeypatch, segs)["fixed"] == 0
+    X = _words("你说什么呢", 3.3)
+    segs = [Segment(*_wspan(A), "我们一起走吧", "", "S1"), Segment(*_wspan(B), "好的", "", "S2")]
+    assert _SpeechWorld(A + X + B).run(monkeypatch, segs)["fixed"] == 0
+    A, B = _words("我们一起走吧", 1.0), _words("你先回去吧", 2.9)
+    w = _SpeechWorld(A + B)
+    segs = [Segment(*_wspan(A), "我们一起走吧", "", "S1"), Segment(*_wspan(B), "你先回去吧", "", "S2")]
+    for s in segs:
+        s.extra["ct"] = w.times(s.text, s.start - 0.05, s.end + 0.05)
+    segs[0].extra["ct"][-1] = [segs[0].extra["ct"][-1][0], segs[0].extra["ct"][-1][0] + 0.03]
+    st = w.run(monkeypatch, segs, with_ct=False)
+    assert st["fixed"] == 0 and _near(segs[0], _wspan(A), 0.001) and _near(segs[1], _wspan(B), 0.001)

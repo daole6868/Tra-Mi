@@ -1798,100 +1798,213 @@ def fix_line_edges(segs: list, wav: Path, engine: str, language: str, settings: 
                    rows: list[int] | None = None, total: float = 0.0, progress: Prog | None = None,
                    cancel=None) -> dict:
     """Đầu / cuối câu bị cắt (2.1.21): mốc câu (bộ căn thời gian / SRT) kết thúc khi nhân vật còn đang nói ("04:30,125 –
-    04:34,871" mà thật ra nói tới 04:36,164, giữa chừng ngừng nhiều lần). `snap.edge_candidates` tìm câu ngay sau cuối
-    (trước đầu) còn tiếng nói không thuộc câu nào -> bộ nghe nghe lại khúc câu đang có + khúc đã nới -> `snap.edge_heard_ok`
-    (khúc nới nghe ra thêm chữ của chính câu, không thêm câu khác) -> nới mép, đo lại mốc từng chữ trong khúc mới
-    (`asr_qwen.align_qwen`; lỗi thì chia chữ theo cụm có tiếng). Sửa `segs` tại chỗ; extra["edge_fix"] = [đầu cũ, cuối
-    cũ]. Trả {"checked", "fixed", "head", "tail", "rows"}."""
+    04:34,871" mà thật ra nói tới 04:36,164, giữa chừng ngừng nhiều lần). `snap.edge_steps` tìm câu ngay sau cuối
+    (trước đầu) còn tiếng nói không thuộc câu nào, mỗi bên vài nấc nới (dừng ở từng chỗ ngừng) -> bộ nghe nghe lại khúc
+    câu đang có + từng nấc -> `snap.edge_heard_ok` (nghe ra thêm chữ của chính câu, không thêm câu khác) -> nhận nấc xa
+    nhất nghe đúng. Câu kẹp giữa 2 câu (2.1.22): nấc gần dừng trước chữ câu bên cạnh; câu bị cắt CẢ 2 đầu -> 1 bên nới
+    xong thì xét lại bên kia với khúc đã nới; 2 câu liền nhau chia sai ranh giới (nói liền không ngừng, câu bên cạnh
+    chiếm mất chữ – `snap.pair_suspects`) -> nghe gộp cả cặp (`snap.pair_heard_ok`), đo mốc chữ cả 2 câu 1 lượt, chia lại
+    ranh giới theo chữ. Câu nới mép: đo lại mốc từng chữ trong khúc mới (`asr_qwen.align_qwen`; lỗi thì chia chữ theo
+    cụm có tiếng). Sửa `segs` tại chỗ; extra["edge_fix"] = [đầu cũ, cuối cũ]. Trả {"checked", "fixed", "head", "tail",
+    "pair", "rows"}."""
     import numpy as np
 
     from . import asr_qwen, snap
     from .align import CJK, GAP_SPLIT, PAD, _char_positions, alloc_chars
     from .asr import to_simplified
+    from .subtitle import Segment
 
-    st = {"checked": 0, "fixed": 0, "head": 0, "tail": 0, "rows": []}
-    cands = snap.edge_candidates(segs, env, hop, rows, total)
-    st["checked"] = len(cands)
-    if not cands:
-        return st
-    spans: list[tuple[float, float, int, str]] = []
-    for i, ns, ne in cands:
-        s = segs[i]
-        spans.append((s.start, s.end, i, "o"))
-        if ne > s.end:
-            spans.append((s.start, ne, i, "t"))
-        if ns < s.start:
-            spans.append((ns, s.end, i, "h"))
-    w = asr_qwen.asr_worker(engine, settings)
+    st = {"checked": 0, "fixed": 0, "extended": 0, "head": 0, "tail": 0, "pair": 0, "rows": []}
+    env = np.asarray(env, np.float32)
+    steps = snap.edge_steps(segs, env, hop, rows, total)
+    st["checked"] = len(steps)
+    simplify = language in ("zh", "yue", "auto")
     req = {"cmd": "asr", "wav": str(Path(wav).resolve()), "language": language,
            "prompt": asr_qwen.hotwords(settings), "align": False, "conf": True}
-    heard: dict[tuple[int, str], str] = {}
-    simplify = language in ("zh", "yue", "auto")
-    for g in range(0, len(spans), EDGE_GROUP):
-        part = spans[g:g + EDGE_GROUP]
-        pr = None
-        if progress:
-            lo, hi = 0.8 * g / len(spans), 0.8 * (g + len(part)) / len(spans)
-            pr = (lambda x, m, lo=lo, hi=hi: progress(lo + (hi - lo) * x, m))
-            progress(lo, f"Kiểm tra đầu / cuối {len(cands)} câu có thể bị cắt…")
-        r = w.call(dict(req, spans=[[round(a, 3), round(b, 3)] for a, b, _i, _k in part]), pr, cancel)
-        for (a, b, i, k), it in zip(part, r.get("items") or []):
-            t = (it.get("text") or "").strip()
-            if simplify:
-                t2 = to_simplified(t)
-                t = t2 if len(t2) == len(t) else t
-            heard[(i, k)] = t
-    fixed: dict[int, tuple[float, float]] = {}
-    for i, ns, ne in cands:
+    worker = []
+
+    def listen(spans: list, lo: float, hi: float, msg: str) -> dict:
+        """Nghe các khúc [(đầu, cuối, khoá)] -> {khoá: lời}."""
+        heard: dict = {}
+        if not spans:
+            return heard
+        if not worker:
+            worker.append(asr_qwen.asr_worker(engine, settings))
+        for g in range(0, len(spans), EDGE_GROUP):
+            part = spans[g:g + EDGE_GROUP]
+            pr = None
+            if progress:
+                x0, x1 = lo + (hi - lo) * g / len(spans), lo + (hi - lo) * (g + len(part)) / len(spans)
+                pr = (lambda x, m, x0=x0, x1=x1: progress(x0 + (x1 - x0) * x, m))
+                progress(x0, msg)
+            r = worker[0].call(dict(req, spans=[[round(a, 3), round(b, 3)] for a, b, _k in part]), pr, cancel)
+            for (_a, _b, k), it in zip(part, r.get("items") or []):
+                t = (it.get("text") or "").strip()
+                if simplify:
+                    t2 = to_simplified(t)
+                    t = t2 if len(t2) == len(t) else t
+                heard[k] = t
+        return heard
+
+    order = sorted(range(len(segs)), key=lambda k: segs[k].start)
+    pos = {k: j for j, k in enumerate(order)}
+
+    def nb(i: int, d: int):
+        j = pos[i] + d
+        return order[j] if 0 <= j < len(order) else None
+
+    # lượt 1: từng nấc mỗi bên, so với khúc câu đang có
+    spans: list = []
+    for i, heads, tails in steps:
+        s = segs[i]
+        spans.append((s.start, s.end, (i, "o")))
+        spans += [(s.start, x, (i, "t", x)) for x in tails]
+        spans += [(x, s.end, (i, "h", x)) for x in heads]
+    heard = listen(spans, 0.0, 0.5, f"Kiểm tra đầu / cuối {len(steps)} câu có thể bị cắt…")
+    new_b: dict[int, list[float]] = {}
+    redo: list = []
+    for i, heads, tails in steps:
         s = segs[i]
         base = heard.get((i, "o"), "")
-        a, b = s.start, s.end
-        if ne > s.end and snap.edge_heard_ok(s.text, base, heard.get((i, "t"), "")):
-            b = ne
-            st["tail"] += 1
-        if ns < s.start and snap.edge_heard_ok(s.text, base, heard.get((i, "h"), "")):
-            a = ns
-            st["head"] += 1
+        t_ok = [x for x in tails if snap.edge_heard_ok(s.text, base, heard.get((i, "t", x), ""))]
+        h_ok = [x for x in heads if snap.edge_heard_ok(s.text, base, heard.get((i, "h", x), ""))]
+        a = min(h_ok) if h_ok else s.start
+        b = max(t_ok) if t_ok else s.end
+        new_b[i] = [a, b]
+        if t_ok and heads and not h_ok:      # câu bị cắt cả 2 đầu: nghe lại bên kia với khúc đã nới
+            redo.append((i, "h", heads, heard.get((i, "t", b), "")))
+        if h_ok and tails and not t_ok:
+            redo.append((i, "t", tails, heard.get((i, "h", a), "")))
+    # lượt 2
+    spans = []
+    for i, side, xs, _base in redo:
+        a, b = new_b[i]
+        spans += [((x, b) if side == "h" else (a, x)) + ((i, side + "2", x),) for x in xs]
+    heard2 = listen(spans, 0.5, 0.6, "Kiểm tra lại câu bị cắt cả đầu lẫn cuối…")
+    for i, side, xs, base in redo:
+        ok = [x for x in xs if snap.edge_heard_ok(segs[i].text, base, heard2.get((i, side + "2", x), ""))]
+        if ok:
+            new_b[i][0 if side == "h" else 1] = min(ok) if side == "h" else max(ok)
+    blocked: set = set()      # nới không được vì nấc xa nghe ra chữ câu bên cạnh -> nghe gộp cả cặp
+    fixed: dict[int, tuple[float, float]] = {}
+    for i, heads, tails in steps:
+        s = segs[i]
+        a, b = new_b[i]
+        k = nb(i, 1)
+        if tails and b == s.end and k is not None and segs[k].start - tails[-1] <= snap.PAIR_GAP:
+            blocked.add((i, k))
+        k = nb(i, -1)
+        if heads and a == s.start and k is not None and heads[-1] - segs[k].end <= snap.PAIR_GAP:
+            blocked.add((k, i))
         if (a, b) != (s.start, s.end):
+            st["head"] += a < s.start
+            st["tail"] += b > s.end
             fixed[i] = (s.start, s.end)
             s.start, s.end = round(a, 3), round(b, 3)
             s.extra.pop("ct", None)
             s.extra.pop("ct_voice", None)
             s.extra.pop("snap", None)
+    rows_fixed = sorted(fixed)
+    st["extended"] = len(rows_fixed)
+    eng_a = "firered" if engine == "firered" else "qwen3"
+    if rows_fixed:
+        if progress:
+            progress(0.6, f"Đo lại mốc từng chữ {len(rows_fixed)} câu đã nới mép…")
+        try:
+            asr_qwen.align_qwen([segs[i] for i in rows_fixed], wav, language, settings, None, cancel,
+                                engine=eng_a, pad=0.05)
+        except ff.Cancelled:
+            raise
+        except Exception:  # noqa: BLE001 – bộ căn lỗi: chia chữ theo cụm có tiếng bên dưới
+            log_error("Đo lại mốc chữ câu nới mép")
+        floor = snap._floor(env)
+        for i in rows_fixed:
+            s = segs[i]
+            pos_c = _char_positions(s.text)
+            ct = s.extra.get("ct")
+            if not ct or len(ct) != len(pos_c):
+                thr = snap._thr(env, hop, s.start, s.end, floor)
+                groups: list[list[float]] = []
+                for x, y in (snap._clusters(env, hop, s.start, s.end, thr) if thr else []):
+                    if groups and x - groups[-1][1] < GAP_SPLIT:
+                        groups[-1][1] = y
+                    else:
+                        groups.append([x, y])
+                got = alloc_chars([tuple(g) for g in groups], s.text, pos_c) if pos_c else None
+                if got:
+                    s.extra["ct"] = [list(x) for x in got]
+                    s.extra["ct_voice"] = True
+                ct = s.extra.get("ct")
+            if ct and CJK.search(s.text or ""):
+                s.start = round(max(s.start, float(ct[0][0]) - PAD), 3)
+                s.end = round(min(s.end, float(ct[-1][1]) + PAD), 3) if float(ct[-1][1]) + PAD > s.start + 0.2 else s.end
+    # cặp câu liền nhau chia sai ranh giới: nghe gộp, đo mốc chữ cả 2 câu 1 lượt, chia lại theo chữ
+    want = None if rows is None else sorted({int(r) for r in rows} | set(rows_fixed))
+    view = list(segs)     # câu chưa có mốc chữ (SRT / dự án cũ): đo tạm để nhận ra mép bị ép chữ – không lưu
+    bare = [i for j, i in enumerate(order) if CJK.search(segs[i].text or "")
+            and len(segs[i].extra.get("ct") or []) != len(_char_positions(segs[i].text))
+            and (want is None or i in want)
+            and ((j > 0 and segs[i].start - segs[order[j - 1]].end <= snap.PAIR_GAP)
+                 or (j + 1 < len(order) and segs[order[j + 1]].start - segs[i].end <= snap.PAIR_GAP))]
+    if bare:
+        if progress:
+            progress(0.65, f"Đo tạm mốc chữ {len(bare)} câu chưa có mốc…")
+        tmp = [Segment(segs[i].start, segs[i].end, segs[i].text) for i in bare]
+        try:
+            asr_qwen.align_qwen(tmp, wav, language, settings, None, cancel, engine=eng_a, pad=0.05)
+            for i, t in zip(bare, tmp):
+                view[i] = t
+        except ff.Cancelled:
+            raise
+        except Exception:  # noqa: BLE001
+            log_error("Đo tạm mốc chữ câu chưa có mốc")
+    pairs = snap.pair_suspects(view, env, hop, want, blocked)
+    spans = [(segs[i].start, segs[k].end, (i, k)) for i, k in pairs]
+    heard3 = listen(spans, 0.7, 0.9, f"Kiểm tra ranh giới {len(pairs)} cặp câu liền nhau…")
+    ok_pairs = [(i, k) for i, k in pairs if snap.pair_heard_ok(segs[i].text, segs[k].text, heard3.get((i, k), ""))]
+    if ok_pairs:
+        if progress:
+            progress(0.9, f"Đo mốc từng chữ {len(ok_pairs)} cặp câu…")
+        tmp = [Segment(segs[i].start, segs[k].end, segs[i].text + segs[k].text) for i, k in ok_pairs]
+        try:
+            asr_qwen.align_qwen(tmp, wav, language, settings, None, cancel, engine=eng_a, pad=0.05)
+        except ff.Cancelled:
+            raise
+        except Exception:  # noqa: BLE001 – không đo được thì giữ ranh giới cũ
+            log_error("Đo mốc chữ cặp câu liền nhau")
+            tmp = []
+        for (i, k), t in zip(ok_pairs, tmp):
+            A, B = segs[i], segs[k]
+            ka = len(_char_positions(A.text))
+            ct = t.extra.get("ct") or []
+            if not ka or len(ct) != ka + len(_char_positions(B.text)) or len(ct) <= ka:
+                continue
+            a_end = float(ct[ka - 1][1]) + PAD
+            b_start = float(ct[ka][0]) - PAD
+            if a_end > b_start - snap.GAP:
+                mid = (float(ct[ka - 1][1]) + float(ct[ka][0])) / 2
+                a_end, b_start = mid - snap.GAP / 2, mid + snap.GAP / 2
+            a_end = min(max(a_end, A.start + 0.2), B.end - 0.2)
+            b_start = max(min(b_start, B.end - 0.2), a_end + snap.GAP)
+            if max(abs(a_end - A.end), abs(b_start - B.start)) < snap.PAIR_MIN:
+                continue
+            for r, s, part in ((i, A, ct[:ka]), (k, B, ct[ka:])):
+                fixed.setdefault(r, (s.start, s.end))
+                s.extra["ct"] = [[float(x), float(y)] for x, y in part]
+                s.extra.pop("ct_voice", None)
+                s.extra.pop("snap", None)
+            A.end, B.start = round(a_end, 3), round(b_start, 3)
+            st["pair"] += 1
     if not fixed:
         return st
+    # nới mép không bao giờ lấn câu bên cạnh
+    for i, k in zip(order, order[1:]):
+        A, B = segs[i], segs[k]
+        if (i in fixed or k in fixed) and A.end > B.start - snap.GAP and fixed.get(i, (0, A.end))[1] <= B.start:
+            A.end = round(max(A.start + 0.2, B.start - snap.GAP), 3)
     rows_fixed = sorted(fixed)
-    if progress:
-        progress(0.85, f"Đo lại mốc từng chữ {len(rows_fixed)} câu đã nới mép…")
-    try:
-        asr_qwen.align_qwen([segs[i] for i in rows_fixed], wav, language, settings, None, cancel,
-                            engine="firered" if engine == "firered" else "qwen3", pad=0.05)
-    except ff.Cancelled:
-        raise
-    except Exception:  # noqa: BLE001 – bộ căn lỗi: chia chữ theo cụm có tiếng bên dưới
-        log_error("Đo lại mốc chữ câu nới mép")
-    floor = snap._floor(np.asarray(env, np.float32))
     for i in rows_fixed:
-        s = segs[i]
-        pos = _char_positions(s.text)
-        ct = s.extra.get("ct")
-        if not ct or len(ct) != len(pos):
-            thr = snap._thr(np.asarray(env, np.float32), hop, s.start, s.end, floor)
-            groups: list[list[float]] = []
-            for x, y in (snap._clusters(np.asarray(env, np.float32), hop, s.start, s.end, thr) if thr else []):
-                if groups and x - groups[-1][1] < GAP_SPLIT:
-                    groups[-1][1] = y
-                else:
-                    groups.append([x, y])
-            got = alloc_chars([tuple(g) for g in groups], s.text, pos) if pos else None
-            if got:
-                s.extra["ct"] = [list(x) for x in got]
-                s.extra["ct_voice"] = True
-            ct = s.extra.get("ct")
-        if ct and CJK.search(s.text or ""):
-            s.start = round(max(s.start, float(ct[0][0]) - PAD), 3)
-            s.end = round(min(s.end, float(ct[-1][1]) + PAD), 3) if float(ct[-1][1]) + PAD > s.start + 0.2 else s.end
-        s.extra["edge_fix"] = [round(fixed[i][0], 3), round(fixed[i][1], 3)]
+        segs[i].extra["edge_fix"] = [round(fixed[i][0], 3), round(fixed[i][1], 3)]
     st["fixed"] = len(rows_fixed)
     st["rows"] = rows_fixed
     return st
@@ -1905,9 +2018,14 @@ def edge_note(st: dict | None) -> str:
         return f"chưa kiểm tra được đầu / cuối câu bị cắt ({st['error']})"
     if not st.get("fixed"):
         return ""
-    parts = [f"{st['tail']} cuối câu" if st.get("tail") else "", f"{st['head']} đầu câu" if st.get("head") else ""]
-    return (f"nới {st['fixed']} câu bị cắt sớm theo giọng (" + ", ".join(x for x in parts if x)
-            + ") – bộ nghe nghe lại xác nhận")
+    out = []
+    n = st.get("extended", st["fixed"] if not st.get("pair") else 0)
+    if n:
+        parts = [f"{st['tail']} cuối câu" if st.get("tail") else "", f"{st['head']} đầu câu" if st.get("head") else ""]
+        out.append(f"nới {n} câu bị cắt sớm theo giọng (" + ", ".join(x for x in parts if x) + ")")
+    if st.get("pair"):
+        out.append(f"chia lại ranh giới {st['pair']} cặp câu liền nhau theo từng chữ")
+    return ", ".join(out) + " – bộ nghe nghe lại xác nhận"
 
 
 def snap_note(stats: dict | None) -> str:

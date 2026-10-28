@@ -219,6 +219,16 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   2g' (sau 2 bộ nghe, trước câu hát / nghe nhầm / mở chỗ ngừng; có giọng đã tách; Cài đặt `asr_edge_fix` mặc định bật –
   tab Tự động nhóm 1 `a_edges`, `C.EDGE_FIX_HELP`; `p.data["edge_fix"]` -> `edge_note` trong `listen_note`) + nút "Căn mép
   theo giọng" (`snap_edges(fix_edges=True)`, việc "realign" dùng card, `stats["edges"]` -> `snap_note`, tích sẵn câu đã nới).
+  Câu kẹp giữa 2 câu (2.1.22): `snap.edge_steps` mỗi bên tối đa `STEP_MAX` 6 nấc nới (dừng ở hết từng cụm tiếng, gần ->
+  xa; `edge_candidates` = nấc xa nhất) -> nhận nấc XA NHẤT nghe đúng (2 câu liền nhau cùng bị cắt: nấc gần dừng trước chữ
+  câu bên cạnh); câu bị cắt cả 2 đầu -> lượt 2 xét bên còn lại với khúc đã nới (luật ≥ 75 % lời câu); cặp câu chia sai
+  ranh giới `snap.pair_suspects` (cách ≤ `PAIR_GAP` 1 s / chồng nhau; `_edge_suspect`: chữ mép ≤ `SQUEEZE` 0,05 s = bộ căn
+  ép chữ, hoặc ≥ `UNCOVERED` 0,25 s tiếng trong khúc câu ngoài chữ mép; hoặc nới không qua được vì nấc xa nghe ra chữ câu
+  bên cạnh – `blocked`, không xét khoảng cách; câu chưa có mốc chữ -> đo tạm `align_qwen` trên bản sao, không lưu) -> nghe
+  gộp [đầu câu trước, cuối câu sau] -> `pair_heard_ok` (đúng lời 2 câu nối nhau: sai ≤ max(60 %, min(2 chữ, 15 %)), không
+  chèn chữ lạ trừ 1 trợ từ) -> `align_qwen` lời 2 câu 1 lượt -> chia mốc chữ, ranh giới = chữ cuối câu trước / chữ đầu
+  câu sau ± PAD (dời ≥ `PAIR_MIN` 0,12 s mới đổi); `st["pair"]`, `st["extended"]` -> `edge_note` "chia lại ranh giới N
+  cặp câu liền nhau theo từng chữ".
 - Xoá câu không chắc (2.1.19): lớp lọc CUỐI CÙNG của `pipeline.recognize` (bước 2i, sau nghe lại câu không chắc / nghe kỹ /
   tên riêng / 2 bộ nghe / câu hát / nghe nhầm / nói vấp / mark_repeats, trước normalize + phân biệt người nói) khi Cài đặt
   `asr_drop_unsure` (tab Tự động nhóm 1 `a_drop`, mặc định tắt) -> `drop_unsure`: bỏ câu `unsure_rows(segs, asr_pick_conf)`
@@ -367,7 +377,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (232 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (234 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2033,7 +2043,19 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (tiếng 04:30,125–04:36,164 ngừng 0,5–0,6 s): cuối câu mới 04:36,21 -> bám mép 04:36,16. Chưa chạy Qwen3 thật (sandbox
   chặn HF) – bộ nghe trên khúc câu bị cắt có tự "đoán" thêm chữ không chưa đo.
 
+- 2.1.22: "câu kẹp giữa 2 câu còn lỗi không, test nhiều trường hợp". Mô phỏng 24 tình huống (bộ nghe giả nghe đúng chữ
+  trong khúc, bộ căn giả ép chữ ngoài khúc như bộ căn thật): 2.1.21 sai 6/13 lúc đầu – 2 câu liền nhau cùng bị cắt (khúc
+  nới chạy 1 mạch tới sát câu bên cạnh -> nghe ra chữ câu đó -> bỏ), câu giữa cắt cả 2 đầu (mỗi bên xét riêng không đủ
+  75 % lời), câu bên cạnh chiếm mất chữ (câu sau bắt đầu quá sớm / câu trước kết thúc quá muộn – không có chỗ để nới),
+  nói liền không ngừng giữa 2 câu. Sửa: nới theo nấc, lượt 2, nghe gộp cặp câu + căn chữ 2 câu 1 lượt (xem Cấu trúc).
+  Sau sửa 24/24: kể cả câu không có mốc chữ (SRT), bộ nghe nghe nhầm 2 chữ đồng âm, "ừm" của người thứ 3 chen giữa, câu
+  giữa 2 chữ, đếm chậm; giữ nguyên khi sau câu là tiếng thở / câu bị bỏ sót, 2 người nói chồng nhau, ranh giới đúng mà
+  bộ căn ép chữ. Giới hạn: 2 người nói ĐÈ lên nhau mà câu trước bị cắt -> giữ nguyên (nghe gộp ra chữ lẫn lộn).
+
 ## Vấn đề đang mở
+- 2.1.22: chờ người dùng chạy lại "1. Nghe & tách câu" (hoặc tích các câu quanh chỗ sai -> tab Phụ đề → Công cụ → Sửa
+  câu → "Căn mép theo giọng"): thông báo có "chia lại ranh giới N cặp câu liền nhau", xem các câu kẹp giữa có đúng lúc
+  nói không; chậm thêm bao nhiêu (mỗi câu nghi thêm vài khúc nghe ngắn).
 - 2.1.21: chờ người dùng chạy lại "1. Nghe & tách câu" (hoặc tích câu bị cắt -> tab Phụ đề → Công cụ → Sửa câu → "Căn mép
   theo giọng") : thông báo có "nới N câu bị cắt sớm theo giọng", câu 04:30,125 có về 04:36,164 không, có nới nhầm sang
   tiếng thở / câu người khác không (rê chuột chữ gốc xem giờ trước – sau; sai thì Ctrl+Z / kéo mép lại).
