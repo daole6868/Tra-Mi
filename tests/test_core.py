@@ -8536,7 +8536,7 @@ def test_list_models_all_pages_newest_first_2114(monkeypatch):
     assert tr.LLMClient({"openai_api_keys": ["k"], "openai_model": "gpt-4o"}, "openai")._max_key == "max_tokens"
     bodies = []
 
-    def post(self, url, headers, body):
+    def post(self, url, headers, body, read=300):
         bodies.append(dict(body))
         if "max_tokens" in body:
             return R({}, 400, "Unsupported parameter: 'max_tokens'. Use 'max_completion_tokens' instead.")
