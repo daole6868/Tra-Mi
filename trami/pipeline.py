@@ -573,7 +573,10 @@ def speaker_note(p: Project, settings: dict) -> str:
     if n_set == 1:
         return "1 người nói (gán hết S1, không tách câu theo giọng)"
     return (f"người nói: {found}" + (f" (đặt {n_set})" if n_set else " (tự đoán)")
-            + (f", tách thêm {p.data['speaker_splits']} câu đổi giọng" if p.data.get("speaker_splits") else ""))
+            + (f", tách thêm {p.data['speaker_splits']} câu đổi giọng" if p.data.get("speaker_splits") else "")
+            + (f", tách {p.data['speaker_interject']} chỗ người khác nói chen ngang giữa câu"
+               if p.data.get("speaker_interject") else "")
+            + (f", {p.data['speaker_short']} câu ngắn gán theo giọng giống nhất" if p.data.get("speaker_short") else ""))
 
 
 def diarize(p: Project, settings: dict | None = None, progress: Prog | None = None, cancel=None) -> int:
@@ -589,6 +592,8 @@ def diarize(p: Project, settings: dict | None = None, progress: Prog | None = No
         for s in segs:
             s.speaker = "S1"
         p.data["speaker_splits"] = 0
+        p.data.pop("speaker_interject", None)
+        p.data.pop("speaker_short", None)
         p.segments = segs
         p.save()
         return 1
@@ -601,6 +606,8 @@ def diarize(p: Project, settings: dict | None = None, progress: Prog | None = No
                         int(settings.get("diarize_speakers", 0)), progress, cancel,
                         split_changes=bool(settings.get("split_speaker_changes", True)))
     p.data["speaker_splits"] = int(getattr(assign_speakers, "splits", 0))
+    p.data["speaker_interject"] = int(getattr(assign_speakers, "interjections", 0))
+    p.data["speaker_short"] = int(getattr(assign_speakers, "short_fixed", 0))
     from .align import drop_char_times
 
     drop_char_times(segs)
@@ -1311,6 +1318,7 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
     want_spk = bool(settings.get("diarize", True))
     p.data.pop("asr_rescue_lowconf", None)
     p.data.pop("breaths_marked", None)
+    p.data.pop("pauses_opened", None)
     if method in ("ocr", "hybrid"):
         opr = progress if method == "ocr" else _sub(progress, 0.0, 0.4)
         from .ocr import detect_subtitle_region, expand_region, extract_hardsubs
@@ -1556,6 +1564,20 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
                 p.data["voice_trimmed"] = res["trimmed"]
             except Exception:  # noqa: BLE001 – bước phụ
                 log_error("Lọc câu nghe nhầm theo cao độ")
+        # 2h0) chỗ nhân vật ngừng giữa câu mà bộ căn thời gian kéo chữ qua (đếm chậm, người khác chen ngang): đo độ to
+        # giọng đã tách -> mốc chữ có khe đúng đoạn lặng (2.1.20) – để bước 2h thêm dấu phẩy, giọng lồng nghỉ đúng chỗ
+        if segs and audio_in != Path(src) and settings.get("snap_edges", True):
+            try:
+                env, ehop, esrc = voice_env(p, None, cancel)
+                if env is not None and esrc == "vocals":
+                    from .snap import open_pauses
+
+                    p.data["pauses_opened"] = len(open_pauses(segs, env, ehop,
+                                                              float(settings.get("dub_pause_min", 0.3))))
+            except ff.Cancelled:
+                raise
+            except Exception:  # noqa: BLE001 – bước phụ
+                log_error("Mở chỗ ngừng giữa câu theo giọng")
         # 2h) chỗ nhân vật ngắt hơi giữa câu mà bộ nghe không đặt dấu câu -> "，" (dịch giữ vế, giọng lồng nghỉ đúng chỗ)
         if segs and language in ("zh", "yue", "auto") and settings.get("breath_marks", True):
             from .align import mark_breaths
@@ -1579,6 +1601,8 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         for s in segs:
             s.speaker = "S1"
         p.data["speaker_splits"] = 0
+        p.data.pop("speaker_interject", None)
+        p.data.pop("speaker_short", None)
     want_dz = want_spk and not spk_from_asr and not one_spk and bool(segs)
     if not want_dz:
         from .align import drop_char_times
@@ -1698,12 +1722,20 @@ def snap_edges(p: Project, settings: dict | None = None, rows: list[int] | None 
         raise RuntimeError("Chưa có âm thanh để đo (video gốc không còn ở chỗ cũ?)")
     before = [(s.start, s.end) for s in segs]
     stretched = snap.fix_stretched(segs, env, hop, rows) if src == "vocals" else 0
+    # chỗ nhân vật ngừng giữa câu mà mốc chữ không có khe -> mở khe đúng đoạn lặng + dấu phẩy (2.1.20): giọng lồng nghỉ
+    # đúng chỗ khi xếp lại (câu dịch đã có dấu phẩy ở vế tương ứng – không cần dịch lại)
+    opened = snap.open_pauses(segs, env, hop, float(settings.get("dub_pause_min", 0.3)), rows) \
+        if src == "vocals" else []
+    if opened and settings.get("breath_marks", True) and source_lang(p) in ("zh", "yue", "auto"):
+        from .align import mark_breaths
+
+        mark_breaths(segs, float(settings.get("dub_pause_min", 0.3)), opened)
     stats = snap.snap(segs, env, hop, rows, float(p.data.get("info", {}).get("duration", 0) or 0))
-    stats.update({"src": src, "measured": measured, "stretched": stretched})
+    stats.update({"src": src, "measured": measured, "stretched": stretched, "opened": len(opened)})
     p.segments = segs
     p.data["snap_stats"] = stats
     p.save()
-    if relayout_dub and has_dub(p) and before != [(s.start, s.end) for s in segs]:
+    if relayout_dub and has_dub(p) and (opened or before != [(s.start, s.end) for s in segs]):
         relayout(p, settings, _sub(progress, 0.85, 1.0), cancel)
     if progress:
         progress(1.0, "Đã bám mép câu theo giọng")
@@ -1718,6 +1750,8 @@ def snap_note(stats: dict | None) -> str:
          else "mép câu đã khớp giọng")
     if stats.get("stretched"):
         t += f", co {stats['stretched']} câu có chữ bị kéo dài qua chỗ lặng"
+    if stats.get("opened"):
+        t += f", mở chỗ ngừng giữa câu ở {stats['opened']} câu (giọng lồng nghỉ đúng chỗ)"
     if stats.get("src") == "mix":
         t += " – đo trên tiếng gốc (chưa tách giọng, kém chính xác hơn)"
     if stats.get("est"):
@@ -1870,6 +1904,8 @@ def listen_note(p: Project) -> str:
     out = [x for x in (hybrid_note(p.data.get("hybrid")) if p.data.get("sub_source") == "hybrid" else "",
                        recheck_note(p.data.get("asr_recheck")), name_note(p.data.get("name_pass")),
                        dual_note(p.data.get("asr_dual"))) if x]
+    if p.data.get("pauses_opened"):
+        out.append(f"mở chỗ ngừng giữa câu theo giọng ở {p.data['pauses_opened']} câu (mốc chữ bị kéo qua đoạn lặng)")
     if p.data.get("breaths_marked"):
         out.append(f"thêm dấu phẩy ở {p.data['breaths_marked']} chỗ nhân vật ngắt hơi")
     if (p.data.get("asr_relisten") or {}).get("foreign"):

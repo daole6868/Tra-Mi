@@ -9112,3 +9112,161 @@ def test_pick_unsure_lines_gui_2116(monkeypatch):
     finally:
         p.delete()
         win.close()
+
+
+def test_counting_pauses_words_and_tail_2120():
+    """Đếm chậm "一……二……三" (2.1.20): jieba gộp dãy số đếm thành 1 "từ" -> trước đây không thêm dấu phẩy giữa các số,
+    giọng lồng đọc liền 1 mạch. Giờ mỗi số 1 từ (con số thật 三十五 / 十一 vẫn là 1 từ); dấu "、" ở chỗ nhân vật ngừng
+    cũng là chỗ nghỉ; chữ cuối câu cách chữ trước ở dấu phẩy / bước đếm không bị kéo về sát chữ trước."""
+    from trami import align, tts
+
+    assert align._is_count_run("一二三") and align._is_count_run("三二一") and align._is_count_run("六七八九十")
+    assert not align._is_count_run("三十") and not align._is_count_run("十一") and not align._is_count_run("一三")
+    assert not align._is_count_run("一二一") and not align._is_count_run("一")
+    ct = [[k * 1.0, k * 1.0 + 0.3] for k in range(5)]
+    s = Segment(0.0, 4.4, "一二三四五", "", "S1", {"ct": [list(x) for x in ct]})
+    assert align.mark_breaths([s], 0.3) == 4 and s.text == "一，二，三，四，五"
+    n = Segment(0.0, 2.0, "三十五", "", "S1", {"ct": [[0.0, 0.3], [0.8, 1.1], [1.6, 1.9]]})
+    assert align.mark_breaths([n], 0.3) == 0 and n.text == "三十五"            # 1 con số – không chèn dấu phẩy
+    # "、": giọng lồng nghỉ ở từng số
+    e = Segment(0.0, 3.4, "一、二、三、四。", "Một, hai, ba, bốn.", "S1", {"ct": [list(x) for x in ct[:4]]})
+    assert len(tts.pause_points(e, "vi", 0.3)) == 3
+    assert len(tts.breath_points(e, 0.3)) == 3
+    # chữ cuối "十" cách "九" 1 s ở dấu phẩy: nhân vật ngừng thật -> giữ mốc
+    q = dict(align.split_params({}), pause_comma=99.0, pause_hard=99.0)
+    for text in ("八，九，十。", "八九十。"):
+        t = [(0.0, 0.3), (1.0, 1.3), (2.3, 2.6)]
+        out = align.split_timed(Segment(0.0, 2.7, text, "", "S1"), t, True, 28, 10.0, q)
+        assert len(out) == 1 and out[0].extra["ct"][-1] == [2.3, 2.6] and out[0].end >= 2.6
+    t2 = [(0.0, 0.2), (0.2, 0.4), (1.5, 1.7), (1.7, 1.9)]   # "什么日" … "子": cắt giữa từ -> vẫn kéo về như cũ
+    out = align.split_timed(Segment(0.0, 1.8, "什么日子。", "", "S1"), t2, True, 28, 10.0, q)
+    assert out[0].extra["ct"][3][0] < 1.0
+
+
+def test_open_pauses_from_voice_2120():
+    """Bộ căn kéo chữ qua đoạn lặng (khe giữa 2 chữ = 0) -> đo độ to giọng đã tách, mở khe đúng đoạn lặng ≥ 0,3 s
+    (chữ trước thôi lúc hết tiếng, chữ sau vào lúc có tiếng lại) – cả khi đoạn lặng nằm giữa 1 chữ; câu đã có khe / nói
+    liền giữ nguyên; không đổi đầu / cuối câu."""
+    from trami import snap
+
+    voiced = [(0.0, 0.3), (1.0, 1.3), (1.6, 2.0), (2.5, 2.8), (3.5, 3.8), (4.5, 4.8)]
+    env = _voice_env_db(voiced, 8)
+    real = [[0.0, 0.3], [1.0, 1.3], [1.6, 1.8], [1.8, 2.0], [2.5, 2.8], [3.5, 3.8], [4.5, 4.8]]
+    gaps = [0.7, 0.3, 0.0, 0.5, 0.7, 0.7]
+    absorbed = [[a, real[i + 1][0] if i + 1 < len(real) else b] for i, (a, b) in enumerate(real)]
+    inside = [list(x) for x in absorbed]
+    inside[4], inside[5] = [2.5, 3.6], [3.6, 3.8]       # "三" phủ cả đoạn lặng + đầu chữ "四"
+    for ct in (absorbed, inside):
+        s = Segment(0.0, 4.85, "一，二，找死！三，四，五。", "", "S1", {"ct": [list(x) for x in ct]})
+        assert snap.open_pauses([s], env) == [0]
+        got = s.extra["ct"]
+        assert [round(got[k + 1][0] - got[k][1], 2) for k in range(len(got) - 1)] == gaps
+        assert (s.start, s.end) == (0.0, 4.85)
+    ok = Segment(0.0, 4.85, "一二找死三四五", "", "S1", {"ct": [list(x) for x in real]})
+    assert snap.open_pauses([ok], env) == [] and ok.extra["ct"] == real
+    flat = _voice_env_db([(0.0, 4.8)], 8)
+    s = Segment(0.0, 4.85, "一二找死三四五", "", "S1", {"ct": [list(x) for x in absorbed]})
+    assert snap.open_pauses([s], flat) == []
+    # câu vừa tách ở chỗ ngừng: chữ cuối "死" kéo tới lúc câu sau bắt đầu (2,5 s) -> co về 2,0 s, cuối câu theo
+    tail = Segment(0.0, 2.55, "一，二，找死！", "", "S1", {"ct": [list(x) for x in absorbed[:4]]})
+    tail.extra["ct"][-1] = [1.8, 2.5]
+    assert snap.open_pauses([tail], env) == [0]
+    assert tail.extra["ct"][-1] == [1.8, 2.0] and tail.end == 2.05 and tail.extra["ct"][0] == [0.0, 0.3]
+
+
+def test_open_pauses_snap_edges_marks_and_relayout_2120(monkeypatch):
+    """Nút "Căn mép theo giọng" (snap_edges): mở chỗ ngừng giữa câu -> thêm dấu phẩy câu gốc, đã lồng thì xếp lại bản
+    lồng (giọng nghỉ đúng chỗ, không cần dịch lại); thông báo có số câu."""
+    from trami import pipeline, silence
+    from trami.project import Project
+
+    p = Project.create("mo_cho_ngung")
+    p.data["info"] = {"duration": 8}
+    p.data["language"] = "zh"
+    real = [[0.0, 0.3], [1.0, 1.3], [2.0, 2.3]]
+    absorbed = [[0.0, 1.0], [1.0, 2.0], [2.0, 2.3]]
+    p.segments = [Segment(0.0, 2.35, "一二三", "Một, hai, ba.", "S1", {"ct": absorbed})]
+    p.save()
+    env = _voice_env_db([tuple(x) for x in real], 8)
+    monkeypatch.setattr(pipeline, "stems", lambda pr: {"vocals": "v.wav", "instrumental": "i.wav"})
+    monkeypatch.setattr(silence, "loudness", lambda *a, **k: env)
+    relaid = []
+    monkeypatch.setattr(pipeline, "has_dub", lambda pr: True)
+    monkeypatch.setattr(pipeline, "relayout", lambda pr, st=None, pg=None, c=None: relaid.append(1))
+    try:
+        st = pipeline.snap_edges(p, {})
+        q = Project(p.id).segments[0]
+        assert st["opened"] == 1 and q.text == "一，二，三" and q.extra["ct"][0] == [0.0, 0.3] and relaid == [1]
+        assert "mở chỗ ngừng giữa câu ở 1 câu" in pipeline.snap_note(st)
+        from trami import tts
+
+        assert len(tts.pause_points(q, "vi", 0.3)) == 2
+    finally:
+        p.delete()
+
+
+def test_counting_dub_follows_each_number_2120(tmp_path):
+    """Cả chuỗi: câu đếm "一、二、三、四" (nhân vật ngừng ~0,7 s sau mỗi số), bộ đọc đọc "Một, hai, ba, bốn." liền
+    ~1,6 s -> giọng lồng chèn lặng ở 3 chỗ, mỗi số vào gần đúng lúc nhân vật nói số đó (trước 2.1.20: đọc liền 1 mạch)."""
+    from trami import tts
+
+    sr = tts.SR
+    word = lambda k: _speech_like(sr, 0.3, k) * 3      # noqa: E731
+    z = np.zeros(int(0.12 * sr), np.float32)
+    clip = np.clip(np.concatenate([word(1), z, word(2), z, word(3), z, word(4)]), -0.95, 0.95)
+    f = tmp_path / "dem.wav"
+    tts.write_wav(f, clip, sr)
+    ct = [[1.0 + k, 1.3 + k] for k in range(4)]
+    segs = [Segment(1.0, 4.35, "一、二、三、四。", "Một, hai, ba, bốn.", "S1", {"ct": ct, "tts_file": str(f)})]
+    st = {}
+    tts.synthesize_dub(segs, tmp_path / "o.wav", 7, tmp_path / "w", stats=st, only=set(), max_speedup=1.0,
+                       settings={"dub_level_match": False})
+    assert st["pauses"] == 3 and segs[0].extra["dub_pauses"] == 3
+    a = tts._decode(tmp_path / "o.wav")
+    hop = int(0.01 * sr)
+    lv = np.array([np.abs(a[i:i + hop]).max() for i in range(0, len(a) - hop, hop)])
+    on = [i * 0.01 for i in range(1, len(lv)) if lv[i] > 0.05 and lv[i - 1] <= 0.05]
+    assert len(on) == 4
+    for k, t in enumerate(on):
+        assert abs(t - (1.0 + k)) < 0.2, on                # mỗi số vào đúng lúc nhân vật nói (±0,2 s)
+    assert segs[0].extra["dub_at"][1] > 4.0
+
+
+def test_interjection_split_and_short_speakers_2120():
+    """Người khác nói chen ngang giữa câu ("一，二，找死！三，四" – 找死 giọng S2) -> tách thành câu riêng của S2 (câu
+    trước / sau giữ S1, mốc từng chữ đi theo); vế cùng giọng / vế dài / chỉ 1 người nói -> giữ nguyên. Câu ngắn < 0,8 s
+    gán theo giọng giống nhất (trước: theo câu gần nhất)."""
+    from trami import diarize
+
+    sr = diarize.SR
+    audio = np.zeros(10 * sr, np.float32)
+
+    def put(a, b, v):
+        audio[int(a * sr):int(b * sr)] = v
+    for a, b in [(0.0, 0.3), (1.0, 1.3), (2.5, 2.8), (3.5, 3.8), (6.0, 6.5)]:
+        put(a, b, 1.0)              # S1
+    put(1.6, 2.0, 2.0)             # S2 chen ngang
+    put(8.0, 8.5, 2.0)             # câu ngắn của S2
+
+    def emb(clip):
+        x = clip[np.abs(clip) > 0]
+        v = float(np.median(x)) if len(x) else 0.0
+        return np.array([1.0, 0.1, 0.0]) if v < 1.5 else np.array([0.1, 1.0, 0.0])
+    cents = {"S1": np.array([1.0, 0.1, 0.0]) / np.linalg.norm([1.0, 0.1, 0.0]),
+             "S2": np.array([0.1, 1.0, 0.0]) / np.linalg.norm([0.1, 1.0, 0.0])}
+    ct = [[0.0, 0.3], [1.0, 1.3], [1.6, 1.8], [1.8, 2.0], [2.5, 2.8], [3.5, 3.8]]
+    s = Segment(0.0, 3.85, "一，二，找死！三，四。", "", "S1", {"ct": [list(x) for x in ct]})
+    segs = [s]
+    assert diarize.split_interjections(segs, audio, emb, cents) == 1
+    assert [(x.text, x.speaker) for x in segs] == [("一，二，", "S1"), ("找死！", "S2"), ("三，四。", "S1")]
+    assert segs[1].extra["interject"] == "S1" and segs[1].extra["ct"] == [[1.6, 1.8], [1.8, 2.0]]
+    assert segs[0].start == 0.0 and segs[2].end == 3.85 and segs[0].end <= segs[1].start < 1.6
+    assert segs[1].end <= segs[2].start and segs[1].end > 2.0
+    put(1.6, 2.0, 1.0)             # cùng giọng -> giữ
+    s2 = Segment(0.0, 3.85, "一，二，找死！三，四。", "", "S1", {"ct": [list(x) for x in ct]})
+    keep = [s2]
+    assert diarize.split_interjections(keep, audio, emb, cents) == 0 and keep == [s2]
+    assert diarize.split_interjections(keep, audio, emb, {"S1": cents["S1"]}) == 0
+    short = [Segment(6.0, 6.5, "好", "", "S1"), Segment(8.0, 8.5, "嗯", "", "S1")]
+    assert diarize.short_speakers(short, audio, emb, cents, set()) == 1
+    assert [x.speaker for x in short] == ["S1", "S2"]

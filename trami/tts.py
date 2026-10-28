@@ -1426,7 +1426,7 @@ def pause_points(s: Segment, lang: str = "vi", min_gap: float = PAUSE_MIN) -> li
     """Chỗ nhân vật ngắt hơi giữa câu (theo mốc từng chữ thật extra["ct"]) mà câu dịch có dấu câu tương ứng:
     [(giây thôi nói, giây nói tiếp, vị trí ngắt trong câu gốc, vị trí ngắt trong câu dịch)]. Không có mốc từng chữ /
     không dấu câu ghép được -> []."""
-    from .align import CJK, _pair_cuts
+    from .align import CJK, PAUSE_ZH, _pair_cuts
     from .subtitle import ct_of
 
     ct = ct_of(s)
@@ -1434,7 +1434,7 @@ def pause_points(s: Segment, lang: str = "vi", min_gap: float = PAUSE_MIN) -> li
     if not ct or len(ct) < 2 or not tr:
         return []
     out = []
-    for pz, pt, _kind in _pair_cuts(zh, tr, lang):
+    for pz, pt, _kind in _pair_cuts(zh, tr, lang, PAUSE_ZH):
         k = len(CJK.findall(zh[:pz]))
         if not 0 < k < len(ct):
             continue
@@ -1454,7 +1454,7 @@ def orig_pauses(s: Segment, lang: str = "vi", min_gap: float = PAUSE_MIN) -> lis
 def breath_points(s: Segment, min_gap: float = PAUSE_MIN) -> list[int]:
     """Chỗ nhân vật ngắt hơi trong câu GỐC (khe ≥ min_gap giữa 2 chữ, có dấu câu ở đó): vị trí ngay sau dấu câu –
     cùng cách tính với vị trí câu gốc của align._pair_cuts (để biết câu dịch đã giữ đủ các vế chưa)."""
-    from .align import END_ZH, CLAUSE_ZH, _bounds, _char_positions
+    from .align import END_ZH, PAUSE_ZH, _bounds, _char_positions
     from .subtitle import ct_of
 
     ct = ct_of(s)
@@ -1463,7 +1463,7 @@ def breath_points(s: Segment, min_gap: float = PAUSE_MIN) -> list[int]:
     if not ct or len(ct) != len(pos) or len(pos) < 2:
         return []
     out = []
-    for pz, _kind in _bounds(zh, END_ZH, CLAUSE_ZH):
+    for pz, _kind in _bounds(zh, END_ZH, PAUSE_ZH):
         k = sum(1 for q in pos if q < pz)
         if 0 < k < len(ct) and float(ct[k][0]) - float(ct[k - 1][1]) >= min_gap:
             out.append(pz)
@@ -1520,12 +1520,12 @@ def plan_pauses(s: Segment, x: dict, runs: list, n1: int, speed: float, room: fl
     ps = orig_pauses(s, lang, min_gap)
     if not ps or not runs or (room < 0.05 and part_speed <= 1.0):
         return []
-    out, added, used, prev = [], 0.0, set(), 0
+    out, added, prev, last_j = [], 0.0, 0, -1
     for g0, g1, frac in ps:
         exp = frac * n1
         best = None
         for j, (a, b) in enumerate(runs):
-            if j in used:
+            if j <= last_j:   # 2.1.20: chỗ nghỉ theo đúng thứ tự (câu đếm "1, 2, 3…" nhiều chỗ lặng sát nhau)
                 continue
             d = abs((a + b) / 2 - exp)
             if d > max(0.25 * n1, 0.4 * SR):
@@ -1538,7 +1538,7 @@ def plan_pauses(s: Segment, x: dict, runs: list, n1: int, speed: float, room: fl
         if best is None:
             continue
         _d, j, a, b = best
-        used.add(j)
+        last_j = j
         mid = (a + b) / 2
         after = x["start"] + added + (b / speed) / SR          # lúc giọng lồng nói tiếp nếu không chèn gì
         target = x["start"] + (g1 - s.start)                    # lúc nhân vật nói tiếp

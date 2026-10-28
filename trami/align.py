@@ -256,6 +256,38 @@ def _word_cut(text: str, pos: list[int], cand: list[int]) -> int:
     return min(ok, key=lambda k: abs(k - mid))
 
 
+COUNT_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8,
+                "九": 9, "十": 10}
+
+
+def count_step(a: str, b: str) -> bool:
+    """2 chữ số liền nhau là 2 số ĐẾM kế tiếp (一二, 九十, 三二 – nhân vật đếm "một… hai… ba"), không phải 1 con số
+    (三十, 二百, 十一)."""
+    x, y = COUNT_DIGITS.get(a), COUNT_DIGITS.get(b)
+    return x is not None and y is not None and abs(x - y) == 1
+
+
+def _is_count_run(w: str) -> bool:
+    """Từ jieba toàn số đếm liền nhau cùng chiều ("一二三四五", "六七八九十", "三二一") – jieba gộp thành 1 "từ" nên
+    chỗ nhân vật ngừng giữa các số không bao giờ là ranh giới từ (2.1.20)."""
+    if len(w) < 2 or not all(count_step(a, b) for a, b in zip(w, w[1:])):
+        return False
+    d = {COUNT_DIGITS[b] - COUNT_DIGITS[a] for a, b in zip(w, w[1:])}
+    return len(d) == 1
+
+
+def _split_counts(words: list) -> list:
+    """Tách dãy số đếm thành từng số (mỗi số 1 từ): ["一二三"] -> ["一", "二", "三"]; (từ, loại từ) giữ loại từ."""
+    out = []
+    for w in words:
+        word = w[0] if isinstance(w, tuple) else w
+        if _is_count_run(word):
+            out += [(c, w[1]) if isinstance(w, tuple) else c for c in word]
+        else:
+            out.append(w)
+    return out
+
+
 def _word_info(text: str) -> tuple[set[int], set[int], set[int]] | None:
     """Tách từ có loại từ (jieba): (vị trí ký tự cuối mỗi từ, cuối các từ không đứng cuối câu được – 一只 / 在 / 因为…,
     đầu các trợ từ không đứng đầu câu được – 的 / 了 / 吗…). Chưa cài jieba -> None."""
@@ -264,7 +296,7 @@ def _word_info(text: str) -> tuple[set[int], set[int], set[int]] | None:
         import jieba.posseg as pseg
 
         jieba.setLogLevel(60)
-        words = [(w.word, w.flag) for w in pseg.cut(text)]
+        words = _split_counts([(w.word, w.flag) for w in pseg.cut(text)])
     except Exception:  # noqa: BLE001
         return None
     if "".join(w for w, _ in words) != text:
@@ -342,7 +374,7 @@ def _word_ends(text: str) -> set[int] | None:
 
         jieba.setLogLevel(60)
         ends, i = set(), 0
-        for w in jieba.cut(text):
+        for w in _split_counts(list(jieba.cut(text))):
             i += len(w)
             ends.add(i - 1)
         return ends
@@ -511,9 +543,11 @@ def _latin_dur(n: int) -> float:
     return 0.1 + 0.12 * min(n, 8)   # "AI" ~0,34 s, "GPT" ~0,46 s, "2026" ~0,58 s
 
 
-def _pull_tail(times: list[tuple[float, float]], a: int, b: int, limit: float = TAIL_PULL) -> None:
+def _pull_tail(times: list[tuple[float, float]], a: int, b: int, limit: float = TAIL_PULL, text: str = "",
+               pos: list[int] | None = None) -> None:
     """Câu ≥ 3 chữ mà 1–2 chữ cuối cách phần trước > limit giây: bộ căn thời gian hay gán chữ cuối vào tiếng động /
-    hơi thở phía sau ("…什么日" … "子。") -> kéo về sát chữ trước."""
+    hơi thở phía sau ("…什么日" … "子。") -> kéo về sát chữ trước. Có dấu câu ở chỗ đó / đang đếm số ("…九，十。")
+    thì nhân vật ngừng thật – giữ nguyên (2.1.20)."""
     if b - a < 3:
         return
     for m in (1, 2):
@@ -521,6 +555,11 @@ def _pull_tail(times: list[tuple[float, float]], a: int, b: int, limit: float = 
         if k - 1 < a:
             break
         if times[k][0] - times[k - 1][1] > limit:
+            if pos and len(pos) == len(times):
+                between = text[pos[k - 1] + 1:pos[k]]
+                if any(not (c.isspace() or c.isalnum()) for c in between) or count_step(text[pos[k - 1]],
+                                                                                        text[pos[k]]):
+                    break
             d = times[k][0] - times[k - 1][1] - 0.05
             for i in range(k, b):
                 times[i] = (times[i][0] - d, times[i][1] - d)
@@ -544,7 +583,7 @@ def split_timed(s: Segment, times: list[tuple[float, float]], exact: bool, max_c
     out = []
     for j, t in enumerate(texts):
         a, b = bounds[j], bounds[j + 1]
-        _pull_tail(times, a, b)
+        _pull_tail(times, a, b, text=s.text, pos=pos)
         st, en = times[a][0], times[b - 1][1]
         # chữ Latin / số ở đầu / cuối câu chưa có mốc: nới vào khoảng trống bên cạnh ("最强AI。" nói xong mới hết câu)
         n_head, n_tail = _latin_run(t, True), _latin_run(t, False)
@@ -1401,6 +1440,7 @@ def draft_lines(segs: list[Segment], settings: dict | None = None, total: float 
 # thời gian đặt ở chỗ ngắt hơi thật (chỗ lặng nhất của giọng quanh vị trí ước theo số chữ), vế sau có "pause_before"
 # -> giọng lồng nghỉ 1 nhịp giữa 2 vế.
 CLAUSE_ZH = "，,；;：:"
+PAUSE_ZH = CLAUSE_ZH + "、"   # chỗ nhân vật ngừng thật (mốc từng chữ) ở dấu liệt kê "一、二、三" cũng là chỗ nghỉ (2.1.20)
 END_ZH = "。！？!?"
 CLAUSE_TR = {"ja": "、，,；;：:", "zh": "，,；;：:"}
 CLAUSE_TR_DEFAULT = ",;:，；："
@@ -1446,13 +1486,13 @@ def _vis(text: str) -> int:
     return sum(1 for c in text if c.isalnum())
 
 
-def _pair_cuts(zh: str, tr: str, lang: str) -> list[tuple[int, int, str]]:
+def _pair_cuts(zh: str, tr: str, lang: str, zh_clauses: str = CLAUSE_ZH) -> list[tuple[int, int, str]]:
     """Cặp chỗ tách (vị trí trong câu gốc, vị trí trong câu dịch, loại). Cùng số chỗ ngắt -> ghép theo thứ tự (vế i ứng
     vế i, lệch tỉ lệ ≤ 30 %); khác số -> mỗi chỗ ngắt của câu dịch lấy chỗ ngắt câu gốc gần nhất theo tỉ lệ độ dài
     (lệch ≤ PAIR_TOL, khác loại dấu thì chặt hơn)."""
     from . import langs
 
-    bz = _bounds(zh, END_ZH, CLAUSE_ZH)
+    bz = _bounds(zh, END_ZH, zh_clauses)
     bt = _bounds(tr, END_TR, CLAUSE_TR.get(lang, CLAUSE_TR_DEFAULT))
     nz, nt = max(1, _vis(zh)), max(1, langs.units(tr, lang))
     sz = [(_vis(zh[:p]) / nz, p, k) for p, k in bz]

@@ -192,6 +192,96 @@ def fix_stretched(segs: list, env: np.ndarray, hop: float = HOP, rows=None) -> i
     return fixed
 
 
+OPEN_GAP = 0.3      # chỗ lặng ≥ 0,3 s bên trong câu = nhân vật ngừng (như dub_pause_min)
+OPEN_NEAR = 0.25    # chỗ ranh giới 2 chữ (theo bộ căn) cách đoạn lặng ≤ 0,25 s mới coi là chỗ ngừng của 2 chữ đó
+MIN_CHAR = 0.04     # mỗi chữ còn ≥ 40 ms sau khi sửa
+
+
+def _voiced_len(env: np.ndarray, hop: float, a: float, b: float, thr: float) -> float:
+    fa, fb = max(0, int(a / hop)), min(len(env), int(np.ceil(b / hop)))
+    return float(np.sum(env[fa:fb] > thr)) * hop if fb > fa else 0.0
+
+
+def _ct_valid(ct: list) -> bool:
+    return all(b - a >= MIN_CHAR - 1e-6 for a, b in ct) and \
+        all(ct[k][1] <= ct[k + 1][0] + 1e-6 for k in range(len(ct) - 1))
+
+
+def open_pauses(segs: list, env: np.ndarray, hop: float = HOP, min_gap: float = OPEN_GAP, rows=None) -> list[int]:
+    """Chỗ nhân vật NGỪNG giữa câu mà mốc từng chữ không có khe (2.1.20): bộ căn thời gian hay kéo chữ qua đoạn lặng
+    khi nói ngắt quãng – đếm chậm "一……二……三", có người khác chen ngang – nên khe giữa 2 chữ = 0 -> không thêm dấu
+    phẩy, giọng lồng đọc liền 1 mạch. Đo độ to giọng đã tách: đoạn lặng ≥ min_gap nằm TRONG câu -> đặt lại mốc 2 chữ ở
+    2 bên cho có khe đúng đoạn lặng (ranh giới 2 chữ gần đoạn lặng nhất; đoạn lặng nằm giữa 1 chữ -> chữ đó là phần có
+    tiếng nhiều hơn, phần còn lại thuộc chữ bên cạnh). Chữ đầu / cuối kéo qua đoạn lặng ở mép câu -> co lại, mép câu
+    theo. Không đổi chữ. Trả các câu đã sửa."""
+    env = np.asarray(env, np.float32)
+    n = len(segs)
+    pick = range(n) if rows is None else sorted({int(r) for r in rows if 0 <= int(r) < n})
+    if not len(env):
+        return []
+    floor = _floor(env)
+    changed: list[int] = []
+    for i in pick:
+        s = segs[i]
+        if not ct_ok(s) or len(s.extra["ct"]) < 2:
+            continue
+        ct = [[float(a), float(b)] for a, b in s.extra["ct"]]
+        a0, b0 = ct[0][0], ct[-1][1]
+        thr = _thr(env, hop, a0, b0, floor)
+        if thr is None:
+            continue
+        cl = _clusters(env, hop, a0, b0, thr)
+        sil = [(cl[j][1], cl[j + 1][0]) for j in range(len(cl) - 1) if cl[j + 1][0] - cl[j][1] >= min_gap]
+        new = [list(c) for c in ct]
+        used: set[int] = set()
+        for x0, x1 in sil:
+            if any(new[k + 1][0] - new[k][1] >= 0.6 * (x1 - x0) and new[k][1] < x1 and new[k + 1][0] > x0
+                   for k in range(len(new) - 1)):
+                continue   # mốc chữ đã có khe ở đúng đoạn lặng
+            dist = []
+            for k in range(len(new) - 1):
+                lo, hi = new[k][1], new[k + 1][0]
+                d = 0.0 if lo <= x1 and hi >= x0 else min(abs(lo - x1), abs(hi - x0), abs(lo - x0), abs(hi - x1))
+                dist.append((d, k))
+            d, k = min(dist)
+            if d > OPEN_NEAR:   # đoạn lặng nằm giữa 1 chữ: chữ đó ở phía có tiếng nhiều hơn
+                m = (x0 + x1) / 2
+                inside = [j for j, (a, b) in enumerate(new) if a < m < b]
+                if not inside:
+                    continue
+                j = inside[0]
+                before = _voiced_len(env, hop, new[j][0], x0, thr)
+                after = _voiced_len(env, hop, x1, new[j][1], thr)
+                k = j if before >= after else j - 1
+                if not 0 <= k < len(new) - 1:
+                    continue
+            if k in used:
+                continue
+            trial = [list(c) for c in new]
+            trial[k][1], trial[k + 1][0] = x0, x1   # chữ trước thôi đúng lúc lặng, chữ sau vào đúng lúc có tiếng lại
+            if not _ct_valid(trial):
+                continue
+            new = trial
+            used.add(k)
+        # chữ đầu / chữ cuối bị kéo qua đoạn lặng ở mép câu (câu vừa tách ở chỗ ngừng): co về phần có tiếng, mép câu
+        # theo (snap sau đó bám đúng chỗ bắt đầu / thôi nói)
+        edge = [False, False]
+        if cl and cl[-1][1] < new[-1][1] - min_gap and cl[-1][1] - new[-1][0] >= MIN_CHAR:
+            new[-1][1] = cl[-1][1]
+            edge[1] = True
+        if cl and cl[0][0] > new[0][0] + min_gap and new[0][1] - cl[0][0] >= MIN_CHAR:
+            new[0][0] = cl[0][0]
+            edge[0] = True
+        if (used or any(edge)) and _ct_valid(new):
+            s.extra["ct"] = [[round(a, 3), round(b, 3)] for a, b in new]
+            if edge[0]:
+                s.start = round(max(s.start, new[0][0] - 0.05), 3)
+            if edge[1]:
+                s.end = round(max(s.start + 0.2, min(s.end, new[-1][1] + 0.05)), 3)
+            changed.append(i)
+    return changed
+
+
 def snap(segs: list, env: np.ndarray, hop: float = HOP, rows=None, total: float = 0.0) -> dict:
     """Dời đầu / cuối các câu (tại chỗ) về đúng lúc nhân vật bắt đầu / thôi nói. rows: chỉ các câu này (số thứ tự
     trong segs đã sắp theo giờ). Trả {"moved": số câu dời, "start": số đầu câu dời, "end": số cuối câu dời,
