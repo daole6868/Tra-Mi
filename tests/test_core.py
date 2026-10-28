@@ -9316,3 +9316,170 @@ def test_snap_edges_retimes_old_project_2120(monkeypatch):
         assert "căn lại theo giọng 1 câu" in pipeline.snap_note(st)
     finally:
         p.delete()
+
+
+def test_edge_candidates_and_heard_check_2121():
+    """Câu bị cắt khi nhân vật còn nói (2.1.21): tìm câu ngay sau cuối / trước đầu còn tiếng nói (nối qua chỗ ngừng ≤ 1 s,
+    dừng trước câu bên cạnh, nới ≥ 0,3 s); nghe lại xác nhận chỉ khi khúc nới nghe ra thêm chữ của chính câu, không thêm
+    câu khác."""
+    from trami import snap
+
+    # nhân vật nói 0,0–1,0 · 1,5–1,8 · 2,4–2,8 (ngừng 0,5–0,6 s) · tiếng khác lúc 4,5 s (cách 1,7 s – không nới tới)
+    env = _voice_env_db([(0.0, 1.0), (1.5, 1.8), (2.4, 2.8), (4.5, 5.0)], 8)
+    s = Segment(0.0, 1.05, "一，二，三，四", "", "S1")
+    got = snap.edge_candidates([s], env)
+    assert len(got) == 1 and got[0][0] == 0 and got[0][1] == 0.0 and abs(got[0][2] - 2.85) < 0.02
+    nxt = Segment(2.5, 3.0, "好", "", "S2")                     # câu sau bắt đầu 2,5 s -> chỉ nới tới trước nó
+    got = snap.edge_candidates([s, nxt], env, total=8)
+    assert abs(got[0][2] - 2.48) < 0.02
+    late = Segment(1.4, 2.85, "三四五", "", "S1")              # đầu câu bị cắt muộn: tiếng từ 0,0 s
+    got = snap.edge_candidates([late], env, total=8)
+    assert got and got[0][1] < 0.05 and got[0][2] == 2.85
+    full = Segment(0.0, 2.85, "一二三四", "", "S1")
+    assert snap.edge_candidates([full], env, total=8) == []      # sau câu cách 1,65 s mới có tiếng
+    song = Segment(0.0, 1.05, "一二", "", "S1", {"song": True})
+    assert snap.edge_candidates([song], env, total=8) == []
+    ok = snap.edge_heard_ok
+    assert ok("一，二，三，四，五，六，七，八，九，十。", "一二三四五六七", "一二三四五六七八九十")
+    assert ok("一二三四五", "一二三", "一二三四五啊")          # thêm đúng 1 trợ từ
+    assert not ok("一二三四五", "一二三四五", "一二三四五")      # khúc cũ đã đủ lời -> phần nới là tiếng khác
+    assert not ok("一二三四五", "一二三", "一二三四五好的走吧")   # khúc nới có câu khác bộ nghe bỏ sót
+    assert not ok("一二三四五", "一二三", "一二三四五好")
+    assert not ok("一二三四五六七八", "一二", "一二三")            # nghe ra < 75 % lời câu
+    assert ok("我们走吧快点", "我们走", "我们走吧快点")
+
+
+def test_fix_line_edges_pipeline_2121(monkeypatch):
+    """`pipeline.fix_line_edges`: nghe khúc câu cũ + khúc nới bằng bộ nghe; xác nhận -> nới mép, đo lại mốc chữ trong khúc
+    mới (lỗi thì chia chữ theo cụm có tiếng), ghi extra["edge_fix"]; khúc nới có câu khác -> giữ nguyên. Nút "Căn mép theo
+    giọng" (snap_edges fix_edges) chạy bước này, thêm dấu phẩy ở chỗ ngừng, đã lồng thì xếp lại."""
+    from trami import asr_qwen, pipeline, silence
+    from trami.project import Project
+
+    env = _voice_env_db([(0.0, 0.3), (1.0, 1.3), (2.0, 2.3), (3.0, 3.3), (4.0, 4.3)] + [(6.5, 7.0)], 10)
+    calls = []
+
+    class W:
+        def call(self, req, progress=None, cancel=None):
+            calls.append(req["cmd"])
+            assert req["cmd"] == "asr" and req["conf"]
+            out = []
+            for a, b in req["spans"]:
+                heard = "".join(ch for k, ch in enumerate("一二三四五") if a - 0.1 <= k + 0.15 <= b + 0.1)
+                if b > 6.6:
+                    heard += "好的走吧"
+                out.append({"text": heard + "。", "conf": 0.9})
+            return {"items": out}
+    monkeypatch.setattr(asr_qwen, "asr_worker", lambda engine, settings=None: W())
+    aligned = []
+
+    def fake_align(segs, wav, language, settings, progress=None, cancel=None, engine="qwen3", pad=0.3):
+        for x in segs:
+            aligned.append((x.start, x.end))
+            x.extra["ct"] = [[k * 1.0, k * 1.0 + 0.3] for k in range(5)]
+        return len(segs)
+    monkeypatch.setattr(asr_qwen, "align_qwen", fake_align)
+    s = Segment(0.0, 2.35, "一，二，三，四，五。", "", "S1", {"ct": [[0.0, 0.3], [0.5, 0.8], [1.0, 1.3], [1.5, 1.8],
+                                                                 [2.0, 2.3]]})
+    st = pipeline.fix_line_edges([s], Path("v.wav"), "qwen3", "zh", {}, env, 0.01, total=10)
+    assert st["fixed"] == 1 and st["tail"] == 1 and st["rows"] == [0]
+    assert aligned == [(0.0, 4.35)] and s.extra["edge_fix"] == [0.0, 2.35]
+    assert s.start == 0.0 and abs(s.end - 4.35) < 0.01 and s.extra["ct"][-1] == [4.0, 4.3]
+    assert "nới 1 câu bị cắt sớm theo giọng (1 cuối câu)" in pipeline.edge_note(st)
+    # khúc nới gặp câu khác (bộ nghe nghe ra thêm "好的走吧") -> không nới
+    env2 = _voice_env_db([(0.0, 0.3), (1.0, 1.3), (2.0, 2.3), (2.9, 3.4)], 10)
+
+    class W2(W):
+        def call(self, req, progress=None, cancel=None):
+            return {"items": [{"text": "一二三" + ("好的走吧" if b > 2.5 else "")} for a, b in req["spans"]]}
+    monkeypatch.setattr(asr_qwen, "asr_worker", lambda engine, settings=None: W2())
+    keep = Segment(0.0, 2.35, "一二三", "", "S1")
+    st = pipeline.fix_line_edges([keep], Path("v.wav"), "qwen3", "zh", {}, env2, 0.01, total=10)
+    assert st["checked"] == 1 and st["fixed"] == 0 and (keep.start, keep.end) == (0.0, 2.35)
+    # bộ căn lỗi -> chia chữ theo cụm có tiếng
+    monkeypatch.setattr(asr_qwen, "asr_worker", lambda engine, settings=None: W())
+
+    def broken_align(*a, **k):
+        raise RuntimeError("thiếu bộ nhớ")
+    monkeypatch.setattr(asr_qwen, "align_qwen", broken_align)
+    s2 = Segment(0.0, 2.35, "一二三四五", "", "S1")
+    st = pipeline.fix_line_edges([s2], Path("v.wav"), "qwen3", "zh", {}, env, 0.01, total=10)
+    assert st["fixed"] == 1 and s2.extra["ct_voice"]
+    assert [round(a, 2) for a, _b in s2.extra["ct"]] == [0.0, 1.0, 2.0, 3.0, 4.0]
+    # nút "Căn mép theo giọng"
+    monkeypatch.setattr(asr_qwen, "align_qwen", fake_align)
+    monkeypatch.setattr(asr_qwen, "release", lambda: None)
+    p = Project.create("noi_mep_cau")
+    p.data["info"] = {"duration": 10}
+    p.data["language"] = "zh"
+    p.segments = [Segment(0.0, 2.35, "一二三四五", "Một, hai, ba, bốn, năm.", "S1")]
+    p.save()
+    monkeypatch.setattr(pipeline, "stems", lambda pr: {"vocals": "v.wav", "instrumental": "i.wav"})
+    monkeypatch.setattr(silence, "loudness", lambda *a, **k: env)
+    monkeypatch.setattr(pipeline, "relisten_engine", lambda pr, st=None: ("qwen3", "Qwen3-ASR"))
+    monkeypatch.setattr(pipeline, "_voice_wav16", lambda pr, pg=None, c=None: Path("v.wav"))
+    relaid = []
+    monkeypatch.setattr(pipeline, "has_dub", lambda pr: True)
+    monkeypatch.setattr(pipeline, "relayout", lambda pr, st=None, pg=None, c=None: relaid.append(1))
+    try:
+        assert pipeline.snap_edges(p, {}, fix_edges=False)["edges"] == {}
+        st = pipeline.snap_edges(p, {}, fix_edges=True)
+        q = Project(p.id).segments[0]
+        assert st["edges"]["fixed"] == 1 and relaid == [1, 1]
+        # lần bấm đầu (không nới) đã bám cuối câu về 2,3 s
+        assert q.text == "一，二，三，四，五" and 4.25 <= q.end <= 4.36 and q.extra["edge_fix"] == [0.0, 2.3]
+        assert "nới 1 câu bị cắt sớm" in pipeline.snap_note(st)
+        st = pipeline.snap_edges(p, {"asr_edge_fix": False}, fix_edges=True)
+        assert st["edges"] == {}
+    finally:
+        p.delete()
+
+
+def test_edge_fix_switch_gui_2121(monkeypatch):
+    """Tab Tự động: công tắc "Sửa đầu / cuối câu bị cắt" lưu Cài đặt; nút "Căn mép theo giọng" chạy kèm bước này (việc
+    dùng card) và tích sẵn các câu đã nới."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from trami import pipeline
+    from trami.config import load_settings
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow()
+    p = Project.create("nới mép câu")
+    try:
+        p.data["info"] = {"duration": 20}
+        p.segments = [Segment(1, 2, "你好。", "", "S1"), Segment(5, 6, "走吧。", "", "S1")]
+        p.save()
+        win.open_project(p.id)
+        app.processEvents()
+        pp = win.project_page
+        assert pp.a_edges.isChecked()
+        pp.a_edges.setChecked(False)
+        assert load_settings()["asr_edge_fix"] is False
+        pp.a_edges.setChecked(True)
+        assert load_settings()["asr_edge_fix"] is True
+        sub = []
+        monkeypatch.setattr(pp, "submit", lambda kind, title, fn, quiet=False: sub.append((kind, fn)))
+        pp.run_snap()
+        assert sub[-1][0] == "realign"
+        got = {}
+
+        def fake_snap(pr, settings=None, rows=None, remeasure=False, relayout_dub=True, progress=None, cancel=None,
+                      fix_edges=False):
+            got["fix"] = fix_edges
+            return {"moved": 0, "start": 0, "end": 0, "shift": 0.0, "est": 0, "checked": 2, "src": "vocals",
+                    "measured": 0, "stretched": 0, "opened": 0, "revoiced": 0,
+                    "edges": {"checked": 1, "fixed": 1, "head": 0, "tail": 1, "rows": [1]}}
+        monkeypatch.setattr(pipeline, "snap_edges", fake_snap)
+
+        class J:
+            update = staticmethod(lambda *a, **k: None)
+            cancelled = staticmethod(lambda: False)
+        res = sub[-1][1](J(), Project(p.id))
+        assert got["fix"] is True and res["pick"] == [1] and "nới 1 câu bị cắt sớm" in res["message"]
+    finally:
+        p.delete()
+        win.close()

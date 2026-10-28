@@ -1545,6 +1545,28 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
             except Exception as e:  # noqa: BLE001 – bước phụ
                 log_error("Nghe 2 bộ rồi so")
                 p.data["asr_dual"] = {"error": err_text(e)[:160]}
+        # 2g') đầu / cuối câu bị cắt khi nhân vật còn đang nói (nói chậm, ngừng nhiều): giọng đã tách còn tiếng ngay
+        # sau cuối / trước đầu câu -> bộ nghe nghe lại xác nhận -> nới mép + đo lại mốc chữ (2.1.21)
+        p.data.pop("edge_fix", None)
+        if segs and audio_in != Path(src) and settings.get("asr_edge_fix", True) and language in ("zh", "yue", "auto"):
+            eng_e, _why = relisten_engine(p, settings)
+            if eng_e:
+                try:
+                    env, ehop, esrc = voice_env(p, None, cancel)
+                    if env is not None and esrc == "vocals":
+                        segs = normalize(segs)
+                        p.data["edge_fix"] = fix_line_edges(
+                            segs, wav, eng_e, language, settings, env, ehop, None, info_dur,
+                            _sub(progress, min(0.97, asr_end + 0.13), min(0.98, asr_end + 0.14)), cancel)
+                except ff.Cancelled:
+                    raise
+                except Exception as e:  # noqa: BLE001 – bước phụ
+                    log_error("Sửa đầu / cuối câu bị cắt")
+                    p.data["edge_fix"] = {"error": err_text(e)[:160]}
+                finally:
+                    from .asr_qwen import release
+
+                    release()
         if engine in ("sensevoice", "qwen3", "firered"):
             from .asr_funasr import mark_songs
 
@@ -1692,10 +1714,12 @@ def voice_env(p: Project, progress: Prog | None = None, cancel=None) -> tuple:
 
 
 def snap_edges(p: Project, settings: dict | None = None, rows: list[int] | None = None, remeasure: bool = False,
-               relayout_dub: bool = True, progress: Prog | None = None, cancel=None) -> dict:
+               relayout_dub: bool = True, progress: Prog | None = None, cancel=None, fix_edges: bool = False) -> dict:
     """Bám mép câu theo giọng (nút "Căn mép câu theo giọng", cuối "1. Nghe & tách câu" / Căn khớp thoại): đầu / cuối
     câu về đúng lúc nhân vật bắt đầu / thôi nói (`snap.snap`). remeasure: đo lại mốc từng chữ bằng Qwen3 trước (dự án
-    cũ không lưu mốc từng chữ). Đã lồng tiếng -> xếp lại bản lồng (không đọc lại). Trả thống kê của snap + "src"."""
+    cũ không lưu mốc từng chữ). fix_edges (nút): câu bị cắt đầu / cuối khi nhân vật còn nói -> nghe lại xác nhận rồi
+    nới mép (`fix_line_edges`, 2.1.21). Đã lồng tiếng -> xếp lại bản lồng (không đọc lại). Trả thống kê của snap +
+    "src"."""
     from . import snap
 
     settings = settings or load_settings()
@@ -1726,6 +1750,22 @@ def snap_edges(p: Project, settings: dict | None = None, rows: list[int] | None 
     if env is None or not len(env):
         raise RuntimeError("Chưa có âm thanh để đo (video gốc không còn ở chỗ cũ?)")
     before = [(s.start, s.end) for s in segs]
+    edges: dict = {}
+    if fix_edges and src == "vocals" and source_lang(p) in ("zh", "yue", "auto") \
+            and settings.get("asr_edge_fix", True):
+        eng_e, why = relisten_engine(p, settings)
+        if eng_e:
+            try:
+                wav = _voice_wav16(p, None, cancel)
+                edges = fix_line_edges(segs, wav, eng_e, p.data.get("language", "zh") or "zh", settings, env, hop,
+                                       rows, float(p.data.get("info", {}).get("duration", 0) or 0),
+                                       _sub(progress, 0.0, 0.7), cancel)
+            finally:
+                from . import asr_qwen
+
+                asr_qwen.release()
+        else:
+            edges = {"error": why}
     # mốc chữ bộ căn đặt sai giờ (rơi vào chỗ lặng, phần nói thật không chữ nào phủ) -> chia lại theo giọng (2.1.20)
     revoiced = snap.retime_by_voice(segs, env, hop, rows) if src == "vocals" else []
     stretched = snap.fix_stretched(segs, env, hop, rows) if src == "vocals" else 0
@@ -1733,14 +1773,14 @@ def snap_edges(p: Project, settings: dict | None = None, rows: list[int] | None 
     # đúng chỗ khi xếp lại (câu dịch đã có dấu phẩy ở vế tương ứng – không cần dịch lại)
     opened = snap.open_pauses(segs, env, hop, float(settings.get("dub_pause_min", 0.3)), rows) \
         if src == "vocals" else []
-    marks = sorted(set(opened) | set(revoiced))
+    marks = sorted(set(opened) | set(revoiced) | set(edges.get("rows") or []))
     if marks and settings.get("breath_marks", True) and source_lang(p) in ("zh", "yue", "auto"):
         from .align import mark_breaths
 
         mark_breaths(segs, float(settings.get("dub_pause_min", 0.3)), marks)
     stats = snap.snap(segs, env, hop, rows, float(p.data.get("info", {}).get("duration", 0) or 0))
     stats.update({"src": src, "measured": measured, "stretched": stretched,
-                  "opened": len(set(opened) - set(revoiced)), "revoiced": len(revoiced)})
+                  "opened": len(set(opened) - set(revoiced)), "revoiced": len(revoiced), "edges": edges})
     p.segments = segs
     p.data["snap_stats"] = stats
     p.save()
@@ -1751,6 +1791,125 @@ def snap_edges(p: Project, settings: dict | None = None, rows: list[int] | None 
     return stats
 
 
+EDGE_GROUP = 40   # số khúc mỗi lần gửi bộ nghe khi kiểm tra đầu / cuối câu
+
+
+def fix_line_edges(segs: list, wav: Path, engine: str, language: str, settings: dict, env, hop: float,
+                   rows: list[int] | None = None, total: float = 0.0, progress: Prog | None = None,
+                   cancel=None) -> dict:
+    """Đầu / cuối câu bị cắt (2.1.21): mốc câu (bộ căn thời gian / SRT) kết thúc khi nhân vật còn đang nói ("04:30,125 –
+    04:34,871" mà thật ra nói tới 04:36,164, giữa chừng ngừng nhiều lần). `snap.edge_candidates` tìm câu ngay sau cuối
+    (trước đầu) còn tiếng nói không thuộc câu nào -> bộ nghe nghe lại khúc câu đang có + khúc đã nới -> `snap.edge_heard_ok`
+    (khúc nới nghe ra thêm chữ của chính câu, không thêm câu khác) -> nới mép, đo lại mốc từng chữ trong khúc mới
+    (`asr_qwen.align_qwen`; lỗi thì chia chữ theo cụm có tiếng). Sửa `segs` tại chỗ; extra["edge_fix"] = [đầu cũ, cuối
+    cũ]. Trả {"checked", "fixed", "head", "tail", "rows"}."""
+    import numpy as np
+
+    from . import asr_qwen, snap
+    from .align import CJK, GAP_SPLIT, PAD, _char_positions, alloc_chars
+    from .asr import to_simplified
+
+    st = {"checked": 0, "fixed": 0, "head": 0, "tail": 0, "rows": []}
+    cands = snap.edge_candidates(segs, env, hop, rows, total)
+    st["checked"] = len(cands)
+    if not cands:
+        return st
+    spans: list[tuple[float, float, int, str]] = []
+    for i, ns, ne in cands:
+        s = segs[i]
+        spans.append((s.start, s.end, i, "o"))
+        if ne > s.end:
+            spans.append((s.start, ne, i, "t"))
+        if ns < s.start:
+            spans.append((ns, s.end, i, "h"))
+    w = asr_qwen.asr_worker(engine, settings)
+    req = {"cmd": "asr", "wav": str(Path(wav).resolve()), "language": language,
+           "prompt": asr_qwen.hotwords(settings), "align": False, "conf": True}
+    heard: dict[tuple[int, str], str] = {}
+    simplify = language in ("zh", "yue", "auto")
+    for g in range(0, len(spans), EDGE_GROUP):
+        part = spans[g:g + EDGE_GROUP]
+        pr = None
+        if progress:
+            lo, hi = 0.8 * g / len(spans), 0.8 * (g + len(part)) / len(spans)
+            pr = (lambda x, m, lo=lo, hi=hi: progress(lo + (hi - lo) * x, m))
+            progress(lo, f"Kiểm tra đầu / cuối {len(cands)} câu có thể bị cắt…")
+        r = w.call(dict(req, spans=[[round(a, 3), round(b, 3)] for a, b, _i, _k in part]), pr, cancel)
+        for (a, b, i, k), it in zip(part, r.get("items") or []):
+            t = (it.get("text") or "").strip()
+            if simplify:
+                t2 = to_simplified(t)
+                t = t2 if len(t2) == len(t) else t
+            heard[(i, k)] = t
+    fixed: dict[int, tuple[float, float]] = {}
+    for i, ns, ne in cands:
+        s = segs[i]
+        base = heard.get((i, "o"), "")
+        a, b = s.start, s.end
+        if ne > s.end and snap.edge_heard_ok(s.text, base, heard.get((i, "t"), "")):
+            b = ne
+            st["tail"] += 1
+        if ns < s.start and snap.edge_heard_ok(s.text, base, heard.get((i, "h"), "")):
+            a = ns
+            st["head"] += 1
+        if (a, b) != (s.start, s.end):
+            fixed[i] = (s.start, s.end)
+            s.start, s.end = round(a, 3), round(b, 3)
+            s.extra.pop("ct", None)
+            s.extra.pop("ct_voice", None)
+            s.extra.pop("snap", None)
+    if not fixed:
+        return st
+    rows_fixed = sorted(fixed)
+    if progress:
+        progress(0.85, f"Đo lại mốc từng chữ {len(rows_fixed)} câu đã nới mép…")
+    try:
+        asr_qwen.align_qwen([segs[i] for i in rows_fixed], wav, language, settings, None, cancel,
+                            engine="firered" if engine == "firered" else "qwen3", pad=0.05)
+    except ff.Cancelled:
+        raise
+    except Exception:  # noqa: BLE001 – bộ căn lỗi: chia chữ theo cụm có tiếng bên dưới
+        log_error("Đo lại mốc chữ câu nới mép")
+    floor = snap._floor(np.asarray(env, np.float32))
+    for i in rows_fixed:
+        s = segs[i]
+        pos = _char_positions(s.text)
+        ct = s.extra.get("ct")
+        if not ct or len(ct) != len(pos):
+            thr = snap._thr(np.asarray(env, np.float32), hop, s.start, s.end, floor)
+            groups: list[list[float]] = []
+            for x, y in (snap._clusters(np.asarray(env, np.float32), hop, s.start, s.end, thr) if thr else []):
+                if groups and x - groups[-1][1] < GAP_SPLIT:
+                    groups[-1][1] = y
+                else:
+                    groups.append([x, y])
+            got = alloc_chars([tuple(g) for g in groups], s.text, pos) if pos else None
+            if got:
+                s.extra["ct"] = [list(x) for x in got]
+                s.extra["ct_voice"] = True
+            ct = s.extra.get("ct")
+        if ct and CJK.search(s.text or ""):
+            s.start = round(max(s.start, float(ct[0][0]) - PAD), 3)
+            s.end = round(min(s.end, float(ct[-1][1]) + PAD), 3) if float(ct[-1][1]) + PAD > s.start + 0.2 else s.end
+        s.extra["edge_fix"] = [round(fixed[i][0], 3), round(fixed[i][1], 3)]
+    st["fixed"] = len(rows_fixed)
+    st["rows"] = rows_fixed
+    return st
+
+
+def edge_note(st: dict | None) -> str:
+    """1 dòng kết quả sửa đầu / cuối câu bị cắt."""
+    if not st:
+        return ""
+    if st.get("error"):
+        return f"chưa kiểm tra được đầu / cuối câu bị cắt ({st['error']})"
+    if not st.get("fixed"):
+        return ""
+    parts = [f"{st['tail']} cuối câu" if st.get("tail") else "", f"{st['head']} đầu câu" if st.get("head") else ""]
+    return (f"nới {st['fixed']} câu bị cắt sớm theo giọng (" + ", ".join(x for x in parts if x)
+            + ") – bộ nghe nghe lại xác nhận")
+
+
 def snap_note(stats: dict | None) -> str:
     """1 dòng kết quả bám mép câu cho thông báo."""
     if not stats:
@@ -1759,6 +1918,8 @@ def snap_note(stats: dict | None) -> str:
          else "mép câu đã khớp giọng")
     if stats.get("stretched"):
         t += f", co {stats['stretched']} câu có chữ bị kéo dài qua chỗ lặng"
+    if edge_note(stats.get("edges")):
+        t += ", " + edge_note(stats.get("edges"))
     if stats.get("revoiced"):
         t += f", căn lại theo giọng {stats['revoiced']} câu bộ căn thời gian đặt sai giờ"
     if stats.get("opened"):
@@ -1915,6 +2076,8 @@ def listen_note(p: Project) -> str:
     out = [x for x in (hybrid_note(p.data.get("hybrid")) if p.data.get("sub_source") == "hybrid" else "",
                        recheck_note(p.data.get("asr_recheck")), name_note(p.data.get("name_pass")),
                        dual_note(p.data.get("asr_dual"))) if x]
+    if edge_note(p.data.get("edge_fix")):
+        out.append(edge_note(p.data.get("edge_fix")))
     if p.data.get("ct_revoiced"):
         out.append(f"căn lại theo giọng {p.data['ct_revoiced']} khúc bộ căn thời gian đặt sai giờ (chữ rơi vào chỗ lặng)")
     if p.data.get("pauses_opened"):

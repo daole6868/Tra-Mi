@@ -369,7 +369,8 @@ class ProjectPage(QWidget):
         self.a_overlap = f.row("Nghe kỹ (mọi câu nghe 2 lần)", Switch(bool(s.get("asr_overlap", False))), C.OVERLAP_HELP)
         self.a_langchk = f.row("Nghe lại khúc nghi tiếng khác", Switch(bool(s.get("asr_lang_check", True))),
                                C.LANG_CHECK_HELP)
-        for w in (self.a_recheck, self.a_overlap, self.a_langchk):
+        self.a_edges = f.row("Sửa đầu / cuối câu bị cắt", Switch(bool(s.get("asr_edge_fix", True))), C.EDGE_FIX_HELP)
+        for w in (self.a_recheck, self.a_overlap, self.a_langchk, self.a_edges):
             w.toggled.connect(self._audio_opts_changed)
         self.a_chunk.valueChanged.connect(self._audio_opts_changed)
         self.a_pad.valueChanged.connect(self._audio_opts_changed)
@@ -2752,6 +2753,7 @@ class ProjectPage(QWidget):
             self.a_pad.setValue(float(st.get("asr_recheck_pad", 5.0) or 5.0))
             self.a_overlap.setChecked(bool(st.get("asr_overlap", False)))
             self.a_langchk.setChecked(bool(st.get("asr_lang_check", True)))
+            self.a_edges.setChecked(bool(st.get("asr_edge_fix", True)))
             for w in (self.s_conf, self.a_conf):
                 w.setValue(float(st.get("asr_pick_conf", 0.7) or 0.7))
             self.a_drop.setChecked(bool(st.get("asr_drop_unsure", False)))
@@ -3046,6 +3048,7 @@ class ProjectPage(QWidget):
                                        "asr_recheck_pad": float(self.a_pad.value()),
                                        "asr_overlap": self.a_overlap.isChecked(),
                                        "asr_lang_check": self.a_langchk.isChecked(),
+                                       "asr_edge_fix": self.a_edges.isChecked(),
                                        "asr_drop_unsure": self.a_drop.isChecked()})
 
     def _engine_changed(self, *_):
@@ -3213,7 +3216,8 @@ class ProjectPage(QWidget):
 
     def run_snap(self):
         """Căn mép câu theo giọng (2.0.96): đầu / cuối câu đã tích (không tích -> cả phim) về đúng lúc nhân vật bắt
-        đầu / thôi nói. Nút ↶ / Ctrl+Z hoàn tác."""
+        đầu / thôi nói; câu bị cắt khi nhân vật còn nói -> bộ nghe nghe lại xác nhận rồi nới mép (2.1.21, Cài đặt
+        `asr_edge_fix`). Nút ↶ / Ctrl+Z hoàn tác."""
         if not self.model.segs:
             return self.win.toast("Chưa có phụ đề", "warn")
         self.flush()
@@ -3221,15 +3225,18 @@ class ProjectPage(QWidget):
         remeasure = self.s_snap_ct.isChecked()
 
         def fn(j, p):
-            st = pipeline.snap_edges(p, None, rows, remeasure, True, j.update, j.cancelled)
+            st = pipeline.snap_edges(p, None, rows, remeasure, True, j.update, j.cancelled, fix_edges=edges)
             msg = pipeline.snap_note(st)
             msg = msg[0].upper() + msg[1:]
             if st.get("measured"):
                 msg += f" · đo lại mốc từng chữ {st['measured']} câu"
-            if pipeline.has_dub(p) and st.get("moved"):
+            if pipeline.has_dub(p) and (st.get("moved") or (st.get("edges") or {}).get("fixed")):
                 msg += " · đã xếp lại giọng lồng theo mốc mới (không đọc lại)"
-            return {"message": msg + (f" ({len(rows)} câu đã tích)" if rows else "")}
-        self.submit("realign" if remeasure else "snap", "Căn mép câu theo giọng", fn)
+            fixed = (st.get("edges") or {}).get("rows") or []
+            return {"message": msg + (f" ({len(rows)} câu đã tích)" if rows else ""), "pick": fixed}
+        edges = bool(self.settings.get("asr_edge_fix", True))
+        # nghe lại đầu / cuối câu dùng bộ nghe (card) -> việc GPU
+        self.submit("realign" if remeasure or edges else "snap", "Căn mép câu theo giọng", fn)
 
     def run_diarize(self):
         def fn(j, p):

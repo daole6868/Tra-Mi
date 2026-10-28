@@ -362,6 +362,105 @@ def retime_by_voice(segs: list, env: np.ndarray, hop: float = HOP, rows=None) ->
     return changed
 
 
+EXT_PAUSE = 1.0      # đầu / cuối câu bị cắt: tiếng nói tiếp diễn qua các chỗ ngừng ≤ 1 s ...
+EXT_MAX = 4.0        # ... nới mép tối đa 4 s mỗi bên (không qua câu bên cạnh)
+EXT_MIN = 0.3        # nới < 0,3 s thì để bám mép (snap) lo
+PARTICLES = set("啊呀吧嘛呢哦嗯哈了啦哇噢喔欸诶")   # nghe lại khúc nới mà thêm đúng 1 trợ từ cuối câu vẫn coi như cùng câu
+
+
+def edge_candidates(segs: list, env: np.ndarray, hop: float = HOP, rows=None,
+                    total: float = 0.0) -> list[tuple[int, float, float]]:
+    """Câu có thể bị cắt đầu / cuối (2.1.21): ngay sau cuối câu (hoặc trước đầu câu) giọng đã tách vẫn còn tiếng nói,
+    nối tiếp qua các chỗ ngừng ≤ EXT_PAUSE, không thuộc câu nào (dừng trước câu bên cạnh), dài thêm ≥ EXT_MIN. Ngưỡng
+    "có tiếng" theo độ to của chính câu. Trả [(câu, đầu mới, cuối mới)] – còn phải cho bộ nghe nghe lại xác nhận
+    (`edge_heard_ok`): tiếng đó có thể là câu khác bộ nghe bỏ sót / tiếng thở / tiếng động."""
+    from .align import CJK, PAD
+
+    env = np.asarray(env, np.float32)
+    n = len(segs)
+    if not len(env) or not n:
+        return []
+    end_t = total or len(env) * hop
+    order = sorted(range(n), key=lambda k: segs[k].start)
+    pos = {k: j for j, k in enumerate(order)}
+    pick = order if rows is None else sorted({int(r) for r in rows if 0 <= int(r) < n}, key=lambda k: segs[k].start)
+    floor = _floor(env)
+    out = []
+    for i in pick:
+        s = segs[i]
+        if not CJK.search(s.text or "") or s.extra.get("song") or s.extra.get("noise"):
+            continue
+        thr = _thr(env, hop, s.start, s.end, floor)
+        if thr is None:
+            continue
+        j = pos[i]
+        prev_end = max((segs[k].end for k in order[:j] if segs[k].end <= s.end), default=0.0)
+        next_start = min((segs[k].start for k in order[j + 1:] if segs[k].start >= s.start), default=end_t)
+        ne = s.end
+        hi = min(next_start - GAP, s.end + EXT_MAX, end_t)
+        if hi - s.end >= EXT_MIN:
+            cur = s.end
+            for a, b in _clusters(env, hop, s.end - 0.05, hi, thr, gap=0.1):
+                if b <= cur + 0.02:
+                    continue
+                if a - cur > EXT_PAUSE:
+                    break
+                cur = b
+            ne = min(hi, cur + PAD)
+        ns = s.start
+        lo = max(prev_end + GAP, s.start - EXT_MAX, 0.0)
+        if s.start - lo >= EXT_MIN:
+            cur = s.start
+            for a, b in reversed(_clusters(env, hop, lo, s.start + 0.05, thr, gap=0.1)):
+                if a >= cur - 0.02:
+                    continue
+                if cur - b > EXT_PAUSE:
+                    break
+                cur = a
+            ns = max(lo, cur - PAD)
+        ns = ns if s.start - ns >= EXT_MIN else s.start
+        ne = ne if ne - s.end >= EXT_MIN else s.end
+        if ns < s.start or ne > s.end:
+            out.append((i, round(ns, 3), round(ne, 3)))
+    return out
+
+
+def _matched(a: str, b: str) -> int:
+    from difflib import SequenceMatcher
+
+    return sum(m.size for m in SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks())
+
+
+def _unmatched(line: str, heard: str) -> list[str]:
+    from difflib import SequenceMatcher
+
+    out: list[str] = []
+    for tag, _i1, _i2, j1, j2 in SequenceMatcher(None, line, heard, autojunk=False).get_opcodes():
+        if tag in ("insert", "replace"):
+            out += list(heard[j1:j2])
+    return out
+
+
+def edge_heard_ok(line: str, base: str, ext: str) -> bool:
+    """Nghe lại xác nhận nới mép câu (2.1.21): base = bộ nghe nghe đúng khúc câu đang có, ext = nghe khúc đã nới.
+    Nhận khi khúc nới nghe ra THÊM ít nhất 1 chữ của chính câu (phần câu bị cắt nằm ngoài khúc cũ), nghe ra ≥ 75 % lời
+    câu, và không thêm chữ lạ nào ngoài những gì khúc cũ vốn nghe sai (thêm ≥ 2 chữ = câu khác bộ nghe bỏ sót -> không
+    nới; thêm 1 chữ chỉ được là trợ từ 啊 / 吧 / 呢…). Chữ so theo `dual.core` (bỏ dấu câu)."""
+    from .dual import core
+
+    L, B, E = core(line), core(base), core(ext)
+    if len(L) < 2 or not E:
+        return False
+    mb, me = _matched(L, B), _matched(L, E)
+    if me < mb + 1 or me < 0.75 * len(L):
+        return False
+    new = list(_unmatched(L, E))
+    for ch in _unmatched(L, B):
+        if ch in new:
+            new.remove(ch)
+    return not new or (len(new) == 1 and new[0] in PARTICLES)
+
+
 def snap(segs: list, env: np.ndarray, hop: float = HOP, rows=None, total: float = 0.0) -> dict:
     """Dời đầu / cuối các câu (tại chỗ) về đúng lúc nhân vật bắt đầu / thôi nói. rows: chỉ các câu này (số thứ tự
     trong segs đã sắp theo giờ). Trả {"moved": số câu dời, "start": số đầu câu dời, "end": số cuối câu dời,

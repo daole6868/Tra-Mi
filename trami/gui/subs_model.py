@@ -73,6 +73,10 @@ def asr_tip(s) -> str:
         lines.append(f"Bộ nghe không chắc câu này (độ chắc {float(conf):.2f}) – nên nghe lại")
     if s.extra.get("from_asr"):
         lines.append("OCR + nghe: phụ đề in sẵn không có câu này – bộ nghe nghe thêm (nên nghe lại)")
+    if s.extra.get("edge_fix"):
+        a, b = s.extra["edge_fix"]
+        lines.append(f"Câu bị cắt khi nhân vật còn nói – đã nới theo giọng (bộ nghe nghe lại xác nhận): trước "
+                     f"{fmt(float(a))} → {fmt(float(b))}, giờ {fmt(s.start)} → {fmt(s.end)}")
     if s.extra.get("name_fix"):   # [[chữ cũ, tên]] (sửa theo âm đọc) hoặc [tên] (nghe lại ra đúng tên)
         parts = [f"{x[0]} → {x[1]}" if isinstance(x, (list, tuple)) and len(x) == 2 else f"nghe lại ra {x}"
                  for x in s.extra["name_fix"]]
@@ -293,7 +297,7 @@ class SubsModel(QAbstractTableModel):
                 return f"🎵 AI: lời bài hát – {s.extra['ai_song']}\nKhông lồng tiếng câu này. Là lời thoại thật: tích rồi " \
                        "bấm 'Không phải nhạc'"
             if c == C_ZH and (s.extra.get("asr_alt") is not None or s.extra.get("from_asr") or s.extra.get("name_fix")
-                              or s.extra.get("asr_recheck") or s.extra.get("asr_same")
+                              or s.extra.get("asr_recheck") or s.extra.get("asr_same") or s.extra.get("edge_fix")
                               or float(s.extra.get("asr_conf", 1) or 1) < 0.7):
                 return asr_tip(s)
             if c == C_ZH and (s.extra.get("src_before") or s.extra.get("src_unsure")):

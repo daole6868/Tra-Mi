@@ -157,6 +157,7 @@ DEFAULT_SETTINGS: dict = {
     "asr_recheck_pad": 5.0,                   # ... nghe kèm bấy nhiêu giây mỗi bên (câu trước / sau làm ngữ cảnh)
     "asr_recheck_orig": True,                 # ... nghe thêm trên tiếng gốc chưa tách giọng (bản tách có thể méo)
     "asr_pick_conf": 0.7,                     # câu "không chắc" = độ chắc dưới mức này (nút Tích câu tab Phụ đề + Xoá câu không chắc)
+    "asr_edge_fix": True,                     # câu bị cắt đầu / cuối khi nhân vật còn nói -> nghe lại xác nhận rồi nới (2.1.21)
     "asr_drop_unsure": False,                 # bước cuối Nghe & tách câu: xoá câu bộ nghe không chắc trước khi dịch (2.1.19)
     "asr_overlap": False,                     # "Nghe kỹ": mọi câu nghe lần 2 trong khúc lệch (chậm gấp đôi) – 2.1.15
     "asr_guard": True,                        # khúc bộ nghe chép lời gợi ý / lặp 1 cụm -> nghe lại không gợi ý (2.1.8)

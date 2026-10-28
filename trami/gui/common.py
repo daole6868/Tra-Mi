@@ -49,6 +49,11 @@ DROP_UNSURE_HELP = ("Lớp lọc CUỐI CÙNG của Nghe & tách câu, trước 
 OVERLAP_HELP = ("Mọi câu (không chỉ câu không chắc) được nghe lần 2 trong khúc lệch với khúc lần đầu (câu nằm giữa khúc); "
                 "2 lần ra khác nhau -> lấy bản chắc hơn theo cùng luật như 'Nghe lại câu không chắc'. Chính xác nhất, "
                 "CHẬM GẤP ĐÔI – dùng cho phim khó (nhiều nhạc, nói nhanh)")
+EDGE_FIX_HELP = ("Câu kết thúc (hoặc bắt đầu) khi nhân vật vẫn còn đang nói – nói chậm, ngừng nhiều lần giữa câu: giọng đã "
+                 "tách còn tiếng ngay sau cuối / trước đầu câu (nối tiếp qua chỗ ngừng ≤ 1 s, không thuộc câu nào) -> bộ "
+                 "nghe nghe lại khúc câu cũ + khúc đã nới; khúc nới nghe ra thêm chữ của chính câu, không thêm câu khác "
+                 "-> nới mép (tối đa 4 s mỗi bên) và đo lại giờ từng chữ. Cần đã tách giọng và Qwen3-ASR / FireRedASR2. "
+                 "Cũng chạy khi bấm 'Căn mép theo giọng' (tab Phụ đề)")
 LANG_CHECK_HELP = ("Khúc bộ nghe (Qwen3-ASR) không chắc -> nghe lại không ép tiếng Trung xem có phải câu tiếng Anh / Nhật… "
                    "không; ra tiếng khác mà chắc hơn thì dùng bản đó. Tắt nếu phim chỉ có tiếng Trung mà thấy câu tiếng "
                    "Anh / Nhật lạ ở đoạn nhạc (bộ nghe đoán lời bài hát thành tiếng nước ngoài)")

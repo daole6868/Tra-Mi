@@ -209,6 +209,16 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `_word_info` / `_word_ends` (三十五 / 十一 giữ); `_pull_tail(text=, pos=)` không kéo chữ cuối qua dấu câu / bước đếm.
   (5) `align.PAUSE_ZH` = `CLAUSE_ZH` + "、" cho `pause_points` / `breath_points` (`_pair_cuts(zh_clauses=)`; tách câu dịch
   dài vẫn `CLAUSE_ZH`); `tts.plan_pauses` chọn chỗ lặng theo thứ tự (`last_j`).
+- Đầu / cuối câu bị cắt khi nhân vật còn nói (2.1.21): `snap.edge_candidates(segs, env)` – ngay sau cuối / trước đầu câu
+  giọng đã tách còn tiếng (ngưỡng theo độ to chính câu), nối tiếp qua chỗ ngừng ≤ `EXT_PAUSE` 1 s, ≤ `EXT_MAX` 4 s, dừng
+  trước câu bên cạnh, nới ≥ `EXT_MIN` 0,3 s; bỏ câu 🎵 / nghe nhầm -> `pipeline.fix_line_edges`: bộ nghe (`relisten_engine`)
+  nghe khúc câu cũ ("o") + khúc nới cuối ("t") / đầu ("h") -> `snap.edge_heard_ok`: khúc nới nghe ra THÊM ≥ 1 chữ của chính
+  câu, ≥ 75 % lời câu, không thêm chữ lạ (ngoài chữ khúc cũ vốn nghe sai; thêm 1 chữ chỉ được là trợ từ `PARTICLES`) ->
+  nới mép, bỏ `ct` / `snap`, đo lại mốc chữ `asr_qwen.align_qwen(pad=0.05)` (lỗi -> `align.alloc_chars` theo cụm có
+  tiếng, `ct_voice`), mép theo chữ đầu / cuối, `extra["edge_fix"]` = [đầu cũ, cuối cũ] (tooltip chữ gốc). `recognize` bước
+  2g' (sau 2 bộ nghe, trước câu hát / nghe nhầm / mở chỗ ngừng; có giọng đã tách; Cài đặt `asr_edge_fix` mặc định bật –
+  tab Tự động nhóm 1 `a_edges`, `C.EDGE_FIX_HELP`; `p.data["edge_fix"]` -> `edge_note` trong `listen_note`) + nút "Căn mép
+  theo giọng" (`snap_edges(fix_edges=True)`, việc "realign" dùng card, `stats["edges"]` -> `snap_note`, tích sẵn câu đã nới).
 - Xoá câu không chắc (2.1.19): lớp lọc CUỐI CÙNG của `pipeline.recognize` (bước 2i, sau nghe lại câu không chắc / nghe kỹ /
   tên riêng / 2 bộ nghe / câu hát / nghe nhầm / nói vấp / mark_repeats, trước normalize + phân biệt người nói) khi Cài đặt
   `asr_drop_unsure` (tab Tự động nhóm 1 `a_drop`, mặc định tắt) -> `drop_unsure`: bỏ câu `unsure_rows(segs, asr_pick_conf)`
@@ -357,7 +367,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (229 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (232 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2015,7 +2025,18 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   thêm tách câu người khác chen ngang theo giọng (ECAPA) – bỏ theo ý người dùng (không phải lỗi đó). Chưa chạy Qwen3 thật
   (sandbox chặn HF) – không biết chắc bộ căn sai theo kiểu nào trên phim người dùng.
 
+- 2.1.21: "SRT cũng sai: câu 04:30,125 – 04:34,871 mà thật ra nói tới 04:36,164, giữa chừng ngừng nhiều" -> "làm phần tự
+  sửa đầu và cuối câu". Trước: bám mép chỉ tìm ±0,35 s (±0,8 s câu không mốc chữ), căn lại theo giọng (2.1.20) cần ≥ 1 s
+  tiếng không ai phủ -> câu thiếu 1,3 s có nhiều chỗ ngừng không được sửa; kéo mép tay trên timeline không đo lại mốc chữ.
+  Sửa: xem Cấu trúc "Đầu / cuối câu bị cắt". Tiếng sau câu có thể là câu khác bộ nghe bỏ sót / tiếng thở -> chỉ nới khi
+  bộ nghe nghe lại xác nhận (khúc nới nghe ra thêm chữ của chính câu, không thêm câu khác). Mô phỏng đúng ví dụ người dùng
+  (tiếng 04:30,125–04:36,164 ngừng 0,5–0,6 s): cuối câu mới 04:36,21 -> bám mép 04:36,16. Chưa chạy Qwen3 thật (sandbox
+  chặn HF) – bộ nghe trên khúc câu bị cắt có tự "đoán" thêm chữ không chưa đo.
+
 ## Vấn đề đang mở
+- 2.1.21: chờ người dùng chạy lại "1. Nghe & tách câu" (hoặc tích câu bị cắt -> tab Phụ đề → Công cụ → Sửa câu → "Căn mép
+  theo giọng") : thông báo có "nới N câu bị cắt sớm theo giọng", câu 04:30,125 có về 04:36,164 không, có nới nhầm sang
+  tiếng thở / câu người khác không (rê chuột chữ gốc xem giờ trước – sau; sai thì Ctrl+Z / kéo mép lại).
 - 2.1.20: chờ người dùng chạy lại "1. Nghe & tách câu" (hoặc dự án cũ: tab Phụ đề → Công cụ → Sửa câu → "Căn mép theo
   giọng") trên đoạn đếm số: khối phụ đề có khớp sóng âm Tiếng gốc không, mỗi số giọng lồng có vào đúng lúc không; thông
   báo có "căn lại theo giọng N khúc / câu", "mở chỗ ngừng giữa câu ở N câu". Vẫn lệch -> xin project.json của dự án +
