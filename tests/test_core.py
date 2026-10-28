@@ -7192,10 +7192,12 @@ def test_gui_snap_follow_pauses_interj(sample_video, monkeypatch):
         # nút căn mép: gửi việc nền
         sub = []
         monkeypatch.setattr(pp, "submit", lambda kind, title, fn: sub.append((kind, title)))
+        pp.settings["asr_edge_fix"] = False       # 2.1.21: bật sửa đầu / cuối câu -> nghe lại bằng card ("realign")
         pp.run_snap()
         pp.s_snap_ct.setChecked(True)
         pp.run_snap()
         assert sub == [("snap", "Căn mép câu theo giọng"), ("realign", "Căn mép câu theo giọng")]
+        pp.settings["asr_edge_fix"] = True
         # từ cảm thán: danh sách người dùng -> Lọc
         pp.d_interj_words.setText("hả, ừm")
         pp._interj_words_changed()
