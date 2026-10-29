@@ -250,6 +250,7 @@ class LiveMix:
         self.rate = 1.0                           # tốc độ phát
         self.dub_rate = 1.0                       # bản lồng ghi theo giờ video đã đổi tốc độ này (2.1.24; 1 = giờ gốc)
         self.skip: set = set()                    # lớp bỏ qua khi trộn (xuất MP3 trộn riêng bản lồng)
+        self.warp = None                          # timewarp.Warp: mọi lớp theo giờ giãn (2.1.27) – rate = 1
         self._dub_env = None                      # độ to giọng lồng mỗi 0,05 s (để giảm nhạc thêm)
         self._duck_cs = None                      # (âm lượng lồng tiếng, tổng tích luỹ các khối có lời)
 
@@ -264,6 +265,17 @@ class LiveMix:
     def duration(self) -> float:
         """Độ dài theo giờ video gốc (bản lồng theo giờ video đã đổi tốc độ -> đổi về giờ gốc)."""
         return max((len(t) * (self.dub_rate if k == "dub" else 1.0) for k, t in self.tracks.items()), default=0) / SR
+
+    # ---- giờ video gốc <-> khung của bộ trộn (có bản đồ giờ giãn: khung theo giờ giãn)
+    def frame_of(self, t: float) -> int:
+        """Giây video gốc -> khung bộ trộn để bắt đầu phát."""
+        return int(max(0.0, self.warp.fwd(t) if self.warp is not None else t) * SR)
+
+    def time_of(self, pos: int, buffered: float) -> float:
+        """Khung đã đưa vào loa − phần còn trong bộ đệm -> giây video gốc đang phát ra loa."""
+        if self.warp is not None:
+            return float(self.warp.inv(max(0.0, (pos - buffered) / SR)))
+        return (pos - buffered * (self.rate or 1.0)) / SR
 
     # ---- thời gian sau khi cắt (nhạc thêm + mờ dần tính theo video XUẤT RA)
     def _out_time(self, t: np.ndarray) -> np.ndarray:

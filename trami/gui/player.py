@@ -1369,7 +1369,8 @@ class _Feeder(QObject):
     def begin(self, t: float):
         self._ensure()
         self.sink.stop()
-        self.pos = int(max(0.0, t) * self.live.SR)
+        mix = self.live.mix
+        self.pos = mix.frame_of(t) if mix is not None else int(max(0.0, t) * self.live.SR)
         self.io = self.sink.start()
         self._feed()
         self.timer.start()
@@ -1399,7 +1400,7 @@ class _Feeder(QObject):
             self.io.write(to_pcm16(a))
             self.pos += adv
         buffered = (self.sink.bufferSize() - self.sink.bytesFree()) / 4
-        self.live._audible = (self.pos - buffered * (mix.rate or 1.0)) / self.live.SR
+        self.live._audible = mix.time_of(self.pos, buffered)
 
 
 class _Bridge(QObject):
@@ -1522,6 +1523,13 @@ class Player(QWidget):
         self._kara_timer = QTimer(self, interval=33, timeout=self._kara_tick)
         self._anim_timer = QTimer(self, interval=33, timeout=self._anim_tick)   # lớp phủ có hiệu ứng (trượt / chạy)
         self.speed = 1.0
+        # làm chậm chỉ khoảng nghỉ (2.1.27): video phát chậm đúng các khoảng giãn, chỗ nhân vật nói ×1
+        self.warp = None
+        self._keep_v: list = []
+        self._edge_timer = QTimer(self)
+        self._edge_timer.setSingleShot(True)
+        self._edge_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._edge_timer.timeout.connect(self._edge_tick)
 
         self.btn_play = IconButton("play", "Phát / dừng (phím Space)", 40, accent=True)
         self.btn_back = IconButton("chev_left", "Lùi 1 khung hình", 32)
@@ -1579,7 +1587,7 @@ class Player(QWidget):
         """Dùng bộ trộn trực tiếp thay cho tiếng của file video (None = tiếng gốc của file). Giữ nguyên vị trí phát."""
         self.live.stop()
         self.live.mix = mix
-        if mix is not None:
+        if mix is not None and getattr(mix, "warp", None) is None:
             mix.rate = self.mp.playbackRate() or 1.0
         on = self.live.ok() and self.live.ready()
         self.audio.setMuted(on)
@@ -1640,6 +1648,8 @@ class Player(QWidget):
         else:
             self.live.stop()
         self._clock = (self.position(), time.monotonic())
+        if self.warp is not None:
+            self._apply_rate(self.position())
         if self.playing() and self.style.get("karaoke"):
             self._kara_timer.start()
         else:
@@ -1654,11 +1664,14 @@ class Player(QWidget):
         edit = edit or {}
         self.view.set_edit(edit, src_w, src_h)
         self.view.set_layers(edit.get("layers") or [])
-        rate = min(4.0, max(0.25, float(edit.get("speed") or 1.0)))
+        gap = (edit.get("speed_mode") or "all") in ("gaps", "need")   # làm chậm chỉ khoảng nghỉ: ô Tốc độ không dùng
+        rate = 1.0 if gap else min(4.0, max(0.25, float(edit.get("speed") or 1.0)))
         self.speed = rate
-        if abs(self.mp.playbackRate() - rate) > 1e-3:
+        if not gap:
+            self.warp = None
+        if self.warp is None and abs(self.mp.playbackRate() - rate) > 1e-3:
             self.mp.setPlaybackRate(rate)
-        if self.live.mix is not None:
+        if self.live.mix is not None and getattr(self.live.mix, "warp", None) is None:
             self.live.mix.rate = rate
         dur = duration or self._dur
         try:
@@ -1668,7 +1681,45 @@ class Player(QWidget):
         if self.keep == [(0.0, dur)] or (len(self.keep) == 1 and self.keep[0][0] <= 0.001
                                          and abs(self.keep[0][1] - dur) < 0.01):
             self.keep = []
+        self._keep_v = [tuple(x) for x in self.warp.map_ranges(self.keep)] if self.warp is not None else []
         self.update_layers()
+
+    def set_warp(self, w):
+        """Bản đồ giờ giãn khoảng nghỉ (timewarp.Warp, None = không giãn): tốc độ phát đổi theo từng đoạn – khoảng nghỉ
+        chậm đúng như video xuất, chỗ nhân vật nói ×1 (giọng / khẩu hình không bị kéo)."""
+        w = w if (w is not None and not getattr(w, "uniform", False) and w.spans) else None
+        same = (w is None and self.warp is None) or (w is not None and self.warp is not None
+                                                      and w.to_list() == self.warp.to_list())
+        self.warp = w
+        self._keep_v = [tuple(x) for x in w.map_ranges(self.keep)] if w is not None else []
+        if not same:
+            self._apply_rate(self.position())
+            self.update_layers()
+
+    def _apply_rate(self, t: float):
+        r = self.warp.rate_at(t) if self.warp is not None else self.speed
+        if abs(self.mp.playbackRate() - r) > 1e-3:
+            self.mp.setPlaybackRate(r)
+            self._clock = (t, time.monotonic())
+        self._edge_timer.stop()
+        if self.warp is not None and self.playing():
+            nxt = self.warp.next_edge(t)
+            if nxt is not None:
+                self._edge_timer.start(max(5, int((nxt - t) / max(r, 0.1) * 1000)))
+
+    def _edge_tick(self):
+        if self.warp is None or not self.playing():
+            return
+        t0, at = self._clock
+        self._apply_rate(t0 + max(0.0, time.monotonic() - at) * (self.mp.playbackRate() or 1.0) + 0.002)
+
+    def out_time(self, t: float) -> float:
+        """Giây video gốc -> giây trên video XUẤT RA (bỏ đoạn cắt, tốc độ / giãn khoảng nghỉ)."""
+        from ..video import out_time
+
+        if self.warp is not None:
+            return out_time(self.warp.fwd(t), self._keep_v or [(0.0, 1e9)], 1.0)
+        return out_time(t, self.keep or [(0.0, (self._dur or 1e9))], self.speed)
 
     def _skip_cut(self, t: float) -> bool:
         """Đang phát vào đoạn đã cắt -> nhảy qua. Trả về True nếu đã tua."""
@@ -1690,6 +1741,8 @@ class Player(QWidget):
         self._clock = (t, time.monotonic())
         if self._skip_cut(t):
             return
+        if self.warp is not None and self.playing():
+            self._apply_rate(t)
         if self.playing() and self.live.ok():
             self.live.sync(t)       # bù lệch tiếng / hình
         if self._dur and not self.slider.isSliderDown():
@@ -1718,21 +1771,19 @@ class Player(QWidget):
     def update_layers(self, t: float | None = None):
         """Hiện / ẩn từng lớp phủ theo đầu phát + hiệu ứng (giờ tính theo video XUẤT: bỏ đoạn cắt, tính tốc độ)."""
         from .. import overlay
-        from ..video import out_time
 
         if not self.view.layers:
             return
         t = self.position() if t is None else t
         dur = self._dur or 0.0
-        keep = self.keep or [(0.0, dur or 1e9)]
         in_keep = not self.keep or any(a - 0.02 <= t < b for a, b in self.keep)
         any_anim = False
         for it in self.view.layers.values():
             L = it.layer
             a, b = overlay.src_span(L, dur or 1e9)
             if a <= t < b and in_keep:
-                A = out_time(a, keep, self.speed)
-                it.set_time(out_time(t, keep, self.speed) - A, out_time(b, keep, self.speed) - A)
+                A = self.out_time(a)
+                it.set_time(self.out_time(t) - A, self.out_time(b) - A)
             else:
                 it.set_time(None, 0)
             any_anim = any_anim or (L.get("anim") or "none") != "none" or bool(L.get("fade_in") or L.get("fade_out"))

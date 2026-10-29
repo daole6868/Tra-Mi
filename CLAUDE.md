@@ -346,6 +346,35 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   tốc độ; giảm nhạc thêm theo t / dub_rate; `duration`), sóng âm timeline / karaoke (`dub_wave` bước 0,01 × vspeed), Tải
   MP3 bản trộn (`mix_audio_file`: các lớp khác theo giờ gốc -> atempo, rồi amix bản lồng; `LiveMix.skip`). Đổi tốc độ /
   công tắc sau khi lồng -> `dub_speed_stale` -> `_save_edit_now` gọi `_relayout` (không đọc lại), `render` tự xếp lại.
+- Làm chậm CHỈ KHOẢNG NGHỈ (2.1.27, `trami/timewarp.py`): edit `speed_mode` "all" (cả phim theo `speed`, như 2.1.24) |
+  "gaps" (đều: `gap_rate` 0,8×, khoảng nghỉ giữa 2 câu ≥ `gap_min` 0,3 s, chừa `PAD` 0,08 s sát lời, không giãn đầu /
+  cuối video – `plan_gaps`) | "need" (theo câu dài: giọng lồng tràn qua câu lồng kế -> giãn các chỗ không lời giữa cuối
+  câu và câu kế, cùng 1 tốc độ, vừa đủ số giây thiếu ≤ `need_max` 1,5 s, hình không chậm dưới `need_rate` 0,6× –
+  `plan_need`, cần độ dài giọng nên chỉ lập trong `synthesize_dub`). `Warp` (đoạn [a, b, r] giây gốc; `fwd` gốc -> giờ
+  giãn V, `inv`, `rate_at`, `next_edge`, `map_ranges`, `setpts_expr` = cây tìm kiếm nhị phân trên các mốc – 1905 đoạn
+  185 KB, xuất không chậm thêm; `uniform(r)` = cả phim, chỉ cho bộ trộn nghe thử). `signature(edit)` = cách + tham số.
+  Lồng tiếng: `pipeline.warp_plan` -> `synthesize_dub(warp=)` xếp giọng theo V (giọng ×1, vspeed 1), bản lồng ghi theo
+  V, dub_at / layout đổi ngược về giây gốc; `stats["warp"]` -> `edit["dub"]["warp"]` + `["warp_sig"]` + `dub_versions[i]`
+  (vá bản lồng chỉ khi cùng warp); `dub_speed` = 1 ở cách khoảng nghỉ; `dub_speed_stale` thêm so `warp_sig` (+ "gaps":
+  lập lại theo câu hiện tại khác bản đã xếp) -> đổi cách / tham số ở tab Chỉnh sửa = xếp lại (`_save_edit_now`, không đọc
+  lại). `pipeline.time_warp(p, edit, segs)` = bản đồ đang dùng (bản lồng xếp đúng cách -> đúng warp của nó; chưa có:
+  "gaps" lập theo câu, "need" None), `warp_note` (dòng dưới ô). Xuất (`video.build_and_render`, `spec["_warp"]` +
+  `["_warp_files"]` do `pipeline.render` / `warp_audio_files` chuẩn bị; ô Tốc độ = 1): `timewarp.map_spec` (trim / cuts /
+  mute / layers / inserts / song_spans) + `map_segments` (giờ câu, kv, kw) sang V; hình đọc theo giây gốc (`v_opts`),
+  `setpts=PTS-STARTPTS,setpts='W'/TB,fps=` rồi mọi bước như cũ; tiếng gốc / nhạc nền / giọng gốc đã tách = FLAC đã giãn
+  (`timewarp.write_flac`, `work/render/warp/<lớp>_<mã>.flac`, dùng lại); không chia đoạn khi có warp; đồ thị lọc dài ->
+  file (`ff.filter_args`: FFmpeg ≥ 7 `-/filter_complex`, cũ `-filter_complex_script`, `major_version`). Giãn tiếng:
+  `stretch_span` (WSOLA 2 kênh cùng nhịp, khung 46 ms, dò ±10 ms, khung đầu / cuối trùng tín hiệu gốc -> nối liền mạch,
+  ~170× thời gian thực) trong `WarpedTrack` (đọc như mảng int16: ngoài khoảng giãn đọc thẳng memmap, khoảng giãn chia
+  mẩu ≤ `PIECE_SEC` 3 s, giãn KHI ĐỌC TỚI + nhớ `CACHE_PIECES` 64 mẩu – không ghi file). Nghe thử: `pipeline.mix_warp`
+  (time_warp, hoặc cả phim ×r -> `Warp(uniform)` + các lớp giải mã kèm atempo – SỬA RÈ: trước đây trình phát kéo chậm
+  khối âm thanh = tiếng trầm / rè), `live_mix` (lớp gốc -> WarpedTrack / atempo), `apply_audio_state` đổi songs / keep /
+  mute sang V, `LiveMix.warp` + `frame_of` / `time_of` (bộ đẩy tiếng `_Feeder`), `mix_warp_key` vào khoá
+  `_update_player_audio`; `Player.set_warp` (từ `_apply_live`): tốc độ phát đổi theo đoạn (`_apply_rate` + hẹn giờ
+  `_edge_timer` tới mép đoạn), `Player.out_time` cho lớp phủ. Sóng âm dòng Lồng tiếng: `dub_wave` -> `_warped_env`
+  (`<bản lồng>.env10s_<mã>.npy` theo giờ gốc, đỉnh mỗi ô); karaoke `kw` đổi ngược `inv`. GUI tab Chỉnh sửa: "Làm chậm"
+  `e_smode` (`timewarp.MODES`) + `e_speed` / `e_dubnat` (cả phim) / `e_grate` + `e_gmin` (đều) / `e_nrate` + `e_nmax`
+  (theo câu dài) / `e_wnote` (`_smode_rows`, `_update_warp_note`); tab Xuất "Lấy khung đang xem" (`_out_time`) theo warp.
 - Karaoke theo mốc thật từng từ (2.1.24, `trami/dubwords.py`): `<file giọng>.words.json` {rel raw | trim, src edge |
   whisper, sig, w [[giây, giây, chữ]]}. Edge: `_edge_comm(words=True)` (boundary "WordBoundary" – edge-tts 7 mặc định
   theo câu) + `save(audio, metadata)` -> `edge_jsonl`; đọc từng vế -> `dubwords.join` (dời theo chỗ nối). Giọng khác:
@@ -456,7 +485,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (247 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (251 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2165,7 +2194,23 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   key, đúng trạng thái; gpt-5 qua dịch vụ khác đổi max_completion_tokens; Ollama 3 trường hợp; giao diện offscreen (kiểm
   tra tất cả, xoá key hỏng giữ key hết lượt hôm nay, mở lại thấy kết quả cũ). Chưa gọi API thật (sandbox chặn).
 
+- 2.1.27: "làm chậm video thì chỗ nhân vật nói cũng chậm, giọng bị rè – chỉ làm chậm khoảng nghỉ sau đoạn lồng tiếng" ->
+  người dùng chọn làm cả 2 cách, tuỳ chỉnh cả 2: "Chỉ khoảng nghỉ – đều" (mọi khoảng nghỉ đủ dài chậm cùng tốc độ) và
+  "Chỉ khoảng nghỉ – theo câu dài" (chỉ giãn chỗ giọng lồng thiếu, vừa đủ số giây), cạnh "Cả phim" cũ (xem Cấu trúc). Chỗ
+  có lời luôn ×1 (giọng gốc, khẩu hình, giọng lồng); tiếng nền ở khoảng nghỉ giãn giữ cao độ. Sửa kèm: xem trước "Cả
+  phim" chậm trước đây kéo chậm khối âm thanh (tiếng trầm xuống, rè – video xuất vẫn giữ cao độ bằng atempo) -> giờ các
+  lớp giải mã kèm atempo như khi xuất. Thử: bản đồ giờ + biểu thức setpts (120 đoạn ngẫu nhiên, lệch < 1e-4 s), tiếng
+  440 Hz giãn 0,5× vẫn 440 Hz, nối không "bụp", bản lồng "theo câu dài" (câu thiếu 0,34 s -> giãn đúng, đọc ×1, câu sau
+  đúng lúc nhân vật nói), dự án: đổi cách -> xếp lại không đọc lại, xuất 8 s + cắt 0,5 s -> 9,34 s, hình trắng bắt đầu đúng
+  W(4) = 5,84 s, giọng lồng câu 2 đúng 5,84 s, tiếng gốc ở khoảng nghỉ 440 Hz; FFmpeg 6.1 + 7.0 (đồ thị lọc ghi ra file);
+  giao diện offscreen (ô theo cách, dòng kết quả, trình phát đổi tốc độ theo đoạn). Chưa nghe trên phim thật.
+
 ## Vấn đề đang mở
+- 2.1.27: chờ người dùng chọn tab Chỉnh sửa → "Làm chậm" = "Chỉ khoảng nghỉ – đều" (0,8×) hoặc "theo câu dài" trên 1 phim
+  đã lồng: tool tự xếp lại giọng lồng; phát trong tool + xuất video – chỗ nói còn rè không, khoảng nghỉ chậm có tự nhiên
+  không (hình chậm lộ quá thì tăng "Tốc độ khoảng nghỉ" / giảm "Thêm tối đa mỗi chỗ"), tiếng nền ở khoảng nghỉ có lạ
+  không; trình phát đổi tốc độ theo đoạn có khựng hình không (Qt đổi playbackRate liên tục); cả phim 0,95× giờ nghe thử
+  có hết trầm / rè không (lần đầu phải giải mã lại các lớp kèm atempo – phim dài vài chục giây).
 - 2.1.26: chờ người dùng bấm Cài đặt → Dịch thuật → "Kiểm tra tất cả API" với các key thật: key nào báo sai trạng
   thái (vd key hết lượt mà báo sống, key sống mà báo lỗi) -> gửi dòng chữ cạnh key đó để sửa cách đọc lỗi của nhà cung cấp.
 - 2.1.25: chờ người dùng (Cài đặt → Công cụ dịch → khung Gemini có key; Công cụ dịch = Gemini) (1) tích ~20 câu nghi

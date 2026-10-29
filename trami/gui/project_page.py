@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDoubleSpinBox, QFi
                                QTableWidgetItem, QVBoxLayout, QWidget, QGridLayout, QSizePolicy)
 
 from .. import langs, pipeline
-from ..config import _deep_merge, load_settings
+from ..config import _deep_merge, load_settings, log_error
 from ..jobs import manager
 from ..karaoke import DEFAULT_COLOR as KARA_COLOR, MODES as KARA_MODES
 from ..project import Project
@@ -1214,7 +1214,26 @@ class ProjectPage(QWidget):
         self.e_fliph = f2.row("Lật ngang (gương)", Switch())
         self.e_flipv = f2.row("Lật dọc", Switch())
         self.e_zoom = f2.row("Phóng to", SliderRow(1, 1.5, 0.01, 1))
+        from ..timewarp import MODES as _WARP_MODES
+
+        self.e_smode = f2.row("Làm chậm", combo(_WARP_MODES, "all"),
+                              "Cả phim: mọi thứ chậm / nhanh theo ô Tốc độ (chỗ nhân vật nói cũng bị kéo chậm). "
+                              "Chỉ khoảng nghỉ: chỉ giãn khoảng lặng giữa các câu – chỗ nhân vật nói và giọng lồng chạy "
+                              "đúng ×1 (không rè, khớp khẩu hình); tiếng nền ở khoảng nghỉ giãn giữ cao độ. "
+                              "– đều: mọi khoảng nghỉ đủ dài chậm cùng 1 tốc độ. – theo câu dài: chỉ giãn khoảng nghỉ "
+                              "ngay sau câu giọng lồng dài hơn chỗ trống, giãn vừa đủ số giây còn thiếu (cần bản lồng)")
         self.e_speed = f2.row("Tốc độ", SliderRow(0.5, 2, 0.05, 1, suffix="×"))
+        self.e_grate = f2.row("Tốc độ khoảng nghỉ", SliderRow(0.3, 1.0, 0.05, 0.8, suffix="×"),
+                              "Khoảng nghỉ giữa 2 câu chạy chậm chừng này (0,8× = dài thêm 25 %); chỗ có lời giữ ×1")
+        self.e_gmin = f2.row("Chỉ giãn khoảng nghỉ dài từ", SliderRow(0.1, 3, 0.1, 0.3, 1, suffix=" s"),
+                             "Khoảng nghỉ ngắn hơn chừng này giữ nguyên (khoảng ngắn giãn ra không thấy khác)")
+        self.e_nrate = f2.row("Hình chậm nhất", SliderRow(0.3, 0.95, 0.05, 0.6, suffix="×"),
+                              "Khoảng nghỉ sau câu dài được giãn nhưng hình không chậm hơn chừng này")
+        self.e_nmax = f2.row("Thêm tối đa mỗi chỗ", SliderRow(0.2, 5, 0.1, 1.5, 1, suffix=" s"),
+                             "Mỗi khoảng nghỉ dài thêm nhiều nhất chừng này giây (giọng còn thiếu chỗ hơn thì đọc "
+                             "nhanh / lùi câu sau như cách xếp ở tab Lồng tiếng)")
+        self.e_wnote = label("", "muted", wrap=True)
+        f2.row("", self.e_wnote)
         self.e_dubnat = f2.row("Giọng lồng giữ tốc độ tự nhiên", Switch(),
                                "Bật (mặc định): làm chậm / nhanh video thì hình + tiếng gốc + nhạc nền đổi tốc độ, còn "
                                "giọng lồng vẫn đọc tốc độ bình thường – mỗi câu được xếp lại theo giờ video mới (video "
@@ -1255,8 +1274,10 @@ class ProjectPage(QWidget):
         for w in (self.e_res, self.e_rot):
             w.currentIndexChanged.connect(sv)
         for w in (self.e_zoom, self.e_speed, self.e_bright, self.e_contrast, self.e_sat, self.e_gamma,
-                  self.e_fin, self.e_fout):
+                  self.e_fin, self.e_fout, self.e_grate, self.e_gmin, self.e_nrate, self.e_nmax):
             w.changed.connect(sv)
+        self.e_smode.currentIndexChanged.connect(lambda *_: (self._smode_rows(), sv()))
+        self._smode_rows()
         for w in (self.e_fliph, self.e_flipv, self.e_sharpen, self.e_denoise, self.e_dubnat):
             w.toggledOn.connect(sv)
 
@@ -1287,6 +1308,25 @@ class ProjectPage(QWidget):
         self._apply_audio_now()
         if self.st_kara.isChecked():
             self._live_timer.start()     # karaoke theo giọng lồng: bật / tắt lồng tiếng thì đổi nhịp chữ
+
+    def _smode_rows(self):
+        """Ô của cách làm chậm đang chọn (Cả phim: Tốc độ + giọng lồng giữ tốc độ; khoảng nghỉ: tốc độ / mức giãn)."""
+        m = self.e_smode.currentData() or "all"
+        f = self.frame_form
+        for w, on in ((self.e_speed, m == "all"), (self.e_dubnat, m == "all"), (self.e_grate, m == "gaps"),
+                      (self.e_gmin, m == "gaps"), (self.e_nrate, m == "need"), (self.e_nmax, m == "need"),
+                      (self.e_wnote, m != "all")):
+            f.setRowVisible(w, on)
+        self._update_warp_note()
+
+    def _update_warp_note(self):
+        if not self.p or not hasattr(self, "e_wnote") or (self.e_smode.currentData() or "all") == "all":
+            return
+        try:
+            ed = self.collect_edit()
+            self.e_wnote.setText(pipeline.warp_note(self.p, ed, self.model.segs))
+        except Exception:  # noqa: BLE001 – giao diện chưa dựng xong
+            pass
 
     def _apply_audio_now(self):
         mix = self.player.live.mix
@@ -2169,6 +2209,10 @@ class ProjectPage(QWidget):
         srcs = pipeline.audio_sources(self.p, ed)
         key = tuple(sorted((k, f, pre, Path(f).stat().st_mtime if Path(f).exists() else 0)
                            for k, (f, pre) in srcs.items()))
+        try:   # tốc độ cả phim / giãn khoảng nghỉ: các lớp nghe thử giãn giữ cao độ -> đổi thì nạp lại
+            key = key + (("warp", pipeline.mix_warp_key(self.p, ed)),)
+        except Exception:  # noqa: BLE001
+            log_error("Bản đồ giờ của bộ trộn nghe thử")
         dub_key = (srcs.get("dub"), key)
         if dub_key != getattr(self, "_dub_key", None):
             self._dub_key = dub_key
@@ -2247,6 +2291,12 @@ class ProjectPage(QWidget):
         self.e_zoom.set(e["zoom"])
         self.e_speed.set(e["speed"])
         self.e_dubnat.setChecked(bool(e.get("dub_natural", True)))
+        set_combo(self.e_smode, e.get("speed_mode") or "all")
+        self.e_grate.set(float(e.get("gap_rate") or 0.8))
+        self.e_gmin.set(float(e.get("gap_min") or 0.3))
+        self.e_nrate.set(float(e.get("need_rate") or 0.6))
+        self.e_nmax.set(float(e.get("need_max") or 1.5))
+        self._smode_rows()
         col = e["color"]
         self.e_bright.set(col.get("brightness", 0))
         self.e_contrast.set(col.get("contrast", 1))
@@ -2288,6 +2338,9 @@ class ProjectPage(QWidget):
             "resolution": self.e_res.currentData(), "rotate": int(self.e_rot.currentData()),
             "flip_h": self.e_fliph.isChecked(), "flip_v": self.e_flipv.isChecked(),
             "zoom": self.e_zoom.value(), "speed": self.e_speed.value(), "dub_natural": self.e_dubnat.isChecked(),
+            "speed_mode": self.e_smode.currentData() or "all", "gap_rate": round(self.e_grate.value(), 3),
+            "gap_min": round(self.e_gmin.value(), 3), "need_rate": round(self.e_nrate.value(), 3),
+            "need_max": round(self.e_nmax.value(), 3),
             "color": {"brightness": self.e_bright.value(), "contrast": self.e_contrast.value(),
                       "saturation": self.e_sat.value(), "gamma": self.e_gamma.value(),
                       "sharpen": self.e_sharpen.isChecked(), "denoise": self.e_denoise.isChecked()},
@@ -2385,12 +2438,20 @@ class ProjectPage(QWidget):
         self._update_summary()
         self._update_timeline()
         self._update_player_audio()
-        spd = lambda e: (round(float(e.get("speed") or 1.0), 3), bool(e.get("dub_natural", True)))  # noqa: E731
+        from ..timewarp import signature as _wsig
+
+        spd = lambda e: (round(float(e.get("speed") or 1.0), 3), bool(e.get("dub_natural", True)),  # noqa: E731
+                         _wsig(e))
         if spd(before) != spd(cur) and pipeline.dub_speed_stale(self.p):
-            # đổi tốc độ video / bật tắt "giọng lồng giữ tốc độ tự nhiên": xếp lại bản lồng theo giờ video mới
+            # đổi tốc độ video / bật tắt "giọng lồng giữ tốc độ tự nhiên" / cách làm chậm khoảng nghỉ: xếp lại bản lồng
+            # theo giờ video mới (không đọc lại câu nào)
             vs = pipeline.dub_speed(cur)
-            self._relayout(f"Xếp lại giọng lồng theo tốc độ video ×{vs:.2f}" if vs != 1 else
-                           "Xếp lại giọng lồng theo giờ video gốc")
+            if _wsig(cur):
+                self._relayout("Xếp lại giọng lồng theo khoảng nghỉ được làm chậm")
+            else:
+                self._relayout(f"Xếp lại giọng lồng theo tốc độ video ×{vs:.2f}" if vs != 1 else
+                               "Xếp lại giọng lồng theo giờ video gốc")
+        self._update_warp_note()
 
     # ------------------------------------------------------------------ hoàn tác / làm lại
     UNDO_MAX = 60
@@ -5795,6 +5856,11 @@ class ProjectPage(QWidget):
             ed = dict(ed, cuts=merge_spans(list(ed.get("cuts") or []) + extra))
         i = self.p.data.get("info", {})
         self.player.set_edit(ed, i.get("width", 0), i.get("height", 0), i.get("duration", 0))
+        if (ed.get("speed_mode") or "all") != "all":     # làm chậm chỉ khoảng nghỉ: video chậm đúng các khoảng giãn
+            try:
+                self.player.set_warp(pipeline.time_warp(self.p, ed, self.model.segs))
+            except Exception:  # noqa: BLE001
+                log_error("Bản đồ giờ giãn khoảng nghỉ")
         self.player.view.select_layer(self.layers_tab.sel)
         self._refresh_overlay()
         self._sync_clean()
@@ -5828,7 +5894,10 @@ class ProjectPage(QWidget):
             items.append(f"Lớp phủ: {nt} chữ, {len(lay) - nt} logo")
         if e["flip_h"] or e["flip_v"] or e.get("rotate"):
             items.append("Lật / xoay")
-        if abs(e["speed"] - 1) > 1e-3:
+        if (e.get("speed_mode") or "all") != "all":
+            note = pipeline.warp_note(self.p, e, self.model.segs)
+            items.append("Làm chậm chỉ khoảng nghỉ" + (": " + note[:1].lower() + note[1:] if note else ""))
+        elif abs(e["speed"] - 1) > 1e-3:
             items.append(f"Tốc độ ×{e['speed']:.2f}" + (" (giọng lồng giữ tốc độ tự nhiên)"
                                                        if e.get("dub_natural", True) and e["dub"].get("wav") else ""))
         if e["dub"].get("enabled") and e["dub"].get("wav"):

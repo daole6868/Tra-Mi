@@ -3411,8 +3411,9 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     # file đó (~1 giây) thay vì dựng lại cả phim (phim 2 giờ: ghi lại ~500 MB + giải mã lại cho trình phát)
     ver = next((v for v in dub_versions(p) if v.get("wav") == str(target)), None) if use_cur else None
     vsp = dub_speed(p.edit)   # video đổi tốc độ mà giọng lồng giữ tốc độ tự nhiên (2.1.24)
-    patch = {"wav": str(target), "placed": ver["placed"], "vspeed": float(ver.get("vspeed") or 1.0)} \
-        if ver and ver.get("placed") else None
+    wplan = warp_plan(p.edit)   # làm chậm chỉ khoảng nghỉ (2.1.27): xếp giọng theo giờ giãn
+    patch = {"wav": str(target), "placed": ver["placed"], "vspeed": float(ver.get("vspeed") or 1.0),
+             "warp": ver.get("warp") or []} if ver and ver.get("placed") else None
     old_stat = target.stat() if patch else None
     patched: list = []        # các đoạn đã vá (mẫu 24 kHz), qua mọi lần chạy
     full = [False]            # có lần dựng lại cả bản (ghi vào tmp_out)
@@ -3426,10 +3427,10 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
                        voices=voices, ref_audio=ref_audio, settings=settings,
                        skip_songs=bool(settings.get("dub_skip_songs", True)), stats=stats,
                        only=set(only) if only is not None else None, lang=trans_lang(p),
-                       genders=p.data.get("speaker_gender") or {}, patch=patch, vspeed=vsp)
+                       genders=p.data.get("speaker_gender") or {}, patch=patch, vspeed=vsp, warp=wplan)
         if stats.get("patched") is not None:
             patched.extend(stats["patched"])
-            patch = {"wav": str(target), "placed": stats["placed_tab"], "vspeed": vsp}
+            patch = {"wav": str(target), "placed": stats["placed_tab"], "vspeed": vsp, "warp": stats.get("warp") or []}
         else:
             full[0] = True
             patch = None      # bản mới nằm ở tmp_out -> lần chạy sau (rút gọn) cũng dựng cả bản
@@ -3483,6 +3484,9 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     env = stats.pop("wave", None)
     top = stats.pop("env_top", None)
     placed_tab = stats.pop("placed_tab", None)
+    warp_spans = stats.pop("warp", None) or []
+    stats["warp_n"] = len(warp_spans)
+    stats["warp_add"] = round(sum((b - a) * (1 / r - 1) for a, b, r in warp_spans), 2)
     stats.pop("patched", None)
     stats.pop("patch_skipped", None)
     if env is not None:
@@ -3507,6 +3511,10 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     if placed_tab is not None:
         entry["placed"] = placed_tab   # đoạn giọng đã đặt trong bản này -> lần sửa sau chỉ vá phần thay đổi
     entry["vspeed"] = vsp
+    from . import timewarp
+
+    entry["warp"] = warp_spans
+    entry["warp_sig"] = timewarp.signature(p.edit)
     if top is not None:
         entry["env_top"] = top
     old_i = next((i for i, v in enumerate(vers) if v["wav"] == str(out)), None)
@@ -3524,6 +3532,8 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     ed["dub"]["enabled"] = True
     ed["dub"]["wav"] = str(out)
     ed["dub"]["vspeed"] = vsp       # bản lồng ghi theo giờ video ở tốc độ này (1 = giờ video gốc)
+    ed["dub"]["warp"] = warp_spans  # bản lồng ghi theo giờ giãn khoảng nghỉ (2.1.27; [] = giờ gốc)
+    ed["dub"]["warp_sig"] = entry["warp_sig"]
     if ed.get("audio") and not was_on and not st and float(ed["audio"].get("orig", 1.0)) > 0.5:
         ed["audio"]["orig"] = 0.15     # mới bật lồng tiếng, chưa tách giọng: tiếng gốc nhỏ lại cho nghe rõ lời Việt
     if st:  # có nhạc nền đã tách -> dùng làm nền cho bản lồng tiếng (sạch giọng gốc)
@@ -3725,10 +3735,65 @@ def relayout(p: Project, settings: dict | None = None, progress: Prog | None = N
     return dub(p, None, None, settings, progress, cancel, inplace=True, only=[])
 
 
+def warp_plan(edit: dict | None) -> dict | None:
+    """Cách làm chậm chỉ khoảng nghỉ đang chọn ở tab Chỉnh sửa (2.1.27) -> {"mode", tham số} cho synthesize_dub."""
+    from . import timewarp
+
+    m = timewarp.mode_of(edit)
+    if m == "all":
+        return None
+    return {"mode": m, **timewarp.params(edit)}
+
+
+def time_warp(p: Project, edit: dict | None = None, segs: list | None = None):
+    """Bản đồ giờ giãn khoảng nghỉ đang dùng khi xem trước / xuất (timewarp.Warp) – None = không giãn. Có bản lồng
+    tiếng xếp theo đúng cách đang chọn -> dùng đúng các đoạn giãn của bản đó (giọng lồng ghi theo giờ giãn đó); chưa có:
+    cách "đều" lập theo câu, cách "theo câu dài" cần bản lồng (chưa có thì không giãn)."""
+    from . import timewarp
+
+    ed = edit or p.edit
+    m = timewarp.mode_of(ed)
+    if m == "all":
+        return None
+    d = ed.get("dub") or {}
+    if d.get("enabled") and d.get("wav") and Path(d["wav"]).exists() and \
+            (d.get("warp_sig") or "") == timewarp.signature(ed):
+        return timewarp.Warp.of(d.get("warp") or [])
+    if m == "gaps":
+        prm = timewarp.params(ed)
+        dur = float(p.data.get("info", {}).get("duration") or 0)
+        return timewarp.Warp.of(timewarp.plan_gaps(p.segments if segs is None else segs, dur, prm["gap_rate"],
+                                                    prm["gap_min"]))
+    return None
+
+
+def warp_note(p: Project, edit: dict | None = None, segs: list | None = None) -> str:
+    """Dòng kết quả dưới ô "Làm chậm" (tab Chỉnh sửa)."""
+    from . import timewarp
+
+    ed = edit or p.edit
+    m = timewarp.mode_of(ed)
+    if m == "all":
+        return ""
+    d = ed.get("dub") or {}
+    if m == "need" and not (d.get("enabled") and d.get("wav")):
+        return "Cách này cần bản lồng tiếng – bấm Tạo bản lồng tiếng (tab Lồng tiếng) trước"
+    w = time_warp(p, ed, segs)
+    txt = timewarp.summary(w, m)
+    if (d.get("warp_sig") or "") != timewarp.signature(ed) and d.get("enabled") and d.get("wav"):
+        txt += " · giọng lồng sẽ được xếp lại theo cách này"
+    return txt[:1].upper() + txt[1:]
+
+
 def dub_speed(edit: dict) -> float:
     """Tốc độ video mà bản lồng cần được xếp theo (2.1.24): đổi Tốc độ ở tab Chỉnh sửa + bật "Giọng lồng giữ tốc độ
     tự nhiên" (mặc định) -> giọng không bị kéo chậm / nhanh theo video, mỗi câu được xếp theo giờ video đã đổi tốc độ.
-    Tắt (hoặc tốc độ 1) -> 1: bản lồng theo giờ video gốc, khi xuất co giãn cùng video như trước."""
+    Tắt (hoặc tốc độ 1) -> 1: bản lồng theo giờ video gốc, khi xuất co giãn cùng video như trước. Làm chậm chỉ khoảng
+    nghỉ (2.1.27) -> 1 (ô Tốc độ không dùng)."""
+    from . import timewarp
+
+    if timewarp.mode_of(edit) != "all":
+        return 1.0
     sp = min(4.0, max(0.25, float(edit.get("speed") or 1.0)))
     if abs(sp - 1) < 1e-3 or not edit.get("dub_natural", True):
         return 1.0
@@ -3741,7 +3806,19 @@ def dub_speed_stale(p: Project, edit: dict | None = None) -> bool:
     d = ed.get("dub") or {}
     if not d.get("wav") or not Path(d["wav"]).exists() or not any(s.extra.get("tts_file") for s in p.segments):
         return False
-    return abs(float(d.get("vspeed") or 1.0) - dub_speed(ed)) > 1e-3
+    if abs(float(d.get("vspeed") or 1.0) - dub_speed(ed)) > 1e-3:
+        return True
+    from . import timewarp
+
+    sig = timewarp.signature(ed)
+    if (d.get("warp_sig") or "") != sig:
+        return True
+    if timewarp.mode_of(ed) == "gaps":      # câu đã dời / thêm / xoá sau khi xếp -> khoảng nghỉ khác
+        prm = timewarp.params(ed)
+        dur = float(p.data.get("info", {}).get("duration") or 0)
+        now = timewarp.Warp(timewarp.plan_gaps(p.segments, dur, prm["gap_rate"], prm["gap_min"])).to_list()
+        return now != timewarp.Warp(d.get("warp") or []).to_list()
+    return False
 
 
 def dub_env_path(wav: str | Path) -> Path:
@@ -3825,8 +3902,39 @@ def dub_wave(p: Project) -> tuple[str, float] | None:
     env = dub_env_path(wav)
     if not env.exists() or env.stat().st_mtime < Path(wav).stat().st_mtime:
         _dub_env_full(wav)
+    spans = (p.edit.get("dub") or {}).get("warp") or []
+    if spans:     # bản lồng theo giờ giãn khoảng nghỉ (2.1.27): đổi sóng âm về giờ video gốc (mỗi ô lấy đỉnh)
+        return _warped_env(env, spans), ENV_HOP
     # bản lồng ghi theo giờ video đã đổi tốc độ: mỗi bước 0,01 s của file = 0,01 × tốc độ giây video gốc
     return str(env), ENV_HOP * float((p.edit.get("dub") or {}).get("vspeed") or 1.0)
+
+
+def _warped_env(env: Path, spans: list) -> str:
+    """Sóng âm bản lồng (theo giờ giãn) -> theo giờ video gốc, lưu <bản lồng>.env10s_<mã>.npy."""
+    import numpy as np
+
+    from . import timewarp
+    from .tts import ENV_HOP
+
+    w = timewarp.Warp(spans)
+    out = env.with_name(env.stem + f"s_{w.key()}.npy")
+    if out.exists() and out.stat().st_mtime >= env.stat().st_mtime:
+        return str(out)
+    e = np.load(env).astype(np.float32)
+    if not len(e):
+        return str(env)
+    n_src = max(1, int(w.inv(len(e) * ENV_HOP) / ENV_HOP))
+    # ô j (giây gốc) = các ô bản lồng từ W(j) tới W(j + 1) -> lấy đỉnh (khoảng giãn: nhiều ô gộp 1)
+    lo = np.clip(np.round(w.fwd(np.arange(n_src) * ENV_HOP) / ENV_HOP).astype(np.int64), 0, len(e) - 1)
+    res = np.maximum.reduceat(e, np.maximum.accumulate(lo))
+    for old in env.parent.glob(env.stem + "s_*.npy"):
+        if old != out:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    np.save(out, res.astype(np.float16))
+    return str(out)
 
 
 
@@ -3896,6 +4004,9 @@ def karaoke_spans(p: Project, edit: dict | None = None) -> dict[int, dict]:
     ver = next((v for v in dub_versions(p) if v.get("wav") == d.get("wav")), None) or {}
     tab = {str(e[0]): e for e in ver.get("placed") or []}
     vsp = float(d.get("vspeed") or 1.0)
+    from . import timewarp
+
+    tw = timewarp.Warp.of(d.get("warp") or [])     # bản lồng theo giờ giãn khoảng nghỉ: mốc từ đổi về giây gốc
     real = bool(load_settings().get("karaoke_listen", True))   # tắt: karaoke đoán theo đoạn có tiếng như trước
     out: dict[int, dict] = {}
     for item in layout:
@@ -3913,6 +4024,8 @@ def karaoke_spans(p: Project, edit: dict | None = None) -> dict[int, dict]:
         if clip and at and real:
             try:
                 words = dubwords.line_words(clip, tab.get(Path(clip).name), vsp)
+                if words and tw:
+                    words = [[round(tw.inv(a), 3), round(tw.inv(b), 3), t] for a, b, t in words]
                 kw = align_words(" ".join((segs[k].trans or "").split()), words) if words else None
             except Exception:  # noqa: BLE001 – file mốc từ hỏng: karaoke đoán như cũ
                 kw = None
@@ -4297,6 +4410,8 @@ def use_dub_version(p: Project, wav: str) -> None:
     ed["dub"]["wav"] = wav
     ed["dub"]["enabled"] = True
     ed["dub"]["vspeed"] = float(v.get("vspeed") or 1.0)
+    ed["dub"]["warp"] = v.get("warp") or []
+    ed["dub"]["warp_sig"] = v.get("warp_sig") or ""
     p.data["edit"] = ed
     p.data["dub_stats"] = v.get("stats") or {}
     p.data["dub_layout"] = v.get("layout") or []
@@ -4317,6 +4432,8 @@ def delete_dub_version(p: Project, wav: str) -> None:
         Path(wav).unlink(missing_ok=True)
         dub_env_path(wav).unlink(missing_ok=True)
         _old_env_path(wav).unlink(missing_ok=True)
+        for f in dub_env_path(wav).parent.glob(dub_env_path(wav).stem + "s_*.npy"):
+            f.unlink(missing_ok=True)
     except OSError:
         pass  # file đang được mở ở chương trình khác -> để lại, chỉ bỏ khỏi danh sách
     p.data["dub_versions"] = vers
@@ -4325,6 +4442,8 @@ def delete_dub_version(p: Project, wav: str) -> None:
         if vers:
             ed["dub"]["wav"] = vers[0]["wav"]
             ed["dub"]["vspeed"] = float(vers[0].get("vspeed") or 1.0)
+            ed["dub"]["warp"] = vers[0].get("warp") or []
+            ed["dub"]["warp_sig"] = vers[0].get("warp_sig") or ""
             p.data["dub_stats"] = vers[0].get("stats") or {}
         else:
             ed["dub"]["wav"] = ""
@@ -4391,33 +4510,77 @@ def audio_state(p: Project, edit: dict | None = None, srcs: dict | None = None) 
             "mute": [list(x) for x in ed.get("mute_spans") or []], "dub_rate": float(d.get("vspeed") or 1.0)}
 
 
+def mix_warp(p: Project, edit: dict | None = None):
+    """Bản đồ giờ của bộ trộn nghe thử (2.1.27): giãn khoảng nghỉ (time_warp) hoặc cả phim đổi tốc độ (đều) – các lớp
+    tiếng gốc / nhạc nền / giọng gốc được giãn GIỮ CAO ĐỘ như khi xuất (trước đây trình phát kéo chậm khối âm thanh
+    -> tiếng trầm, rè). None = tốc độ ×1."""
+    from . import timewarp
+
+    ed = edit or p.edit
+    w = time_warp(p, ed)
+    if w is not None or timewarp.mode_of(ed) != "all":
+        return w
+    sp = min(4.0, max(0.25, float(ed.get("speed") or 1.0)))
+    return timewarp.Warp(uniform_rate=sp) if abs(sp - 1) > 1e-3 else None
+
+
+def mix_warp_key(p: Project, edit: dict | None = None) -> str:
+    w = mix_warp(p, edit)
+    if w is None:
+        return ""
+    return f"u{w.spans[0][2]:.4f}" if w.uniform else w.key()
+
+
 def live_mix(p: Project, edit: dict | None = None, progress: Prog | None = None):
     """Bộ trộn đã nạp đủ các lớp (giải mã 1 lần vào work/live, lần sau dùng lại) + trạng thái trộn hiện tại."""
     from .audiomix import LiveMix, decode_track, load_raw
+    from .video import _atempo_chain
 
     ed = edit or p.edit
     srcs = audio_sources(p, ed)
+    w = mix_warp(p, ed)
     mix = LiveMix()
     tracks = {}
+    d = ed.get("dub") or {}
     for k, (f, pre) in srcs.items():
         if progress:
             progress(len(tracks) / max(1, len(srcs)), "Đang chuẩn bị âm thanh để nghe thử…")
+        tempo = 1.0
+        if w is not None and w.uniform:     # cả phim đổi tốc độ: FFmpeg giãn giữ cao độ (như atempo khi xuất)
+            r = w.spans[0][2]
+            if k in ("orig", "bg", "voice"):
+                tempo = r
+            elif k == "dub":
+                tempo = r / min(4.0, max(0.25, float(d.get("vspeed") or 1.0)))
+        if abs(tempo - 1) > 1e-3:
+            pre = ",".join(x for x in [pre] + _atempo_chain(tempo) if x)
         raw = decode_track(f, p.work / "live", k, pre)
-        if raw:
+        if not raw:
+            continue
+        if w is not None and not w.uniform and k in ("orig", "bg", "voice"):
+            from .timewarp import warped_track
+
+            tracks[k] = warped_track(raw, p.work / "live", k, w)
+        else:
             tracks[k] = load_raw(raw)
     mix.set_tracks(tracks)
+    mix.warp = w
     apply_audio_state(mix, audio_state(p, ed, srcs))
     return mix
 
 
 def apply_audio_state(mix, state: dict) -> None:
+    w = getattr(mix, "warp", None)
+    mp = w.map_ranges if w is not None else (lambda xs: [list(x) for x in xs or []])
     mix.g = dict(state["gains"])
-    mix.songs = state["songs"]
-    mix.keep = state["keep"]
+    mix.songs = mp(state["songs"])
+    mix.keep = [tuple(x) for x in mp(state["keep"])] if w is not None else state["keep"]
     mix.fade = state["fade"]
     mix.duck = state["duck"]
-    mix.mute = state.get("mute") or []
-    mix.dub_rate = float(state.get("dub_rate") or 1.0)
+    mix.mute = mp(state.get("mute") or [])
+    mix.dub_rate = 1.0 if w is not None else float(state.get("dub_rate") or 1.0)
+    if w is not None:
+        mix.rate = 1.0
 
 
 def mix_audio_file(p: Project, out: Path, progress: Prog | None = None) -> Path:
@@ -4490,6 +4653,9 @@ def dub_summary(p: Project) -> str:
         extra.append(f"✂ {sh['cut']} câu bị cắt bớt cuối")
     if abs(float(st.get("vspeed") or 1.0) - 1) > 1e-3:
         extra.append(f"xếp theo video ×{float(st['vspeed']):.2f} – giọng lồng giữ tốc độ tự nhiên")
+    if st.get("warp_n"):
+        extra.append(f"làm chậm {st['warp_n']} khoảng nghỉ (video dài thêm {float(st.get('warp_add') or 0):.1f} s), "
+                     "chỗ nhân vật nói giữ ×1")
     if st.get("pauses"):
         extra.append(f"nghỉ đúng chỗ nhân vật ngắt hơi {st['pauses']} chỗ")
     if st.get("clauses"):
@@ -4716,6 +4882,15 @@ def render(p: Project, settings: dict | None = None, progress: Prog | None = Non
         d["bg_wav"] = srcs["bg"][0]
         d["vocals_wav"] = srcs.get("voice", ("",))[0]
         d["song_spans"] = song_spans(p, settings)
+    from . import timewarp
+
+    if timewarp.mode_of(edit) != "all":
+        edit["speed"] = 1.0     # làm chậm chỉ khoảng nghỉ: ô Tốc độ (cả phim) không dùng
+    tw = time_warp(p, edit)
+    if tw:     # làm chậm chỉ khoảng nghỉ (2.1.27): tiếng nền giãn sẵn giữ cao độ, hình dời mốc khi xuất
+        edit["_warp"] = tw.to_list()
+        edit["_warp_files"] = warp_audio_files(p, tw, edit, _sub(progress, 0.0, 0.1), cancel)
+        progress = _sub(progress, 0.1, 1.0)
     name = out_name or (safe_name(Path(p.data.get("source", "video")).stem) + "_vietsub")
     stamp = time.strftime('%H%M%S')
     batch = time.strftime('%Y%m%d-%H%M%S')
@@ -4760,6 +4935,39 @@ def render(p: Project, settings: dict | None = None, progress: Prog | None = Non
         p.add_output(out, "video", ratio=ratio, batch=batch, **size)
         main_out = main_out or out
     return main_out
+
+
+def warp_audio_files(p: Project, w, edit: dict, progress: Prog | None = None, cancel=None) -> dict:
+    """Các lớp tiếng gốc / nhạc nền / giọng gốc đã tách giãn theo bản đồ giờ (giữ cao độ) -> FLAC cho xuất video.
+    Chỉ làm lớp video sẽ dùng; đoạn giãn dùng chung với trình phát (work/live), lần xuất sau dùng lại."""
+    from .audiomix import audio_settings, decode_track, use_stems
+    from .timewarp import warped_track, write_flac
+
+    srcs = audio_sources(p, edit)
+    d = edit.get("dub") or {}
+    ok = lambda f: bool(f) and Path(f).exists()  # noqa: E731
+    use_dub = bool(d.get("enabled") and ok(d.get("wav")))
+    stems_on = use_stems(audio_settings(edit), ok(d.get("bg_wav")), use_dub)
+    want = {}
+    if stems_on:
+        want["bg"] = d["bg_wav"]
+        if ok(d.get("vocals_wav")):
+            want["voice"] = d["vocals_wav"]
+    elif "orig" in srcs:
+        want["orig"] = srcs["orig"][0]
+    out = {}
+    for j, (k, f) in enumerate(want.items()):
+        pr = _sub(progress, j / len(want), (j + 1) / len(want))
+        live_pre = (srcs.get(k) or ("", ""))[1]
+        name = k if not live_pre else k + "_np"     # đổi cao độ: bản không đổi cao độ riêng (khi xuất đổi sau)
+        if pr:
+            pr(0.0, f"Đang chuẩn bị tiếng '{k}' cho khoảng nghỉ được làm chậm")
+        raw = decode_track(f, p.work / "live", name, "")
+        if not raw:
+            continue
+        tr = warped_track(raw, p.work / "live", name, w)
+        out[k] = str(write_flac(tr, p.work / "render" / "warp", k, _sub(pr, 0.1, 1.0), cancel))
+    return out
 
 
 # ------------------------------------------------------------------ tự động toàn bộ

@@ -10398,3 +10398,265 @@ def test_check_all_api_gui_2126(monkeypatch):
         win.close()
         save_settings(old)
         tr._KEY_DEAD.clear()
+
+
+def test_timewarp_plan_2127():
+    """2.1.27: bản đồ giờ giãn khoảng nghỉ – đổi qua lại đúng, biểu thức setpts (cây tìm kiếm) khớp, cách "đều" chỉ giãn
+    khoảng nghỉ GIỮA 2 câu đủ dài, cách "theo câu dài" giãn vừa đủ chỗ giọng lồng còn thiếu, không chậm dưới mức."""
+    from trami import timewarp as tw
+
+    w = tw.Warp([(1.0, 2.0, 0.5), (5.0, 6.0, 0.8)])
+    assert abs(w.fwd(3.0) - 4.0) < 1e-9 and abs(w.inv(4.0) - 3.0) < 1e-9 and abs(w.added() - 1.25) < 1e-9
+    assert w.rate_at(1.5) == 0.5 and w.rate_at(3) == 1.0 and w.next_edge(0.2) == 1.0 and w.next_edge(1.5) == 2.0
+
+    def lt(a, b):
+        return 1.0 if a < b else 0.0
+
+    def iff(c, a, b):
+        return a if c else b
+
+    rng = np.random.default_rng(3)
+    spans, t = [], 0.4
+    for _ in range(120):
+        a = t + rng.uniform(0.3, 2)
+        b = a + rng.uniform(0.2, 1.5)
+        spans.append((a, b, rng.uniform(0.4, 0.95)))
+        t = b
+    big = tw.Warp(spans)
+    for s0 in (0.0, spans[5][0] + 0.1):
+        expr = big.setpts_expr(s0, 1e9).replace("if(", "iff(")
+        for T in np.linspace(0, 150, 400):
+            assert abs(eval(expr) - (big.fwd(T + s0) - big.fwd(s0))) < 1e-4
+
+    segs = [Segment(0.5, 1.5, "a", "x"), Segment(1.6, 2.5, "b", "y"), Segment(4.0, 5.0, "c", "z"),
+            Segment(5.1, 5.15, "", "")]
+    g = tw.plan_gaps(segs, 8.0, 0.5, 0.3)
+    assert g == [[2.58, 3.92, 0.5]]        # khoảng 1,5–1,6 quá ngắn, sau câu cuối / đầu video giữ nguyên
+    assert tw.signature({"speed_mode": "gaps", "gap_rate": 0.5}) == "gaps:0.500,0.300"
+    assert tw.signature({"speed_mode": "all"}) == "" and tw.mode_of({"speed_mode": "lạ"}) == "all"
+
+    items = [{"k": 0, "want": 0.5, "dur": 2.0, "pause": 0}, {"k": 1, "want": 1.6, "dur": 0.5, "pause": 0},
+             {"k": 2, "want": 4.0, "dur": 0.8, "pause": 0}]
+    segs2 = [Segment(0.5, 1.0, "a", "x"), Segment(1.6, 2.0, "b", "y"), Segment(4.0, 5.0, "c", "z")]
+    need = tw.plan_need(items, segs2, 8.0, 0.6, 1.5)
+    assert len(need) == 1 and need[0][:2] == [1.08, 1.52]
+    w2 = tw.Warp(need)
+    assert abs(w2.added() - 0.293) < 0.01 and need[0][2] >= 0.599   # thiếu 0,94 s, giãn tối đa tới hình 0,6×
+    items[0]["dur"] = 1.0
+    assert tw.plan_need(items, segs2, 8.0, 0.6, 1.5) == []          # vừa chỗ -> không giãn
+
+
+def test_timewarp_audio_and_dub_2127(monkeypatch, tmp_path):
+    """Tiếng nền ở khoảng nghỉ giãn giữ cao độ, nối liền mạch; bản lồng xếp theo giờ giãn (giọng ×1, không phải đọc
+    nhanh), dub_at về giây gốc; bộ trộn nghe thử đọc theo giờ giãn."""
+    from trami import timewarp as tw
+    from trami import tts
+    from trami.audiomix import LiveMix
+
+    sr = tw.SR
+    t = np.arange(sr * 6) / sr
+    x = (np.stack([np.sin(2 * np.pi * 440 * t), np.sin(2 * np.pi * 660 * t)], 1) * 8000).astype(np.int16)
+    raw = tmp_path / "orig_x.raw"
+    raw.write_bytes(x.astype("<i2").tobytes())
+    w = tw.Warp([(2.0, 3.0, 0.5)])
+    tr = tw.warped_track(raw, tmp_path, "orig", w)
+    assert len(tr) == int(round(w.fwd(6.0) * sr))
+    seg = tr[int(2.2 * sr):int(3.8 * sr)].astype(np.float32)[:, 0]
+    f = np.abs(np.fft.rfft(seg * np.hanning(len(seg))))
+    assert abs(np.argmax(f) * sr / len(seg) - 440) < 3                 # cao độ giữ nguyên
+    a = tr[0:len(tr)].astype(np.float32)[:, 0]
+    assert np.abs(np.diff(a)).max() < 700                              # không có tiếng "bụp" ở chỗ nối
+    assert np.array_equal(tr[int(5 * sr):int(5 * sr) + 500], x[int(4 * sr):int(4 * sr) + 500])
+    assert tw.warped_track(raw, tmp_path, "orig", w).key == tr.key and len(tr.index) == 1
+    long_w = tw.Warp([(0.5, 5.5, 0.8)])                                 # khoảng nghỉ dài: chia mẩu ≤ 3 s, nối liền
+    lt = tw.warped_track(raw, tmp_path, "orig", long_w)
+    assert len(lt.index) == 2 and len(lt) == int(round(long_w.fwd(6.0) * sr))
+    la = lt[0:len(lt)].astype(np.float32)[:, 0]
+    assert np.abs(np.diff(la)).max() < 700
+    seg2 = la[int(1.0 * sr):int(6.0 * sr)]
+    f2 = np.abs(np.fft.rfft(seg2 * np.hanning(len(seg2))))
+    assert abs(np.argmax(f2) * sr / len(seg2) - 440) < 3
+
+    mix = LiveMix()
+    mix.set_tracks({"orig": tr})
+    mix.g, mix.warp = {"orig": 1.0}, w
+    assert mix.frame_of(4.0) == int(5.0 * sr) and abs(mix.time_of(int(5.0 * sr), 0) - 4.0) < 1e-6
+    out, adv = mix.render(int(5 * sr), 400)
+    assert adv == 400 and np.allclose(out[:, 0] * 32768, x[int(4 * sr):int(4 * sr) + 400, 0], atol=1)
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, p, voice in items:
+            _fake_audio(p, 1.9 if text == "một" else 0.6, 600)
+        return []
+
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+
+    def run(warp):
+        segs = [Segment(1.0, 2.0, "a", "một"), Segment(2.6, 3.4, "b", "hai")]
+        st = {}
+        tts.synthesize_dub(segs, tmp_path / f"d{bool(warp)}.wav", 5.0, tmp_path / "t", max_speedup=1.3, stats=st,
+                           settings={"dub_level_match": False, "dub_overflow": "push"}, warp=warp)
+        return segs, st
+
+    segs, st = run(None)
+    assert st["warp"] == [] and segs[0].extra["fit_speed"] > 1.0      # giờ gốc: câu 1 phải đọc nhanh
+    segs, st = run({"mode": "need", "need_rate": 0.4, "need_max": 2.0})
+    assert len(st["warp"]) == 1 and segs[0].extra["fit_speed"] == 1.0 and segs[0].extra["fit"] == "ok"
+    wn = tw.Warp(st["warp"])
+    a0, a1 = segs[0].extra["dub_at"]
+    assert abs(a0 - 1.0) < 0.01 and abs(wn.fwd(a1) - wn.fwd(a0) - 1.9) < 0.06   # giọng đủ 1,9 s ở ×1
+    assert abs(segs[1].extra["dub_at"][0] - 2.6) < 0.02                         # câu sau đúng lúc nhân vật nói
+    assert abs(tts.wav_info(tmp_path / "dTrue.wav")[1] / tts.SR - wn.fwd(5.0)) < 0.05
+
+
+def test_timewarp_project_render_2127(monkeypatch, tmp_path):
+    """Dự án: chọn "Chỉ khoảng nghỉ – đều" sau khi lồng -> bản lồng lệch -> xếp lại (không đọc lại câu nào); xuất video
+    dài thêm đúng số giây, hình dời mốc đúng khoảng nghỉ, tiếng gốc ở khoảng nghỉ giữ cao độ, giọng lồng đúng lúc, đoạn
+    cắt theo giờ giãn; đồ thị lọc dài ghi ra file."""
+    from trami import pipeline, tts
+    from trami.project import Project
+
+    src = tmp_path / "bw.mp4"
+    subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "color=black:s=320x180:d=4:r=25[a];color=white:s=320x180:d=4:r=25[b];[a][b]concat=n=2:v=1:a=0",
+                    "-f", "lavfi", "-i", "sine=f=440:d=8", "-shortest", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", str(src)], check=True)
+    spoken = []
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, p, voice in items:
+            spoken.append(text)
+            _fake_audio(p, 1.0, 1200)
+        return []
+
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    p = Project.create("warp2127")
+    try:
+        pipeline.attach_source(p, src)
+        p.segments = [Segment(0.5, 2.0, "a", "Một", "S1"), Segment(4.0, 5.5, "b", "Hai", "S1")]
+        p.save()
+        pipeline.dub(p, "edge:vi-VN-HoaiMyNeural", engine="edge")
+        assert p.edit["dub"]["warp"] == [] and not pipeline.dub_speed_stale(p)
+        ed = p.edit
+        ed.update({"speed_mode": "gaps", "gap_rate": 0.5, "gap_min": 0.3, "cuts": [[6.5, 7.0]],
+                   "audio": dict(ed.get("audio") or {}, orig=1.0, dub=1.0), "subtitles": {"burn": False}})
+        p.data["edit"] = ed
+        p.save()
+        assert pipeline.dub_speed(p.edit) == 1.0 and pipeline.dub_speed_stale(p)
+        assert "Giãn 1 khoảng nghỉ" in pipeline.warp_note(p) and "xếp lại" in pipeline.warp_note(p)
+        n = len(spoken)
+        pipeline.relayout(p)
+        assert len(spoken) == n and not pipeline.dub_speed_stale(p)
+        assert p.edit["dub"]["warp"] == [[2.08, 3.92, 0.5]] and pipeline.dub_versions(p)[0]["warp_sig"]
+        assert "làm chậm 1 khoảng nghỉ" in pipeline.dub_summary(p)
+        w = pipeline.time_warp(p)
+        assert w is not None and abs(w.added() - 1.84) < 1e-6
+        env, hop = pipeline.dub_wave(p)
+        assert hop == 0.01 and "s_" in Path(env).name                 # sóng âm đổi về giờ gốc cho timeline
+        e = np.load(env).astype(float)
+        on = np.where(e > 0.3)[0] * 0.01
+        assert abs(on[on > 3].min() - 4.0) < 0.05                       # giọng câu 2 đúng lúc nhân vật nói (giờ gốc)
+
+        mix = pipeline.live_mix(p)            # nghe thử: tiếng gốc giãn sẵn theo đúng bản đồ giờ của bản lồng
+        assert mix.warp.to_list() == [[2.08, 3.92, 0.5]] and mix.rate == 1.0 and mix.dub_rate == 1.0
+        assert abs(len(mix.tracks["orig"]) / 44100 - (8 + 1.84)) < 0.05 and mix.keep == [(0.0, 8.34), (8.84, 9.84)]
+        assert pipeline.mix_warp_key(p) == mix.warp.key()
+
+        out = pipeline.render(Project(p.id))
+        assert abs(ff.probe(out).duration - (8 + 1.84 - 0.5)) < 0.12
+
+        def luma(t):
+            r = subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-ss", f"{t:.2f}", "-i", str(out), "-frames:v", "1",
+                                "-vf", "scale=8:8,format=gray", "-f", "rawvideo", "-"], capture_output=True)
+            return np.frombuffer(r.stdout, np.uint8).mean()
+
+        assert luma(5.6) < 60 and luma(6.1) > 190                     # hình trắng bắt đầu ở W(4) = 5,84
+        pcm = subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-i", str(out), "-ac", "1", "-ar", "8000", "-f", "s16le",
+                              "-"], capture_output=True).stdout
+        x = np.frombuffer(pcm, np.int16).astype(float)
+
+        def peak(a, b):
+            seg = x[int(a * 8000):int(b * 8000)]
+            f = np.abs(np.fft.rfft(seg * np.hanning(len(seg))))
+            return np.argmax(f) * 8000 / len(seg)
+
+        assert abs(peak(2.4, 3.6) - 440) < 5                           # tiếng gốc ở khoảng nghỉ: giãn mà giữ cao độ
+        hi = np.array([np.abs(np.fft.rfft(x[i:i + 400]))[55:66].max() for i in range(0, len(x) - 400, 80)])
+        t_on = np.where(hi > hi.max() * 0.3)[0] * 0.01
+        assert abs(t_on[t_on > 3].min() - 5.84) < 0.08                 # giọng lồng câu 2 đúng lúc hình câu 2
+    finally:
+        p.delete()
+
+    # cả phim chậm 0,8× (cách cũ): nghe thử giãn tiếng gốc GIỮ CAO ĐỘ (trước đây kéo chậm khối âm thanh -> trầm, rè)
+    q = Project.create("warp2127b")
+    try:
+        pipeline.attach_source(q, src)
+        ed = q.edit
+        ed.update({"speed": 0.8, "audio": dict(ed.get("audio") or {}, orig=1.0)})
+        q.data["edit"] = ed
+        q.save()
+        mix = pipeline.live_mix(q)
+        assert mix.warp is not None and mix.warp.uniform and mix.rate == 1.0
+        assert abs(len(mix.tracks["orig"]) / 44100 - 10.0) < 0.1 and pipeline.mix_warp_key(q) == "u0.8000"
+        a, adv = mix.render(int(4 * 44100), 8192)
+        assert adv == 8192 and mix.frame_of(4.0) == int(5.0 * 44100)
+        f = np.abs(np.fft.rfft(a[:, 0] * np.hanning(len(a))))
+        assert abs(np.argmax(f) * 44100 / len(a) - 440) < 8
+    finally:
+        q.delete()
+
+    long_fc = "anullsrc=r=8000:cl=mono,atrim=0:0.2," + ",".join(["volume=1"] * 1500) + "[a]"
+    args = ff.filter_args(long_fc, tmp_path)
+    assert args[0] in ("-/filter_complex", "-filter_complex_script") and Path(args[1]).exists()
+    ff.run(args + ["-map", "[a]", str(tmp_path / "a.wav")])
+    assert (tmp_path / "a.wav").exists()
+
+
+
+def test_timewarp_gui_2127(sample_video):
+    """Tab Chỉnh sửa: ô "Làm chậm" đổi các ô đi kèm, dòng kết quả, trình phát chạy chậm đúng khoảng nghỉ."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from trami import pipeline
+    from trami.gui.main import MainWindow
+    from trami.gui.widgets import set_combo
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    p = Project.create("warpgui")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [Segment(0.3, 1.2, "a", "Một"), Segment(2.5, 3.0, "b", "Hai"), Segment(4.5, 5.0, "c", "Ba")]
+    p.save()
+    win = MainWindow()
+    try:
+        win.open_project(p.id)
+        pg = win.project_page
+        f = pg.frame_form
+        assert f.isRowVisible(pg.e_speed) and f.isRowVisible(pg.e_dubnat) and not f.isRowVisible(pg.e_grate)
+        set_combo(pg.e_smode, "gaps")
+        app.processEvents()
+        assert not f.isRowVisible(pg.e_speed) and f.isRowVisible(pg.e_grate) and f.isRowVisible(pg.e_gmin)
+        assert not f.isRowVisible(pg.e_nrate) and "Giãn 2 khoảng nghỉ" in pg.e_wnote.text()
+        pg.e_grate.set(0.5)
+        ed = pg.collect_edit()
+        assert ed["speed_mode"] == "gaps" and ed["gap_rate"] == 0.5
+        pg._apply_live()
+        assert pg.player.warp is not None and [x[2] for x in pg.player.warp.spans] == [0.5, 0.5]
+        pg.player._apply_rate(1.5)
+        assert abs(pg.player.mp.playbackRate() - 0.5) < 1e-6
+        pg.player._apply_rate(2.7)
+        assert abs(pg.player.mp.playbackRate() - 1.0) < 1e-6
+        assert abs(pg.player.out_time(2.5) - (2.5 + 1.14 + 0.0)) < 0.2
+        pg._save_edit_now()
+        assert Project(p.id).edit["speed_mode"] == "gaps"
+        set_combo(pg.e_smode, "need")
+        app.processEvents()
+        assert f.isRowVisible(pg.e_nmax) and "cần bản lồng tiếng" in pg.e_wnote.text()
+        set_combo(pg.e_smode, "all")
+        app.processEvents()
+        pg._apply_live()
+        assert pg.player.warp is None and f.isRowVisible(pg.e_speed)
+    finally:
+        win.close()
+        p.delete()

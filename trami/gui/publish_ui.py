@@ -488,7 +488,13 @@ class PublishCard(SectionCard):
         ed = p.edit
         dur = float((p.data.get("info") or {}).get("duration") or 0)
         keep = keep_ranges(dur, ed.get("trim"), ed.get("cuts")) if dur else []
-        return out_time(t, keep, float(ed.get("speed") or 1.0)) if keep else t
+        from .. import pipeline
+
+        w = pipeline.time_warp(p, ed)      # làm chậm chỉ khoảng nghỉ (2.1.27)
+        if w is not None and keep:
+            return out_time(w.fwd(t), [tuple(x) for x in w.map_ranges(keep)], 1.0)
+        speed = 1.0 if (ed.get("speed_mode") or "all") != "all" else float(ed.get("speed") or 1.0)
+        return out_time(t, keep, speed) if keep else t
 
     def _check(self):
         """Cảnh báo theo nền tảng (Reels 3–90 s dọc, Shorts ≤ 3 phút; YouTube API riêng bị khoá Riêng tư)."""

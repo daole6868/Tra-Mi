@@ -220,6 +220,35 @@ def run(args: list[str], duration: float = 0.0, progress: ProgressCB | None = No
         progress(1.0, msg)
 
 
+_VER: int | None = None
+
+
+def major_version() -> int:
+    """Số phiên bản chính của FFmpeg (bản dựng từ mã mới nhất "N-…" -> 99)."""
+    global _VER
+    if _VER is None:
+        try:
+            r = subprocess.run([ffmpeg_bin(), "-version"], capture_output=True, text=True, timeout=20,
+                               creationflags=_NO_WINDOW)
+            import re
+
+            m = re.search(r"version\s+(n?)(\d+)\.", r.stdout or "")
+            _VER = int(m.group(2)) if m else (99 if re.search(r"version\s+N-", r.stdout or "") else 6)
+        except Exception:  # noqa: BLE001
+            _VER = 6
+    return _VER
+
+
+def filter_args(fc: str, work: str | Path | None = None, name: str = "filter_complex.txt") -> list[str]:
+    """-filter_complex; đồ thị lọc dài (vd. giãn hàng nghìn khoảng nghỉ) -> ghi ra file (dòng lệnh Windows tối đa ~32 nghìn
+    ký tự). FFmpeg ≥ 7: "-/filter_complex <file>", bản cũ: "-filter_complex_script <file>"."""
+    if len(fc) < 8000 or work is None:
+        return ["-filter_complex", fc]
+    f = Path(work) / name
+    f.write_text(fc, encoding="utf-8")
+    return ["-/filter_complex" if major_version() >= 7 else "-filter_complex_script", str(f.resolve())]
+
+
 # ------------------------------------------------------------------ âm thanh theo đúng giờ của video
 # FFmpeg mặc định ghi các mẫu âm thanh NỐI LIỀN, bỏ qua giờ (timestamp) của luồng âm thanh. Video dài có giờ âm thanh
 # lệch dần (livestream / ghép nhiều phần / đồng hồ thu âm lệch: số mẫu nhiều hoặc ít hơn giờ ghi trong file) thì mọi thứ

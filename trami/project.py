@@ -31,6 +31,8 @@ DEFAULT_EDIT = {
                 "blur_strength": 20, "strength": "normal"},
     "flip_h": False, "flip_v": False, "rotate": 0, "zoom": 1.0, "speed": 1.0,
     "dub_natural": True,    # đổi tốc độ video mà giọng lồng giữ tốc độ tự nhiên (xếp theo giờ video mới, 2.1.24)
+    # làm chậm (2.1.27): "all" cả phim theo speed | "gaps" chỉ khoảng nghỉ – đều | "need" chỉ khoảng nghỉ – theo câu dài
+    "speed_mode": "all", "gap_rate": 0.8, "gap_min": 0.3, "need_rate": 0.6, "need_max": 1.5,
     "aspect": "original", "aspect_mode": "blur", "resolution": "original",
     "aspect_pos": [0.5, 0.5],   # vị trí phim trong khung khi đổi tỉ lệ (0 = sát trái / trên, 0,5 = giữa)
     "aspect_scale": 1.0,        # cỡ phim trong khung (1 = vừa khít; > 1 phóng to, phần tràn bị cắt)

@@ -558,13 +558,29 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
     else:
         base_p, span_p = 0.0, 1.0
 
+    # làm chậm chỉ khoảng nghỉ (2.1.27, trami/timewarp.py): mọi mốc giờ gốc -> giờ giãn; hình dời mốc bằng setpts (mỗi
+    # khoảng nghỉ chậm riêng), tiếng gốc / nhạc nền / giọng gốc đã tách dùng bản giãn sẵn giữ cao độ (_warp_files),
+    # bản lồng vốn ghi theo giờ giãn
+    tw = None
+    if spec.get("_warp") and _part is None:
+        from . import timewarp
+
+        tw = timewarp.Warp.of(spec["_warp"])
+    wfiles = spec.get("_warp_files") or {}
+    dur_src = dur
+    if tw:
+        spec = timewarp.map_spec(spec, tw)
+        if segments:
+            segments = timewarp.map_segments(segments, tw)
+        dur = float(tw.fwd(dur))
+
     keep = keep_ranges(dur, spec.get("trim"), spec.get("cuts"))
     if not keep:
         raise ValueError("Không còn đoạn video nào sau khi cắt.")
     speed = float(spec.get("speed") or 1.0)
     speed = min(4.0, max(0.25, speed))
     final_dur = sum(b - a for a, b in keep) / speed
-    if _part is None and can_chunk(spec, settings, info, speed, final_dur):
+    if _part is None and not tw and can_chunk(spec, settings, info, speed, final_dur):
         def pc(x, m):
             if progress:
                 progress(base_p + span_p * x, m)
@@ -585,7 +601,15 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
         in_opts += ["-t", f"{seek1 - seek0:.3f}"]
     if vpart:   # 1 đoạn của bản xuất chia đoạn: chỉ giải mã đúng khúc nguồn của đoạn đó
         in_opts = ["-ss", f"{vpart['X']:.3f}", "-t", f"{vpart['span']:.3f}"]
-    inputs: list[str] = in_opts + ["-i", str(src.resolve())]
+    v_opts = in_opts
+    if tw:      # hình đọc theo giây GỐC (in_opts theo giờ giãn – cho các file âm thanh đã giãn / bản lồng)
+        vs0, vs1 = float(tw.inv(seek0)), float(tw.inv(seek1))
+        v_opts = []
+        if vs0 > 0.01:
+            v_opts += ["-ss", f"{vs0:.3f}"]
+        if vs1 < dur_src - 0.05 or vs0 > 0.01:
+            v_opts += ["-t", f"{vs1 - vs0:.3f}"]
+    inputs: list[str] = v_opts + ["-i", str(src.resolve())]
     n_in = 1
     fc: list[str] = []
     full = len(keep) == 1 and keep[0][0] <= 0.01 and abs(keep[0][1] - dur) < 0.05
@@ -597,7 +621,12 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
     mexpr = mute_expr(spec.get("mute_spans") or [], seek0)
     mute_f = f"volume=volume=0:enable='{mexpr}'," if mexpr else ""
     expr = "+".join(f"between(t,{a:.3f},{b - 0.001:.3f})" for a, b in rel_keep)
-    if vpart:
+    if tw and do_video:
+        # dời mốc từng khung theo bản đồ giờ (khoảng nghỉ dài ra) rồi đưa về số khung / giây đều (lặp khung ở chỗ chậm)
+        wv = f"setpts=PTS-STARTPTS,setpts='({tw.setpts_expr(vs0, vs1)})/TB',fps={fps:.5f}"
+        fc.append(f"[0:v]{wv}[v0]" if len(keep) == 1 else
+                  f"[0:v]{wv},select='{expr}',setpts=N/FRAME_RATE/TB[v0]")
+    elif vpart:
         # mốc thời gian GỐC (cộng lại phần đã seek) -> lưới khung cố định theo giây gốc, giống nhau ở mọi đoạn ->
         # chọn đúng các khung của đoạn (biên giữa 2 khung) -> các đoạn nối lại không thừa / thiếu khung nào
         fc.append(f"[0:v]setpts=PTS+{vpart['X']:.6f}/TB,fps={vpart['fps']:.6f},select='{vpart['expr']}',"
@@ -606,7 +635,17 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
         fc.append("[0:v]setpts=PTS-STARTPTS[v0]")
     elif do_video:
         fc.append(f"[0:v]fps={fps:.5f},select='{expr}',setpts=N/FRAME_RATE/TB[v0]")
-    if do_audio and has_a:
+    if do_audio and has_a and tw:
+        # tiếng gốc đã giãn sẵn (theo giờ giãn, giữ cao độ); không cần (dùng bản tách) thì không có
+        if wfiles.get("orig"):
+            inputs += in_opts + ["-i", str(Path(wfiles["orig"]).resolve())]
+            ia = n_in
+            n_in += 1
+            fc.append(f"[{ia}:a]aresample=44100,{mute_f}asetpts=PTS-STARTPTS[a0]" if len(keep) == 1 else
+                      f"[{ia}:a]aresample=44100,{mute_f}aselect='{expr}',asetpts=N/SR/TB[a0]")
+        else:
+            has_a = False
+    elif do_audio and has_a:
         # tiếng gốc theo đúng giờ của hình (2.0.92) – trước đây mẫu nối liền: video có giờ âm thanh lệch dần thì tiếng
         # gốc (và mọi thứ tính từ nó) trôi so với khẩu hình
         sync = ff.audio_sync(src, 44100) or "aresample=44100"
@@ -845,6 +884,8 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
         bgm = spec.get("bgm") or {}
         has_bgm = bool(bgm.get("path") and Path(bgm["path"]).exists())
         bg_ok = bool(dub.get("bg_wav") and Path(dub["bg_wav"]).exists())
+        if tw:
+            bg_ok = bg_ok and bool(wfiles.get("bg"))
         stems_on = use_stems(aset, bg_ok, use_dub)
         g = mix_gains(aset, stems_on, use_dub, has_bgm)
         pf = pitch_filter(float(aset.get("pitch") or 1.0))
@@ -882,18 +923,19 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
         if stems_on:
             # nền = nhạc + hiệu ứng đã tách (không còn giọng Trung)
             if g["bg"] > 0.001:
-                lab = ext_audio(dub["bg_wav"], mute_f.rstrip(","))
+                lab = ext_audio(wfiles.get("bg") if tw else dub["bg_wav"], mute_f.rstrip(","))
                 fc.append(f"[{lab}]volume={g['bg']:.3f}{tempo}[bgx]")
                 amix_inputs.append("[bgx]")
             # giọng gốc đã tách: nhỏ / tắt, riêng đoạn hát giữ to (nếu bật "giữ nguyên đoạn hát")
             voc = dub.get("vocals_wav")
             spans = dub.get("song_spans") or []
-            if voc and Path(voc).exists() and (g["voice"] > 0.001 or (spans and g["voice_song"] > 0.001)):
+            if voc and Path(voc).exists() and (not tw or wfiles.get("voice")) and \
+                    (g["voice"] > 0.001 or (spans and g["voice_song"] > 0.001)):
                 # mốc thời gian lúc này là của file gốc (trước khi cắt) vì -ss đã dời về 0 tại seek0
                 cond = "+".join(f"between(t,{a - seek0:.3f},{b - seek0:.3f})" for a, b in spans) or "0"
                 pre = f"volume='if({cond},{g['voice_song']:.3f},{g['voice']:.3f})':eval=frame" + (f",{pf}" if pf else "") \
                     + (f",{mute_f.rstrip(',')}" if mute_f else "")
-                lab = ext_audio(voc, pre)
+                lab = ext_audio(wfiles.get("voice") if tw else voc, pre)
                 fc.append(f"[{lab}]anull{tempo}[vcx]")
                 amix_inputs.append("[vcx]")
         elif has_a and g["orig"] > 0.001:
@@ -978,7 +1020,7 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
             return None
         return inputs + ["-filter_complex", ";".join(fc), "-map", "[aout]"] + ff.audio_encode_args(settings) + \
             ["-t", f"{final_dur:.3f}", str(out.resolve())]
-    args = inputs + ["-filter_complex", ";".join(fc), "-map", "[vout2]" if ins else "[vout]"]
+    args = inputs + ff.filter_args(";".join(fc), work) + ["-map", "[vout2]" if ins else "[vout]"]
     if amix_inputs:
         args += ["-map", "[aout]"] + ff.audio_encode_args(settings)
     args += ff.video_encode_args(settings, spec.get("crf"))

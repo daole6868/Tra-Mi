@@ -1658,7 +1658,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                    ref_audio: str | Path | None = None, settings: dict | None = None,
                    skip_songs: bool = True, stats: dict | None = None, only: set[int] | None = None,
                    lang: str = "vi", genders: dict | None = None, prepare_only: bool = False,
-                   patch: dict | None = None, vspeed: float = 1.0) -> Path:
+                   patch: dict | None = None, vspeed: float = 1.0, warp: dict | None = None) -> Path:
     """patch: {"wav": bản lồng đang dùng, "placed": bảng đoạn giọng đã đặt trong bản đó} -> chỉ ghi lại những đoạn thời
     gian có thay đổi vào chính file đó (xoá / kéo / gộp / đọc lại vài câu: ~1 giây thay vì dựng lại cả phim);
     stats["patched"] = các đoạn đã ghi (mẫu 24 kHz). Không vá được -> dựng cả bản vào out_wav như thường.
@@ -1671,9 +1671,14 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     genders: {người nói: {"g": "male"/"female"}} để chọn giọng Edge thay cho VieNeu.
     vspeed ≠ 1 (2.1.24, video làm chậm / nhanh mà giọng lồng giữ tốc độ tự nhiên): xếp giọng theo giờ video gốc với độ
     dài giọng × vspeed (video chậm 0,85 -> mỗi câu có thêm chỗ), bản lồng ghi theo giờ video ĐÃ đổi tốc độ (giây gốc /
-    vspeed) – xuất video / trình phát không co giãn lại giọng lồng. dub_at / layout vẫn theo giây video gốc."""
+    vspeed) – xuất video / trình phát không co giãn lại giọng lồng. dub_at / layout vẫn theo giây video gốc.
+    warp (2.1.27, làm chậm CHỈ KHOẢNG NGHỈ – trami/timewarp.py): {"mode": "gaps" | "need", + timewarp.params}. Lập bản
+    đồ giờ (gaps: theo câu; need: theo chỗ giọng lồng tràn – cần độ dài giọng), xếp giọng theo giờ giãn (giọng ×1), bản
+    lồng ghi theo giờ giãn; dub_at / layout vẫn giây gốc (đổi ngược). stats["warp"] = các đoạn giãn [[a, b, tốc độ]]."""
     settings = settings or {}
     vspeed = min(4.0, max(0.25, float(vspeed or 1.0)))
+    if warp and warp.get("mode") in ("gaps", "need"):
+        vspeed = 1.0
     stats = stats if stats is not None else {}
     lang = langs.norm(lang)
     genders = genders or {}
@@ -2061,6 +2066,22 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                       "pause": float(s.extra.get("pause_before") or 0)})
     durs = {it["k"]: it["dur"] for it in items}
     user_min = {it["k"]: it["user"] for it in items if it["user"]}
+    tw = None        # bản đồ giờ giãn khoảng nghỉ (2.1.27): mọi mốc xếp giọng theo giờ giãn, dub_at đổi ngược về giờ gốc
+    if warp and warp.get("mode") in ("gaps", "need"):
+        from . import timewarp
+
+        wp = timewarp.params(warp)
+        if warp["mode"] == "gaps":
+            spans = timewarp.plan_gaps(segs, total, wp["gap_rate"], wp["gap_min"])
+        else:
+            spans = timewarp.plan_need(items, segs, total, wp["need_rate"], wp["need_max"])
+        tw = timewarp.Warp.of(spans)
+        if tw:
+            for it in items:
+                it["want"] = tw.fwd(it["want"])
+            total = tw.fwd(total)
+    stats["warp"] = tw.to_list() if tw else []
+    back = (lambda v: round(tw.inv(v), 3)) if tw else (lambda v: v)   # giờ giãn -> giây video gốc
     plan = plan_layout(items, total, settings.get("dub_overflow", "smart"), max_speedup,
                        float(settings.get("dub_lead_max", 1.0)), float(settings.get("dub_max_lag", 2.0)))
     end_t = max([total] + [x["end"] + 0.5 for x in plan.values()])
@@ -2128,6 +2149,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             if seg_len > 0:
                 placed += 1
                 a0, a1 = round(x["start"], 3), round(x["start"] + seg_len / SR * vspeed, 3)
+                a0, a1 = back(a0), back(a1)
                 layout.append([a0, a1, k, x["fit"]])
                 s.extra["tts_file"] = str(p)   # giọng đang dùng của câu này (để lần sau chỉ đọc lại câu được chọn)
                 s.extra["dub_at"] = [a0, a1]   # đoạn giọng đang phát của câu (phụ đề chạy theo giọng lồng)
@@ -2166,7 +2188,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     def files_by_name() -> dict[str, str]:
         return {Path(p).name: p for p in files.values()}
 
-    same_speed = abs(float((patch or {}).get("vspeed") or 1.0) - vspeed) < 1e-3
+    same_speed = abs(float((patch or {}).get("vspeed") or 1.0) - vspeed) < 1e-3 and \
+        [list(map(float, e)) for e in (patch or {}).get("warp") or []] == [list(map(float, e)) for e in stats["warp"]]
     try:
         tab, layout, too_long, placed = assemble(bool(patch and patch.get("placed") and same_speed))
     except _NoPatch as e:   # không vá được (file bản lồng khác, đổi gần hết…) -> dựng lại cả bản lồng như thường
