@@ -646,12 +646,15 @@ def speaker_genders(p: Project, audio: str | None = None) -> dict:
     from .asr_funasr import load_wav16k
     from .gender import speaker_gender
 
+    old = dict(p.data.get("speaker_gender") or {})
     wav = load_wav16k(audio or stems(p).get("vocals") or str(p.source))
     spans: dict[str, list] = {}
     for s in p.segments:
         if not s.extra.get("song"):
             spans.setdefault(s.speaker or "S1", []).append((s.start, s.end))
-    out = {spk: speaker_gender(wav, sp) for spk, sp in spans.items()}
+    # Gemini đã thấy mặt người nói khi dịch có nhìn hình (2.1.25) -> giữ, không đoán lại theo cao độ giọng
+    out = {spk: (old[spk] if (old.get(spk) or {}).get("src") == "gemini" else speaker_gender(wav, sp))
+           for spk, sp in spans.items()}
     p.reload()
     p.data["speaker_gender"] = out
     p.save()
@@ -1619,6 +1622,20 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         p.data["asr_stammer"] = sum(drop_false_starts(x) for x in segs)
     if method != "ocr":
         p.data["asr_repeat"] = mark_repeats(segs)   # câu vẫn còn lặp lời / 2 câu liền giống nhau -> tô màu để kiểm
+    # 2i0) Gemini XEM + NGHE video soát lại phụ đề gốc (2.1.25, Cài đặt asr_gemini_review – mặc định tắt): sửa câu nghe
+    # nhầm / sai tên riêng, đánh dấu câu không phải lời / lời hát, thêm câu bị sót; câu Gemini xác nhận đúng không bị
+    # bước 2i xoá
+    p.data.pop("gemini_review", None)
+    if segs and settings.get("asr_gemini_review"):
+        try:
+            segs, gst = gemini_review(p, segs, settings, None, None if method == "ocr" else locals().get("wav"),
+                                      language, _sub(progress, 0.97, 0.985), cancel)
+            p.data["gemini_review"] = {k: v for k, v in gst.items() if k != "touched"}
+        except ff.Cancelled:
+            raise
+        except Exception as e:  # noqa: BLE001 – bước phụ
+            log_error("Gemini xem video soát phụ đề")
+            p.data["gemini_review"] = {"error": err_text(e)[:160]}
     # 2i) lớp lọc CUỐI CÙNG trước khi dịch (2.1.19): bỏ hẳn câu bộ nghe không chắc – sau mọi bước nghe lại / 2 bộ nghe
     p.data.pop("unsure_dropped", None)
     p.data.pop("unsure_removed", None)
@@ -2107,6 +2124,180 @@ def use_alt(p: Project, rows: list[int]) -> list[int]:
     return out
 
 
+def gemini_review(p: Project, segs: list, settings: dict, rows: list[int] | None = None, wav: Path | None = None,
+                  language: str = "zh", progress: Prog | None = None, cancel=None) -> tuple[list, dict]:
+    """A – Gemini XEM + NGHE video soát phụ đề gốc (2.1.25, trami/vreview.py): cắt phim thành khúc ≤ 5 phút, gửi kèm
+    các câu trong khúc -> Gemini báo câu nghe nhầm / sai tên riêng (gần chữ cũ -> điền, khác hẳn -> chữ xanh), không
+    phải lời nói (tím) / lời bài hát (🎵), câu đúng (xác nhận), câu bị sót (thêm, chữ cam), tên riêng thấy trên màn hình
+    (-> Bảng tên riêng). Mốc giờ vẫn của tool: câu đổi số chữ / câu thêm được đo lại mốc từng chữ (khi có bộ nghe +
+    `wav`). rows: chỉ soát các câu này (kèm 2 câu trước / sau làm ngữ cảnh). Trả (danh sách câu mới, thống kê)."""
+    from . import gemvideo, vreview
+    from .translate import engine_parallel, run_parallel
+
+    st: dict = {"windows": 0, "checked": 0}
+    ok, why = gemvideo.ready(settings)
+    if not ok:
+        st["error"] = why
+        return segs, st
+    if not p.data.get("source") or source_missing(p):
+        st["error"] = "chưa có video gốc"
+        return segs, st
+    total = float(p.data.get("info", {}).get("duration", 0) or 0)
+    wins = vreview.windows(segs, rows, total)
+    if not wins:
+        return segs, st
+    simplify = None
+    if language in ("zh", "auto"):
+        from .asr import to_simplified as simplify
+    profile = p.data.get("film_profile", "") or ""
+    vs = gemvideo.VideoSource(p.source, p.work / "gemvideo", settings)
+
+    def one(w):
+        a, b, rows_w, check = w
+        text, num = vreview.payload(segs, rows_w, check, a, profile)
+        try:
+            reply = vs.ask(vreview.PROMPT, text, a, b, max_tokens=2000 + 120 * len(rows_w), cancel=cancel)
+        except ff.Cancelled:
+            raise
+        except (PermissionError, ValueError) as e:   # key sai / model không có: các khúc sau cũng vậy -> dừng
+            raise ApiStop(err_text(e)) from e
+        except Exception as e:  # noqa: BLE001 – 1 khúc lỗi (mạng, Gemini từ chối…) không chặn các khúc khác
+            log_error("Gemini xem video")
+            return None, num, err_text(e)
+        return vreview.parse(reply), num, ""
+
+    added: list = []
+    names: list = []
+    touched: set = set()
+    try:
+        results = []
+        if engine_parallel(settings, "gemini") and len(wins) > 1:
+            if progress:
+                progress(0.05, f"Gemini đang xem {len(wins)} khúc video cùng lúc…")
+            c0, report = net.current()
+            with net.task(cancel or c0, report):
+                for n, (w, res) in enumerate(run_parallel(one, wins), 1):
+                    results.append((w, res))
+                    if progress:
+                        progress(0.05 + 0.8 * n / len(wins), f"Gemini đã xem {n}/{len(wins)} khúc video")
+        else:
+            for n, w in enumerate(wins):
+                if cancel and cancel():
+                    raise ff.Cancelled()
+                if progress:
+                    progress(0.05 + 0.8 * n / len(wins), f"Gemini đang xem khúc video {n + 1}/{len(wins)} "
+                                                         f"({fmt_time(w[0])}–{fmt_time(w[1])})")
+                results.append((w, one(w)))
+        for (a, _b, _rows_w, check), (d, num, err) in results:
+            if d is None:
+                st["failed"] = st.get("failed", 0) + 1
+                st["error"] = err
+                continue
+            st["windows"] += 1
+            st["checked"] += len(check)
+            r = vreview.apply(segs, d, num, check, a, st, simplify)
+            touched.update(r["fixed"] + r["alt"] + r["flag"])
+            added += r["added"]
+            names += r["names"]
+    except ApiStop as e:
+        st["error"] = str(e)
+    finally:
+        vs.cleanup()     # xoá khúc video đã tải lên máy chủ Google
+    for x in segs:
+        if x.extra.get("gem_fix") and x.extra.get("src_before") and _cjk_count(x.text) != _cjk_count(x.extra["src_before"]):
+            x.extra.pop("ct", None)
+    if added:
+        segs = vreview.insert_added(segs, added)
+    new_rows = [x for x in segs if x.extra.get("from_gemini") and "ct" not in x.extra]
+    # đo lại mốc từng chữ: câu đổi số chữ + câu thêm (giờ Gemini đoán – căn trong khoảng rộng rồi lấy mép theo chữ)
+    need = [x for x in segs if (x.extra.get("gem_fix") or x.extra.get("from_gemini")) and "ct" not in x.extra]
+    if need and wav is not None:
+        eng, _why = relisten_engine(p, settings)
+        if eng:
+            from . import asr_qwen
+
+            try:
+                asr_qwen.align_qwen(need, wav, language, settings, None, cancel, engine=eng, pad=1.0)
+                for x in new_rows:
+                    ct = x.extra.get("ct")
+                    if ct:
+                        x.start, x.end = round(float(ct[0][0]), 3), round(max(float(ct[-1][1]), float(ct[0][0]) + 0.2), 3)
+            except ff.Cancelled:
+                raise
+            except Exception:  # noqa: BLE001 – không đo được: mốc câu giữ như cũ / theo giờ Gemini
+                log_error("Đo lại mốc chữ sau khi Gemini soát")
+            finally:
+                asr_qwen.release()
+    segs.sort(key=lambda x: x.start)
+    if names and trans_lang(p) == "vi":
+        key = glossary_key("vi")
+        add = vreview.names_text(names, p.data.get(key, "") or "")
+        if add:
+            p.data[key] = ((p.data.get(key) or "").rstrip() + "\n" + add).strip()
+            st["names"] = len(add.splitlines())
+    st["touched"] = len(touched)
+    return segs, st
+
+
+class ApiStop(Exception):
+    """Lỗi làm mọi khúc sau cũng hỏng (key sai, model không có) -> dừng sớm."""
+
+
+def fmt_time(t: float) -> str:
+    t = max(0, int(t))
+    return f"{t // 3600}:{t // 60 % 60:02d}:{t % 60:02d}" if t >= 3600 else f"{t // 60}:{t % 60:02d}"
+
+
+def gemini_check(p: Project, settings: dict | None = None, rows: list[int] | None = None, progress: Prog | None = None,
+                 cancel=None) -> dict:
+    """Nút "Gemini xem video & soát" (tab Phụ đề): soát câu đã tích / cả phim. Chỉ đổi chữ gốc (bản dịch / giọng lồng giữ
+    nguyên – giao diện tích sẵn câu đổi để dịch lại); câu đổi 🎵 khi đã lồng tiếng -> xếp lại bản lồng. Ctrl+Z hoàn tác.
+    Trả thống kê + "pick" (số thứ tự câu đã sửa / chữ xanh / đánh dấu / thêm)."""
+    settings = dict(settings or load_settings())
+    segs = p.segments
+    if not segs:
+        raise ValueError("Chưa có phụ đề")
+    from . import gemvideo
+
+    ok, why = gemvideo.ready(settings)
+    if not ok:
+        raise RuntimeError("Chưa dùng được Gemini: " + why)
+    language = p.data.get("language", "zh") or "zh"
+    songs0 = {id(x) for x in segs if x.extra.get("song")}
+    before = {id(x): x.text for x in segs}
+    wav = None
+    if relisten_engine(p, settings)[0] and p.data.get("sub_source") not in ("ocr",):
+        try:
+            wav = _voice_wav16(p, _sub(progress, 0.0, 0.03), cancel)
+        except ff.Cancelled:
+            raise
+        except Exception:  # noqa: BLE001 – không có bản 16 kHz: không đo lại mốc chữ
+            wav = None
+    for i in (rows if rows is not None else range(len(segs))):
+        if 0 <= i < len(segs) and segs[i].extra.get("asr_alt_eng") == "gemini":
+            for k in ("asr_alt", "asr_alt_eng", "asr_unsure", "gem_note"):
+                segs[i].extra.pop(k, None)
+    segs, st = gemini_review(p, segs, settings, rows, wav, language, _sub(progress, 0.03, 0.97), cancel)
+    if st.get("error") and not st.get("windows"):
+        raise RuntimeError("Gemini chưa xem video được: " + st["error"])
+    new_song = [i for i, x in enumerate(segs) if x.extra.get("song") and id(x) in before and id(x) not in songs0]
+    pick = [i for i, x in enumerate(segs) if id(x) not in before or before[id(x)] != x.text
+            or x.extra.get("asr_alt_eng") == "gemini" or str(x.extra.get("noise", "")).startswith("Gemini")]
+    p.segments = segs
+    p.data["gemini_review"] = {k: v for k, v in st.items() if k != "touched"}
+    p.save()
+    if new_song and has_dub(p):
+        try:
+            relayout(p, settings, None, cancel)   # câu thành 🎵 -> bỏ giọng lồng câu đó khỏi bản lồng
+        except ff.Cancelled:
+            raise
+        except Exception:  # noqa: BLE001
+            log_error("Xếp lại bản lồng sau khi Gemini soát")
+    st["pick"] = sorted(set(pick + new_song))
+    st["changed"] = [i for i, x in enumerate(segs) if id(x) in before and before[id(x)] != x.text]
+    return st
+
+
 def relisten_engine(p: Project, settings: dict | None = None) -> tuple[str | None, str]:
     """Bộ nghe cho "Bộ nghe nghe lại câu đã tích": bộ đã nghe dự án này / bộ chọn ở Cài đặt nếu là Qwen3-ASR /
     FireRedASR2, không thì bộ nào dùng được (cần độ chắc từng chữ). Trả (bộ | None, tên / lý do)."""
@@ -2191,9 +2382,11 @@ def listen_note(p: Project) -> str:
     """Kết quả các bước nghe chính xác hơn (2.1.0) cho thông báo xong "1. Nghe & tách câu" / Tự động."""
     from .recheck import note as recheck_note
 
+    from .vreview import note as gemini_note
+
     out = [x for x in (hybrid_note(p.data.get("hybrid")) if p.data.get("sub_source") == "hybrid" else "",
                        recheck_note(p.data.get("asr_recheck")), name_note(p.data.get("name_pass")),
-                       dual_note(p.data.get("asr_dual"))) if x]
+                       dual_note(p.data.get("asr_dual")), gemini_note(p.data.get("gemini_review"))) if x]
     if edge_note(p.data.get("edge_fix")):
         out.append(edge_note(p.data.get("edge_fix")))
     if p.data.get("ct_revoiced"):
@@ -2968,6 +3161,7 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
         a0 += 0.05
     tr = Translator(settings, engine, style, parse_glossary(p.data.get(gkey, "")), cache, target=target,
                     source=source_lang(p), skill=skills.skill_text(settings) if is_ai else "")
+    tr.video = video_source(p, settings, eng)   # dịch có nhìn hình (Gemini xem khúc video của từng lô, 2.1.25)
 
     last_save = [time.time()]
     tr_prog = _sub(progress, a0, 0.85 if do_review else 1.0)
@@ -2986,8 +3180,16 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
         mark_breaths(segs, min_gap, rows if rows is not None else
                      ([i for i, x in enumerate(segs) if not x.trans.strip()] if only_empty else None))
     before = [x.trans for x in segs]
-    tr.translate_segments(segs, prog, cancel, only_empty=only_empty, summary=profile, auto_terms=not profile,
-                          rows=set(rows) if rows is not None else None)
+    try:
+        tr.translate_segments(segs, prog, cancel, only_empty=only_empty, summary=profile, auto_terms=not profile,
+                              rows=set(rows) if rows is not None else None)
+    finally:
+        if tr.video is not None:
+            tr.video.cleanup()      # xoá khúc video đã tải lên máy chủ Google
+    if tr.video is not None:
+        note = video_translate_note(p, tr)
+        if note:
+            p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + note
     new_rows = [i for i, x in enumerate(segs) if x.trans.strip() and x.trans != before[i]]   # câu vừa có bản dịch mới
     # câu dịch thiếu vế so với chỗ nhân vật ngắt hơi -> AI sửa cho đủ vế (2.1.3)
     if is_ai and new_rows and settings.get("trans_clause_match", True):
@@ -3048,6 +3250,38 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
         # câu đã có giọng lồng giữ nguyên (tách thì mất giọng) – muốn tách thì bấm "Tách câu dài" ở tab Phụ đề
         auto_split_long(p, settings, voiced=False, cancel=cancel)
     return sum(1 for s in p.segments if s.trans)
+
+
+def video_source(p: Project, settings: dict, engine: str):
+    """Dịch có nhìn hình (Cài đặt translate_video, chỉ Gemini – công cụ khác không nhận video): bộ cắt khúc video nhẹ
+    để gửi kèm mỗi lô dịch. Không đủ điều kiện -> None (dịch chỉ bằng chữ như trước)."""
+    if not settings.get("translate_video") or engine != "gemini" or not p.data.get("source") or source_missing(p):
+        return None
+    from . import gemvideo
+
+    if not gemvideo.ready(settings)[0]:
+        return None
+    return gemvideo.VideoSource(p.source, p.work / "gemvideo", settings, low_res=True)
+
+
+def video_translate_note(p: Project, tr) -> str:
+    """Kết quả dịch có nhìn hình + lưu giới tính người nói Gemini thấy trên hình (Tự gán giọng nam / nữ dùng)."""
+    if not (tr.video_batches or tr.video_failed):
+        return ""
+    note = f"Gemini xem video khi dịch {tr.video_batches} lô"
+    if tr.video_failed:
+        note += f" · ⚠ {tr.video_failed} lô gửi video lỗi – dịch chỉ bằng chữ ({tr.video_error[:80]})"
+    sg = tr.speaker_genders()
+    if sg:
+        cur = dict(p.data.get("speaker_gender") or {})
+        for spk, v in sg.items():   # nhìn thấy mặt người nói chắc hơn đoán theo cao độ giọng
+            cur[spk] = {**(cur.get(spk) or {}), "g": v["g"], "by": "gemini", "src": "gemini",
+                        **({"name": v["name"]} if v.get("name") else {})}
+        p.data["speaker_gender"] = cur
+        note += " · giới tính người nói theo hình: " + ", ".join(
+            f"{k} {'nữ' if v['g'] == 'female' else 'nam'}" + (f" ({v['name']})" if v.get("name") else "")
+            for k, v in sorted(sg.items()))
+    return note
 
 
 def auto_split_long(p: Project, settings: dict | None = None, voiced: bool = False, progress: Prog | None = None,

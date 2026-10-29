@@ -815,6 +815,24 @@ def hymt_worker(settings: dict | None = None) -> HymtWorker:
 
 # ======================================================================= Translator
 
+VIDEO_WIN = 600.0  # dịch có nhìn hình (2.1.25): mỗi lô ứng với 1 khúc video ≤ 10 phút
+VIDEO_PAD = 3.0    # khúc video rộng hơn dòng đầu / cuối của lô 3 s
+VIDEO_RULE_VI = """
+
+VIDEO GỬI KÈM: bạn được XEM + NGHE khúc video chứa các dòng cần dịch (giờ từng dòng – giây tính từ đầu khúc – và người
+nói ở mục THỜI ĐIỂM TRONG VIDEO). Dùng hình + giọng để: biết ai đang nói với ai (nam / nữ, già / trẻ, vai vế, thân / sơ)
+mà chọn xưng hô đúng; hiểu câu ngắn theo hành động trên hình; đọc chữ trên màn hình (tin nhắn, biển hiệu, tên nhân vật)
+làm ngữ cảnh. Vẫn dịch đúng CHỮ của từng dòng (tai nghe khác chữ dòng thì vẫn theo chữ dòng), giữ đủ mọi luật trên.
+Thêm 1 khoá "_nguoi_noi" vào JSON: {"S1": {"gioi": "nam" | "nu", "ten": "<tên nhân vật nếu biết>"}} cho người nói có
+trong lô – chỉ ghi khi thấy rõ người đó trên hình."""
+VIDEO_RULE_EN = """
+
+ATTACHED VIDEO: you can WATCH + HEAR the video clip containing these lines (each line's time – seconds from the start of
+the clip – and speaker are in VIDEO TIMES). Use picture + voice to know who is talking to whom (male / female, age,
+rank, closeness) and choose the right forms of address; understand short lines from the action on screen; read on-screen
+text (messages, signs, character names) as context. Still translate the TEXT of each line (if what you hear differs from
+the line, follow the line) and keep every rule above. Add one key "_speakers" to the JSON: {"S1": {"gender": "male" |
+"female", "name": "<character name if known>"}} for speakers in this batch – only when clearly seen."""
 CTX_BEFORE = 6     # số dòng ngay trước lô gửi kèm (đã dịch) – luật 2: đọc ≥ 2 dòng trước / sau mỗi dòng
 CTX_AFTER = 4      # số dòng ngay sau lô gửi kèm
 _HEAD_DROP = re.compile(r"[\W_]+")
@@ -887,6 +905,13 @@ class Translator:
         self.fill_short = bool(settings.get("translate_fill", False))
         self.genre = genres.form(self.style, self.target, settings)   # form thể loại phim (sửa được) -> lời nhắc hệ thống
         self.fallback_lines = 0   # số câu AI trả lỗi định dạng, phải dùng Google bù
+        # dịch có nhìn hình (2.1.25): gemvideo.VideoSource – mỗi lô gửi kèm khúc video của chính các dòng đó (chỉ Gemini)
+        self.video = None
+        self.video_batches = 0       # số lô đã gửi kèm video
+        self.video_failed = 0        # số lô gửi video lỗi -> đã dịch chỉ bằng chữ
+        self.video_error = ""
+        self.speakers: dict[str, dict] = {}   # người nói -> {"g": male / female, "name"} Gemini thấy trên hình
+        self._spk_lock = threading.Lock()
 
     # ------------------------------------------------------------- public
     def translate_segments(self, segs: list[Segment], progress: ProgressCB | None = None,
@@ -912,7 +937,10 @@ class Translator:
             unit = langs.INFO[self.target]["unit_vi"] if self.target == "vi" else langs.INFO[self.target]["unit_ai"]
             texts = [f"{segs[i].text} {length_marker(segs[i].duration, self.target, unit, self.fill_short)}"
                      for i in idx]
-        results = self.translate_lines(texts, progress, cancel, summary=summary)
+        times = None
+        if self.video is not None and self.llm is not None and self.engine == "gemini":
+            times = [(segs[i].start, segs[i].end, segs[i].speaker or "") for i in idx]
+        results = self.translate_lines(texts, progress, cancel, summary=summary, times=times)
         for i, t in zip(idx, results):
             segs[i].trans = BUDGET_RE.sub(" ", t or "").strip()
             segs[i].extra.pop("trans_user", None)
@@ -975,7 +1003,10 @@ class Translator:
         return out
 
     def translate_lines(self, lines: list[str], progress: ProgressCB | None = None,
-                        cancel: Callable[[], bool] | None = None, summary: str = "") -> list[str]:
+                        cancel: Callable[[], bool] | None = None, summary: str = "",
+                        times: list[tuple[float, float, str]] | None = None) -> list[str]:
+        """times: (đầu, cuối, người nói) từng dòng – có thì mỗi lô gửi kèm khúc video của chính các dòng đó (dịch có nhìn
+        hình, 2.1.25): lô gom theo cả số câu lẫn độ dài khúc video (≤ VIDEO_WIN)."""
         out: list[str | None] = [None] * len(lines)
         todo = []
         for i, l in enumerate(lines):
@@ -1011,7 +1042,19 @@ class Translator:
             def one(ids):
                 ctx_before = [(lines[k], out[k] or "") for k in range(max(0, ids[0] - CTX_BEFORE), ids[0])]
                 ctx_after = [lines[k] for k in range(ids[-1] + 1, min(len(lines), ids[-1] + 1 + CTX_AFTER))]
-                return self._llm_batch([lines[i] for i in ids], ctx_before, ctx_after, summary)
+                return self._llm_batch([lines[i] for i in ids], ctx_before, ctx_after, summary,
+                                       vt=[times[i] for i in ids] if times else None)
+
+            def take(pos: int) -> list[int]:
+                """Lô tiếp theo từ vị trí pos: ≤ số câu mỗi lần gửi; dịch có nhìn hình thì khúc video ≤ VIDEO_WIN."""
+                ids = todo[pos:pos + self._size()]
+                if times and ids:
+                    a = times[ids[0]][0]
+                    k = 1
+                    while k < len(ids) and times[ids[k]][1] - a <= VIDEO_WIN:
+                        k += 1
+                    ids = ids[:k]
+                return ids
 
             def keep(ids, res):
                 for gi, r in zip(ids, res):
@@ -1019,9 +1062,13 @@ class Translator:
                     if r and not untranslated(r, self.target):
                         self.cache[cache_key(self.engine, self.style, self.target, lines[gi])] = r
             size = self._size()
-            if self.parallel and len(todo) > size:
+            if self.parallel and (len(todo) > size or times):
                 # gửi tất cả cùng lúc: các lô đi song song; lô sau chưa có bản dịch của lô trước -> ngữ cảnh chỉ có câu gốc
-                groups = [todo[b:b + size] for b in range(0, len(todo), size)]
+                groups, b = [], 0
+                while b < len(todo):
+                    g = take(b)
+                    groups.append(g)
+                    b += len(g)
                 if progress:
                     progress(done / len(lines), f"AI đang dịch {len(todo)} câu – gửi {len(groups)} lần cùng lúc "
                                                 f"({self.engine})")
@@ -1038,7 +1085,7 @@ class Translator:
                 while pos < len(todo):
                     if cancel and cancel():
                         raise Cancelled()
-                    ids = todo[pos:pos + self._size()]   # model trả lời ngắn hơn lô (đã biết) -> lô sau nhỏ lại
+                    ids = take(pos)   # model trả lời ngắn hơn lô (đã biết) -> lô sau nhỏ lại
                     keep(ids, one(ids))
                     pos += len(ids)
                     done += len(ids)
@@ -1108,7 +1155,8 @@ class Translator:
         return with_skill(system_prompt(self.target, self.source, self.fit_dub and self.fill_short, self.genre),
                           self.skill)
 
-    def _llm_batch(self, lines: list[str], ctx_before, ctx_after, summary: str, depth: int = 0) -> list[str]:
+    def _llm_batch(self, lines: list[str], ctx_before, ctx_after, summary: str, depth: int = 0,
+                   vt: list[tuple[float, float, str]] | None = None, win: tuple[float, float] | None = None) -> list[str]:
         """Dịch 1 lô. ctx_before: [(câu gốc, bản dịch)] các dòng ngay trước lô; ctx_after: [câu gốc] các dòng ngay sau.
         Dòng thiếu / còn chữ Hán / bị LỆCH DÒNG ("dau" khớp dòng bên cạnh) được hỏi lại KÈM 2+ dòng trước / sau của chính
         nó (2.1.13 – trước đây hỏi lại 1 dòng lẻ với ngữ cảnh của cả lô, mất nghĩa)."""
@@ -1132,6 +1180,14 @@ class Translator:
             parts.append(f"{lab[3]}:\n" + "\n".join(f"- {BUDGET_RE.sub(' ', a).strip()}" for a in ctx_after))
         payload = {str(i + 1): l for i, l in enumerate(lines)}
         n = len(lines)
+        if vt and self.video is not None:     # dịch có nhìn hình: khúc video của chính các dòng trong lô
+            if win is None:   # hỏi lại phần thiếu / chia đôi lô: dùng lại đúng khúc video đã tải lên của lô
+                win = (max(0.0, min(t[0] for t in vt) - VIDEO_PAD), max(t[1] for t in vt) + VIDEO_PAD)
+            a = win[0]
+            parts.append(("THỜI ĐIỂM TRONG VIDEO (giây tính từ đầu khúc video gửi kèm | người nói):\n" if vi else
+                          "VIDEO TIMES (seconds from the start of the attached clip | speaker):\n") +
+                         "\n".join(f"{k + 1}: {max(0.0, t0 - a):.1f}–{max(0.0, t1 - a):.1f} | {sp or '?'}"
+                                    for k, (t0, t1, sp) in enumerate(vt)))
         ask = (f"DỊCH {n} DÒNG SAU sang tiếng Việt – đúng {n} dòng, trả về JSON với đủ các khoá 1..{n}:" if vi else
                f"TRANSLATE THE FOLLOWING {n} LINES into {langs.INFO[self.target]['english']} – exactly {n} lines, "
                f"return JSON with every key 1..{n}:")
@@ -1141,7 +1197,13 @@ class Translator:
         if tl is not None:
             tl.cut = False
         try:   # xin đủ chỗ trả lời cho cả lô (trước 2.1.23 cố định 8000 token: lô 200 câu bị cắt giữa chừng)
-            d = _extract_json(self.llm.chat(self.system(), user, max_tokens=TOK_BASE + TOK_LINE * n))
+            reply = None
+            if win is not None:
+                reply = self._video_chat(user, win, TOK_BASE + TOK_LINE * n + 400)
+                tl = getattr(getattr(self.video, "client", None), "_tl", None) if reply is not None else tl
+            if reply is None:
+                reply = self.llm.chat(self.system(), user, max_tokens=TOK_BASE + TOK_LINE * n)
+            d = _extract_json(reply)
         except (Cancelled, net.NetworkDown):
             raise
         except (PermissionError, ApiError, ValueError) as e:
@@ -1152,6 +1214,8 @@ class Translator:
         except Exception:
             d = None
         if isinstance(d, dict):
+            if win is not None:
+                self._keep_speakers(d)
             res, heads = _answers(d, n)
             bad = shifted_lines(heads, lines)
             miss = [i for i, r in enumerate(res)
@@ -1171,15 +1235,17 @@ class Translator:
                     cb = (list(ctx_before) + [(lines[j], res[j]) for j in range(a)])[-CTX_BEFORE:]
                     ca = ([lines[j] for j in range(b + 1, n)] + list(ctx_after))[:CTX_AFTER]
                     sub = depth if a == k else depth + 1
-                    for i, f in zip(grp, self._llm_batch([lines[i] for i in grp], cb, ca, summary, sub)):
+                    for i, f in zip(grp, self._llm_batch([lines[i] for i in grp], cb, ca, summary, sub,
+                                                         [vt[i] for i in grp] if vt else None, win)):
                         res[i] = f
                 return res
         # lỗi hoặc thiếu nhiều dòng -> chia đôi lô rồi thử lại (mỗi nửa vẫn có ngữ cảnh của nửa kia)
         if n > 1 and depth < 4:
             mid = n // 2
-            a = self._llm_batch(lines[:mid], ctx_before, (lines[mid:] + list(ctx_after))[:CTX_AFTER], summary, depth + 1)
+            a = self._llm_batch(lines[:mid], ctx_before, (lines[mid:] + list(ctx_after))[:CTX_AFTER], summary, depth + 1,
+                                vt[:mid] if vt else None, win)
             b = self._llm_batch(lines[mid:], (list(ctx_before) + list(zip(lines[:mid], a)))[-CTX_BEFORE:], ctx_after,
-                                summary, depth + 1)
+                                summary, depth + 1, vt[mid:] if vt else None, win)
             return a + b
         # cuối cùng dùng Google để không bị trống (đếm lại để cảnh báo người dùng)
         try:
@@ -1189,6 +1255,54 @@ class Translator:
             raise
         except Exception:
             return [""] * n
+
+    def _video_chat(self, user: str, win: tuple[float, float], max_tokens: int) -> str | None:
+        """Hỏi Gemini kèm khúc video [win]. Lỗi (tải video lên hỏng, Gemini từ chối khúc này…) -> None: lô này dịch chỉ
+        bằng chữ như trước. Huỷ / mất mạng quá lâu / key hỏng hết -> ném lỗi như dịch thường."""
+        rule = VIDEO_RULE_VI if self.target == "vi" else VIDEO_RULE_EN
+        try:
+            reply = self.video.ask(self.system() + rule, user, win[0], win[1], max_tokens)
+            with self._spk_lock:
+                self.video_batches += 1
+            return reply
+        except (Cancelled, net.NetworkDown, PermissionError):
+            raise
+        except Exception as e:  # noqa: BLE001
+            with self._spk_lock:
+                self.video_failed += 1
+                self.video_error = str(e)[:160]
+            return None
+
+    def _keep_speakers(self, d: dict) -> None:
+        """Giới tính / tên người nói Gemini thấy trên hình ("_nguoi_noi" / "_speakers") -> self.speakers."""
+        info = d.get("_nguoi_noi") or d.get("_speakers")
+        if not isinstance(info, dict):
+            return
+        with self._spk_lock:
+            for spk, v in info.items():
+                if not isinstance(v, dict) or not str(spk).strip():
+                    continue
+                g = str(v.get("gioi") or v.get("gender") or "").lower()
+                g = "female" if g in ("nu", "nữ", "female", "f") else "male" if g in ("nam", "male", "m") else ""
+                cur = self.speakers.setdefault(str(spk).strip(), {"votes": {}})
+                if g:
+                    cur["votes"][g] = cur["votes"].get(g, 0) + 1
+                name = str(v.get("ten") or v.get("name") or "").strip()
+                if name and not cur.get("name"):
+                    cur["name"] = name[:40]
+
+    def speaker_genders(self) -> dict[str, dict]:
+        """{người nói: {"g": male / female, "src": "gemini", "name"}} – theo số lần Gemini thấy (đa số, ≥ 2/3)."""
+        out = {}
+        for spk, v in self.speakers.items():
+            votes = v.get("votes") or {}
+            tot = sum(votes.values())
+            if not tot:
+                continue
+            g, c = max(votes.items(), key=lambda x: x[1])
+            if c / tot >= 2 / 3:
+                out[spk] = {"g": g, "src": "gemini", **({"name": v["name"]} if v.get("name") else {})}
+        return out
 
     # ------------------------------------------------------------- Hy-MT2 (trên máy)
     def _hymt(self, lines: list[str], todo: list[int], progress: ProgressCB | None, cancel, done0: int) -> list[str]:

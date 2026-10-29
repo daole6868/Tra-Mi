@@ -54,6 +54,18 @@ EDGE_FIX_HELP = ("Câu kết thúc (hoặc bắt đầu) khi nhân vật vẫn c
                  "nghe nghe lại khúc câu cũ + khúc đã nới; khúc nới nghe ra thêm chữ của chính câu, không thêm câu khác "
                  "-> nới mép (tối đa 4 s mỗi bên) và đo lại giờ từng chữ. Cần đã tách giọng và Qwen3-ASR / FireRedASR2. "
                  "Cũng chạy khi bấm 'Căn mép theo giọng' (tab Phụ đề)")
+GEMINI_REVIEW_HELP = ("Gemini XEM + NGHE từng khúc video ~5 phút cùng phụ đề tiếng Trung máy nghe ra: câu nghe nhầm / sai tên "
+                      "riêng (đọc được tên hiện trên màn hình) -> sửa khi chữ mới gần chữ cũ, khác hẳn thì tô xanh để bạn "
+                      "chọn ('Dùng bản bộ nghe 2'); câu không phải lời nói -> tím, lời bài hát -> 🎵 (không tự xoá); câu "
+                      "bị sót -> thêm (chữ cam, giờ ước lượng – có Qwen3 thì đo lại giờ từng chữ); câu Gemini xác nhận "
+                      "đúng không bị bước 'Xoá câu không chắc' xoá. Mốc giờ vẫn của tool. Cần API key Gemini (Cài đặt "
+                      "→ Công cụ dịch → Gemini); video được tải lên Google rồi xoá ngay sau khi xem. Phim 1 giờ ≈ 12 lần "
+                      "gửi")
+VIDEO_TRANSLATE_HELP = ("Chỉ khi Công cụ dịch = Gemini: mỗi lô câu gửi dịch kèm khúc video của chính các câu đó (480p, 1 khung"
+                        " / giây) -> Gemini thấy ai nói với ai (nam / nữ, già / trẻ, vai vế) nên chọn xưng hô đúng hơn, "
+                        "hiểu câu ngắn theo hành động trên hình, đọc chữ trên màn hình; ghi lại giới tính từng người nói "
+                        "(Tự gán giọng nam / nữ dùng). Luật dịch / form thể loại / kỹ năng giữ nguyên. Lô gửi video lỗi -> "
+                        "dịch chỉ bằng chữ như thường. Chậm hơn dịch thường (tải video lên), tốn thêm token video")
 LANG_CHECK_HELP = ("Khúc bộ nghe (Qwen3-ASR) không chắc -> nghe lại không ép tiếng Trung xem có phải câu tiếng Anh / Nhật… "
                    "không; ra tiếng khác mà chắc hơn thì dùng bản đó. Tắt nếu phim chỉ có tiếng Trung mà thấy câu tiếng "
                    "Anh / Nhật lạ ở đoạn nhạc (bộ nghe đoán lời bài hát thành tiếng nước ngoài)")

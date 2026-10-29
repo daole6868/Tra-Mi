@@ -118,6 +118,8 @@ DEFAULT_SETTINGS: dict = {
     "dub_overflow": "smart",          # câu đọc dài hơn chỗ trống: smart / push / overlap / early / cut (tts.OVERFLOW_MODES)
     "dub_lead_max": 1.0,              # "Tự động": câu dài được bắt đầu sớm tối đa (giây)
     "dub_max_lag": 2.0,               # "Tự động": câu sau bị lùi tối đa (giây), quá thì đọc đè
+    "asr_gemini_review": False,       # Gemini xem video soát lại phụ đề gốc cuối bước Nghe & tách câu (2.1.25)
+    "translate_video": False,         # dịch bằng Gemini có gửi kèm khúc video (xưng hô theo hình, giới tính người nói)
     "karaoke_listen": True,           # karaoke theo mốc thật từng từ của giọng lồng (Edge trả sẵn / Whisper nghe lại)
     "dub_subs_follow": True,          # phụ đề Việt hiện theo đúng lúc giọng lồng đọc (khi giọng sớm / trễ / dài)
     "sub_follow_mode": "always",      # giờ hiện phụ đề: always = luôn theo giọng lồng / shift = chỉ khi lệch > 0,3 s

@@ -370,7 +370,9 @@ class ProjectPage(QWidget):
         self.a_langchk = f.row("Nghe lại khúc nghi tiếng khác", Switch(bool(s.get("asr_lang_check", True))),
                                C.LANG_CHECK_HELP)
         self.a_edges = f.row("Sửa đầu / cuối câu bị cắt", Switch(bool(s.get("asr_edge_fix", True))), C.EDGE_FIX_HELP)
-        for w in (self.a_recheck, self.a_overlap, self.a_langchk, self.a_edges):
+        self.a_gemrev = f.row("Gemini xem video soát lại phụ đề", Switch(bool(s.get("asr_gemini_review", False))),
+                              C.GEMINI_REVIEW_HELP)
+        for w in (self.a_recheck, self.a_overlap, self.a_langchk, self.a_edges, self.a_gemrev):
             w.toggled.connect(self._audio_opts_changed)
         self.a_chunk.valueChanged.connect(self._audio_opts_changed)
         self.a_pad.valueChanged.connect(self._audio_opts_changed)
@@ -442,6 +444,9 @@ class ProjectPage(QWidget):
                                   "Dịch xong cả phim -> câu dịch dài hơn mức đặt ở tab Phụ đề (mặc định 14 tiếng) được "
                                   "tách ở dấu ? ! . / dấu phẩy thành nhiều dòng, giọng lồng nghỉ 1 nhịp giữa 2 vế. Tách "
                                   "xong hết mới lồng tiếng. Cùng 1 công tắc với 'Tự tách câu dịch dài' ở tab Phụ đề")
+        self.a_vtrans = f.row("Dịch có nhìn hình (Gemini xem video)", Switch(bool(s.get("translate_video", False))),
+                              C.VIDEO_TRANSLATE_HELP)
+        self.a_vtrans.toggled.connect(self._vtrans_changed)
         self.a_clean.toggled.connect(self._ai_switch_changed)
         self.a_review.toggled.connect(self._ai_switch_changed)
         self.a_songai.toggled.connect(self._ai_switch_changed)
@@ -615,6 +620,11 @@ class ProjectPage(QWidget):
         self.s_skill.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.s_style.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         tr_card.add(g)
+        self.s_vtrans = Switch(bool(self.settings.get("translate_video", False)))
+        self.s_vtrans.setToolTip(C.VIDEO_TRANSLATE_HELP)
+        self.s_vtrans.toggled.connect(self._vtrans_changed)
+        tr_card.add(flow(self.s_vtrans, label("Dịch có nhìn hình – Gemini xem khúc video của từng lô câu (xưng hô theo "
+                                              "người nói / người nghe, giới tính người nói)", "muted", wrap=True)))
         self.s_tr_card = tr_card
         # ---- các trang của khung "Công cụ" (mỗi lúc hiện 1 trang)
         self.s_snap_ct = Switch(False)
@@ -745,6 +755,12 @@ class ProjectPage(QWidget):
                  button("Tích câu nghi lặp", "check", "Câu chữ gốc màu hồng: còn 1 cụm lặp liền nhau / 2 câu liền nhau "
                         "gần giống nhau – nghe lại rồi sửa hoặc Xoá", flat=True,
                         on_click=lambda: self._pick_flag("asr_repeat"))),
+            flow(_rowlbl("Gemini"),
+                 button("Gemini xem video & soát", "eye", C.GEMINI_REVIEW_HELP + ". Chạy cho câu đã tích (chưa tích = "
+                        "cả phim)", on_click=self.run_gemini_review),
+                 button("Tích câu Gemini sửa / đánh dấu", "check", "Câu Gemini đã sửa chữ, nghe ra khác hẳn (chữ xanh), "
+                        "đánh dấu không phải lời / lời hát, hoặc thêm vào (chữ cam) ở lần soát gần nhất", flat=True,
+                        on_click=self._pick_gemini)),
             flow(_rowlbl("2 bộ nghe"),
                  button("Nghe 2 bộ rồi so", "mic", C.DUAL_HELP + ". Chạy cho câu đã tích (chưa tích = cả phim)",
                         on_click=self.run_dual),
@@ -2803,6 +2819,9 @@ class ProjectPage(QWidget):
             self.a_overlap.setChecked(bool(st.get("asr_overlap", False)))
             self.a_langchk.setChecked(bool(st.get("asr_lang_check", True)))
             self.a_edges.setChecked(bool(st.get("asr_edge_fix", True)))
+            self.a_gemrev.setChecked(bool(st.get("asr_gemini_review", False)))
+            for w in (self.s_vtrans, self.a_vtrans):
+                w.setChecked(bool(st.get("translate_video", False)))
             for w in (self.s_conf, self.a_conf):
                 w.setValue(float(st.get("asr_pick_conf", 0.7) or 0.7))
             self.a_drop.setChecked(bool(st.get("asr_drop_unsure", False)))
@@ -2848,6 +2867,20 @@ class ProjectPage(QWidget):
              "asr_engine": self.a_asr.currentData(), "ocr_fps": self.a_ocrfps.currentData() or "4",
              "tts_engine": self.a_tts.currentData()}
         self.settings = save_settings(d)
+
+    def _vtrans_changed(self, on: bool):
+        """"Dịch có nhìn hình": 1 cài đặt chung (translate_video) cho công tắc tab Tự động + tab Phụ đề."""
+        for w in (getattr(self, "a_vtrans", None), getattr(self, "s_vtrans", None)):
+            if w is not None and w.isChecked() != bool(on):
+                w.blockSignals(True)
+                w.setChecked(bool(on))
+                w.blockSignals(False)
+        if getattr(self, "loading", True):
+            return
+        self._save_setting("translate_video", bool(on))
+        if on and not self.settings.get("gemini_api_key") and not self.settings.get("gemini_api_keys"):
+            self.win.toast("Dịch có nhìn hình cần API key Gemini (Cài đặt → Công cụ dịch → khung Gemini) và Công cụ "
+                           "dịch = Gemini", "warn")
 
     def _ai_switch_changed(self, *_):
         if getattr(self, "loading", True):
@@ -3098,6 +3131,7 @@ class ProjectPage(QWidget):
                                        "asr_overlap": self.a_overlap.isChecked(),
                                        "asr_lang_check": self.a_langchk.isChecked(),
                                        "asr_edge_fix": self.a_edges.isChecked(),
+                                       "asr_gemini_review": self.a_gemrev.isChecked(),
                                        "asr_drop_unsure": self.a_drop.isChecked()})
 
     def _engine_changed(self, *_):
@@ -3193,6 +3227,10 @@ class ProjectPage(QWidget):
             w = getattr(self, name, None)
             if w is not None:
                 w.setEnabled(ai)
+        for name in ("a_vtrans", "s_vtrans"):   # chỉ Gemini nhận video
+            w = getattr(self, name, None)
+            if w is not None:
+                w.setEnabled(eng == "gemini")
         if getattr(self, "a_ai_note", None) is not None:
             self.a_ai_note.setVisible(not ai)
 
@@ -4625,7 +4663,8 @@ class ProjectPage(QWidget):
                 it.setToolTip(f"Chất giọng: {('nam' if gi.get('g') == 'male' else 'nữ' if gi.get('g') == 'female' else 'chưa rõ')}"
                               + (f" · cao độ ~{gi['f0']:.0f} Hz" if gi.get("f0") else "")
                               + (" · theo mô hình + cao độ" if gi.get("by") == "model+pitch" else " · theo cao độ giọng"
-                                 if gi.get("by") == "pitch" else ""))
+                                 if gi.get("by") == "pitch" else " · Gemini thấy trên hình" if gi.get("by") == "gemini"
+                                 else "") + (f" · {gi['name']}" if gi.get("name") else ""))
             it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             from .subs_model import spk_color
             from PySide6.QtGui import QColor
@@ -5161,6 +5200,51 @@ class ProjectPage(QWidget):
                 msg += " · câu đổi chữ gốc đã tích sẵn – bấm 'Dịch câu đã tích' để dịch lại"
             return {"message": msg, "pick": sorted(set(pick))}
         self.submit("dual", "Nghe 2 bộ rồi so", fn)
+
+    def run_gemini_review(self):
+        """A – Gemini xem + nghe video, soát phụ đề gốc (câu đã tích / cả phim)."""
+        if not self.model.segs:
+            return self.win.toast("Chưa có phụ đề", "warn")
+        from .. import gemvideo
+
+        ok, why = gemvideo.ready(self.settings)
+        if not ok:
+            return self.win.toast("Chưa dùng được Gemini: " + why, "warn")
+        if pipeline.source_missing(self.p) or not self.p.data.get("source"):
+            return self.win.toast("Chưa có video gốc – bấm 'Tìm lại video gốc…'", "warn")
+        rows = sorted(self.model.selected) or None
+        if rows is None:
+            dur = float(self.p.data.get("info", {}).get("duration", 0) or 0)
+            n = max(1, int(dur // 300) + 1)
+            if QMessageBox.question(self, "Gemini xem cả phim",
+                                    f"Chưa tích câu nào – Gemini sẽ xem CẢ PHIM ({n} khúc ~5 phút, tải lên ~"
+                                    f"{max(1, int(dur / 60))} MB). Tốn khoảng {max(1, n)} lần gửi Gemini. Tiếp tục?") != \
+                    QMessageBox.StandardButton.Yes:
+                return
+        self.flush()
+        self._undo_mark()
+
+        def fn(j, p):
+            from ..vreview import note
+
+            st = pipeline.gemini_check(p, None, rows, j.update, j.cancelled)
+            msg = note(st) or "Gemini đã xem video"
+            if st.get("changed") and any(p.segments[i].trans.strip() for i in st["changed"] if i < len(p.segments)):
+                msg += " · câu đổi chữ gốc đã tích sẵn – bấm 'Dịch câu đã tích' để dịch lại"
+            return {"message": msg, "pick": st.get("pick", [])}
+        self.submit("dual", "Gemini xem video & soát phụ đề", fn)
+
+    def _pick_gemini(self):
+        segs = self.model.segs
+        rows = [i for i, x in enumerate(segs) if x.extra.get("gem_fix") or x.extra.get("from_gemini")
+                or x.extra.get("asr_alt_eng") == "gemini" or str(x.extra.get("noise", "")).startswith("Gemini")
+                or str(x.extra.get("ai_song", "")).startswith("Gemini")]
+        if not rows:
+            return self.win.toast("Không có câu nào Gemini sửa / đánh dấu", "ok")
+        self.model.set_picked(range(len(segs)), False)
+        self.model.set_picked(rows)
+        self._select_line(rows[0], seek=False)
+        self.win.toast(f"Đã tích {len(rows)} câu Gemini sửa / đánh dấu – rê chuột vào chữ gốc xem lý do", "ok")
 
     def _use_alt(self):
         rows = [r for r in sorted(self.model.selected) if 0 <= r < len(self.model.segs)]

@@ -341,6 +341,37 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   giữa, khớp < `ALIGN_MIN` 60 % -> None) -> `pipeline.karaoke_spans` trả {câu: {"kv", "kw"}} -> `extra["kw"]` (xuất:
   `to_ass` -> `ass_text(words=)`, `remap_after_cut` / `scale_time` dời theo; xem trước `player._karaoke`) ->
   `word_times(words=)`. Cài đặt `karaoke_listen` (công tắc "Theo mốc từng từ của giọng lồng", tắt = đoán như cũ).
+- Gemini XEM + NGHE video (2.1.25, `trami/gemvideo.py`): gọi thẳng API Gemini (cổng tương thích OpenAI không nhận
+  video). `VideoSource(src, work, settings, low_res)` – `clip(a, b)` cắt khúc nhẹ `work/gemvideo/g_<mã>_<a>_<b>.mp4`
+  (480p, 1 khung / giây, tiếng mono 16 kHz + `ff.audio_sync`, ~1 MB / phút), `ask(system, user, a, b)`, `cleanup` (xoá
+  file trên máy chủ Google), đếm `asked` / `failed`; `GeminiVideo(LLMClient)` – File API tải lên resumable
+  (`upload/v1beta/files` start -> `upload, finalize`), `_wait_active` (PROCESSING ≤ 10 phút), `_file` nhớ theo (key,
+  file) – file thuộc key đã tải, đổi key thì tải lại; `generateContent` với `fileData` + `systemInstruction` +
+  `responseMimeType` JSON (+ `mediaResolution` LOW khi low_res; API báo 400 tham số -> tự bỏ, gửi lại); dùng chung key /
+  `_pace` / `_key_failed` / `_switch` / 429 chờ / `net` của LLMClient; `ready(settings)` (cần key Gemini).
+  A – soát phụ đề gốc (`trami/vreview.py`, hàm thuần): `windows` (khúc ≤ `WIN_SEC` 300 s, cắt ở khoảng lặng ≥ 4 s; câu
+  đã tích kèm ±`CTX` 2 câu ngữ cảnh), `payload` (số | giờ trong khúc | người nói | chữ | độ chắc + hồ sơ phim), `PROMPT`
+  -> JSON {"sua": [{so, loai nghe_nham / ten_rieng / khong_phai_loi / hat, cau, chac, ly_do}], "dung", "thieu", "ten"}
+  -> `apply`: chữ mới gần chữ cũ (`close_enough`: giống ≥ `FIX_SIM` 0,5 hoặc pinyin ≥ 0,7, lệch số chữ ≤ max(2, 30 %))
+  + chắc -> điền (`gem_fix`, `src_before`, `asr_same` "gemini", tên -> `name_fix`), khác hẳn / không chắc -> chữ xanh
+  (`asr_alt` + `asr_alt_eng` "gemini" + `gem_note`, "Dùng bản bộ nghe 2" dùng được), hát -> 🎵 (`ai_song`), không phải
+  lời -> `noise` tím (không đụng câu `voice_ok` / `not_song`), "dung" -> `asr_same` "gemini" (bước Xoá câu không chắc
+  không xoá), "thieu" -> câu mới `from_gemini` (chữ cam, `insert_added` co vào khoảng trống), "ten" -> Bảng tên riêng
+  (`names_text`, chỉ tiếng Việt). `pipeline.gemini_review` (khúc song song khi bật "Gửi tất cả cùng lúc" của Gemini;
+  key sai / model không có -> `ApiStop` dừng sớm; câu đổi số chữ / câu thêm -> đo lại mốc chữ `align_qwen(pad=1.0)`,
+  câu thêm lấy mép theo chữ) -> `recognize` bước 2i0 (trước Xoá câu không chắc; Cài đặt `asr_gemini_review` mặc định
+  tắt – tab Tự động nhóm 1 `a_gemrev`, `C.GEMINI_REVIEW_HELP`; `p.data["gemini_review"]` -> `vreview.note` trong
+  `listen_note`) + `gemini_check` (nút "Gemini xem video & soát" tab Phụ đề → Công cụ → Lời hát & nghe nhầm hàng
+  "Gemini", việc "dual", câu đã tích hoặc cả phim – hỏi lại; chỉ đổi chữ gốc, câu thành 🎵 khi đã lồng -> xếp lại;
+  tích sẵn `pick`) + "Tích câu Gemini sửa / đánh dấu" (`_pick_gemini`). Tooltip chữ gốc (`subs_model.asr_tip`).
+  B – dịch có nhìn hình (Cài đặt `translate_video`, chỉ khi Công cụ dịch = Gemini – công tắc `a_vtrans` tab Tự động nhóm
+  2 + `s_vtrans` khung Dịch tab Phụ đề, `_vtrans_changed`, mờ khi công cụ khác): `pipeline.video_source` ->
+  `Translator.video` (low_res) -> `translate_lines(times=)` gom lô theo số câu + khúc video ≤ `VIDEO_WIN` 600 s
+  (`take`), `_llm_batch(vt=, win=)` thêm mục "THỜI ĐIỂM TRONG VIDEO" (giờ trong khúc | người nói) + `VIDEO_RULE_VI/EN`
+  vào lời nhắc hệ thống -> `_video_chat` (lỗi video -> None = lô đó dịch chỉ bằng chữ, `video_failed`); JSON thêm
+  "_nguoi_noi" / "_speakers" -> `_keep_speakers` -> `speaker_genders` (đa số ≥ 2/3) -> `video_translate_note` ghi
+  `p.data["speaker_gender"]` src "gemini" (`pipeline.speaker_genders` giữ, không đoán lại theo cao độ; tooltip bảng
+  người nói "Gemini thấy trên hình") -> Tự gán giọng nam / nữ. Cuối `translate` `cleanup` file trên máy chủ Google.
 - Dấu câu bản dịch (2.1.11): `translate.punct_fix` = `fix_commas` (bỏ dấu phẩy ngay sau `COMMA_GLUE` lượng từ / "của" khi
   chữ sau viết thường, trừ dãy số; dấu phẩy giữa các tiếng của tên trong bảng thuật ngữ `Translator.names`) + `end_punct`
   (thiếu dấu câu cuối -> theo câu gốc: ？/吗/么 -> ?, ！ -> !, … , dấu phẩy -> ",", còn lại "."; Nhật 。？！、, Thái không
@@ -409,7 +440,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (240 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (244 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2100,7 +2131,23 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   chạy Edge thật (sandbox chặn) – mốc WordBoundary lệch bao nhiêu so với mp3 Edge chưa đo; Whisper thật chưa chạy.
   Gửi bản FULL tool (người dùng yêu cầu).
 
+- 2.1.25: người dùng hỏi "sao có người dùng AI xử lý thẳng video, liệt kê AI hỗ trợ (miễn phí -> trả phí), tích hợp
+  được không" (Gemini 2.x / 3 nhận video + tiếng qua API – có gói miễn phí; GPT / Claude chỉ nhận ảnh khung, không nghe
+  tiếng; Qwen-VL / Qwen-Omni chạy được trên máy nhưng nặng) -> chọn làm A "Gemini xem + nghe video soát phụ đề gốc" + B
+  "dịch có nhìn hình" (xem Cấu trúc "Gemini XEM + NGHE video"). Gemini đoán giờ chỉ ~0,5–1 s -> trả lời theo số dòng,
+  mốc giờ vẫn của tool; sửa an toàn như "Nghe 2 bộ rồi so" (khác hẳn -> chữ xanh, không tự xoá câu nào). Chi phí: video
+  ~260–300 token / giây ở độ phân giải thường (A), ~100 ở LOW (B) – phim 1 giờ ~1 triệu token mỗi lượt. Thử với máy chủ
+  Gemini giả (tải lên resumable, chờ PROCESSING, đổi key -> tải lại, 400 mediaResolution -> bỏ, xoá file) + AI giả cho A
+  (sửa / chữ xanh / 🎵 / tím / thêm câu / tên riêng / xác nhận) và B (lô theo khúc video, giới tính người nói, lỗi video ->
+  dịch bằng chữ). Chưa gọi Gemini thật (sandbox chặn) – tên tham số File API / mediaResolution theo tài liệu chính thức.
+  Gửi bản FULL tool (người dùng yêu cầu).
+
 ## Vấn đề đang mở
+- 2.1.25: chờ người dùng (Cài đặt → Công cụ dịch → khung Gemini có key; Công cụ dịch = Gemini) (1) tích ~20 câu nghi
+  sai ở tab Phụ đề → Công cụ → Lời hát & nghe nhầm → "Gemini xem video & soát": thông báo "Gemini xem video N khúc…", câu
+  điền có đúng không (Ctrl+Z), chữ xanh / tím / cam có hợp lý không; lỗi 400 / File API -> gửi dòng lỗi (data\logs\
+  loi.txt) để sửa tham số; (2) bật "Dịch có nhìn hình" rồi "Dịch lại tất cả" 1 tập: xưng hô có đúng vai hơn không, thông
+  báo có "giới tính người nói theo hình", thời gian + tiền / lượt miễn phí tốn bao nhiêu.
 - 2.1.24: chờ người dùng (1) làm chậm 1 phim đã lồng (tab Chỉnh sửa → Tốc độ 0,85, "Giọng lồng giữ tốc độ tự nhiên" bật):
   tool tự xếp lại giọng lồng, nghe trình phát + video xuất – giọng có bình thường không, câu đỏ / ⚡ có ít đi không;
   (2) karaoke với giọng Edge (lồng lại để có mốc từ – câu đọc trước 2.1.24 chưa có) + VieNeu (tab Kiểu chữ → "Đo mốc

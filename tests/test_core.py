@@ -10030,3 +10030,196 @@ def test_karaoke_real_word_times_2124(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "load_settings", lambda: {"karaoke_listen": False})
     assert pipeline.karaoke_spans(p)[1]["kw"] is None                              # tắt -> đoán như cũ
     p.delete()
+
+
+class _R:
+    def __init__(self, code, data=None, text="", headers=None):
+        self.status_code, self._d, self.headers = code, data, headers or {}
+        self.text = text or (json.dumps(data) if data is not None else "")
+
+    def json(self):
+        return self._d
+
+
+def test_gemini_video_client_2125(monkeypatch, tmp_path, sample_video):
+    """2.1.25: cắt khúc video nhẹ (480p, 1 khung / giây, tiếng mono) -> File API (tải lên resumable, chờ ACTIVE) ->
+    generateContent kèm fileData; model cũ không nhận độ phân giải thấp -> bỏ rồi gửi lại; key hỏng -> đổi key và TẢI LẠI
+    (file thuộc về key đã tải); xong xoá file trên máy chủ Google."""
+    from trami import gemvideo, net
+    from trami import translate as tr
+
+    monkeypatch.setattr(tr, "_KEY_DEAD", {})
+    monkeypatch.setattr(tr, "_KEY_POS", {})
+    monkeypatch.setattr(tr, "_KEY_CALLS", {})
+    monkeypatch.setattr(net, "sleep", lambda *a, **k: None)
+    assert gemvideo.ready({})[0] is False and gemvideo.ready({"gemini_api_key": "k1"})[0]
+    vs = gemvideo.VideoSource(sample_video, tmp_path / "gv", {"gemini_api_keys": ["k1", "k2"], "gemini_model": "gm"},
+                              low_res=True)
+    clip = vs.clip(1.0, 4.0)
+    info = gemvideo.ff.probe(clip)
+    assert clip.exists() and abs(info.duration - 3.0) < 0.3 and info.height == 480 and info.has_audio
+    assert vs.clip(1.0, 4.0) == clip
+    calls, files = [], {}
+
+    def fake(method, url, read=120, **kw):
+        key = (kw.get("headers") or {}).get("x-goog-api-key", "")
+        calls.append((method, url.split("googleapis.com")[-1], key))
+        if url.endswith("/upload/v1beta/files"):
+            return _R(200, {}, headers={"x-goog-upload-url": f"https://up/{key}"})
+        if url.startswith("https://up/"):
+            name = f"files/f{len(files)}"
+            files[name] = url.rsplit("/", 1)[-1]
+            return _R(200, {"file": {"name": name, "uri": f"https://u/{name}", "mimeType": "video/mp4",
+                                     "state": "PROCESSING"}})
+        if method == "GET":
+            nm = url.split("v1beta/")[1]
+            return _R(200, {"name": nm, "uri": f"https://u/{nm}", "mimeType": "video/mp4", "state": "ACTIVE"})
+        if method == "DELETE":
+            return _R(200, {})
+        body = kw["json"]
+        cfg = body["generationConfig"]
+        if key == "k1":
+            return _R(403, text="API key expired")
+        if "mediaResolution" in cfg:
+            return _R(400, text='Invalid JSON payload received. Unknown name "media_resolution"')
+        part = body["contents"][0]["parts"]
+        assert part[0]["fileData"]["fileUri"].startswith("https://u/files/") and "ĐỀ" in part[1]["text"]
+        assert body["systemInstruction"]["parts"][0]["text"] == "SYS"
+        return _R(200, {"candidates": [{"finishReason": "STOP", "content": {"parts": [
+            {"text": "nghĩ…", "thought": True}, {"text": '{"ok": 1}'}]}}]})
+    monkeypatch.setattr(gemvideo.GeminiVideo, "_req", lambda self, m, u, read=120, **kw: fake(m, u, read, **kw))
+    out = vs.ask("SYS", "ĐỀ BÀI", 1.0, 4.0, 2000)
+    assert out == '{"ok": 1}' and vs.client._send_res is False
+    ups = [c for c in calls if c[1] == "/upload/v1beta/files"]
+    assert [c[2] for c in ups] == ["k1", "k2"]          # key 1 hết hạn -> key 2 tải lại file
+    vs.cleanup()
+    dels = [c for c in calls if c[0] == "DELETE"]
+    assert len(dels) == 2 and {c[2] for c in dels} == {"k1", "k2"}
+
+
+def test_gemini_review_apply_2125():
+    """A (2.1.25): gom khúc ≤ 5 phút, áp kết quả an toàn – chữ gần -> sửa + xác nhận, khác hẳn -> chữ xanh, lời hát -> 🎵,
+    không phải lời -> tím (câu đã bấm 'Không phải nhạc' giữ nguyên), câu đúng -> xác nhận, câu sót -> thêm (không trùng
+    câu đang có), tên riêng -> Bảng tên riêng."""
+    from trami import vreview
+
+    segs = [Segment(10 * i + 1, 10 * i + 4, t, "", "S1") for i, t in enumerate(
+        ["我叫林北。", "他在家里。", "今天天气很好。", "啦啦啦啦。", "嗯嗯嗯。", "你好吗？", "我们走吧。"])]
+    segs[4].extra["voice_ok"] = True
+    segs[5].extra["asr_conf"] = 0.4
+    w = vreview.windows(segs, None, 80)
+    assert len(w) == 1 and w[0][2] == list(range(7)) and w[0][0] == 0
+    assert len(vreview.windows([Segment(60 * i, 60 * i + 3, "好的。") for i in range(12)], None, 720)) >= 3
+    wr = vreview.windows(segs, [3], 80)
+    assert wr[0][2] == [1, 2, 3, 4, 5] and wr[0][3] == {3}
+    text, num = vreview.payload(segs, w[0][2], w[0][3], w[0][0], "林北=Lâm Bắc")
+    assert "6 | 51.0–54.0 | S1 | 你好吗？ | 0.40" in text and num[1] == 0 and text.startswith("HỒ SƠ PHIM")
+    d = {"sua": [{"so": 1, "loai": "ten_rieng", "cau": "我叫林贝。", "ly_do": "tên hiện trên màn hình"},
+                 {"so": 2, "loai": "nghe_nham", "cau": "他再加一些。"},
+                 {"so": 3, "loai": "nghe_nham", "cau": "明天下雨了吗", "chac": True},
+                 {"so": 4, "loai": "hat", "ly_do": "nhạc phim"},
+                 {"so": 5, "loai": "khong_phai_loi"}],
+         "dung": [6, 1],
+         "thieu": [{"tu": 65.0, "den": 67.0, "cau": "等一下！"}, {"tu": 60.5, "den": 63.5, "cau": "我们走吧。"}],
+         "ten": [{"goc": "林贝", "viet": "Lâm Bối", "nguon": "man_hinh"}, {"goc": "林北", "viet": "Lâm Bắc"}]}
+    st: dict = {}
+    r = vreview.apply(segs, d, num, w[0][3], 0.0, st)
+    assert segs[0].text == "我叫林贝。" and segs[0].extra["src_before"] == "我叫林北。" and segs[0].extra["asr_same"] == "gemini"
+    assert segs[0].extra["name_fix"] == [["我叫林北。", "我叫林贝。"]]
+    assert segs[1].text == "他再加一些。" or segs[1].extra.get("asr_alt_eng") == "gemini"
+    assert segs[2].text == "今天天气很好。" and segs[2].extra["asr_alt"] == "明天下雨了吗" and segs[2].extra["asr_unsure"]
+    assert segs[3].extra["song"] and segs[3].extra["ai_song"].startswith("Gemini")
+    assert "noise" not in segs[4].extra                       # đã bấm "Không phải nhạc"
+    assert segs[5].extra["asr_same"] == "gemini" and 5 in r["confirmed"]
+    assert [x.text for x in r["added"]] == ["等一下！"] and r["added"][0].extra["from_gemini"]
+    out = vreview.insert_added(segs, r["added"])
+    assert len(out) == 8 and out[7].text == "等一下！" and out[7].start == 65.0
+    assert vreview.names_text(r["names"], "林北=Lâm Bắc") == "林贝=Lâm Bối"
+    n = vreview.note(dict(st, windows=1, checked=7))
+    assert "Gemini xem video 1 khúc, soát 7 câu" in n and "lời bài hát" in n
+
+
+def test_gemini_check_project_2125(monkeypatch, sample_video):
+    """A qua dự án: nút "Gemini xem video & soát" – Gemini (giả) trả JSON, câu đổi / thêm / chữ xanh được tích sẵn, kết
+    quả lưu vào dự án; chưa có key -> báo rõ."""
+    from trami import gemvideo, pipeline
+    from trami.project import Project
+
+    p = Project.create("gemrev")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [Segment(0.5, 1.8, "我叫林北。", "", "S1"), Segment(2.5, 4.0, "他在家里。", "", "S2")]
+    p.save()
+    with pytest.raises(RuntimeError):
+        pipeline.gemini_check(p, {})
+    asked = []
+
+    def fake_ask(self, system, user, a, b, max_tokens=8000, cancel=None):
+        asked.append((system, user, a, b))
+        return json.dumps({"sua": [{"so": 1, "loai": "nghe_nham", "cau": "我叫林贝。"}],
+                           "thieu": [{"tu": 4.6, "den": 5.6, "cau": "走吧！"}]}, ensure_ascii=False)
+    monkeypatch.setattr(gemvideo.VideoSource, "ask", fake_ask)
+    monkeypatch.setattr(gemvideo.GeminiVideo, "cleanup", lambda self: None)
+    st = pipeline.gemini_check(p, {"gemini_api_key": "k"})
+    assert asked and asked[0][0] == __import__("trami.vreview", fromlist=["x"]).PROMPT and "1 | " in asked[0][1]
+    segs = Project(p.id).segments
+    assert [x.text for x in segs] == ["我叫林贝。", "他在家里。", "走吧！"] and st["pick"] == [0, 2]
+    assert Project(p.id).data["gemini_review"]["fixed"] == 1
+    p.delete()
+
+
+def test_translate_with_video_2125(monkeypatch):
+    """B (2.1.25): dịch có nhìn hình – mỗi lô gửi kèm khúc video của chính các dòng (lô ≤ 10 phút video), lời nhắc có
+    luật xem video + giờ từng dòng trong khúc; Gemini báo giới tính người nói -> lưu (Tự gán giọng dùng); lô gửi video lỗi
+    -> dịch bằng chữ như thường."""
+    from trami import pipeline
+    from trami import translate as tr
+
+    monkeypatch.setattr(tr, "_OUT_CAP", {})
+    sent = []
+
+    class FakeVideo:
+        def __init__(self, fail_at=None):
+            self.fail_at = fail_at
+
+        def ask(self, system, user, a, b, max_tokens=8000):
+            sent.append((system, user, a, b))
+            if self.fail_at is not None and len(sent) == self.fail_at:
+                raise RuntimeError("tải video lỗi")
+            payload = json.loads(user[user.rindex("{"):])
+            out = {k: {"dau": v[:3], "dich": "VI " + re.sub(r"\D", "", v)} for k, v in payload.items()}
+            out["_nguoi_noi"] = {"S1": {"gioi": "nu", "ten": "Lâm Bối"}, "S2": {"gioi": "nam"}}
+            return json.dumps(out, ensure_ascii=False)
+
+    def text_chat(self, system, user, max_tokens=8000, temperature=0.3):
+        sent.append(("TEXT", user, None, None))
+        payload = json.loads(user[user.rindex("{"):])
+        return json.dumps({k: "TXT " + re.sub(r"\D", "", v) for k, v in payload.items()}, ensure_ascii=False)
+    monkeypatch.setattr(tr.LLMClient, "chat", text_chat)
+    segs = [Segment(100.0 * i, 100.0 * i + 2, f"他说第{i:02d}句", "", "S1" if i % 2 == 0 else "S2") for i in range(14)]
+    base = {"translate_engine": "gemini", "gemini_api_key": "k", "gemini_batch": 50, "dub_fit": False}
+    t = tr.Translator(base, "gemini")
+    t.video = FakeVideo()
+    t.translate_segments(segs, auto_terms=False)
+    assert [s.trans for s in segs] == [f"VI {i:02d}." for i in range(14)]
+    assert len(sent) == 3 and all(b - a <= tr.VIDEO_WIN + 2 * tr.VIDEO_PAD for _s, _u, a, b in sent)
+    sysm, user, a, b = sent[0]
+    assert "VIDEO GỬI KÈM" in sysm and "THỜI ĐIỂM TRONG VIDEO" in user and "1: 0.0–2.0 | S1" in user and "6: 500.0–502.0 | S2" in user and a == 0.0
+    assert t.video_batches == 3 and t.speaker_genders() == {"S1": {"g": "female", "src": "gemini", "name": "Lâm Bối"},
+                                                            "S2": {"g": "male", "src": "gemini"}}
+    # lô gửi video lỗi -> dịch bằng chữ
+    sent.clear()
+    segs2 = [Segment(1.0 * i, 1.0 * i + 0.8, f"好的{i:02d}个", "", "S1") for i in range(4)]
+    t2 = tr.Translator(base, "gemini")
+    t2.video = FakeVideo(fail_at=1)
+    t2.translate_segments(segs2, auto_terms=False)
+    assert [s.trans for s in segs2] == [f"TXT {i:02d}." for i in range(4)] and t2.video_failed == 1
+    assert sent[-1][0] == "TEXT"
+    # công cụ khác Gemini / tắt công tắc -> không gửi video
+    p = type("P", (), {"data": {"source": "x.mp4"}})()
+    assert pipeline.video_source(p, dict(base, translate_video=False), "gemini") is None
+    assert pipeline.video_source(p, dict(base, translate_video=True), "openai") is None
+    # giới tính người nói theo hình -> lưu vào dự án
+    pp = type("P", (), {"data": {"speaker_gender": {"S1": {"g": "male", "by": "pitch", "f0": 150}}}})()
+    note = pipeline.video_translate_note(pp, t)
+    assert pp.data["speaker_gender"]["S1"]["g"] == "female" and pp.data["speaker_gender"]["S1"]["by"] == "gemini"
+    assert "S1 nữ (Lâm Bối)" in note and "Gemini xem video khi dịch 3 lô" in note

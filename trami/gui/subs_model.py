@@ -45,7 +45,7 @@ def fit_text(s: Segment) -> str:
 
 
 ENGINE_LABEL = {"firered": "FireRedASR2", "qwen3": "Qwen3-ASR", "recheck": "Nghe lại với khúc rộng hơn",
-                "recheck_o": "Nghe lại trên tiếng gốc", "recheck_s": "Nghe lại riêng câu"}
+                "recheck_o": "Nghe lại trên tiếng gốc", "recheck_s": "Nghe lại riêng câu", "gemini": "Gemini xem video"}
 
 
 def asr_tip(s) -> str:
@@ -55,7 +55,9 @@ def asr_tip(s) -> str:
         eng = str(s.extra.get("asr_alt_eng", ""))
         who = ENGINE_LABEL.get(eng, "Bộ nghe 2")
         alt = s.extra["asr_alt"] or "(không nghe ra chữ nào – có thể là nhạc / tiếng động)"
-        lines.append(f"{who} ra khác: {alt}" if eng.startswith("recheck") else f"2 bộ nghe ra khác nhau – {who}: {alt}")
+        lines.append(f"{who} ra khác: {alt}" if eng.startswith("recheck") else
+                     f"Gemini xem video nghe ra: {alt}" + (f" ({s.extra['gem_note']})" if s.extra.get("gem_note") else "")
+                     if eng == "gemini" else f"2 bộ nghe ra khác nhau – {who}: {alt}")
         pick = s.extra.get("asr_pick")
         if pick:
             lines.append({"A": "AI giữ bản đang có", "B": f"AI chọn bản của {who}",
@@ -65,14 +67,19 @@ def asr_tip(s) -> str:
     if s.extra.get("asr_recheck"):
         lines.append("Đã sửa theo lần nghe lại " + {"o": "trên tiếng gốc", "s": "riêng câu"}.get(
             s.extra["asr_recheck"], "với khúc rộng hơn (câu nằm giữa, có câu trước / sau)"))
+    if s.extra.get("gem_fix"):
+        lines.append(f"Gemini xem video đã sửa ({s.extra['gem_fix']})")
     if s.extra.get("asr_same"):
         lines.append("2 bộ nghe ra giống nhau – câu đã được xác nhận" if s.extra["asr_same"] == "dual" else
+                     "Gemini xem video: câu đúng – đã được xác nhận" if s.extra["asr_same"] == "gemini" else
                      "Bộ nghe đã nghe lại câu này: vẫn ra như cũ – câu đã được xác nhận")
     conf = s.extra.get("asr_conf")
     if conf is not None and float(conf) < 0.7 and not s.extra.get("asr_same"):
         lines.append(f"Bộ nghe không chắc câu này (độ chắc {float(conf):.2f}) – nên nghe lại")
     if s.extra.get("from_asr"):
         lines.append("OCR + nghe: phụ đề in sẵn không có câu này – bộ nghe nghe thêm (nên nghe lại)")
+    if s.extra.get("from_gemini"):
+        lines.append(s.extra.get("gem_note") or "Gemini thấy có người nói mà phụ đề chưa có – nên nghe lại")
     if s.extra.get("edge_fix"):
         a, b = s.extra["edge_fix"]
         lines.append(f"Câu bị cắt khi nhân vật còn nói – đã nới theo giọng (bộ nghe nghe lại xác nhận): trước "
@@ -266,8 +273,8 @@ class SubsModel(QAbstractTableModel):
                     return QColor("#F28FB0")       # hồng = còn 1 cụm lặp liền nhau / 2 câu liền giống nhau
                 if s.extra.get("asr_unsure"):
                     return QColor("#6FC8E8")       # xanh = 2 bộ nghe ra khác nhau, chưa chọn được -> nghe lại
-                if s.extra.get("from_asr"):
-                    return QColor("#E8A87C")       # cam nhạt = OCR + nghe: câu phụ đề không có, bộ nghe thêm vào
+                if s.extra.get("from_asr") or s.extra.get("from_gemini"):
+                    return QColor("#E8A87C")       # cam nhạt = câu bộ nghe / Gemini thêm vào (phụ đề không có)
                 return QColor("#E8C26A" if s.extra.get("src_unsure") else "#C3CAD6")   # vàng = AI sửa mà chưa chắc
             if c == C_FIT:
                 return QColor(FIT_COLOR.get(s.extra.get("fit"), theme.MUTED))
@@ -297,6 +304,7 @@ class SubsModel(QAbstractTableModel):
                 return f"🎵 AI: lời bài hát – {s.extra['ai_song']}\nKhông lồng tiếng câu này. Là lời thoại thật: tích rồi " \
                        "bấm 'Không phải nhạc'"
             if c == C_ZH and (s.extra.get("asr_alt") is not None or s.extra.get("from_asr") or s.extra.get("name_fix")
+                              or s.extra.get("gem_fix") or s.extra.get("from_gemini")
                               or s.extra.get("asr_recheck") or s.extra.get("asr_same") or s.extra.get("edge_fix")
                               or float(s.extra.get("asr_conf", 1) or 1) < 0.7):
                 return asr_tip(s)
