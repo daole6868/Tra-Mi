@@ -21,7 +21,7 @@ import requests
 
 from . import ffmpeg as ff, net
 from .translate import (ENGINE_NAMES, THINK_TOK, WAIT_LIMIT_429, ApiError, LLMClient, _KEY_DEAD, _key_tag,
-                        api_keys, DAY_BLOCK)
+                        _note_ok, api_keys, DAY_BLOCK, note_key, why_state)
 
 API = "https://generativelanguage.googleapis.com"
 CLIP_H = 480            # chiều cao bản nhẹ: đủ đọc chữ trên màn hình / phụ đề cứng, tải lên nhanh
@@ -215,6 +215,7 @@ class GeminiVideo(LLMClient):
                     cand = (d.get("candidates") or [{}])[0]
                     self._tl.cut = cand.get("finishReason") == "MAX_TOKENS"
                     parts = (cand.get("content") or {}).get("parts") or []
+                    _note_ok(key)
                     return "".join(p.get("text", "") for p in parts if not p.get("thought"))
                 raise _HttpError(r)
             except _HttpError as he:
@@ -233,6 +234,7 @@ class GeminiVideo(LLMClient):
                 if why:
                     tag = _key_tag("gemini", self.ki, len(self.keys))
                     _KEY_DEAD[key] = (time.time() + (DAY_BLOCK if "hôm nay" in why or "tiền" in why else 10 ** 9), why)
+                    note_key(key, why_state(why), why, "dich")
                     if self._switch(f"{tag} {why}"):
                         continue
                     raise ApiError(f"Tất cả {len(self.keys)} key {name} đều {why} – thêm key ở Cài đặt (khung Gemini)")

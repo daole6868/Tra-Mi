@@ -10223,3 +10223,178 @@ def test_translate_with_video_2125(monkeypatch):
     note = pipeline.video_translate_note(pp, t)
     assert pp.data["speaker_gender"]["S1"]["g"] == "female" and pp.data["speaker_gender"]["S1"]["by"] == "gemini"
     assert "S1 nữ (Lâm Bối)" in note and "Gemini xem video khi dịch 3 lô" in note
+
+
+class _PR:
+    """Trả lời HTTP giả cho kiểm tra key."""
+
+    def __init__(self, code, body=None, text=None, headers=None):
+        self.status_code = code
+        self._b = body
+        self.text = text if text is not None else json.dumps(body if body is not None else {})
+        self.headers = headers or {}
+
+    def json(self):
+        if self._b is None:
+            return json.loads(self.text)
+        return self._b
+
+
+def test_probe_key_states_2126(monkeypatch):
+    """2.1.26: kiểm tra từng key bằng đúng 1 lần gửi ngắn (không chờ / gửi lại / đổi key) -> phân loại sống / bị giới
+    hạn phút / hết lượt hôm nay / hết tiền / sai key / sai model / mất mạng; cập nhật key hỏng của phiên + lưu trạng thái
+    (chỉ dấu của key, không lưu key); lần dịch gặp key hỏng / dịch được cũng ghi lại."""
+    import requests
+
+    from trami import config, net, translate as tr
+
+    daily = [{"error": {"code": 429, "message": "Quota exceeded", "details": [
+        {"violations": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}]}}]
+    plan = {
+        "OK": lambda b: _PR(200, {"choices": [{"message": {"content": "OK"}}]}),
+        "MIN": lambda b: _PR(429, {"error": {"message": "Please retry in 7.2s."}}),
+        "DAY": lambda b: _PR(429, daily),
+        "BAD": lambda b: _PR(400, [{"error": {"message": "API key not valid. Please pass a valid API key."}}]),
+        "MONEY": lambda b: _PR(402, {"error": {"message": "Insufficient Balance"}}),
+        "NOMODEL": lambda b: _PR(404, {"error": {"message": "models/gemini-x is not found"}}),
+        "BUSY": lambda b: _PR(503, {"error": {"message": "The model is overloaded."}}),
+        "NET": None,
+        # gpt-5 / o-series qua dịch vụ khác: đòi max_completion_tokens -> đổi tham số, gửi lại 1 lần
+        "MCT": lambda b: (_PR(200, {"choices": [{"message": {"content": "OK"}}]}) if "max_completion_tokens" in b
+                          else _PR(400, {"error": {"message": "Use 'max_completion_tokens' instead."}})),
+    }
+    sent: list = []
+
+    class Sess:
+        def post(self, url, headers=None, json=None, timeout=None):
+            a = headers.get("Authorization")
+            k = a.split()[-1] if a else headers.get("x-api-key")
+            sent.append((k, url, dict(json)))
+            if plan[k] is None:
+                raise requests.ConnectionError("connection reset")
+            return plan[k](json)
+
+    monkeypatch.setattr(net, "session", lambda: Sess())
+    monkeypatch.setattr(net, "sleep", lambda *a, **k: (_ for _ in ()).throw(AssertionError("không được chờ")))
+    tr._KEY_DEAD.clear()
+    tr._KEY_DEAD["OK"] = (10 ** 12, "sai")           # key bị đánh dấu hỏng trước đó mà giờ sống lại
+    st = {"gemini_model": "gemini-2.5-flash"}
+    want = {"OK": "ok", "MIN": "busy", "DAY": "day", "BAD": "bad", "MONEY": "money", "NOMODEL": "model",
+            "BUSY": "server", "NET": "net"}
+    res = {k: tr.probe_key(st, "gemini", k) for k in want}
+    assert {k: r["state"] for k, r in res.items()} == want
+    assert len(sent) == len(want)                    # đúng 1 lần gửi mỗi key
+    assert res["OK"]["text"].startswith("✓ Sống") and res["MIN"]["text"].startswith("✓") and "~8 s" in res["MIN"]["msg"]
+    assert res["DAY"]["text"].startswith("✗ Hết lượt miễn phí hôm nay")
+    assert res["NOMODEL"]["text"].startswith("⚠") and "☰" in res["NOMODEL"]["msg"]
+    assert "OK" not in tr._KEY_DEAD and {"DAY", "BAD", "MONEY"} <= set(tr._KEY_DEAD) and "NET" not in tr._KEY_DEAD
+    assert tr._KEY_DEAD["BAD"][0] > tr._KEY_DEAD["DAY"][0]
+    # trạng thái lưu ra file: chỉ dấu của key, không có key
+    raw = (config.DATA_DIR / "key_status.json").read_text(encoding="utf-8")
+    assert "MONEY" not in raw and tr.key_status("MONEY")["s"] == "money" and tr.key_status("NET") is None
+    assert tr.status_text(tr.key_status("OK")).startswith("✓ Sống · kiểm tra ") and "hôm nay" in \
+        tr.status_text(tr.key_status("OK"))
+    assert tr.probe_summary("gemini", list(res.values())).startswith("Gemini: 3/8 key sống (")
+    assert tr.probe_summary("deepseek", []) == "DeepSeek: chưa có key"
+    # OpenAI-compatible + đổi tên tham số độ dài; Claude gửi đúng header
+    sent.clear()
+    r = tr.probe_key({"openai_model": "gpt-5-mini", "openai_base_url": "https://x.example/v1"}, "openai", "MCT")
+    assert r["state"] == "ok" and len(sent) == 2 and "max_completion_tokens" in sent[1][2]
+    sent.clear()
+    assert tr.probe_key({}, "anthropic", "OK")["state"] == "ok" and sent[0][1].endswith("/v1/messages")
+    # lúc dịch: key hết tiền -> ghi "khi dịch"; dịch được -> ghi sống
+    tr._KEY_DEAD.clear()
+    tr._KEY_POS.clear()
+    tr._OK_NOTED.clear()
+    monkeypatch.setattr(net, "sleep", lambda *a, **k: None)
+    c = tr.LLMClient({"deepseek_api_keys": ["MONEY", "OK"], "deepseek_rpm": 0}, "deepseek")
+    assert c.chat("s", "u") == "OK"
+    m = tr.key_status("MONEY")
+    assert m["s"] == "money" and m["src"] == "dich" and "khi dịch" in tr.status_text(m)
+    assert tr.key_status("OK")["s"] == "ok"        # vừa kiểm tra "sống" < 1 giờ -> không ghi lại mỗi lô
+    tr._KEY_DEAD.clear()
+    tr._KEY_POS.clear()
+
+
+def test_probe_ollama_2126(monkeypatch):
+    """Ollama: đang chạy + có model / chưa tải model / chưa mở Ollama."""
+    import requests
+
+    from trami import net, translate as tr
+
+    state = {"up": True, "models": ["qwen2.5:7b", "llama3:latest"]}
+
+    class Sess:
+        def get(self, url, timeout=None, **kw):
+            if not state["up"]:
+                raise requests.ConnectionError("refused")
+            assert url == "http://localhost:11434/api/tags"
+            return _PR(200, {"models": [{"name": n} for n in state["models"]]})
+
+    monkeypatch.setattr(net, "session", lambda: Sess())
+    assert tr.probe_key({}, "ollama")["state"] == "ok"
+    assert tr.probe_key({"ollama_model": "llama3"}, "ollama")["state"] == "ok"
+    r = tr.probe_key({"ollama_model": "gemma3:4b"}, "ollama")
+    assert r["state"] == "model" and "ollama pull gemma3:4b" in r["msg"] and r["text"].startswith("⚠")
+    state["up"] = False
+    r = tr.probe_key({}, "ollama")
+    assert r["state"] == "net" and "chưa chạy" in r["msg"]
+    assert tr.probe_summary("ollama", [r]) == "Ollama: không kết nối được"
+
+
+def test_check_all_api_gui_2126(monkeypatch):
+    """Cài đặt → Dịch thuật "Kiểm tra tất cả API": thử mọi key của mọi công cụ, kết quả cạnh từng key + tóm tắt;
+    "Xoá N key hỏng" chỉ xoá key sai / hết tiền (giữ key hết lượt hôm nay); mở lại Cài đặt thấy kết quả lần trước."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    import time as _t
+
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from trami import translate as tr
+    from trami.config import load_settings, save_settings
+    from trami.gui.main import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    old = load_settings()
+    states = {"G1": "ok", "G2": "day", "G3": "bad", "D1": "money"}
+
+    def fake(settings, engine, key="", read=0):
+        s = states[key]
+        tr.note_key(key, s, "", "check")
+        icon, name = tr.KEY_STATES[s]
+        return {"state": s, "msg": "", "text": f"{icon} {name}"}
+
+    monkeypatch.setattr(tr, "probe_key", fake)
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    save_settings(dict(old, gemini_api_keys=["G1", "G2", "G3"], gemini_api_key="G1", deepseek_api_keys=["D1"],
+                       deepseek_api_key="D1", anthropic_api_keys=[], anthropic_api_key="", openai_api_keys=[],
+                       openai_api_key="", translate_engine="gemini"))
+    win = MainWindow()
+    try:
+        sp = win.settings_page
+        sp.load()
+        sp._check_all_api()
+        t0 = _t.time()
+        while "đang kiểm tra" in sp.api_sum.text() and _t.time() - t0 < 10:
+            app.processEvents()
+            _t.sleep(0.02)
+        s = sp.api_sum.text()
+        assert "Gemini: 1/3 key sống" in s and "DeepSeek: 0/1 key sống" in s and "Claude" not in s and s.startswith("⚠")
+        kl = sp.eng_w["gemini"]["keys"]
+        texts = [st.text() for _, _, st in kl.rows]
+        assert texts[0].startswith("✓ Sống") and texts[1].startswith("✗ Hết lượt") and texts[2].startswith("✗ Key sai")
+        g = sp.eng_w["gemini"]
+        assert not g["prune"].isHidden() and g["prune"].text() == "Xoá 1 key hỏng"
+        sp._prune_keys("gemini")
+        assert kl.keys() == ["G1", "G2"] and load_settings()["gemini_api_keys"] == ["G1", "G2"]
+        # mở lại: thấy kết quả lần trước cạnh key
+        sp.load()
+        texts = [st.text() for _, _, st in sp.eng_w["gemini"]["keys"].rows]
+        assert texts[0].startswith("✓ Sống · kiểm tra") and texts[1].startswith("✗ Hết lượt miễn phí hôm nay")
+        assert sp.eng_w["deepseek"]["keys"].rows[0][2].text().startswith("✗ Hết tiền")
+        app.processEvents()
+    finally:
+        win.close()
+        save_settings(old)
+        tr._KEY_DEAD.clear()

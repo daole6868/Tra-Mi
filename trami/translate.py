@@ -615,6 +615,7 @@ class LLMClient:
                     if r.status_code == 200:
                         d = r.json()
                         self._tl.cut = d.get("stop_reason") == "max_tokens"
+                        _note_ok(self.api_key)
                         return "".join(b.get("text", "") for b in d.get("content", []) if b.get("type") == "text")
                 else:
                     body = {"model": self.model,
@@ -635,6 +636,8 @@ class LLMClient:
                     if r.status_code == 200:
                         ch = r.json()["choices"][0]
                         self._tl.cut = ch.get("finish_reason") in ("length", "max_tokens")
+                        if self.engine != "ollama":
+                            _note_ok(self.api_key)
                         return ch["message"]["content"] or ""
                 if r.status_code == 400 and (_token_cap(r.text, ask) or 0) > 0:
                     _OUT_CAP[(self.engine, self.model)] = _token_cap(r.text, ask)   # model trả lời ngắn hơn -> hạ, gửi lại
@@ -647,6 +650,7 @@ class LLMClient:
                     tag = _key_tag(self.engine, self.ki, len(self.keys))
                     _KEY_DEAD[self.api_key] = (time.time() + (DAY_BLOCK if "hôm nay" in why or "tiền" in why
                                                               else 10 ** 9), why)
+                    note_key(self.api_key, why_state(why), why, "dich")    # Cài đặt hiện cạnh key này
                     if self._switch(f"{tag} {why}"):
                         continue
                     if r.status_code in (401, 403) or "hết hạn" in why:
@@ -756,15 +760,252 @@ def list_models(settings: dict, engine: str, key: str = "", hidden: list | None 
 
 
 def check_key(settings: dict, engine: str, key: str) -> str:
-    """Thử 1 key (nút 'Kiểm tra' ở Cài đặt): trả lời ngắn gọn ✓ / ✗ + lý do."""
-    st = dict(settings, **{f"{engine}_api_key": key, f"{engine}_api_keys": [key], f"{engine}_rpm": 0})
-    _KEY_DEAD.pop(key, None)
+    """Thử 1 key: 1 dòng ✓ / ⚠ / ✗ + lý do (xem probe_key)."""
+    return probe_key(settings, engine, key)["text"]
+
+
+# ----------------------------------------------------------------------- kiểm tra key (2.1.26)
+# Trạng thái 1 key: (biểu tượng, chữ ngắn). "Sống" = gọi được (kể cả đang bị giới hạn số lần / phút).
+KEY_STATES = {
+    "ok": ("✓", "Sống"),
+    "busy": ("✓", "Sống – đang bị giới hạn số lần / phút"),
+    "model": ("⚠", "Key sống – model không có"),
+    "server": ("⚠", "Máy chủ đang bận / lỗi"),
+    "net": ("⚠", "Không kết nối được"),
+    "day": ("✗", "Hết lượt miễn phí hôm nay"),
+    "money": ("✗", "Hết tiền / hết hạn mức"),
+    "bad": ("✗", "Key sai / hết hạn / bị khoá"),
+    "region": ("✗", "Không dùng được ở khu vực này"),
+    "error": ("✗", "Lỗi"),
+}
+ALIVE = ("ok", "busy", "model")       # key còn dùng được (model sai thì chỉ cần chọn model khác)
+DEAD = ("bad", "money")               # nên xoá / thay key
+PROBE_READ = 40.0                     # chờ trả lời tối đa (model suy luận nghĩ hơi lâu)
+_STATUS_LOCK = threading.Lock()
+_OK_NOTED: dict[str, float] = {}      # key -> lần cuối ghi "sống" khi dịch (không ghi file mỗi lô)
+
+
+def key_fp(key: str) -> str:
+    """Dấu nhận ra key (không lưu chính key ra file trạng thái)."""
+    import hashlib
+
+    return hashlib.sha256((key or "").strip().encode()).hexdigest()[:16]
+
+
+def _status_file():
+    from .config import DATA_DIR
+
+    return DATA_DIR / "key_status.json"
+
+
+def key_status(key: str) -> dict | None:
+    """Kết quả gần nhất của key: {"s": trạng thái, "m": chữ, "t": giờ, "src": "check" | "dich"}."""
     try:
-        c = LLMClient(st, engine)
-        c.chat("Reply with JSON only.", 'Return {"ok": 1}', max_tokens=50, temperature=0)
-        return f"✓ dùng được ({c.model})"
-    except Exception as e:  # noqa: BLE001
-        return "✗ " + str(e)[:220]
+        return json.loads(_status_file().read_text(encoding="utf-8")).get(key_fp(key))
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def note_key(key: str, state: str, msg: str = "", src: str = "check") -> None:
+    """Ghi trạng thái key vào data/key_status.json (Cài đặt hiện cạnh từng key lần mở sau)."""
+    if not key or key == "ollama":
+        return
+    f = _status_file()
+    with _STATUS_LOCK:
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+            d = d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            d = {}
+        d[key_fp(key)] = {"s": state, "m": msg[:200], "t": round(time.time()), "src": src}
+        if len(d) > 300:      # giữ 300 key gần nhất
+            d = dict(sorted(d.items(), key=lambda x: x[1].get("t", 0))[-300:])
+        try:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            tmp = f.with_suffix(".tmp")
+            tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(f)
+        except OSError:
+            pass
+
+
+def _note_ok(key: str) -> None:
+    """Dịch được bằng key này -> ghi "sống" (tối đa 10 phút 1 lần / key, hoặc khi trước đó key bị ghi hỏng)."""
+    now = time.time()
+    if now - _OK_NOTED.get(key, 0) < 600:
+        return
+    _OK_NOTED[key] = now
+    old = key_status(key) or {}
+    if old.get("s") != "ok" or now - float(old.get("t") or 0) > 3600:
+        note_key(key, "ok", "dịch được", "dich")
+
+
+def why_state(why: str) -> str:
+    """Lý do của LLMClient._key_failed -> trạng thái key."""
+    return "day" if "hôm nay" in why else "money" if "tiền" in why else "bad"
+
+
+def _err_msg(r) -> str:
+    """Câu báo lỗi ngắn gọn trong trả lời lỗi của API (JSON {"error": {"message"}} / [{"error": …}] / chữ thường)."""
+    try:
+        d = r.json()
+        if isinstance(d, list) and d:
+            d = d[0]
+        e = d.get("error") if isinstance(d, dict) else None
+        m = (e.get("message") if isinstance(e, dict) else e) or (d.get("message") if isinstance(d, dict) else "")
+        if m:
+            return " ".join(str(m).split())[:180]
+    except Exception:  # noqa: BLE001
+        pass
+    return " ".join((r.text or "").split())[:180]
+
+
+def _when(t: float) -> str:
+    lt, now = time.localtime(t), time.localtime()
+    hm = time.strftime("%H:%M", lt)
+    if lt.tm_yday == now.tm_yday and lt.tm_year == now.tm_year:
+        return hm + " hôm nay"
+    if time.time() - t < 2 * 86400 and (now.tm_yday - lt.tm_yday) % 366 == 1:
+        return hm + " hôm qua"
+    return time.strftime("%H:%M %d/%m", lt)
+
+
+def status_text(st: dict | None) -> str:
+    """Dòng hiện cạnh key: "✓ Sống · kiểm tra 10:32 hôm nay" (trạng thái đã lưu)."""
+    if not st or st.get("s") not in KEY_STATES:
+        return ""
+    icon, name = KEY_STATES[st["s"]]
+    how = "khi dịch" if st.get("src") == "dich" else "kiểm tra"
+    extra = f" – {st['m']}" if st.get("m") and st["s"] not in ("ok",) else ""
+    old = ""
+    if st["s"] == "day" and time.localtime(st.get("t", 0)).tm_yday != time.localtime().tm_yday:
+        old = " (đã sang ngày mới – có thể đã có lượt lại, bấm Kiểm tra)"
+    return f"{icon} {name}{extra} · {how} {_when(float(st.get('t') or 0))}{old}"
+
+
+def _probe_ollama(settings: dict, read: float) -> dict:
+    base = (settings.get("ollama_base_url") or "http://localhost:11434/v1").rstrip("/")
+    model = settings.get("ollama_model") or "qwen2.5:7b"
+    root = base[:-3] if base.endswith("/v1") else base
+    t0 = time.time()
+    try:
+        r = net.session().get(f"{root}/api/tags", timeout=(5, min(read, 15)))
+    except requests.RequestException:
+        return {"state": "net", "msg": f"Ollama chưa chạy ở {root} – mở ứng dụng Ollama trên máy", "model": model}
+    names: list[str] = []
+    if r.status_code == 200:
+        try:
+            names = [m.get("name") or m.get("model") or "" for m in r.json().get("models", [])]
+        except (ValueError, AttributeError):
+            names = []
+    else:      # máy chủ tương thích OpenAI khác ở địa chỉ này
+        try:
+            r = net.session().get(f"{base}/models", timeout=(5, min(read, 15)))
+            names = [m.get("id", "") for m in r.json().get("data", [])] if r.status_code == 200 else []
+        except (requests.RequestException, ValueError, AttributeError):
+            names = []
+        if r.status_code != 200:
+            return {"state": "error", "msg": f"HTTP {r.status_code}: {_err_msg(r)}", "model": model}
+    short = {n.split(":")[0] for n in names}
+    ms = int((time.time() - t0) * 1000)
+    if model in names or f"{model}:latest" in names or (":" not in model and model in short):
+        return {"state": "ok", "msg": f"Ollama đang chạy, có model {model}", "model": model, "ms": ms}
+    have = ", ".join(names[:5]) or "chưa có model nào"
+    return {"state": "model", "msg": f"Ollama đang chạy nhưng chưa có model '{model}' (có: {have}) – chạy lệnh "
+                                     f"'ollama pull {model}' hoặc chọn model khác", "model": model, "ms": ms}
+
+
+def probe_key(settings: dict, engine: str, key: str = "", read: float = PROBE_READ) -> dict:
+    """Kiểm tra 1 key bằng ĐÚNG 1 lần gửi thật ngắn (không chờ, không gửi lại, không đổi key – khác lúc dịch) với model
+    đang chọn. Trả {"state" (KEY_STATES), "msg", "model", "ms", "text"}. Cập nhật luôn danh sách key hỏng của phiên
+    (key sống lại -> lần dịch sau dùng ngay; key hỏng -> bỏ qua) + ghi data/key_status.json."""
+    if engine == "ollama":
+        res = _probe_ollama(settings, read)
+    else:
+        res = _probe(settings, engine, key, read)
+        st = res["state"]
+        if st in ALIVE:
+            _KEY_DEAD.pop(key, None)
+        elif st in ("bad", "money", "day"):
+            _KEY_DEAD[key] = (time.time() + (10 ** 9 if st == "bad" else DAY_BLOCK), KEY_STATES[st][1].lower())
+        if st != "net":      # mất mạng: không phải lỗi của key -> không ghi đè kết quả cũ
+            note_key(key, st, res.get("msg", ""), "check")
+    icon, name = KEY_STATES.get(res["state"], ("✗", "Lỗi"))
+    tail = f" ({res['ms'] / 1000:.1f} s)" if res.get("ms") and res["state"] == "ok" else ""
+    res["text"] = f"{icon} {name}{tail}" + (f" – {res['msg']}" if res.get("msg") else "")
+    return res
+
+
+def _probe(settings: dict, engine: str, key: str, read: float) -> dict:
+    st = dict(settings, **{f"{engine}_api_key": key, f"{engine}_api_keys": [key]})
+    c = LLMClient(st, engine)
+    model = c.model
+    out = {"model": model}
+    ask = 256 if c.thinking or engine == "anthropic" else 16
+    max_key = c._max_key
+    user = "Reply with the single word OK."
+    t0 = time.time()
+    r = None
+    for _ in range(3):         # 400 vì tên tham số độ dài trả lời (max_tokens / max_completion_tokens) -> đổi, gửi lại
+        try:
+            if engine == "anthropic":
+                r = net.session().post("https://api.anthropic.com/v1/messages",
+                                       headers={"x-api-key": key, "anthropic-version": "2023-06-01",
+                                                "content-type": "application/json"},
+                                       json={"model": model, "max_tokens": ask,
+                                             "messages": [{"role": "user", "content": user}]}, timeout=(10, read))
+            else:
+                r = net.session().post(f"{c.base}/chat/completions", headers={"Authorization": f"Bearer {key}"},
+                                       json={"model": model, "messages": [{"role": "user", "content": user}],
+                                             max_key: ask}, timeout=(10, read))
+        except requests.RequestException as e:
+            why = "hết thời gian chờ trả lời" if isinstance(e, requests.Timeout) else "mạng / tường lửa / máy chủ"
+            return dict(out, state="net", msg=f"{why} – thử lại sau")
+        t = r.text or ""
+        if r.status_code == 400 and max_key == "max_tokens" and "max_completion_tokens" in t:
+            max_key = "max_completion_tokens"
+            continue
+        if r.status_code == 400 and max_key == "max_completion_tokens" and "max_tokens" in t \
+                and "max_completion_tokens" not in t:
+            max_key = "max_tokens"
+            continue
+        break
+    ms = int((time.time() - t0) * 1000)
+    code, t = r.status_code, (r.text or "").lower()
+    msg = _err_msg(r)
+    if code == 200:
+        return dict(out, state="ok", msg=f"model {model} trả lời được", ms=ms)
+    if "location is not supported" in t or "not available in your country" in t or "unsupported_country" in t:
+        return dict(out, state="region", msg=msg)
+    why = c._key_failed(r)
+    if why:
+        return dict(out, state=why_state(why), msg=msg)
+    if code == 429:
+        wait = LLMClient._retry_after(r)
+        return dict(out, state="busy", msg=f"chờ ~{wait:.0f} s là gửi tiếp được")
+    if code == 404 or "model_not_found" in t or ("model" in t and ("not found" in t or "does not exist" in t)):
+        hint = " hoặc Base URL sai" if engine == "openai" else ""
+        return dict(out, state="model", msg=f"không có model '{model}'{hint} – bấm ☰ cạnh ô Model để chọn ({msg})")
+    if code >= 500:
+        return dict(out, state="server", msg=f"HTTP {code} – key có thể vẫn sống, thử lại sau ({msg})")
+    return dict(out, state="error", msg=f"HTTP {code}: {msg}")
+
+
+def probe_summary(engine: str, results: list[dict]) -> str:
+    """"Gemini: 2/3 key sống (1 hết lượt hôm nay)"."""
+    name = ENGINE_NAMES.get(engine, engine)
+    if engine == "ollama":
+        r = results[0] if results else {}
+        return f"{name}: {KEY_STATES.get(r.get('state'), ('', 'chưa kiểm tra'))[1].lower()}"
+    if not results:
+        return f"{name}: chưa có key"
+    alive = sum(r.get("state") in ALIVE for r in results)
+    cnt: dict[str, int] = {}
+    for r in results:
+        if r.get("state") not in ("ok",):
+            cnt[r.get("state", "error")] = cnt.get(r.get("state", "error"), 0) + 1
+    det = ", ".join(f"{n} {KEY_STATES.get(s, ('', s))[1].lower()}" for s, n in cnt.items())
+    return f"{name}: {alive}/{len(results)} key sống" + (f" ({det})" if det else "")
 
 
 # ======================================================================= Hy-MT2

@@ -840,6 +840,12 @@ class SettingsPage(QWidget):
         t.add(label("API key, số câu mỗi lần gửi, giới hạn gói miễn phí: chỉnh riêng ở khung từng công cụ bên dưới. "
                     "Kỹ năng dịch chung (giữ đúng số câu, tên riêng chuẩn) sửa ở tab Tự động → 'Kỹ năng dịch AI' → "
                     "Sửa / thêm…", "muted", wrap=True))
+        # kiểm tra mọi key của mọi công cụ cùng lúc (2.1.26): key nào sống / hết lượt hôm nay / hết tiền / sai
+        self.api_sum = label("", "muted", wrap=True)
+        t.add(flow(button("Kiểm tra tất cả API", "check", "Gửi thử 1 câu thật ngắn bằng TỪNG key của mọi công cụ dịch "
+                          "đã nhập (Ollama: khi đang dùng) – kết quả hiện cạnh từng key và ở dòng dưới. Mỗi key tốn 1 "
+                          "lần gửi (gói miễn phí Gemini: 1 lượt trong ngày)", on_click=self._check_all_api)))
+        t.add(self.api_sum)
 
         # --- mỗi công cụ dịch AI 1 khung: nhiều key (key 1 hết lượt -> key 2…), model, số câu / lần, lần gửi / phút
         self.eng_w: dict[str, dict] = {}
@@ -873,10 +879,17 @@ class SettingsPage(QWidget):
                               "(tool tự chờ cho đủ, nhiều key thì dùng xen kẽ)")
             card.add(ff)
             w["out"] = label("", "muted", wrap=True)
-            card.add(flow(*([button("Kiểm tra các key", "check", "Gửi thử 1 câu ngắn bằng từng key", flat=True,
-                                    on_click=lambda _=False, e=eng: self._check_keys(e))] if eng != "ollama" else []),
+            w["prune"] = button("Xoá key hỏng", "trash", "Xoá khỏi danh sách các key vừa kiểm tra ra sai / hết hạn / "
+                                "hết tiền (key chỉ hết lượt hôm nay thì giữ – mai dùng lại được)", flat=True,
+                                on_click=lambda _=False, e=eng: self._prune_keys(e))
+            w["prune"].hide()
+            card.add(flow(button("Kiểm tra Ollama" if eng == "ollama" else "Kiểm tra các key", "check",
+                                 "Ollama có đang chạy trên máy, đã có model chưa" if eng == "ollama" else
+                                 "Gửi thử 1 câu thật ngắn bằng từng key (không chờ, không gửi lại): sống / đang bị giới "
+                                 "hạn số lần / phút / hết lượt hôm nay / hết tiền / sai key / sai model", flat=True,
+                                 on_click=lambda _=False, e=eng: self._check_keys(e)),
                           button("Thử dịch 1 câu", "sparkle", flat=True,
-                                 on_click=lambda _=False, e=eng: self.test_translate(e))))
+                                 on_click=lambda _=False, e=eng: self.test_translate(e)), w["prune"]))
             card.add(w["out"])
             self.eng_w[eng] = w
             eng_cards.append(card)
@@ -987,6 +1000,7 @@ class SettingsPage(QWidget):
         for eng, w in self.eng_w.items():
             if "keys" in w:
                 w["keys"].set_keys(api_keys(raw, eng))
+                w["keys"].show_saved()      # kết quả kiểm tra / lần dịch gần nhất của từng key
             w["batch"].setValue(engine_batch(raw, eng))
             w["parallel"].setChecked(engine_parallel(raw, eng))
             w["rpm"].setValue(engine_rpm(raw, eng))
@@ -1086,22 +1100,103 @@ class SettingsPage(QWidget):
         run_async(lambda: translate_text("师父，这件事你就别管了，我自己能搞定。", load_settings(), eng),
                   lambda r: out.setText("✓ " + r), lambda m: out.setText("✗ " + m))
 
-    def _check_keys(self, eng: str):
-        """Thử từng key của công cụ này, ghi kết quả cạnh mỗi key."""
+    def _check_keys(self, eng: str, done=None):
+        """Thử từng key của công cụ này (cùng lúc, mỗi key đúng 1 lần gửi ngắn), ghi kết quả cạnh mỗi key + dòng tóm tắt.
+        done(eng, kết quả) khi xong hết (nút 'Kiểm tra tất cả API')."""
         save_settings(self.collect())
-        from ..translate import check_key
+        from ..translate import probe_key
 
         w = self.eng_w[eng]
+        st = load_settings()
+        w["prune"].hide()
+        if eng == "ollama":
+            w["out"].setText("Đang kiểm tra Ollama…")
+
+            def fin(r):
+                self._set_out(w["out"], r["text"])
+                if done:
+                    done(eng, [r])
+            run_async(lambda: probe_key(st, "ollama", ""), fin,
+                      lambda m: fin({"state": "error", "msg": m, "text": "✗ " + m}))
+            return
         keys = w["keys"].keys()
         if not keys:
-            return w["out"].setText("Chưa có key nào – bấm 'Thêm key'")
+            w["out"].setText("Chưa có key nào – bấm 'Thêm key'")
+            if done:
+                done(eng, [])
+            return
         w["out"].setText(f"Đang kiểm tra {len(keys)} key…")
-        st = load_settings()
+        results: list = [None] * len(keys)
+
+        def one(i, r):
+            results[i] = r
+            w["keys"].set_status_for(keys[i], r["text"])
+            if all(x is not None for x in results):
+                self._keys_checked(eng, keys, results)
+                if done:
+                    done(eng, results)
         for i, k in enumerate(keys):
-            w["keys"].set_status(i, "đang thử…")
-            run_async(lambda k=k: check_key(st, eng, k),
-                      lambda r, i=i: (w["keys"].set_status(i, r), w["out"].setText("Xong – xem kết quả cạnh từng key")),
-                      lambda m, i=i: w["keys"].set_status(i, "✗ " + m))
+            w["keys"].set_status_for(k, "đang thử…")
+            run_async(lambda k=k: probe_key(st, eng, k), lambda r, i=i: one(i, r),
+                      lambda m, i=i: one(i, {"state": "error", "msg": m, "text": "✗ " + m}))
+
+    @staticmethod
+    def _set_out(lab, text: str):
+        lab.setText(text)
+        lab.setStyleSheet(f"color: {theme.OK if text.startswith('✓') else theme.ERR if text.startswith('✗') else theme.WARN if text.startswith('⚠') else theme.MUTED};")
+
+    def _keys_checked(self, eng: str, keys: list[str], results: list[dict]):
+        from ..translate import ALIVE, DEAD, probe_summary
+
+        w = self.eng_w[eng]
+        alive = sum(r.get("state") in ALIVE for r in results)
+        self._set_out(w["out"], ("✓ " if alive == len(results) else "⚠ " if alive else "✗ ") +
+                      probe_summary(eng, results))
+        dead = [k for k, r in zip(keys, results) if r.get("state") in DEAD]
+        w["dead"] = dead
+        if dead:
+            w["prune"].setText(f"Xoá {len(dead)} key hỏng")
+            w["prune"].show()
+
+    def _prune_keys(self, eng: str):
+        """Xoá các key vừa kiểm tra ra sai / hết hạn / hết tiền rồi lưu."""
+        w = self.eng_w[eng]
+        dead = list(w.get("dead") or [])
+        if not dead or QMessageBox.question(self, "Xoá key hỏng", f"Xoá {len(dead)} key sai / hết hạn / hết tiền khỏi "
+                                            "danh sách? (key hết lượt hôm nay vẫn giữ)") != \
+                QMessageBox.StandardButton.Yes:
+            return
+        w["keys"].remove_keys(dead)
+        save_settings(self.collect())
+        w["prune"].hide()
+        self._set_out(w["out"], f"✓ Đã xoá {len(dead)} key hỏng – còn {len(w['keys'].keys())} key")
+
+    def _check_all_api(self):
+        """Kiểm tra mọi key của mọi công cụ dịch đã nhập (Ollama khi đang được dùng) cùng lúc, tóm tắt 1 dòng / công cụ."""
+        from ..translate import ENGINE_NAMES
+        s = dict(load_settings(), **self.collect())
+        used = {s.get("translate_engine"), s.get("ai_join_engine"), s.get("asr_ai")}
+        engines = [e for e, _t, _d in ENGINE_CARDS if (e == "ollama" and "ollama" in used) or
+                   (e != "ollama" and self.eng_w[e]["keys"].keys())]
+        if not engines:
+            return self._set_out(self.api_sum, "Chưa nhập API key nào ở các khung bên dưới")
+        sums: dict[str, str] = {}
+        bad: dict[str, bool] = {}
+
+        def show():
+            parts = [sums.get(e, f"{ENGINE_NAMES.get(e, e)}: đang kiểm tra…") for e in engines]
+            head = "" if len(sums) < len(engines) else ("✓ " if not any(bad.values()) else "⚠ ")
+            self._set_out(self.api_sum, head + " · ".join(parts))
+
+        def fin(eng, results):
+            from ..translate import ALIVE, probe_summary
+
+            sums[eng] = probe_summary(eng, results)
+            bad[eng] = any(r.get("state") not in ALIVE for r in results) or (eng == "ollama" and not results)
+            show()
+        show()
+        for e in engines:
+            self._check_keys(e, fin)
 
     def _pick_model(self, eng: str):
         """Lấy danh sách model mà key dùng được rồi cho chọn (tên model của nhà cung cấp hay đổi): đủ mọi model, mới nhất
@@ -1155,6 +1250,7 @@ class KeyList(QWidget):
                      on_click=lambda: e.setEchoMode(QLineEdit.EchoMode.Normal if e.echoMode() ==
                                                     QLineEdit.EchoMode.Password else QLineEdit.EchoMode.Password))
         rm = button("", "x", "Xoá key này", flat=True, on_click=lambda: self._remove(row))
+        e.textChanged.connect(lambda _=None: st.hide())    # đổi key -> kết quả cũ không còn đúng
         h.addWidget(QLabel(f"{len(self.rows) + 1}."))
         h.addWidget(e, 1)
         h.addWidget(eye)
@@ -1205,8 +1301,30 @@ class KeyList(QWidget):
         if 0 <= i < len(self.rows):
             st = self.rows[i][2]
             st.setText(text)
-            st.setStyleSheet(f"color: {theme.OK if text.startswith('✓') else theme.ERR if text.startswith('✗') else theme.MUTED};")
+            st.setStyleSheet(f"color: {theme.OK if text.startswith('✓') else theme.ERR if text.startswith('✗') else theme.WARN if text.startswith('⚠') else theme.MUTED};")
             st.show()
+
+    def set_status_for(self, key: str, text: str):
+        """Ghi kết quả cạnh đúng dòng có key này (dòng trống / trùng không lệch số thứ tự)."""
+        for i, (_, e, _) in enumerate(self.rows):
+            if e.text().strip() == key:
+                self.set_status(i, text)
+                return
+
+    def show_saved(self):
+        """Kết quả kiểm tra / lần dịch gần nhất của từng key (data/key_status.json – chỉ lưu dấu của key, không lưu key)."""
+        from ..translate import key_status, status_text
+
+        for i, (_, e, _) in enumerate(self.rows):
+            k = e.text().strip()
+            txt = status_text(key_status(k)) if k else ""
+            if txt:
+                self.set_status(i, txt)
+
+    def remove_keys(self, keys: list[str]):
+        left = [k for k in self.keys() if k not in set(keys)]
+        self.set_keys(left)
+        self.show_saved()
 
 
 ENGINE_CARDS = [

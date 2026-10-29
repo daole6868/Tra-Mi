@@ -320,6 +320,22 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `Translator._size` vừa sức; trả lời bị cắt (`finish_reason` length / `stop_reason` max_tokens -> `LLMClient._tl.cut`
   theo luồng) -> giữ dòng đã trả (`_extract_json` nhặt cả dòng {"dau","dich"} trọn trong JSON dở), dịch tiếp phần sau 1 lô
   (không tính 1 lần thử). Vừa tách vừa dịch (`stream`) lô ≤ 200.
+- Kiểm tra API key (2.1.26): `translate.probe_key(settings, engine, key)` – ĐÚNG 1 lần gửi thật ngắn (không `_pace` /
+  chờ 429 / chờ mạng / đổi key như `chat`) với model đang chọn ("Reply with the single word OK", 16 token; model suy luận /
+  Claude 256; 400 đòi `max_completion_tokens` / `max_tokens` -> đổi tên tham số gửi lại) -> trạng thái `KEY_STATES`: ok,
+  busy (429 mỗi phút – vẫn sống), model (404 / không có model – key sống), server (5xx), net (mất mạng / quá hạn chờ
+  `PROBE_READ` 40 s), day (429 PerDay), money (402 / insufficient), bad (401 / 403 / key not valid), region, error; `ALIVE`
+  = ok / busy / model, `DEAD` = bad / money. Cập nhật `_KEY_DEAD` của phiên (sống lại -> bỏ chặn; day -> chặn `DAY_BLOCK`).
+  Ollama `_probe_ollama`: GET `<gốc>/api/tags` -> có / chưa có model (gợi ý `ollama pull`) / chưa chạy. Trạng thái lưu
+  `data/key_status.json` theo `key_fp` (sha256 16 ký tự – KHÔNG lưu key) {s, m, t, src check | dich}: `note_key` (kiểm tra
+  + `LLMClient.chat` / `GeminiVideo.ask` gặp key hỏng khi dịch), `_note_ok` (dịch được: ghi "sống" ≤ 1 lần / 10 phút / key,
+  không ghi lại nếu đã "ok" < 1 giờ), `key_status`, `status_text` ("✓ Sống · kiểm tra 10:32 hôm nay", day sang ngày mới ->
+  nhắc kiểm tra lại), `probe_summary` ("Gemini: 1/3 key sống (…)"); `check_key` = `probe_key(...)["text"]`. GUI Cài đặt
+  (`main.SettingsPage`): khung Dịch thuật nút "Kiểm tra tất cả API" (`_check_all_api`: mọi công cụ có key + Ollama khi đang
+  dùng ở translate_engine / ai_join_engine / asr_ai, chạy cùng lúc, tóm tắt `api_sum`); mỗi khung "Kiểm tra các key" /
+  "Kiểm tra Ollama" (`_check_keys(eng, done)`, kết quả cạnh đúng dòng key `KeyList.set_status_for`, tóm tắt `w["out"]`
+  `_set_out` màu ✓ / ⚠ / ✗) + "Xoá N key hỏng" (`_prune_keys`: chỉ bad / money, giữ key hết lượt hôm nay); mở Cài đặt
+  -> `KeyList.show_saved` hiện kết quả lần trước; sửa chữ 1 key -> ẩn kết quả cũ.
 - Video đổi tốc độ, giọng lồng giữ tốc độ tự nhiên (2.1.24): edit `dub_natural` (mặc định bật, công tắc `e_dubnat` dưới
   "Tốc độ" tab Chỉnh sửa) -> `pipeline.dub_speed(edit)` = tốc độ video (tắt / ×1 -> 1) -> `synthesize_dub(vspeed=)`: xếp
   giọng theo giây video GỐC với độ dài giọng × vspeed (0,85× -> mỗi câu thêm ~18 % chỗ), bản lồng ghi theo giờ video ĐÃ
@@ -440,7 +456,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (244 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (247 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2142,7 +2158,16 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   dịch bằng chữ). Chưa gọi Gemini thật (sandbox chặn) – tên tham số File API / mediaResolution theo tài liệu chính thức.
   Gửi bản FULL tool (người dùng yêu cầu).
 
+- 2.1.26: "có nhiều API không biết API nào sống – thêm chức năng check cho mỗi loại API". Nút "Kiểm tra các key" cũ
+  (2.0.62) gọi `chat` – có chờ 429 tới 20 lần / chờ mạng 10 phút, báo lỗi thô, không biết key hết lượt hôm nay hay sai,
+  không nhớ kết quả, không có cho Ollama, không có nút kiểm tra hết. Giờ xem Cấu trúc "Kiểm tra API key". Thử: máy chủ
+  giả 8 kiểu trả lời (sống / 429 phút / 429 ngày / key sai / hết tiền / sai model / 503 / mất mạng) -> đúng 1 lần gửi mỗi
+  key, đúng trạng thái; gpt-5 qua dịch vụ khác đổi max_completion_tokens; Ollama 3 trường hợp; giao diện offscreen (kiểm
+  tra tất cả, xoá key hỏng giữ key hết lượt hôm nay, mở lại thấy kết quả cũ). Chưa gọi API thật (sandbox chặn).
+
 ## Vấn đề đang mở
+- 2.1.26: chờ người dùng bấm Cài đặt → Dịch thuật → "Kiểm tra tất cả API" với các key thật: key nào báo sai trạng
+  thái (vd key hết lượt mà báo sống, key sống mà báo lỗi) -> gửi dòng chữ cạnh key đó để sửa cách đọc lỗi của nhà cung cấp.
 - 2.1.25: chờ người dùng (Cài đặt → Công cụ dịch → khung Gemini có key; Công cụ dịch = Gemini) (1) tích ~20 câu nghi
   sai ở tab Phụ đề → Công cụ → Lời hát & nghe nhầm → "Gemini xem video & soát": thông báo "Gemini xem video N khúc…", câu
   điền có đúng không (Ctrl+Z), chữ xanh / tím / cam có hợp lý không; lỗi 400 / File API -> gửi dòng lỗi (data\logs\
