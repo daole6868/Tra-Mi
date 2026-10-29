@@ -538,7 +538,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             lines.append(f"Dialogue: {layer},{t0},{t1},Default,,0,0,0,,{pre}{_ass_escape(body)}\n")
             continue
         ft = head_tags(vi_rows[0][1], vi_rows[0][2]) if vi_rows else ""
-        txt = ft + (kara_text(vi, s.start, s.end, s.extra.get("kv"), kara_mode) if kara else _ass_escape(vi)) \
+        txt = ft + (kara_text(vi, s.start, s.end, s.extra.get("kv"), kara_mode, s.extra.get("kw")) if kara
+                    else _ass_escape(vi)) \
             if vi else ""
         if kara_box and vi:
             hide = "{\\1a&HFF&\\2a&HFF&}"
@@ -689,6 +690,9 @@ def remap_after_cut(segs: list[Segment], keep: list[tuple[float, float]]) -> lis
                         ex["kv"] = kv
                     else:
                         ex.pop("kv")
+                if ex.get("kw"):   # mốc thật từng từ (karaoke): giữ đủ số từ, từ rơi vào đoạn cắt dồn về mép đoạn
+                    ex["kw"] = [[min(max(x, ks), ke) - ks + offset_base, min(max(y, ks), ke) - ks + offset_base]
+                                for x, y in ex["kw"]]
                 out.append(Segment(a - ks + offset_base, b - ks + offset_base, s.text, s.trans, s.speaker, ex))
         offset_base += ke - ks
     return out
@@ -742,6 +746,7 @@ def scale_time(segs: list[Segment], speed: float) -> list[Segment]:
         for s in segs:
             s.start /= speed
             s.end /= speed
-            if s.extra.get("kv"):
-                s.extra["kv"] = [[x / speed, y / speed] for x, y in s.extra["kv"]]
+            for k in ("kv", "kw"):
+                if s.extra.get(k):
+                    s.extra[k] = [[x / speed, y / speed] for x, y in s.extra[k]]
     return segs

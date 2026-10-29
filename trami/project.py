@@ -30,6 +30,7 @@ DEFAULT_EDIT = {
     "hardsub": {"mode": "none", "regions": [], "box_color": "#000000", "box_opacity": 1.0,
                 "blur_strength": 20, "strength": "normal"},
     "flip_h": False, "flip_v": False, "rotate": 0, "zoom": 1.0, "speed": 1.0,
+    "dub_natural": True,    # đổi tốc độ video mà giọng lồng giữ tốc độ tự nhiên (xếp theo giờ video mới, 2.1.24)
     "aspect": "original", "aspect_mode": "blur", "resolution": "original",
     "aspect_pos": [0.5, 0.5],   # vị trí phim trong khung khi đổi tỉ lệ (0 = sát trái / trên, 0,5 = giữa)
     "aspect_scale": 1.0,        # cỡ phim trong khung (1 = vừa khít; > 1 phóng to, phần tràn bị cắt)

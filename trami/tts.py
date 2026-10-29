@@ -381,28 +381,39 @@ EDGE_CONNECT = 10     # giây chờ nối tới máy chủ Edge
 EDGE_RECEIVE = 20     # giây chờ giữa 2 gói dữ liệu giọng (mạng lag / rớt -> báo lỗi thay vì chờ mãi)
 
 
-def _edge_comm(text: str, voice: str, rate: str = "+0%", pitch: str = "+0Hz"):
+def _edge_comm(text: str, voice: str, rate: str = "+0%", pitch: str = "+0Hz", words: bool = False):
     import edge_tts
 
+    kw = {"boundary": "WordBoundary"} if words else {}   # mốc từng từ (karaoke) – edge-tts 7 mặc định chỉ theo câu
     try:
         return edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, connect_timeout=EDGE_CONNECT,
-                                    receive_timeout=EDGE_RECEIVE)
-    except TypeError:   # edge-tts rất cũ chưa có tham số chờ
+                                    receive_timeout=EDGE_RECEIVE, **kw)
+    except TypeError:   # edge-tts cũ chưa có tham số chờ / boundary (bản cũ vốn trả mốc từng từ)
         return edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
 
 
 async def _edge_save(text: str, voice: str, out: Path, rate: str = "+0%", pitch: str = "+0Hz") -> None:
     """Đọc 1 câu ra file. Ghi vào file tạm rồi mới đổi tên: rớt mạng giữa chừng không để lại file giọng cụt
     (file cụt từng bị coi là câu đã đọc xong -> câu mất đuôi mãi). Cả câu quá 60 s + 0,2 s/chữ -> coi như treo."""
+    from . import dubwords
+
     tmp = out.with_name(out.stem + ".part" + out.suffix)
+    meta = out.with_name(out.stem + ".part.jsonl")   # mốc từng từ Edge trả kèm (karaoke theo đúng lúc từng từ, 2.1.24)
     tmp.unlink(missing_ok=True)
     try:
-        await asyncio.wait_for(_edge_comm(text, voice, rate, pitch).save(str(tmp)), timeout=60 + 0.2 * len(text))
+        comm = _edge_comm(text, voice, rate, pitch, words=True)
+        try:
+            job = comm.save(str(tmp), str(meta))
+        except TypeError:   # bản edge-tts không ghi được mốc từ -> chỉ lấy tiếng (karaoke tự đoán / Whisper nghe lại)
+            job = comm.save(str(tmp))
+        await asyncio.wait_for(job, timeout=60 + 0.2 * len(text))
         if not tmp.exists() or tmp.stat().st_size == 0:
             raise RuntimeError("Edge không trả về tiếng nào")
         tmp.replace(out)
+        dubwords.save(out, dubwords.edge_jsonl(meta), "raw", "edge")
     finally:
         tmp.unlink(missing_ok=True)
+        meta.unlink(missing_ok=True)
 
 
 async def _edge_all(items: list[tuple[int, str, Path, str]], rate: str, pitch: str, progress, cancel,
@@ -1511,12 +1522,14 @@ def _trim_start(a: np.ndarray, thr: float = 0.01) -> int:
 
 
 def plan_pauses(s: Segment, x: dict, runs: list, n1: int, speed: float, room: float, lang: str = "vi",
-                min_gap: float = PAUSE_MIN, part_speed: float = 1.0, max_speed: float = 1.5) -> list[list[int]]:
+                min_gap: float = PAUSE_MIN, part_speed: float = 1.0, max_speed: float = 1.5,
+                vspeed: float = 1.0) -> list[list[int]]:
     """Khoảng nghỉ chèn vào giọng lồng 1 câu: phần sau chỗ nhân vật ngắt hơi bắt đầu đúng lúc nhân vật nói tiếp (tính
     từ lúc giọng câu bắt đầu như trong phim gốc), chỉ dùng chỗ trống `room` giây trước câu sau. runs: chỗ lặng của
     đoạn giọng ở ×1 (mẫu), n1: độ dài ×1. part_speed > 1 (đọc từng vế): vế trước dài hơn vế gốc -> đọc nhanh riêng
     vế đó (≤ part_speed, tổng ≤ max_speed) để vế sau vẫn vào đúng lúc. Trả [[mẫu cắt (theo tốc độ), số mẫu lặng(,
-    tốc độ riêng ×1000)]]."""
+    tốc độ riêng ×1000)]]. vspeed < 1: video làm chậm, bản lồng ghi theo giờ video đã chậm (giọng giữ tốc độ tự
+    nhiên) – mọi mốc tính theo giờ video gốc, số mẫu lặng đổi sang giờ bản lồng."""
     ps = orig_pauses(s, lang, min_gap)
     if not ps or not runs or (room < 0.05 and part_speed <= 1.0):
         return []
@@ -1540,12 +1553,12 @@ def plan_pauses(s: Segment, x: dict, runs: list, n1: int, speed: float, room: fl
         _d, j, a, b = best
         last_j = j
         mid = (a + b) / 2
-        after = x["start"] + added + (b / speed) / SR          # lúc giọng lồng nói tiếp nếu không chèn gì
+        after = x["start"] + added + (b / speed) / SR * vspeed  # lúc giọng lồng nói tiếp nếu không chèn gì
         target = x["start"] + (g1 - s.start)                    # lúc nhân vật nói tiếp
         f = 1.0
         if after - target > 0.05 and part_speed > 1.0:          # vế trước dài hơn vế gốc: đọc nhanh riêng vế đó
-            dur = (a - prev) / speed / SR
-            if dur > 0.3:
+            dur = (a - prev) / speed / SR * vspeed
+            if dur > 0.3 * vspeed:
                 f = min(part_speed, max(1.0, max_speed / max(speed, 1e-3)), dur / max(0.1, dur - (after - target)))
                 if f > 1.02:
                     added -= dur * (1 - 1 / f)
@@ -1556,7 +1569,7 @@ def plan_pauses(s: Segment, x: dict, runs: list, n1: int, speed: float, room: fl
         if pad < 0.05 and f == 1.0:
             prev = b
             continue
-        out.append([int(mid / speed), int(pad * SR)] + ([int(round(f * 1000))] if f > 1.0 else []))
+        out.append([int(mid / speed), int(pad * SR / vspeed)] + ([int(round(f * 1000))] if f > 1.0 else []))
         added += pad if pad >= 0.05 else 0.0
         if pad < 0.05:
             out[-1][1] = 0
@@ -1645,7 +1658,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                    ref_audio: str | Path | None = None, settings: dict | None = None,
                    skip_songs: bool = True, stats: dict | None = None, only: set[int] | None = None,
                    lang: str = "vi", genders: dict | None = None, prepare_only: bool = False,
-                   patch: dict | None = None) -> Path:
+                   patch: dict | None = None, vspeed: float = 1.0) -> Path:
     """patch: {"wav": bản lồng đang dùng, "placed": bảng đoạn giọng đã đặt trong bản đó} -> chỉ ghi lại những đoạn thời
     gian có thay đổi vào chính file đó (xoá / kéo / gộp / đọc lại vài câu: ~1 giây thay vì dựng lại cả phim);
     stats["patched"] = các đoạn đã ghi (mẫu 24 kHz). Không vá được -> dựng cả bản vào out_wav như thường.
@@ -1655,8 +1668,12 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     Câu đọc lại bị lỗi mà có giọng cũ -> giữ giọng cũ (báo lỗi), không làm hỏng cả bản lồng tiếng.
     lang: tiếng đích của dự án; mỗi câu còn được nhận tiếng theo chữ viết (langs.detect) -> giọng Edge tự đổi đúng tiếng,
     OmniVoice đọc đúng tiếng, VieNeu (chỉ tiếng Việt) gặp câu tiếng khác thì đọc bằng Edge cùng nam / nữ.
-    genders: {người nói: {"g": "male"/"female"}} để chọn giọng Edge thay cho VieNeu."""
+    genders: {người nói: {"g": "male"/"female"}} để chọn giọng Edge thay cho VieNeu.
+    vspeed ≠ 1 (2.1.24, video làm chậm / nhanh mà giọng lồng giữ tốc độ tự nhiên): xếp giọng theo giờ video gốc với độ
+    dài giọng × vspeed (video chậm 0,85 -> mỗi câu có thêm chỗ), bản lồng ghi theo giờ video ĐÃ đổi tốc độ (giây gốc /
+    vspeed) – xuất video / trình phát không co giãn lại giọng lồng. dub_at / layout vẫn theo giây video gốc."""
     settings = settings or {}
+    vspeed = min(4.0, max(0.25, float(vspeed or 1.0)))
     stats = stats if stats is not None else {}
     lang = langs.norm(lang)
     genders = genders or {}
@@ -1960,11 +1977,15 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                                             base + b))
     if cancel and cancel():
         raise Cancelled()
+    from . import dubwords
+
     for i, (pj, pfiles) in joins.items():   # đọc từng vế: ghép các vế đã đọc thành đoạn giọng của câu
         try:
             if all(pf.exists() and pf.stat().st_size > 0 for pf in pfiles):
                 if not (pj.exists() and pj.stat().st_mtime >= max(pf.stat().st_mtime for pf in pfiles)):
                     join_parts(pfiles, pj)
+                if not dubwords.load(pj):    # mốc từng từ của câu ghép = mốc từng vế dời theo chỗ nối
+                    dubwords.join(pfiles, pj, json.loads(pj.with_name(pj.name + ".joins.json").read_text()), SR)
             else:
                 pj.unlink(missing_ok=True)   # có vế đọc lỗi -> câu không có giọng (hoặc giữ giọng cũ bên dưới)
         except Exception as e:  # noqa: BLE001
@@ -2034,7 +2055,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         s = segs[k]
         # tốc độ người dùng đặt cho câu (tab Lồng tiếng / timeline) = mức TỐI THIỂU: câu vốn phải đọc nhanh hơn để vừa
         # thì giữ tốc độ đó; < 1 = đọc chậm lại (nếu còn chỗ)
-        items.append({"k": k, "want": want(k), "dur": meta.n(files[k]) / SR, "user": float(s.extra.get("speed") or 0),
+        items.append({"k": k, "want": want(k), "dur": meta.n(files[k]) / SR * vspeed,
+                      "user": float(s.extra.get("speed") or 0),
                       "fixed": bool(s.extra.get("dub_shift")), "mode": s.extra.get("overflow") or "",
                       "pause": float(s.extra.get("pause_before") or 0)})
     durs = {it["k"]: it["dur"] for it in items}
@@ -2042,8 +2064,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     plan = plan_layout(items, total, settings.get("dub_overflow", "smart"), max_speedup,
                        float(settings.get("dub_lead_max", 1.0)), float(settings.get("dub_max_lag", 2.0)))
     end_t = max([total] + [x["end"] + 0.5 for x in plan.values()])
-    track_len = int(end_t * SR) + SR
-    n_out = int(total * SR)
+    track_len = int(end_t / vspeed * SR) + SR      # bản lồng theo giờ video đã đổi tốc độ (vspeed 1 = giờ gốc)
+    n_out = int(total / vspeed * SR)
     # giọng lồng nghỉ đúng chỗ nhân vật ngắt hơi giữa câu (2.0.96): cắt đoạn giọng ở chỗ bộ đọc tự ngắt (dấu câu tương
     # ứng) rồi chèn lặng cho phần sau vào đúng lúc nhân vật nói tiếp – chỉ dùng chỗ trống trước câu sau, không xê dịch
     # câu nào khác; câu ngắn hay dài đều vậy (cần mốc từng chữ thật extra["ct"])
@@ -2060,7 +2082,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             # 2.1.12: cả câu đọc 1 lần (bộ đọc AI) cũng được đọc nhanh riêng vế trước khi vế đó dài hơn vế gốc (cắt ở
             # đúng chỗ bộ đọc tự ngắt) – như đọc từng vế mà không phải đọc riêng từng mẩu ngắn
             g = plan_pauses(s, x, meta.gaps(files[k]), meta.n(files[k]), spd, room,
-                            langs.detect(s.trans or "", lang), min_gap, PART_SPEED, max_speedup)
+                            langs.detect(s.trans or "", lang), min_gap, PART_SPEED, max_speedup, vspeed)
             if g:
                 pauses[k] = g
     stats["pauses"] = sum(1 for v in pauses.values() for q in v if q[1] > 0)
@@ -2082,9 +2104,9 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             s, x, p = segs[k], plan[k], files[k]
             speed = _clip_speed(x["speed"])
             name = Path(p).name
-            st = int(x["start"] * SR)
+            st = int(x["start"] / vspeed * SR)
             # "Giữ đúng giờ": vẫn quá dài -> nhỏ dần phần cuối (≤0,3 s) rồi dừng đúng lúc câu sau vào
-            keep_n = max(int(0.3 * SR), int(x["keep"] * SR)) if x["keep"] is not None else 0
+            keep_n = max(int(0.3 * SR), int(x["keep"] / vspeed * SR)) if x["keep"] is not None else 0
             g = old_g.get(name) if patch_on else None
             gaps = pauses.get(k) or []
             ent = [name, st, speed, g, keep_n, 0] + ([gaps] if gaps else [])
@@ -2105,7 +2127,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             seg_len = min(full_len, track_len - st)
             if seg_len > 0:
                 placed += 1
-                a0, a1 = round(x["start"], 3), round(x["start"] + seg_len / SR, 3)
+                a0, a1 = round(x["start"], 3), round(x["start"] + seg_len / SR * vspeed, 3)
                 layout.append([a0, a1, k, x["fit"]])
                 s.extra["tts_file"] = str(p)   # giọng đang dùng của câu này (để lần sau chỉ đọc lại câu được chọn)
                 s.extra["dub_at"] = [a0, a1]   # đoạn giọng đang phát của câu (phụ đề chạy theo giọng lồng)
@@ -2144,13 +2166,15 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     def files_by_name() -> dict[str, str]:
         return {Path(p).name: p for p in files.values()}
 
+    same_speed = abs(float((patch or {}).get("vspeed") or 1.0) - vspeed) < 1e-3
     try:
-        tab, layout, too_long, placed = assemble(bool(patch and patch.get("placed")))
+        tab, layout, too_long, placed = assemble(bool(patch and patch.get("placed") and same_speed))
     except _NoPatch as e:   # không vá được (file bản lồng khác, đổi gần hết…) -> dựng lại cả bản lồng như thường
         stats["patch_skipped"] = str(e)
         tab, layout, too_long, placed = assemble(False)
     meta.save()
     stats["placed_tab"] = tab
+    stats["vspeed"] = vspeed
     stats["layout"] = layout
     stats["too_long"] = too_long
     stats["level_fixed"] = sum(1 for e in tab if e[3] > 1.0)

@@ -9816,3 +9816,217 @@ def test_send_all_switch_gui_2123(monkeypatch):
     finally:
         win.close()
         save_settings(old)
+
+
+def test_slow_video_natural_dub_2124(monkeypatch, tmp_path):
+    """2.1.24: làm chậm video 0,8× mà giọng lồng giữ tốc độ tự nhiên – xếp giọng theo giờ video mới (câu có thêm chỗ,
+    không phải đọc nhanh), bản lồng ghi theo giờ video đã chậm, trình phát + xuất video không co giãn lại giọng."""
+    from trami import pipeline, tts, video
+    from trami.audiomix import LiveMix
+    from trami.config import _deep_merge, load_settings
+    from trami.project import DEFAULT_EDIT
+
+    assert pipeline.dub_speed({"speed": 0.85}) == 0.85
+    assert pipeline.dub_speed({"speed": 0.85, "dub_natural": False}) == 1.0
+    assert pipeline.dub_speed({"speed": 1.0}) == 1.0 and DEFAULT_EDIT["dub_natural"] is True
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, p, voice in items:
+            _fake_audio(p, 1.2 if text == "một" else 1.0, 600)
+        return []
+
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+
+    def run(vs):
+        segs = [Segment(1.0, 2.0, "a", "một"), Segment(2.1, 3.0, "b", "hai")]
+        st = {}
+        out = tts.synthesize_dub(segs, tmp_path / f"d{vs}.wav", 5.0, tmp_path / "t", max_speedup=1.3, stats=st,
+                                 settings={"dub_level_match": False}, vspeed=vs)
+        return segs, st, tts._decode(out)
+
+    segs1, st1, _ = run(1.0)
+    assert segs1[0].extra["fit_speed"] > 1.05                 # giờ gốc: câu 1 phải đọc nhanh cho vừa
+    segs, st, a = run(0.8)
+    assert st["vspeed"] == 0.8 and segs[0].extra["fit_speed"] == 1.0 and segs[0].extra["fit"] == "ok"
+    assert abs(len(a) / tts.SR - 5.0 / 0.8) < 0.05            # bản lồng theo giờ video đã chậm
+    on = np.where(np.abs(a) > 0.05)[0] / tts.SR
+    first = on[on < 2.6]
+    assert abs(first.min() - 1.25) < 0.05 and abs(first.max() - first.min() - 1.2) < 0.08   # đúng lúc, đủ 1,2 s
+    a0, a1 = segs[0].extra["dub_at"]
+    assert abs(a0 - 1.0) < 0.01 and abs(a1 - (1.0 + 1.2 * 0.8)) < 0.08        # dub_at vẫn theo giây video gốc
+
+    # trình phát: phát 0,8× -> giọng lồng đọc thẳng từ bản lồng (không co giãn), các khối nối liền
+    ramp = (np.arange(44100 * 7) % 20000).astype(np.int16)
+    mix = LiveMix()
+    mix.set_tracks({"dub": np.stack([ramp, ramp], axis=1)})
+    mix.g, mix.rate, mix.dub_rate = {"dub": 1.0}, 0.8, 0.8
+    assert abs(mix.duration() - 7 * 0.8) < 1e-6
+    x1, adv = mix.render(88200, 1000)
+    x2, _ = mix.render(88200 + adv, 1000)
+    d0 = round(88200 / 0.8)
+    assert np.allclose(x1[:, 0] * 32768, ramp[d0:d0 + 1000], atol=0.6)
+    assert np.allclose(x2[:, 0] * 32768, ramp[d0 + 1000:d0 + 2000], atol=0.6)
+
+    # xuất: video 4 s, cắt 0,4–0,8 s, tốc độ 0,8 -> giọng 1 kHz đặt ở 1,25 s (giờ đã chậm) dài đúng 1,2 s
+    ff = video.ff
+    src = tmp_path / "src.mp4"
+    subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:d=4:r=25", "-f",
+                    "lavfi", "-i", "sine=f=440:d=4", "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-c:a",
+                    "aac", str(src)], check=True)
+    dw = np.zeros(int(5.0 * tts.SR), np.float32)
+    i0, i1 = int(1.25 * tts.SR), int(2.45 * tts.SR)
+    dw[i0:i1] = 0.5 * np.sin(2 * np.pi * 1000 * np.arange(i1 - i0) / tts.SR)
+    tts.write_wav(tmp_path / "dub.wav", dw)
+    spec = _deep_merge(DEFAULT_EDIT, {"speed": 0.8, "cuts": [[0.4, 0.8]], "audio": {"orig": 0.0, "dub": 1.0},
+                                      "dub": {"enabled": True, "wav": str(tmp_path / "dub.wav"), "vspeed": 0.8},
+                                      "subtitles": {"burn": False}})
+    out = video.build_and_render(src, tmp_path / "out.mp4", spec, load_settings(), tmp_path / "w")
+    assert abs(ff.probe(out).duration - 3.6 / 0.8) < 0.15
+    pcm = subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-i", str(out), "-ac", "1", "-ar", "8000", "-f", "s16le",
+                          "-"], capture_output=True).stdout
+    x = np.abs(np.frombuffer(pcm, np.int16).astype(float) / 32768)
+    env = np.array([x[i:i + 80].max() for i in range(0, len(x) - 80, 80)])    # 10 ms
+    loud = np.where(env > 0.1)[0] * 0.01
+    assert abs(loud.min() - 0.75) < 0.06 and abs(loud.max() - loud.min() - 1.2) < 0.08   # 1,25 − 0,5 (đoạn cắt / 0,8)
+
+
+def test_slow_video_relayout_project_2124(monkeypatch, tmp_path):
+    """Đổi tốc độ video sau khi lồng tiếng -> bản lồng cũ "lệch tốc độ" -> xếp lại theo giờ video mới (không đọc lại),
+    sóng âm timeline đổi bước theo, xếp lại lần sau vá đúng đoạn; tắt "giữ tốc độ tự nhiên" -> về giờ gốc."""
+    from trami import pipeline, tts
+    from trami.project import Project
+
+    spoken = []
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, p, voice in items:
+            spoken.append(text)
+            _fake_audio(p, 0.9, 500)
+        return []
+
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    p = Project.create("slowdub")
+    p.data["info"] = {"duration": 6}
+    p.segments = [Segment(0.5, 1.5, "a", "Xin chào", "S1"), Segment(2.0, 3.0, "b", "Tạm biệt", "S1")]
+    p.save()
+    pipeline.dub(p, "edge:vi-VN-HoaiMyNeural", engine="edge")
+    assert p.edit["dub"]["vspeed"] == 1.0 and not pipeline.dub_speed_stale(p)
+    ed = p.edit
+    ed["speed"] = 0.8
+    p.data["edit"] = ed
+    p.save()
+    assert pipeline.dub_speed_stale(p)
+    n = len(spoken)
+    pipeline.relayout(p)
+    assert len(spoken) == n                                  # không đọc lại câu nào
+    assert p.edit["dub"]["vspeed"] == 0.8 and pipeline.dub_versions(p)[0]["vspeed"] == 0.8
+    assert not pipeline.dub_speed_stale(p)
+    w = pipeline.dub_wave(p)
+    assert abs(w[1] - 0.008) < 1e-9
+    assert abs(tts.wav_info(p.edit["dub"]["wav"])[1] / tts.SR - 6 / 0.8) < 0.05
+    segs = p.segments
+    segs[1].extra["dub_shift"] = 0.3
+    p.segments = segs
+    p.save()
+    ino = os.stat(p.edit["dub"]["wav"]).st_ino
+    pipeline.relayout(p)
+    assert os.stat(p.edit["dub"]["wav"]).st_ino == ino and p.edit["dub"]["vspeed"] == 0.8   # vá tại chỗ
+    ed = p.edit
+    ed["dub_natural"] = False
+    p.data["edit"] = ed
+    p.save()
+    assert pipeline.dub_speed_stale(p)
+    pipeline.relayout(p)
+    assert p.edit["dub"]["vspeed"] == 1.0 and abs(pipeline.dub_wave(p)[1] - 0.01) < 1e-9
+    p.delete()
+
+
+def test_karaoke_real_word_times_2124(monkeypatch, tmp_path):
+    """2.1.24: karaoke theo mốc THẬT từng từ của giọng lồng: Edge trả sẵn (WordBoundary), giọng khác Whisper nghe lại;
+    đổi sang giờ bản lồng đúng như đoạn giọng được đặt (tốc độ, chỗ nghỉ chèn thêm, video làm chậm); ghép vào từng từ
+    phụ đề theo chữ (số đọc thành chữ, từ thiếu -> chia khoảng giữa); lời đã sửa sau khi lồng -> đoán như cũ."""
+    from trami import dubwords, karaoke, pipeline, tts
+    from trami.project import Project
+
+    meta = tmp_path / "m.jsonl"
+    meta.write_text("\n".join(json.dumps(x) for x in (
+        {"type": "WordBoundary", "offset": 1_000_000, "duration": 2_000_000, "text": "Xin"},
+        {"type": "SentenceBoundary", "offset": 0, "duration": 9, "text": "Xin chào"},
+        {"type": "WordBoundary", "offset": 3_500_000, "duration": 2_500_000, "text": "chào"})), encoding="utf-8")
+    assert dubwords.edge_jsonl(meta) == [[0.1, 0.3, "Xin"], [0.35, 0.6, "chào"]]
+
+    words = [[0.1, 0.3, "Xin"], [0.3, 0.6, "chào"], [0.8, 1.0, "ba"], [1.0, 1.2, "bạn"], [1.2, 1.5, "nhé"]]
+    kw = karaoke.align_words("Xin chào, 3 bạn nhé!", words)
+    assert kw == [[0.1, 0.3], [0.3, 0.6], [0.6, 1.0], [1.0, 1.2], [1.2, 1.5]]      # "3" -> khoảng giữa
+    assert karaoke.align_words("Một câu khác hẳn rồi", words) is None              # lời đã sửa -> đoán như cũ
+    tw = karaoke.word_times("Xin chào, 3 bạn nhé!", 0.0, 2.0, None, kw)
+    assert tw[3] == (1.0, 1.2)
+    ass = karaoke.ass_text("Xin chào, 3 bạn nhé!", 0.0, 2.0, None, "sweep", kw)
+    assert ass.startswith("{\\k10}{\\kf20}Xin")                                    # chờ 0,1 s rồi quét "Xin" 0,2 s
+    assert len(karaoke.word_times("Xin chào", 0.0, 2.0, None, kw)) == 2             # khác số từ -> bỏ mốc thật
+
+    # đổi sang giờ bản lồng: giọng đặt ở 2 s, đọc nhanh ×1,25, chèn 0,5 s lặng sau 0,4 s đầu, video chậm 0,8
+    sr = tts.SR
+    clip = np.zeros(int(2.0 * sr), np.float32)
+    for t in (0.2, 0.6, 1.4):                                                       # 3 tiếng "tách" trên đoạn ×1
+        clip[int(t * sr):int(t * sr) + 60] = 0.9
+    cp = tmp_path / "c.wav"
+    tts.write_wav(cp, clip)
+    off = tts._trim_start(tts._decode_cached(cp)) / sr
+    gaps = [[int(0.4 * sr / 1.25), int(0.5 * sr)]]
+    shaped, _g = tts._shaped_clip(cp, 1.25, None, 0, 1.0, None, gaps)
+    hits = np.where(shaped > 0.5)[0]
+    groups = [hits[0]] + [h for a, h in zip(hits, hits[1:]) if h - a > sr // 50]
+    entry = ["c.wav", int(2.0 / 0.8 * sr), 1.25, 1.0, 0, len(shaped), gaps]
+    got = dubwords.to_dub(entry, [t - off for t in (0.2, 0.6, 1.4)], 0.8)
+    want = [2.0 + g / sr * 0.8 for g in groups]
+    assert np.allclose(got, want, atol=0.03)
+
+    # cả dự án: Edge giả ghi kèm mốc từ -> karaoke_spans trả mốc từng từ theo giờ video gốc
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, p, voice in items:
+            _fake_audio(p, 1.0, 500)
+            n = len(text.split())
+            dubwords.save(p, [[0.05 + 0.9 * j / n, 0.05 + 0.9 * (j + 1) / n, w] for j, w in enumerate(text.split())])
+        return []
+
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    p = Project.create("karawords")
+    p.data["info"] = {"duration": 6}
+    p.segments = [Segment(1.0, 2.2, "a", "Xin chào bạn"), Segment(3.0, 4.2, "b", "Tạm biệt nhé")]
+    p.save()
+    pipeline.dub(p, "edge:vi-VN-HoaiMyNeural", engine="edge")
+    ks = pipeline.karaoke_spans(p)
+    a0 = p.segments[0].extra["dub_at"][0]
+    off = dubwords.trim_offset(p.segments[0].extra["tts_file"])
+    assert len(ks[0]["kw"]) == 3 and abs(ks[0]["kw"][0][0] - (a0 + 0.05 - off)) < 0.02
+    assert abs(ks[0]["kw"][2][1] - (a0 + 0.95 - off)) < 0.02
+    # Whisper giả nghe lại câu chưa có mốc
+    f2 = p.segments[1].extra["tts_file"]
+    dubwords.path(f2).unlink()
+    assert [x[0] for x in pipeline.karaoke_listen_todo(p)] == [f2]
+
+    class W:
+        def __init__(self, a, b, w):
+            self.start, self.end, self.word = a, b, w
+
+    class S:
+        words = [W(0.0, 0.3, " Tạm"), W(0.3, 0.6, " biệt"), W(0.6, 0.9, " nhé.")]
+
+    class M:
+        def transcribe(self, audio, **kw):
+            assert kw["word_timestamps"] and kw["initial_prompt"] == "Tạm biệt nhé" and kw["language"] == "vi"
+            return [S()], None
+
+    from trami import asr
+
+    monkeypatch.setattr(dubwords, "model_name", lambda settings=None: "turbo")
+    monkeypatch.setattr(asr, "get_model", lambda *a, **k: M())
+    st = pipeline.karaoke_listen(p, {}, download=False)
+    assert st["done"] == 1 and dubwords.load(f2)["rel"] == "trim"
+    assert "1/1" in pipeline.karaoke_note(st)
+    kw2 = pipeline.karaoke_spans(p)[1]["kw"]
+    assert abs(kw2[0][0] - p.segments[1].extra["dub_at"][0]) < 0.02 and len(kw2) == 3
+    monkeypatch.setattr(pipeline, "load_settings", lambda: {"karaoke_listen": False})
+    assert pipeline.karaoke_spans(p)[1]["kw"] is None                              # tắt -> đoán như cũ
+    p.delete()

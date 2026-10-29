@@ -1199,6 +1199,12 @@ class ProjectPage(QWidget):
         self.e_flipv = f2.row("Lật dọc", Switch())
         self.e_zoom = f2.row("Phóng to", SliderRow(1, 1.5, 0.01, 1))
         self.e_speed = f2.row("Tốc độ", SliderRow(0.5, 2, 0.05, 1, suffix="×"))
+        self.e_dubnat = f2.row("Giọng lồng giữ tốc độ tự nhiên", Switch(),
+                               "Bật (mặc định): làm chậm / nhanh video thì hình + tiếng gốc + nhạc nền đổi tốc độ, còn "
+                               "giọng lồng vẫn đọc tốc độ bình thường – mỗi câu được xếp lại theo giờ video mới (video "
+                               "chậm 0,85× -> mỗi câu có thêm ~18 % chỗ, ít câu phải đọc nhanh). Tắt: giọng lồng chậm / "
+                               "nhanh theo video như trước")
+        self.e_dubnat.setChecked(True)
         self.crop_info = label("Không crop", "muted")
         f2.row("Crop khung", hbox(button("Chọn vùng crop", "crop", on_click=self._crop_dialog),
                                   button("Bỏ crop", "x", on_click=self._clear_crop), self.crop_info, None))
@@ -1235,7 +1241,7 @@ class ProjectPage(QWidget):
         for w in (self.e_zoom, self.e_speed, self.e_bright, self.e_contrast, self.e_sat, self.e_gamma,
                   self.e_fin, self.e_fout):
             w.changed.connect(sv)
-        for w in (self.e_fliph, self.e_flipv, self.e_sharpen, self.e_denoise):
+        for w in (self.e_fliph, self.e_flipv, self.e_sharpen, self.e_denoise, self.e_dubnat):
             w.toggledOn.connect(sv)
 
         w = QWidget()
@@ -1322,6 +1328,15 @@ class ProjectPage(QWidget):
         self.st_kcolor = f.row("Màu karaoke", ColorButton(KARA_COLOR))
         self.st_kmode = f.row("Kiểu karaoke", combo(list(KARA_MODES), "sweep"),
                               "Quét mượt: màu chạy dần qua từng chữ · Từng từ: cả từ đổi màu khi tới lượt")
+        self.st_klisten = f.row("Theo mốc từng từ của giọng lồng", Switch(True),
+                                "Từng từ đổi màu đúng lúc giọng lồng đọc từ đó: giọng Edge có sẵn mốc từng từ; giọng "
+                                "VieNeu / OmniVoice được Whisper nghe lại (bấm \"Đo mốc từng từ\" – lần đầu tải Whisper "
+                                "turbo ~1,6 GB; đã có Whisper thì tự đo khi xuất video). Tắt: chia theo đoạn có tiếng")
+        self.st_klisten.setChecked(bool(self.settings.get("karaoke_listen", True)))
+        self.st_knote = label("", "muted", wrap=True)
+        self.st_kbtn = f.row("", flow(button("Đo mốc từng từ", "mic", "Whisper nghe lại các câu giọng lồng chưa có mốc "
+                                             "từng từ (không đọc lại giọng nào)", flat=True,
+                                             on_click=self._kara_listen), self.st_knote))
         self.st_ocolor = f.row("Màu viền", ColorButton("#000000"))
         self.st_outline = f.row("Độ dày viền", SliderRow(0, 8, 0.5, 2.5, 1))
         self.st_shadow = f.row("Bóng đổ", SliderRow(0, 5, 0.5, 1, 1))
@@ -1368,6 +1383,7 @@ class ProjectPage(QWidget):
         self.st_linefit.currentIndexChanged.connect(self._style_rows)
         self.st_box.toggledOn.connect(lambda *_: self._style_rows())
         self.st_kara.toggledOn.connect(lambda *_: self._style_rows())
+        self.st_klisten.toggledOn.connect(self._kara_listen_changed)
         for w in (self.st_burn, self.st_bold, self.st_upper, self.st_box, self.st_kara):
             w.toggledOn.connect(sv)
         card.add(f)
@@ -1395,13 +1411,36 @@ class ProjectPage(QWidget):
         f = self.st_form
         kara = self.st_kara.isChecked()
         for w, on in ((self.st_margin, not custom and self.st_pos.currentData() != "middle"),
-                      (self.st_kcolor, kara), (self.st_kmode, kara),
+                      (self.st_kcolor, kara), (self.st_kmode, kara), (self.st_klisten, kara),
+                      (self.st_kbtn, kara and self.st_klisten.isChecked()),
                       (self.st_posx, custom), (self.st_posy, custom), (self.st_posauto, custom),
                       (self.st_bfixed, box), (self.st_bpadx, box and not fixed), (self.st_bpady, box and not fixed),
                       (self.st_bw, box and fixed), (self.st_bh, box and fixed), (self.st_bcolor, box),
                       (self.st_bop, box), (self.st_bradius, box),
                       (self.st_minscale, self.st_linefit.currentData() == "shrink")):
             f.setRowVisible(w, on)
+
+    def _kara_listen_changed(self, on: bool):
+        self._save_setting("karaoke_listen", bool(on))
+        self._style_rows()
+        self._kara = None              # tính lại nhịp chữ karaoke xem trước
+        self._refresh_overlay()
+
+    def _kara_listen(self):
+        """Nút "Đo mốc từng từ": Whisper nghe lại các câu giọng lồng chưa có mốc từng từ -> karaoke đúng từng từ."""
+        if not self.p:
+            return
+        if not pipeline.karaoke_spans_on(self.p, self.p.edit):
+            return self.win.toast("Chưa có bản lồng tiếng đang bật – karaoke chỉ đo theo giọng lồng", "warn")
+        todo = len(pipeline.karaoke_listen_todo(self.p))
+        if not todo:
+            self.st_knote.setText("✓ Mọi câu đã có mốc từng từ")
+            return self.win.toast("Mọi câu giọng lồng đã có mốc từng từ – karaoke chạy đúng lúc từng từ", "ok")
+
+        def fn(j, p):
+            st = pipeline.karaoke_listen(p, None, j.update, j.cancelled, download=True)
+            return {"message": pipeline.karaoke_note(st)}
+        self.submit("karaoke", f"Đo mốc từng từ giọng lồng ({todo} câu)", fn)
 
     def _sub_edited(self, d: dict):
         """Kéo phụ đề / 4 chấm của nền hộp trên video -> ghi vào tab Kiểu chữ (lưu lại, xuất đúng như vậy)."""
@@ -2191,6 +2230,7 @@ class ProjectPage(QWidget):
         self.e_flipv.setChecked(bool(e["flip_v"]))
         self.e_zoom.set(e["zoom"])
         self.e_speed.set(e["speed"])
+        self.e_dubnat.setChecked(bool(e.get("dub_natural", True)))
         col = e["color"]
         self.e_bright.set(col.get("brightness", 0))
         self.e_contrast.set(col.get("contrast", 1))
@@ -2231,7 +2271,7 @@ class ProjectPage(QWidget):
             **self._frame_edit(e),
             "resolution": self.e_res.currentData(), "rotate": int(self.e_rot.currentData()),
             "flip_h": self.e_fliph.isChecked(), "flip_v": self.e_flipv.isChecked(),
-            "zoom": self.e_zoom.value(), "speed": self.e_speed.value(),
+            "zoom": self.e_zoom.value(), "speed": self.e_speed.value(), "dub_natural": self.e_dubnat.isChecked(),
             "color": {"brightness": self.e_bright.value(), "contrast": self.e_contrast.value(),
                       "saturation": self.e_sat.value(), "gamma": self.e_gamma.value(),
                       "sharpen": self.e_sharpen.isChecked(), "denoise": self.e_denoise.isChecked()},
@@ -2329,6 +2369,12 @@ class ProjectPage(QWidget):
         self._update_summary()
         self._update_timeline()
         self._update_player_audio()
+        spd = lambda e: (round(float(e.get("speed") or 1.0), 3), bool(e.get("dub_natural", True)))  # noqa: E731
+        if spd(before) != spd(cur) and pipeline.dub_speed_stale(self.p):
+            # đổi tốc độ video / bật tắt "giọng lồng giữ tốc độ tự nhiên": xếp lại bản lồng theo giờ video mới
+            vs = pipeline.dub_speed(cur)
+            self._relayout(f"Xếp lại giọng lồng theo tốc độ video ×{vs:.2f}" if vs != 1 else
+                           "Xếp lại giọng lồng theo giờ video gốc")
 
     # ------------------------------------------------------------------ hoàn tác / làm lại
     UNDO_MAX = 60
@@ -2598,6 +2644,9 @@ class ProjectPage(QWidget):
             if again and j.get("status") == "done" and j["id"] not in self._chained:
                 self._chained.add(j["id"])   # tách câu dài xong -> đọc lại giọng các vế mới (việc thứ 2), đúng 1 lần
                 self._redub_rows(again, play=False)
+            if j["kind"] in ("karaoke", "render", "dub", "redub", "relayout"):
+                self._kara = None                # mốc từng từ / bản lồng mới -> tính lại nhịp karaoke xem trước
+                self._refresh_overlay()
             if j["kind"] == "render" and j.get("status") == "done":
                 self.pub._use_latest()          # mục Đăng video dùng ngay bản vừa xuất
             elif j["kind"] == "publish":
@@ -5696,7 +5745,8 @@ class ProjectPage(QWidget):
         if e["flip_h"] or e["flip_v"] or e.get("rotate"):
             items.append("Lật / xoay")
         if abs(e["speed"] - 1) > 1e-3:
-            items.append(f"Tốc độ ×{e['speed']:.2f}")
+            items.append(f"Tốc độ ×{e['speed']:.2f}" + (" (giọng lồng giữ tốc độ tự nhiên)"
+                                                       if e.get("dub_natural", True) and e["dub"].get("wav") else ""))
         if e["dub"].get("enabled") and e["dub"].get("wav"):
             items.append(f"Lồng tiếng {langs.INFO[pipeline.trans_lang(self.p)]['short']}" +
                          (" + nhạc nền gốc đã tách" if e["dub"].get("bg_wav") else ""))

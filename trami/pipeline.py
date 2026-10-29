@@ -3176,7 +3176,9 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     # sửa bản đang dùng (xếp lại, xoá / kéo / gộp câu, đọc lại vài câu): chỉ ghi lại đúng đoạn thời gian thay đổi vào
     # file đó (~1 giây) thay vì dựng lại cả phim (phim 2 giờ: ghi lại ~500 MB + giải mã lại cho trình phát)
     ver = next((v for v in dub_versions(p) if v.get("wav") == str(target)), None) if use_cur else None
-    patch = {"wav": str(target), "placed": ver["placed"]} if ver and ver.get("placed") else None
+    vsp = dub_speed(p.edit)   # video đổi tốc độ mà giọng lồng giữ tốc độ tự nhiên (2.1.24)
+    patch = {"wav": str(target), "placed": ver["placed"], "vspeed": float(ver.get("vspeed") or 1.0)} \
+        if ver and ver.get("placed") else None
     old_stat = target.stat() if patch else None
     patched: list = []        # các đoạn đã vá (mẫu 24 kHz), qua mọi lần chạy
     full = [False]            # có lần dựng lại cả bản (ghi vào tmp_out)
@@ -3190,10 +3192,10 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
                        voices=voices, ref_audio=ref_audio, settings=settings,
                        skip_songs=bool(settings.get("dub_skip_songs", True)), stats=stats,
                        only=set(only) if only is not None else None, lang=trans_lang(p),
-                       genders=p.data.get("speaker_gender") or {}, patch=patch)
+                       genders=p.data.get("speaker_gender") or {}, patch=patch, vspeed=vsp)
         if stats.get("patched") is not None:
             patched.extend(stats["patched"])
-            patch = {"wav": str(target), "placed": stats["placed_tab"]}
+            patch = {"wav": str(target), "placed": stats["placed_tab"], "vspeed": vsp}
         else:
             full[0] = True
             patch = None      # bản mới nằm ở tmp_out -> lần chạy sau (rút gọn) cũng dựng cả bản
@@ -3270,6 +3272,7 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
              "stats": stats, "layout": layout}
     if placed_tab is not None:
         entry["placed"] = placed_tab   # đoạn giọng đã đặt trong bản này -> lần sửa sau chỉ vá phần thay đổi
+    entry["vspeed"] = vsp
     if top is not None:
         entry["env_top"] = top
     old_i = next((i for i, v in enumerate(vers) if v["wav"] == str(out)), None)
@@ -3286,6 +3289,7 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     was_on = bool(ed["dub"].get("enabled"))
     ed["dub"]["enabled"] = True
     ed["dub"]["wav"] = str(out)
+    ed["dub"]["vspeed"] = vsp       # bản lồng ghi theo giờ video ở tốc độ này (1 = giờ video gốc)
     if ed.get("audio") and not was_on and not st and float(ed["audio"].get("orig", 1.0)) > 0.5:
         ed["audio"]["orig"] = 0.15     # mới bật lồng tiếng, chưa tách giọng: tiếng gốc nhỏ lại cho nghe rõ lời Việt
     if st:  # có nhạc nền đã tách -> dùng làm nền cho bản lồng tiếng (sạch giọng gốc)
@@ -3487,6 +3491,25 @@ def relayout(p: Project, settings: dict | None = None, progress: Prog | None = N
     return dub(p, None, None, settings, progress, cancel, inplace=True, only=[])
 
 
+def dub_speed(edit: dict) -> float:
+    """Tốc độ video mà bản lồng cần được xếp theo (2.1.24): đổi Tốc độ ở tab Chỉnh sửa + bật "Giọng lồng giữ tốc độ
+    tự nhiên" (mặc định) -> giọng không bị kéo chậm / nhanh theo video, mỗi câu được xếp theo giờ video đã đổi tốc độ.
+    Tắt (hoặc tốc độ 1) -> 1: bản lồng theo giờ video gốc, khi xuất co giãn cùng video như trước."""
+    sp = min(4.0, max(0.25, float(edit.get("speed") or 1.0)))
+    if abs(sp - 1) < 1e-3 or not edit.get("dub_natural", True):
+        return 1.0
+    return round(sp, 4)
+
+
+def dub_speed_stale(p: Project, edit: dict | None = None) -> bool:
+    """Bản lồng đang dùng được xếp theo tốc độ video khác tốc độ hiện tại -> cần xếp lại (không đọc lại câu nào)."""
+    ed = edit or p.edit
+    d = ed.get("dub") or {}
+    if not d.get("wav") or not Path(d["wav"]).exists() or not any(s.extra.get("tts_file") for s in p.segments):
+        return False
+    return abs(float(d.get("vspeed") or 1.0) - dub_speed(ed)) > 1e-3
+
+
 def dub_env_path(wav: str | Path) -> Path:
     """Sóng âm 0,01 s của bản lồng (2.0.97; bản cũ "<bản lồng>.env.npy" 0,05 s – tự làm lại khi mở)."""
     return Path(wav).with_suffix(".env10.npy")
@@ -3568,7 +3591,8 @@ def dub_wave(p: Project) -> tuple[str, float] | None:
     env = dub_env_path(wav)
     if not env.exists() or env.stat().st_mtime < Path(wav).stat().st_mtime:
         _dub_env_full(wav)
-    return str(env), ENV_HOP
+    # bản lồng ghi theo giờ video đã đổi tốc độ: mỗi bước 0,01 s của file = 0,01 × tốc độ giây video gốc
+    return str(env), ENV_HOP * float((p.edit.get("dub") or {}).get("vspeed") or 1.0)
 
 
 
@@ -3611,11 +3635,13 @@ def follow_params(settings: dict) -> dict:
             "min_dur": float(settings.get("sub_min_dur", 1.0)), "join": float(settings.get("sub_join_gap", 0.3))}
 
 
-def karaoke_spans(p: Project, edit: dict | None = None) -> dict[int, list]:
-    """{số câu: [[giây bắt đầu, giây kết thúc] các đoạn có tiếng]} của giọng lồng từng câu – karaoke chạy theo giọng
-    đọc. Không dùng bản lồng tiếng (tắt / tắt lớp / âm lượng 0) -> {} (karaoke theo thời gian hiện câu)."""
+def karaoke_spans(p: Project, edit: dict | None = None) -> dict[int, dict]:
+    """{số câu: {"kv": [[giây bắt đầu, giây kết thúc] các đoạn có tiếng], "kw": mốc thật từng từ phụ đề | None}} của
+    giọng lồng từng câu – karaoke chạy theo giọng đọc (kw: Edge trả sẵn / Whisper nghe lại, trami/dubwords.py; chưa có
+    thì karaoke chia theo đoạn có tiếng). Không dùng bản lồng tiếng (tắt / tắt lớp / âm lượng 0) -> {}."""
+    from . import dubwords
     from .audiomix import audio_settings
-    from .karaoke import voiced
+    from .karaoke import align_words, voiced
 
     ed = edit or p.edit
     d = ed.get("dub") or {}
@@ -3633,7 +3659,11 @@ def karaoke_spans(p: Project, edit: dict | None = None) -> dict[int, list]:
     except (OSError, ValueError):
         return {}
     segs = p.segments
-    out: dict[int, list] = {}
+    ver = next((v for v in dub_versions(p) if v.get("wav") == d.get("wav")), None) or {}
+    tab = {str(e[0]): e for e in ver.get("placed") or []}
+    vsp = float(d.get("vspeed") or 1.0)
+    real = bool(load_settings().get("karaoke_listen", True))   # tắt: karaoke đoán theo đoạn có tiếng như trước
+    out: dict[int, dict] = {}
     for item in layout:
         a0, a1, k = float(item[0]), float(item[1]), int(item[2])
         if not 0 <= k < len(segs):
@@ -3644,9 +3674,85 @@ def karaoke_spans(p: Project, edit: dict | None = None) -> dict[int, list]:
         elif a1 <= segs[k].start - 1.0 or a0 >= segs[k].end + 1.0:
             continue        # câu đã sửa / thêm bớt sau khi lồng tiếng
         sp = voiced(env, w[1], a0, a1)
-        if sp:
-            out[k] = sp
+        kw = None
+        clip = segs[k].extra.get("tts_file")
+        if clip and at and real:
+            try:
+                words = dubwords.line_words(clip, tab.get(Path(clip).name), vsp)
+                kw = align_words(" ".join((segs[k].trans or "").split()), words) if words else None
+            except Exception:  # noqa: BLE001 – file mốc từ hỏng: karaoke đoán như cũ
+                kw = None
+        if sp or kw:
+            out[k] = {"kv": sp, "kw": kw}
     return out
+
+
+def karaoke_spans_on(p: Project, edit: dict | None = None) -> bool:
+    """Bản lồng tiếng đang được nghe (karaoke chạy theo giọng lồng)."""
+    from .audiomix import audio_settings
+
+    ed = edit or p.edit
+    d = ed.get("dub") or {}
+    a = audio_settings(ed)
+    return bool(d.get("enabled") and d.get("wav") and Path(d["wav"]).exists()) and "dub" not in a["mute"] and \
+        float(a.get("dub", 1.0)) > 0
+
+
+def _deep_merge_style(settings: dict, edit: dict) -> dict:
+    from .config import _deep_merge
+
+    return _deep_merge(settings.get("sub_style") or {}, (edit.get("subtitles") or {}).get("style") or {})
+
+
+def karaoke_gpu(p: Project, settings: dict | None = None) -> bool:
+    """Xuất video sẽ phải nghe lại giọng lồng bằng Whisper (karaoke bật, có câu chưa có mốc từng từ, có mô hình)."""
+    from . import dubwords
+
+    settings = settings or load_settings()
+    ed = p.edit
+    if not (_deep_merge_style(settings, ed).get("karaoke") and settings.get("karaoke_listen", True)
+            and karaoke_spans_on(p, ed)):
+        return False
+    return bool(dubwords.model_name(settings)) and bool(karaoke_listen_todo(p, settings))
+
+
+def karaoke_listen_todo(p: Project, settings: dict | None = None) -> list[tuple[str, str, str]]:
+    """Các đoạn giọng lồng chưa có mốc từng từ (giọng không phải Edge, hoặc đọc từ trước 2.1.24) – (file, lời, tiếng)."""
+    from . import dubwords, langs
+
+    lg = trans_lang(p)
+    out, seen = [], set()
+    for s in p.segments:
+        f = s.extra.get("tts_file")
+        if not f or f in seen or not s.extra.get("dub_at") or not Path(f).exists() or dubwords.load(f):
+            continue
+        seen.add(f)
+        out.append((f, " ".join((s.trans or "").split()), langs.detect(s.trans or "", lg)))
+    return out
+
+
+def karaoke_listen(p: Project, settings: dict | None = None, progress: Prog | None = None, cancel=None,
+                   download: bool = True) -> dict:
+    """Nút "Đo mốc từng từ" (tab Kiểu chữ) / trước khi xuất video có karaoke: nghe lại các đoạn giọng lồng chưa có mốc
+    từng từ bằng Whisper (biết trước lời) -> karaoke đổi màu đúng lúc từng từ được đọc. Không đọc lại giọng nào."""
+    from . import dubwords
+
+    settings = settings or load_settings()
+    todo = karaoke_listen_todo(p, settings)
+    st = dubwords.listen(todo, settings, progress, cancel, download=download)
+    st["todo"] = len(todo)
+    return st
+
+
+def karaoke_note(st: dict) -> str:
+    if not st.get("todo"):
+        return "Mọi câu đã có mốc từng từ của giọng lồng – karaoke chạy đúng lúc từng từ được đọc"
+    if not st.get("model"):
+        return f"{st['todo']} câu chưa có mốc từng từ (chưa có Whisper trên máy) – karaoke đoán theo đoạn có tiếng"
+    msg = f"Đã đo mốc từng từ {st['done']}/{st['todo']} câu giọng lồng (Whisper {st['model']})"
+    if st.get("skipped"):
+        msg += f" · {st['skipped']} câu không đo được (karaoke đoán theo đoạn có tiếng)"
+    return msg
 
 def redub(p: Project, rows: list[int], rate: str | None = None, settings: dict | None = None,
           progress: Prog | None = None, cancel=None, engine: str | None = None, new_take: bool = True) -> Path:
@@ -3956,6 +4062,7 @@ def use_dub_version(p: Project, wav: str) -> None:
     ed = p.edit
     ed["dub"]["wav"] = wav
     ed["dub"]["enabled"] = True
+    ed["dub"]["vspeed"] = float(v.get("vspeed") or 1.0)
     p.data["edit"] = ed
     p.data["dub_stats"] = v.get("stats") or {}
     p.data["dub_layout"] = v.get("layout") or []
@@ -3983,6 +4090,7 @@ def delete_dub_version(p: Project, wav: str) -> None:
     if ed["dub"].get("wav") == wav:
         if vers:
             ed["dub"]["wav"] = vers[0]["wav"]
+            ed["dub"]["vspeed"] = float(vers[0].get("vspeed") or 1.0)
             p.data["dub_stats"] = vers[0].get("stats") or {}
         else:
             ed["dub"]["wav"] = ""
@@ -4046,7 +4154,7 @@ def audio_state(p: Project, edit: dict | None = None, srcs: dict | None = None) 
     return {"gains": gains(a, stems_on, dub_on, "bgm" in srcs), "stems_on": stems_on, "dub_on": dub_on,
             "songs": song_spans(p) if stems_on else [], "keep": keep, "duck": bool(a.get("duck", True)),
             "fade": (float(fade.get("in") or 0), float(fade.get("out") or 0)), "settings": a,
-            "mute": [list(x) for x in ed.get("mute_spans") or []]}
+            "mute": [list(x) for x in ed.get("mute_spans") or []], "dub_rate": float(d.get("vspeed") or 1.0)}
 
 
 def live_mix(p: Project, edit: dict | None = None, progress: Prog | None = None):
@@ -4075,6 +4183,7 @@ def apply_audio_state(mix, state: dict) -> None:
     mix.fade = state["fade"]
     mix.duck = state["duck"]
     mix.mute = state.get("mute") or []
+    mix.dub_rate = float(state.get("dub_rate") or 1.0)
 
 
 def mix_audio_file(p: Project, out: Path, progress: Prog | None = None) -> Path:
@@ -4088,6 +4197,13 @@ def mix_audio_file(p: Project, out: Path, progress: Prog | None = None) -> Path:
     tmp = out.with_suffix(".tmp.wav")
     import wave
 
+    # bản lồng xếp theo video đã đổi tốc độ (giọng giữ tốc độ tự nhiên): trộn các lớp khác theo giờ gốc, đổi tốc độ
+    # giữ cao độ bằng FFmpeg rồi mới thêm bản lồng – không co giãn giọng lồng
+    dr = float(getattr(mix, "dub_rate", 1.0) or 1.0)
+    dub_sep = abs(dr - 1) > 1e-3 and "dub" in mix.tracks and mix.g.get("dub", 0) > 0 and mix.solo in (None, "dub")
+    if dub_sep:
+        mix.skip = {"dub"}
+        dur = max((len(t) for k, t in mix.tracks.items() if k != "dub"), default=0) / SR
     with wave.open(str(tmp), "wb") as w:
         w.setnchannels(2)
         w.setsampwidth(2)
@@ -4100,7 +4216,19 @@ def mix_audio_file(p: Project, out: Path, progress: Prog | None = None) -> Path:
             pos += adv
             if progress:
                 progress(pos / total, "Đang trộn âm thanh")
-    ff.run(["-i", str(tmp), "-c:a", "libmp3lame", "-b:a", "192k", str(out)], dur, None, None, "Đang lưu MP3")
+    if dub_sep:
+        from .video import _atempo_chain
+
+        gd = mix.g.get("dub", 1.0)
+        solo = mix.solo == "dub" or total <= 0
+        fc = (f"[1:a]aresample={SR},aformat=channel_layouts=stereo,volume={gd:.3f}[d]" if solo else
+              f"[0:a]{','.join(_atempo_chain(dr))}[a];[1:a]aresample={SR},aformat=channel_layouts=stereo,"
+              f"volume={gd:.3f}[d];[a][d]amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.95[m]")
+        ff.run(["-i", str(tmp), "-i", str(p.edit["dub"]["wav"]), "-filter_complex", fc, "-map",
+                "[d]" if solo else "[m]", "-c:a", "libmp3lame", "-b:a", "192k", str(out)], dur / dr, None, None,
+               "Đang lưu MP3")
+    else:
+        ff.run(["-i", str(tmp), "-c:a", "libmp3lame", "-b:a", "192k", str(out)], dur, None, None, "Đang lưu MP3")
     tmp.unlink(missing_ok=True)
     return out
 
@@ -4126,6 +4254,8 @@ def dub_summary(p: Project) -> str:
         extra.append(f"⧉ {sh['over']} câu đọc đè câu sau")
     if sh.get("cut"):
         extra.append(f"✂ {sh['cut']} câu bị cắt bớt cuối")
+    if abs(float(st.get("vspeed") or 1.0) - 1) > 1e-3:
+        extra.append(f"xếp theo video ×{float(st['vspeed']):.2f} – giọng lồng giữ tốc độ tự nhiên")
     if st.get("pauses"):
         extra.append(f"nghỉ đúng chỗ nhân vật ngắt hơi {st['pauses']} chỗ")
     if st.get("clauses"):
@@ -4324,7 +4454,26 @@ def render(p: Project, settings: dict | None = None, progress: Prog | None = Non
     from .video import build_and_render, edit_for_ratio, ratio_tag
 
     settings = settings or load_settings()
+    if dub_speed_stale(p) and (p.edit.get("dub") or {}).get("enabled"):
+        # đổi tốc độ video (hoặc bật / tắt "giọng lồng giữ tốc độ tự nhiên") sau khi lồng tiếng: xếp lại bản lồng
+        # theo giờ video mới trước khi xuất (không đọc lại câu nào)
+        relayout(p, settings, _sub(progress, 0.0, 0.05), cancel)
+        progress = _sub(progress, 0.05, 1.0)
     edit = p.edit
+    sty = _deep_merge_style(settings, edit)
+    if sty.get("karaoke") and settings.get("karaoke_listen", True) and karaoke_spans_on(p, edit):
+        # karaoke theo mốc thật từng từ: câu giọng lồng chưa có mốc (không phải Edge) -> Whisper nghe lại (chỉ khi đã
+        # có mô hình Whisper trên máy – không tự tải 1,6 GB khi xuất)
+        from .ffmpeg import Cancelled
+
+        try:
+            st = karaoke_listen(p, settings, _sub(progress, 0.0, 0.08), cancel, download=False)
+            if st.get("todo"):
+                progress = _sub(progress, 0.08, 1.0)
+        except Cancelled:
+            raise
+        except Exception:  # noqa: BLE001 – không đo được: karaoke đoán như cũ
+            log_error("Đo mốc từng từ giọng lồng trước khi xuất")
     edit["hardsub"] = hardsub_spec(p)
     srcs = audio_sources(p, edit)
     d = edit.setdefault("dub", {})
@@ -4354,8 +4503,11 @@ def render(p: Project, settings: dict | None = None, progress: Prog | None = Non
             out = p.output_dir / f"{safe_name(nm)}_{stamp}.mp4"
         segs = [Segment(s.start, s.end, s.text, s.trans, s.speaker, dict(s.extra)) for s in segs0]
         if e["subtitles"]["style"].get("karaoke"):
-            for i, sp in karaoke_spans(p, e).items():
-                segs[i].extra["kv"] = sp
+            for i, v in karaoke_spans(p, e).items():
+                if v.get("kv"):
+                    segs[i].extra["kv"] = v["kv"]
+                if v.get("kw"):
+                    segs[i].extra["kw"] = v["kw"]
         # câu có giọng lồng đọc sớm / bị lùi / đọc dài: phụ đề hiện theo đúng lúc giọng đọc
         segs = subs_follow_dub(p, segs, e, settings, (e.get("subtitles") or {}).get("which", "trans"))
         pr = progress

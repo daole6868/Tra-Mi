@@ -1761,8 +1761,12 @@ class Player(QWidget):
         key = (i, text, s.start, s.end)
         times = self._kara_cache.get(key)
         if times is None:
+            v = self.kara_spans.get(i) or {}
+            if isinstance(v, list):
+                v = {"kv": v}
             times = self._kara_cache[key] = word_times(" ".join((text or "").split()) if self.which != "source"
-                                                       else text, s.start, s.end, self.kara_spans.get(i))
+                                                       else text, s.start, s.end, v.get("kv"),
+                                                       v.get("kw") if self.which != "source" else None)
         return progress(times, t, self.style.get("karaoke_mode", "sweep"))
 
     def update_sub(self, t: float | None = None):

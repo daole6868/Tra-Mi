@@ -320,6 +320,27 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `Translator._size` vừa sức; trả lời bị cắt (`finish_reason` length / `stop_reason` max_tokens -> `LLMClient._tl.cut`
   theo luồng) -> giữ dòng đã trả (`_extract_json` nhặt cả dòng {"dau","dich"} trọn trong JSON dở), dịch tiếp phần sau 1 lô
   (không tính 1 lần thử). Vừa tách vừa dịch (`stream`) lô ≤ 200.
+- Video đổi tốc độ, giọng lồng giữ tốc độ tự nhiên (2.1.24): edit `dub_natural` (mặc định bật, công tắc `e_dubnat` dưới
+  "Tốc độ" tab Chỉnh sửa) -> `pipeline.dub_speed(edit)` = tốc độ video (tắt / ×1 -> 1) -> `synthesize_dub(vspeed=)`: xếp
+  giọng theo giây video GỐC với độ dài giọng × vspeed (0,85× -> mỗi câu thêm ~18 % chỗ), bản lồng ghi theo giờ video ĐÃ
+  đổi tốc độ (giây gốc / vspeed: vị trí `st`, lặng chèn `plan_pauses(vspeed=)`, cắt đuôi), `dub_at` / layout vẫn giây
+  gốc; `edit["dub"]["vspeed"]` + `dub_versions[i]["vspeed"]` (vá chỉ khi cùng vspeed). Dùng bản lồng: xuất
+  (`video.ext_audio(scale=)` -ss / -t / aselect / apad chia vspeed, atempo chỉ phần tốc độ / vspeed), trình phát
+  (`LiveMix.dub_rate` từ `audio_state["dub_rate"]`: đọc bản lồng ở khung start / dub_rate, không co giãn khi phát đúng
+  tốc độ; giảm nhạc thêm theo t / dub_rate; `duration`), sóng âm timeline / karaoke (`dub_wave` bước 0,01 × vspeed), Tải
+  MP3 bản trộn (`mix_audio_file`: các lớp khác theo giờ gốc -> atempo, rồi amix bản lồng; `LiveMix.skip`). Đổi tốc độ /
+  công tắc sau khi lồng -> `dub_speed_stale` -> `_save_edit_now` gọi `_relayout` (không đọc lại), `render` tự xếp lại.
+- Karaoke theo mốc thật từng từ (2.1.24, `trami/dubwords.py`): `<file giọng>.words.json` {rel raw | trim, src edge |
+  whisper, sig, w [[giây, giây, chữ]]}. Edge: `_edge_comm(words=True)` (boundary "WordBoundary" – edge-tts 7 mặc định
+  theo câu) + `save(audio, metadata)` -> `edge_jsonl`; đọc từng vế -> `dubwords.join` (dời theo chỗ nối). Giọng khác:
+  `dubwords.listen` = faster-whisper `word_timestamps` + `initial_prompt` = lời đã đọc trên đoạn đã bỏ lặng (mô hình
+  `model_name`: turbo / `asr_model` / large-v3… đã có trên máy; nút "Đo mốc từng từ" tab Kiểu chữ = việc GPU "karaoke",
+  `download=True` tải turbo; `render` tự đo khi đã có mô hình – `jobs.needs_gpu("render")` -> `karaoke_gpu`).
+  `dubwords.to_dub(entry placed, giây, vspeed)` (như `insert_pauses`: tốc độ, lặng chèn, đọc nhanh vế trước, cắt đuôi)
+  -> `line_words` -> `karaoke.align_words(trans, words)` (khớp theo CHỮ bằng SequenceMatcher, từ không khớp chia khoảng
+  giữa, khớp < `ALIGN_MIN` 60 % -> None) -> `pipeline.karaoke_spans` trả {câu: {"kv", "kw"}} -> `extra["kw"]` (xuất:
+  `to_ass` -> `ass_text(words=)`, `remap_after_cut` / `scale_time` dời theo; xem trước `player._karaoke`) ->
+  `word_times(words=)`. Cài đặt `karaoke_listen` (công tắc "Theo mốc từng từ của giọng lồng", tắt = đoán như cũ).
 - Dấu câu bản dịch (2.1.11): `translate.punct_fix` = `fix_commas` (bỏ dấu phẩy ngay sau `COMMA_GLUE` lượng từ / "của" khi
   chữ sau viết thường, trừ dãy số; dấu phẩy giữa các tiếng của tên trong bảng thuật ngữ `Translator.names`) + `end_punct`
   (thiếu dấu câu cuối -> theo câu gốc: ？/吗/么 -> ?, ！ -> !, … , dấu phẩy -> ",", còn lại "."; Nhật 。？！、, Thái không
@@ -388,7 +409,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (237 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (240 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2069,8 +2090,22 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   200 câu cần ~8–12k (tiếng Việt có dấu tốn token, JSON "dau"/"dich") -> câu trả lời bị cắt, JSON hỏng, chia đôi lô gửi lại
   (tốn gấp 2–3 lần). Xem Cấu trúc "Số câu mỗi lần gửi / gửi cùng lúc". Thử với AI giả: 50 câu / 5 lô 0,25 s mỗi lô -> gửi
   cùng lúc ~0,3 s (lần lượt 1,25 s), kết quả giống hệt; API thật chưa gọi (sandbox).
+- 2.1.24: người dùng xem ttthanh2044/voxdub (KHÔNG có giấy phép – chỉ học ý, không chép mã) -> làm mục 1 "làm chậm cả
+  video cho vừa lồng tiếng mà giọng lồng giữ tốc độ tự nhiên" + mục 2 "karaoke theo mốc từ thật". Trước: Tốc độ ở tab
+  Chỉnh sửa co giãn CẢ bản lồng (atempo) -> video chậm 0,85 thì giọng Việt cũng kéo chậm, câu vốn phải đọc nhanh vẫn
+  nhanh; karaoke chia đều theo độ dài từ trên đoạn có tiếng. Giờ xem Cấu trúc "Video đổi tốc độ…" + "Karaoke theo mốc
+  thật từng từ". Thử: Edge giả 1,2 s câu chỗ 1,1 s -> ×1 phải đọc nhanh, 0,8× đọc ×1,0 đúng 1,2 s ở giây 1,25 của bản
+  lồng; trình phát đọc thẳng bản lồng (khối nối liền); xuất có đoạn cắt + 0,8× tiếng 1 kHz đúng 0,75 s dài 1,2 s; đổi tốc
+  độ -> xếp lại không đọc lại, lần sau vá tại chỗ; mốc từ map đúng ±0,03 s qua tốc độ ×1,25 + lặng chèn + 0,8×. Chưa
+  chạy Edge thật (sandbox chặn) – mốc WordBoundary lệch bao nhiêu so với mp3 Edge chưa đo; Whisper thật chưa chạy.
+  Gửi bản FULL tool (người dùng yêu cầu).
 
 ## Vấn đề đang mở
+- 2.1.24: chờ người dùng (1) làm chậm 1 phim đã lồng (tab Chỉnh sửa → Tốc độ 0,85, "Giọng lồng giữ tốc độ tự nhiên" bật):
+  tool tự xếp lại giọng lồng, nghe trình phát + video xuất – giọng có bình thường không, câu đỏ / ⚡ có ít đi không;
+  (2) karaoke với giọng Edge (lồng lại để có mốc từ – câu đọc trước 2.1.24 chưa có) + VieNeu (tab Kiểu chữ → "Đo mốc
+  từng từ", lần đầu tải Whisper turbo): chữ đổi màu có đúng lúc từng từ không, có lệch đều 1 khoảng không (mp3 Edge có
+  thể lệch ~0,05 s).
 - 2.1.23: chờ người dùng bật "Gửi tất cả cùng lúc" (Cài đặt → Công cụ dịch → khung OpenAI), dịch lại 1 phim: thời gian
   dịch, có bị báo gửi quá nhanh (429 – giới hạn token / phút của gói) không, thông báo "N câu AI lỗi phải dùng Google"
   phải ~0; thử "Số câu mỗi lần gửi" 300–500.

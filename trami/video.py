@@ -776,8 +776,8 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
         # ---- 11. phụ đề mới
         sub = spec.get("subtitles") or {}
         if sub.get("burn") and segments:
-            segs = [Segment(s.start, s.end, s.text, s.trans, extra={"kv": s.extra["kv"]} if s.extra.get("kv") else {})
-                    for s in segments]
+            segs = [Segment(s.start, s.end, s.text, s.trans, extra={k: s.extra[k] for k in ("kv", "kw")
+                                                                    if s.extra.get(k)}) for s in segments]
             if not full:
                 segs = remap_after_cut(segs, keep)
             segs = scale_time(segs, speed)
@@ -852,21 +852,30 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
         counter = [0]
         span = seek1 - seek0  # độ dài đoạn video đầu vào sau khi seek
 
-        def ext_audio(path: str, pre: str = "") -> str:
-            """Thêm 1 file âm thanh ngoài (cùng mốc thời gian với video gốc), cắt giống video. Trả về nhãn."""
+        def ext_audio(path: str, pre: str = "", scale: float = 1.0) -> str:
+            """Thêm 1 file âm thanh ngoài (cùng mốc thời gian với video gốc), cắt giống video. Trả về nhãn.
+            scale ≠ 1: file theo giờ video đã đổi tốc độ (giây gốc / scale – bản lồng giữ tốc độ tự nhiên)."""
             nonlocal n_in
-            inputs.extend(in_opts + ["-i", str(Path(path).resolve())])
+            opts = in_opts
+            if abs(scale - 1) > 1e-3:
+                opts = []
+                if seek0 > 0.01:
+                    opts += ["-ss", f"{seek0 / scale:.3f}"]
+                if seek1 < dur - 0.05 or seek0 > 0.01:
+                    opts += ["-t", f"{(seek1 - seek0) / scale:.3f}"]
+            inputs.extend(opts + ["-i", str(Path(path).resolve())])
             idx = n_in
             n_in += 1
             counter[0] += 1
             lab = f"ex{counter[0]}"
             pre_f = (pre + ",") if pre else ""
+            sp = span / scale
             if len(keep) == 1:
-                fc.append(f"[{idx}:a]aresample=44100,{pre_f}asetpts=PTS-STARTPTS,apad=whole_dur={span:.3f},"
-                          f"atrim=0:{span:.3f}[{lab}]")
+                fc.append(f"[{idx}:a]aresample=44100,{pre_f}asetpts=PTS-STARTPTS,apad=whole_dur={sp:.3f},"
+                          f"atrim=0:{sp:.3f}[{lab}]")
             else:
-                expr = "+".join(f"between(t,{a:.3f},{b - 0.001:.3f})" for a, b in rel_keep)
-                fc.append(f"[{idx}:a]aresample=44100,{pre_f}apad=whole_dur={span:.3f},atrim=0:{span:.3f},"
+                expr = "+".join(f"between(t,{a / scale:.3f},{b / scale - 0.001:.3f})" for a, b in rel_keep)
+                fc.append(f"[{idx}:a]aresample=44100,{pre_f}apad=whole_dur={sp:.3f},atrim=0:{sp:.3f},"
                           f"aselect='{expr}',asetpts=N/SR/TB[{lab}]")
             return lab
 
@@ -895,9 +904,14 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
             amix_inputs.append("[ao]")
         duck = has_bgm and use_dub and aset.get("duck", True) and g["dub"] > 0.001 and g["bgm"] > 0.001
         if use_dub and g["dub"] > 0.001:
-            lab = ext_audio(dub["wav"])
+            # bản lồng xếp theo giờ video đã đổi tốc độ (giọng giữ tốc độ tự nhiên, 2.1.24) -> không co giãn lại;
+            # bản lồng theo giờ gốc (vspeed 1) co giãn cùng video như trước
+            dsp = min(4.0, max(0.25, float(dub.get("vspeed") or 1.0)))
+            lab = ext_audio(dub["wav"], scale=dsp)
+            rest = speed / dsp
+            dtempo = (',' + ','.join(_atempo_chain(rest))) if abs(rest - 1) > 1e-3 else ''
             split = ",asplit=2[dso][dsk]" if duck else "[dso]"
-            fc.append(f"[{lab}]volume={g['dub']:.3f}{tempo}{split}")
+            fc.append(f"[{lab}]volume={g['dub']:.3f}{dtempo}{split}")
             amix_inputs.append("[dso]")
         if has_a and "[ao]" not in amix_inputs:
             fc.append("[a0]anullsink")  # âm thanh gốc không dùng tới

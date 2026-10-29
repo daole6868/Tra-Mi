@@ -75,7 +75,7 @@ def max_running() -> int:
         _limit_cache[0] = now
     return _limit_cache[1]
 # việc nặng GPU (mỗi lúc 1 việc); việc khác (mạng / CPU) chạy song song
-GPU_KINDS = {"auto", "recognize", "separate", "diarize", "inpaint", "dub", "redub", "realign", "dual"}
+GPU_KINDS = {"auto", "recognize", "separate", "diarize", "inpaint", "dub", "redub", "realign", "dual", "karaoke"}
 # việc chỉ ĐỌC dự án (không ghi project.json) -> chạy được song song với việc khác của cùng dự án
 READONLY_KINDS = {"preview", "tool", "publish"}   # publish chỉ ghi posts.json riêng
 # việc rất nhẹ (vài giây, không dùng card): xếp lại bản lồng sau khi xoá / kéo / gộp câu -> không phải chờ việc dài của
@@ -105,8 +105,10 @@ def needs_gpu(kind: str, project_id: str = "") -> bool:
             from .video import needs_clean
 
             p = Project(project_id)
-            return bool(p.data.get("source")) and needs_clean(pipeline.hardsub_spec(p)) and \
-                pipeline.inpainted_video(p) is None
+            if bool(p.data.get("source")) and needs_clean(pipeline.hardsub_spec(p)) and \
+                    pipeline.inpainted_video(p) is None:
+                return True
+            return pipeline.karaoke_gpu(p)   # karaoke: Whisper nghe lại giọng lồng chưa có mốc từng từ
         except Exception:  # noqa: BLE001
             return True
     return kind in GPU_KINDS

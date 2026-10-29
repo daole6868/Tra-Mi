@@ -1,6 +1,8 @@
 """Hiệu ứng karaoke cho phụ đề: chữ đổi màu lần lượt từng từ đúng lúc được đọc. Dùng được với MỌI font.
 
 Thời điểm từng từ:
+  - đã có mốc từng từ thật của giọng lồng (2.1.24, trami/dubwords.py: Edge trả sẵn, giọng khác nghe lại bằng
+    Whisper): mỗi từ đổi màu đúng lúc được đọc (align_words ghép từ giọng đọc vào từ phụ đề theo chữ);
   - đang dùng bản lồng tiếng: theo đúng đoạn giọng Việt của câu đó (chỗ có tiếng / chỗ ngắt hơi đo từ sóng âm
     bản lồng) -> chữ chạy theo giọng đọc, dừng ở dấu phẩy khi giọng ngừng;
   - không lồng tiếng: rải đều trong thời gian hiện câu (theo độ dài từ, có nghỉ ở dấu câu).
@@ -78,12 +80,96 @@ def _walk(spans: list[tuple[float, float]], x: float) -> float:
     return spans[-1][1]
 
 
-def word_times(text: str, start: float, end: float, spans: list | None = None) -> list[tuple[float, float]]:
-    """(bắt đầu, kết thúc) của từng từ trong tokens(text)."""
+def _norm(s: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFC", s.lower()) if c.isalnum())
+
+
+ALIGN_MIN = 0.6     # ≥ 60 % chữ của câu phụ đề khớp chữ giọng đọc mới dùng mốc thật (lời đã sửa sau khi lồng -> đoán)
+
+
+def align_words(text: str, words: list | None) -> list[list[float]] | None:
+    """Ghép mốc từng từ của giọng đọc [[bắt đầu, kết thúc, chữ]] vào từng từ phụ đề (tokens(text)) theo CHỮ (không
+    theo số từ: Edge / Whisper có thể gộp / tách từ khác phụ đề, đọc "3" thành "ba"…). Từ không khớp chữ nào -> chia
+    đều khoảng giữa 2 từ khớp bên cạnh. Khớp < ALIGN_MIN -> None (karaoke đoán như cũ)."""
+    from difflib import SequenceMatcher
+
+    toks = tokens(text)
+    if not toks or not words:
+        return None
+    s_chars, s_tok = [], []
+    for i, (t, _j) in enumerate(toks):
+        for c in _norm(t):
+            s_chars.append(c)
+            s_tok.append(i)
+    t_chars, t_time = [], []
+    for a, b, w in words:
+        cs = _norm(str(w))
+        a, b = float(a), max(float(a), float(b))
+        for j, c in enumerate(cs):
+            t_chars.append(c)
+            t_time.append((a + (b - a) * j / len(cs), a + (b - a) * (j + 1) / len(cs)))
+    if not s_chars or not t_chars:
+        return None
+    sm = SequenceMatcher(None, "".join(s_chars), "".join(t_chars), autojunk=False)
+    got: list[list[float] | None] = [None] * len(toks)
+    hit = 0
+    for blk in sm.get_matching_blocks():
+        for d in range(blk.size):
+            i, (a, b) = s_tok[blk.a + d], t_time[blk.b + d]
+            hit += 1
+            if got[i] is None:
+                got[i] = [a, b]
+            else:
+                got[i] = [min(got[i][0], a), max(got[i][1], b)]
+    if hit < ALIGN_MIN * len(s_chars):
+        return None
+    # từ không khớp: lấp khoảng giữa 2 từ khớp bên cạnh (theo độ dài từ)
+    known = [i for i, g in enumerate(got) if g is not None]
+    if not known:
+        return None
+    first, last = known[0], known[-1]
+    for i in range(first):                       # trước từ khớp đầu tiên: chạy nhanh ngay trước nó
+        got[i] = [got[first][0], got[first][0]]
+    for i in range(last + 1, len(toks)):
+        got[i] = [got[last][1], got[last][1]]
+    i = first
+    while i < last:
+        if got[i + 1] is not None:
+            i += 1
+            continue
+        j = i + 1
+        while got[j] is None:
+            j += 1
+        lo, hi = got[i][1], max(got[i][1], got[j][0])
+        ws = [_weight(toks[k][0]) for k in range(i + 1, j)]
+        acc, tot = 0.0, sum(ws)
+        for k, w in zip(range(i + 1, j), ws):
+            a = lo + (hi - lo) * acc / tot
+            acc += w
+            got[k] = [a, lo + (hi - lo) * acc / tot]
+        i = j
+    out, prev = [], None
+    for a, b in got:                             # luôn tăng dần, không chồng
+        a = a if prev is None else max(a, prev)
+        b = max(a, b)
+        out.append([round(a, 3), round(b, 3)])
+        prev = b
+    return out
+
+
+def word_times(text: str, start: float, end: float, spans: list | None = None,
+               words: list | None = None) -> list[tuple[float, float]]:
+    """(bắt đầu, kết thúc) của từng từ trong tokens(text). words: mốc thật từng từ (align_words, cùng số từ) – giọng dài
+    hơn thời gian hiện câu thì co lại cho vừa như đoạn giọng."""
     toks = tokens(text)
     n = len(toks)
     if not n or end <= start:
         return [(start, end)] * n
+    if words and len(words) == n:
+        lo, hi = min(float(words[0][0]), start), max(float(words[-1][1]), end)
+        k = (end - start) / max(1e-6, hi - lo) if (lo < start or hi > end) else 1.0
+        return [(start + (float(a) - lo) * k, start + (float(b) - lo) * k) if k != 1.0 else (float(a), float(b))
+                for a, b in words]
     w = [_weight(t) for t, _ in toks]
     pz = [_pause(t) for t, _ in toks[:-1]] + [0.0]
     sp = _fit(spans or [], start, end)
@@ -140,12 +226,13 @@ def _esc(t: str) -> str:
     return t.replace("\\", "\\\\").replace("{", "(").replace("}", ")")
 
 
-def ass_text(text: str, start: float, end: float, spans: list | None = None, mode: str = "sweep") -> str:
+def ass_text(text: str, start: float, end: float, spans: list | None = None, mode: str = "sweep",
+             words: list | None = None) -> str:
     """Câu phụ đề (đã ngắt dòng bằng \\n) -> chữ ASS có thẻ karaoke. Chỗ chưa tới lượt có thẻ \\k rỗng để chờ."""
     toks = tokens(text)
     if not toks:
         return ""
-    times = word_times(text, start, end, spans)
+    times = word_times(text, start, end, spans, words)
     tag = "\\kf" if mode != "word" else "\\k"
     out, cur = [], 0
     for (word, join), (a, b) in zip(toks, times):

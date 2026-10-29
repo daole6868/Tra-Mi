@@ -118,6 +118,7 @@ DEFAULT_SETTINGS: dict = {
     "dub_overflow": "smart",          # câu đọc dài hơn chỗ trống: smart / push / overlap / early / cut (tts.OVERFLOW_MODES)
     "dub_lead_max": 1.0,              # "Tự động": câu dài được bắt đầu sớm tối đa (giây)
     "dub_max_lag": 2.0,               # "Tự động": câu sau bị lùi tối đa (giây), quá thì đọc đè
+    "karaoke_listen": True,           # karaoke theo mốc thật từng từ của giọng lồng (Edge trả sẵn / Whisper nghe lại)
     "dub_subs_follow": True,          # phụ đề Việt hiện theo đúng lúc giọng lồng đọc (khi giọng sớm / trễ / dài)
     "sub_follow_mode": "always",      # giờ hiện phụ đề: always = luôn theo giọng lồng / shift = chỉ khi lệch > 0,3 s
     "sub_lead": 0.1,                  # hiện trước lúc giọng lồng bắt đầu (giây)

@@ -248,6 +248,8 @@ class LiveMix:
         self.mute: list = []                      # đoạn tắt tiếng gốc (orig / bg / voice), giây video gốc
         self.solo: str | None = None              # "nghe riêng" 1 lớp (chỉ khi xem trước, không lưu)
         self.rate = 1.0                           # tốc độ phát
+        self.dub_rate = 1.0                       # bản lồng ghi theo giờ video đã đổi tốc độ này (2.1.24; 1 = giờ gốc)
+        self.skip: set = set()                    # lớp bỏ qua khi trộn (xuất MP3 trộn riêng bản lồng)
         self._dub_env = None                      # độ to giọng lồng mỗi 0,05 s (để giảm nhạc thêm)
         self._duck_cs = None                      # (âm lượng lồng tiếng, tổng tích luỹ các khối có lời)
 
@@ -260,7 +262,8 @@ class LiveMix:
         self._duck_cs = None
 
     def duration(self) -> float:
-        return max((len(t) for t in self.tracks.values()), default=0) / SR
+        """Độ dài theo giờ video gốc (bản lồng theo giờ video đã đổi tốc độ -> đổi về giờ gốc)."""
+        return max((len(t) * (self.dub_rate if k == "dub" else 1.0) for k, t in self.tracks.items()), default=0) / SR
 
     # ---- thời gian sau khi cắt (nhạc thêm + mờ dần tính theo video XUẤT RA)
     def _out_time(self, t: np.ndarray) -> np.ndarray:
@@ -284,8 +287,10 @@ class LiveMix:
         span = max(1, int(round(n * self.rate)))
         acc = np.zeros((span, 2), np.float32)
         t = (start + np.arange(span)) / SR
+        dr = float(self.dub_rate or 1.0)
+        natural = abs(dr - 1) > 1e-3        # bản lồng giữ tốc độ tự nhiên: đọc theo giờ của chính nó, không co giãn
         for name, arr in self.tracks.items():
-            if self.solo and name != self.solo:
+            if (self.solo and name != self.solo) or name in self.skip or (natural and name == "dub"):
                 continue
             gain = self.g.get(name, 0.0)
             if name == "voice":
@@ -322,6 +327,7 @@ class LiveMix:
             else:
                 acc += part * (gain / 32768.0)
         fi, fo = self.fade
+        env = None
         if fi > 0 or fo > 0:
             ot = self._out_time(t)
             env = np.ones(span, np.float32)
@@ -333,6 +339,22 @@ class LiveMix:
         if span != n:                               # phát nhanh / chậm: co giãn khối cho vừa n khung
             src = np.linspace(0, span - 1, n)
             acc = np.stack([np.interp(src, np.arange(span), acc[:, c]) for c in (0, 1)], axis=1).astype(np.float32)
+        arr = self.tracks.get("dub")
+        gd = self.g.get("dub", 0.0)
+        if natural and arr is not None and gd > 0 and "dub" not in self.skip and self.solo in (None, "dub"):
+            d0, d1 = int(round(start / dr)), int(round((start + span) / dr))   # liền mạch giữa các khối
+            dn = max(1, d1 - d0)
+            part = np.zeros((dn, 2), np.float32)
+            b = min(len(arr), d1)
+            if b > d0:
+                part[: b - d0] = arr[d0:b]
+            part *= gd / 32768.0
+            if env is not None:
+                part *= np.interp(np.linspace(0, span - 1, dn), np.arange(span), env)[:, None]
+            if dn != n:      # phát đúng tốc độ video (thường dn = n): không co giãn; lệch thì co cho vừa khối
+                src = np.linspace(0, dn - 1, n)
+                part = np.stack([np.interp(src, np.arange(dn), part[:, c]) for c in (0, 1)], axis=1)
+            acc += part.astype(np.float32)
         peak = float(np.abs(acc).max()) if len(acc) else 0.0
         if peak > 0.95:                             # chặn đỉnh như alimiter khi xuất
             acc *= 0.95 / peak
@@ -348,7 +370,7 @@ class LiveMix:
             self._duck_cs = (gd, np.concatenate([[0], np.cumsum(active)]))
         cs = self._duck_cs[1]
         n = len(cs) - 1
-        k = (t / hop).astype(np.int64)
+        k = (t / (self.dub_rate or 1.0) / hop).astype(np.int64)    # độ to bản lồng theo giờ của chính bản lồng
         look = int(DUCK_RELEASE / hop)
         hi = np.clip(k + 1, 0, n)
         lo = np.clip(k - look, 0, n)
