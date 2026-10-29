@@ -937,10 +937,10 @@ class Translator:
             unit = langs.INFO[self.target]["unit_vi"] if self.target == "vi" else langs.INFO[self.target]["unit_ai"]
             texts = [f"{segs[i].text} {length_marker(segs[i].duration, self.target, unit, self.fill_short)}"
                      for i in idx]
-        times = None
+        kw = {}
         if self.video is not None and self.llm is not None and self.engine == "gemini":
-            times = [(segs[i].start, segs[i].end, segs[i].speaker or "") for i in idx]
-        results = self.translate_lines(texts, progress, cancel, summary=summary, times=times)
+            kw["times"] = [(segs[i].start, segs[i].end, segs[i].speaker or "") for i in idx]
+        results = self.translate_lines(texts, progress, cancel, summary=summary, **kw)
         for i, t in zip(idx, results):
             segs[i].trans = BUDGET_RE.sub(" ", t or "").strip()
             segs[i].extra.pop("trans_user", None)
