@@ -313,7 +313,8 @@ class ProjectPage(QWidget):
         self.sk_toggle.setText("Ẩn hồ sơ phim / tên riêng" if on else "Hồ sơ phim / tên riêng")
         sizes = self.subs_split.sizes()
         if len(sizes) == 2 and sum(sizes) > 0:
-            card = self.subs_split.widget(1).sizeHint().height()
+            w = self.subs_split.widget(1)
+            card = max(w.sizeHint().height(), w.minimumSizeHint().height())
             self.subs_split.setSizes([max(60, sum(sizes) - card), card])
 
     def _show_inspector(self, on: bool):
@@ -682,9 +683,73 @@ class ProjectPage(QWidget):
             (w.toggledOn if w is self.s_split else w.valueChanged).connect(self._split_opts_changed)
         self.a_split_long.toggled.connect(
             lambda on: None if self.loading or self.s_split.isChecked() == on else self.s_split.setChecked(on))
+        # tách phụ đề HIỂN THỊ (2.1.28, trami/subsplit.py): câu / bản dịch / giọng lồng giữ nguyên, chữ hiện trên video
+        # (xem trước, video xuất, SRT đã dịch) thành từng mảnh nối nhau, mỗi mảnh hiện đúng lúc giọng đọc tới
+        from ..subsplit import DEFAULTS as _DS, MODES as _DS_MODES
+
+        def _ispin(lo, hi, key, suffix, tip):
+            w = QSpinBox()
+            w.setRange(lo, hi)
+            w.setSuffix(suffix)
+            w.setValue(int(self.settings.get(key, _DS[key.replace("sub_split_", "")])))
+            w.setToolTip(tip)
+            w.setMaximumWidth(96)
+            return w
+
+        def _dspin(lo, hi, key, tip):
+            w = QDoubleSpinBox()
+            w.setRange(lo, hi)
+            w.setSingleStep(0.05)
+            w.setDecimals(2)
+            w.setSuffix(" s")
+            w.setValue(float(self.settings.get(key, _DS[key.replace("sub_split_", "")])))
+            w.setToolTip(tip)
+            w.setMaximumWidth(96)
+            return w
+
+        self.s_ds_mode = combo(_DS_MODES, self.settings.get("sub_split_mode", "off"))
+        self.s_ds_mode.setMinimumContentsLength(24)
+        self.s_ds_mode.setToolTip(
+            "Tách phụ đề HIỂN THỊ – khác 'Tách câu dài': câu, bản dịch, giọng lồng giữ nguyên, chỉ chữ hiện trên video "
+            "(xem trước, video xuất, SRT đã dịch) thành từng mảnh nối nhau, mỗi mảnh hiện đúng lúc giọng đọc tới.\n"
+            "• Sau dấu phẩy / dấu câu: \"Thuyền trưởng, lẩu anh nấu…\" -> \"Thuyền trưởng,\" rồi \"lẩu anh nấu…\"\n"
+            "• Theo số từ: câu dài hơn N từ hiện mỗi lần ≤ M từ (chia đều, không xé tên riêng / từ ghép)\n"
+            "• Dấu câu + số từ: tách ở dấu câu trước, mảnh còn dài thì chia tiếp theo số từ\n"
+            "• Theo số ký tự: mỗi lần vừa 1 dòng (video dọc, chữ to)\n"
+            "• Theo chỗ ngắt hơi của giọng lồng: đổi mảnh khi giọng đọc ngừng (chưa lồng tiếng thì như dấu câu)")
+        self.s_ds_pover = _ispin(2, 60, "sub_split_punct_over", " từ", "Chỉ tách ở dấu câu / chỗ ngắt hơi khi câu dài "
+                                 "hơn bấy nhiêu từ")
+        self.s_ds_words = _ispin(2, 30, "sub_split_words", " từ", "Mỗi lần hiện tối đa bấy nhiêu từ (chia đều các mảnh, "
+                                 "ngắt ở chỗ tự nhiên)")
+        self.s_ds_over = _ispin(3, 60, "sub_split_over", " từ", "Chỉ chia theo số từ khi câu (hoặc mảnh sau dấu câu) dài "
+                                "hơn bấy nhiêu từ")
+        self.s_ds_chars = _ispin(10, 120, "sub_split_chars", " ký tự", "Mỗi lần hiện tối đa bấy nhiêu ký tự (kể cả dấu "
+                                 "cách) – ~42 vừa 1 dòng video ngang cỡ chữ thường, video dọc / chữ to để ~25")
+        self.s_ds_breath = _dspin(0.1, 1.5, "sub_split_breath", "Giọng lồng ngừng từ bấy nhiêu giây thì đổi mảnh")
+        self.s_ds_minw = _ispin(1, 6, "sub_split_min_words", " từ", "Mảnh ngắn hơn bấy nhiêu từ gộp vào mảnh bên cạnh "
+                                "(tránh mảnh chỉ 1 chữ như \"Ừ,\")")
+        self.s_ds_mindur = _dspin(0.2, 3.0, "sub_split_min_dur", "Mỗi mảnh hiện ít nhất bấy nhiêu giây (câu quá ngắn thì "
+                                  "tách ít mảnh hơn / không tách)")
+        self.ds_pover_box = wrap(hbox(label("khi câu dài hơn", "muted"), self.s_ds_pover))
+        self.ds_words_box = wrap(hbox(label("mỗi lần", "muted"), self.s_ds_words, label("khi dài hơn", "muted"),
+                                 self.s_ds_over))
+        self.ds_chars_box = wrap(hbox(label("mỗi lần ≤", "muted"), self.s_ds_chars))
+        self.ds_breath_box = wrap(hbox(label("giọng ngừng từ", "muted"), self.s_ds_breath))
+        self.s_ds_note = label("", "muted", wrap=True)
+        self.s_ds_note.setMinimumWidth(480)
+        self.ds_row2 = flow(_rowlbl(""), hbox(label("mảnh ngắn nhất", "muted"), self.s_ds_minw),
+                            hbox(label("mỗi mảnh hiện ít nhất", "muted"), self.s_ds_mindur),
+                            button("Mặc định", "refresh", "Về mặc định: 7 từ / câu dài hơn 12 từ, dấu câu khi dài hơn 6 "
+                                   "từ, 42 ký tự, ngắt hơi 0,3 s, mảnh ≥ 2 từ, ≥ 0,6 s", flat=True,
+                                   on_click=self._ds_defaults))
+        self.s_ds_mode.currentIndexChanged.connect(self._ds_changed)
+        for w in (self.s_ds_pover, self.s_ds_words, self.s_ds_over, self.s_ds_chars, self.s_ds_breath, self.s_ds_minw,
+                  self.s_ds_mindur):
+            w.valueChanged.connect(self._ds_changed)
         pg_join = [
             "Nối dòng bị cắt ngang câu (máy nghe cắt sai chỗ) · tách câu dịch quá dài thành nhiều dòng, giữa 2 vế "
-            "giọng lồng nghỉ 1 nhịp",
+            "giọng lồng nghỉ 1 nhịp · tách phụ đề: chỉ đổi cách chữ HIỆN trên video (1 câu hiện thành nhiều mảnh nối "
+            "nhau), câu và giọng lồng giữ nguyên",
             flow(_rowlbl("Nối câu"),
                  button("Nối câu bị cắt", "merge", "Tự nối các dòng bị cắt ngang câu (cắt giữa 1 từ như 真|的, mẩu "
                         "cụt như 子。, câu chưa hết) rồi tách lại đúng chỗ – không cần AI, không nghe lại. Theo Kiểu "
@@ -700,7 +765,12 @@ class ProjectPage(QWidget):
                         "câu (các câu đã tích, chưa tích thì cả phim). Chỗ tách phải có dấu câu ở cả câu gốc lẫn câu "
                         "dịch, đúng vị trí tương ứng. Mốc đặt đúng chỗ ngắt hơi. Đã lồng tiếng thì đọc lại giọng các vế "
                         "mới", on_click=self.run_split_long),
-                 button("Hoàn tác tách", "undo", flat=True, on_click=self.run_undo_split))]
+                 button("Hoàn tác tách", "undo", flat=True, on_click=self.run_undo_split)),
+            flow(_rowlbl("Tách phụ đề"), self.s_ds_mode, self.ds_pover_box, self.ds_words_box, self.ds_chars_box,
+                 self.ds_breath_box),
+            self.ds_row2,
+            flow(_rowlbl(""), self.s_ds_note)]
+        self._ds_rows()
         # câu nghe nhầm: nhạc / tiếng động bị chép thành lời -> lọc theo cao độ giọng thật của từng người nói
         self.s_ptol = QDoubleSpinBox()
         self.s_ptol.setRange(1.0, 12.0)
@@ -820,11 +890,11 @@ class ProjectPage(QWidget):
         self.profile_edit.setPlaceholderText(
             "AI tự lập khi dịch lần đầu: thể loại, nhân vật, xưng hô, tên riêng / meme. Sửa được – AI dùng cho mọi lần "
             "dịch / kiểm tra sau. VD:\n- 小克 -> Claude – AI bạn của Thần D\n- các AI: tớ – cậu")
-        self.profile_edit.setMinimumHeight(64)
+        self.profile_edit.setMinimumHeight(126)
         self.profile_edit.textChanged.connect(lambda: self._save_edit_timer.start())
         self.glossary = QPlainTextEdit()
         self.glossary.setPlaceholderText("Mỗi dòng: 中文=Tiếng Việt   (VD: 李逍遥=Lý Tiêu Dao). AI tự điền khi dịch.")
-        self.glossary.setMinimumHeight(64)
+        self.glossary.setMinimumHeight(126)
         self.glossary.textChanged.connect(lambda: self._save_edit_timer.start())
         # 1 thẻ chung: kỹ năng dịch AI + hồ sơ phim + bảng tên riêng (2 ô cạnh nhau) – kéo vách trên để đổi chiều cao
         sk = SectionCard("Kỹ năng dịch AI", "sparkle")
@@ -857,7 +927,8 @@ class ProjectPage(QWidget):
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 0)
         split.setCollapsible(0, False)
-        split.setSizes([10000, 230])
+        split.setCollapsible(1, False)    # thẻ kỹ năng không bị kéo dẹp tới mức 2 ô chữ chỉ còn 1 dòng
+        split.setSizes([10000, 330])
         self.subs_split = split
         w = QWidget()
         v = QVBoxLayout(w)
@@ -2860,6 +2931,7 @@ class ProjectPage(QWidget):
             self.d_interj_words.setText(INTERJ_DEFAULT if iw is None else str(iw))
             self.a_parallel.setChecked(bool(st.get("auto_parallel", False)))
             self._sync_follow(st)
+            self._sync_dsplit(st)
             from .. import autoflow
 
             pv = autoflow.preset_values(st)
@@ -3522,7 +3594,23 @@ class ProjectPage(QWidget):
             segs = pipeline.subs_follow_dub(self.p, segs, self.collect_edit(), self.settings, which)
         except Exception:  # noqa: BLE001 – giao diện chưa dựng xong
             pass
-        self.player.set_subtitles(segs, st, which, self._karaoke_spans() if st.get("karaoke") else {})
+        kara = self._karaoke_spans() if st.get("karaoke") else {}
+        from .. import subsplit
+
+        if subsplit.params(self.settings)["mode"] != "off":   # tách phụ đề hiển thị (như video xuất)
+            if kara:      # karaoke theo giọng lồng: gắn vào câu (bản sao) rồi chia theo từng mảnh
+                segs = [Segment(x.start, x.end, x.text, x.trans, x.speaker,
+                                dict(x.extra, **{k: v for k, v in ((kara.get(i) if isinstance(kara.get(i), dict)
+                                                                    else {"kv": kara.get(i)}) or {}).items() if v}))
+                        for i, x in enumerate(segs)]
+            segs = subsplit.split_segments(segs, self.settings, which)
+            if kara:
+                kara = {j: {"kv": x.extra.get("kv"), "kw": x.extra.get("kw")} for j, x in enumerate(segs)
+                        if x.extra.get("kv") or x.extra.get("kw")}
+            if not hasattr(self, "_ds_timer"):
+                self._ds_timer = QTimer(self, singleShot=True, interval=600, timeout=self._ds_note)
+            self._ds_timer.start()     # dòng "N câu sẽ hiện thành M mảnh" (không tính lại mỗi lần gõ chữ)
+        self.player.set_subtitles(segs, st, which, kara)
 
     def _karaoke_spans(self) -> dict:
         """Đoạn giọng lồng từng câu cho karaoke xem trước (tính ở luồng nền, nhớ theo bản lồng + bật/tắt lồng tiếng)."""
@@ -4975,6 +5063,89 @@ class ProjectPage(QWidget):
             w.setEnabled(always and self.s_follow.isChecked())
         self.s_follow_mode.setEnabled(self.s_follow.isChecked())
 
+    def _ds_rows(self):
+        """Ô của cách tách phụ đề đang chọn."""
+        m = self.s_ds_mode.currentData() or "off"
+        self.ds_pover_box.setVisible(m in ("punct", "punct_words", "breath"))
+        self.ds_words_box.setVisible(m in ("words", "punct_words"))
+        self.ds_chars_box.setVisible(m == "chars")
+        self.ds_breath_box.setVisible(m == "breath")
+        self.ds_row2.setVisible(m != "off")
+        self._ds_note()
+
+    def _ds_changed(self, *_):
+        """Tách phụ đề hiển thị: lưu Cài đặt (dùng chung mọi dự án), vẽ lại phụ đề xem trước, đếm số mảnh."""
+        if getattr(self, "_ds_loading", False):
+            return
+        from ..config import save_settings
+
+        d = {"sub_split_mode": self.s_ds_mode.currentData() or "off",
+             "sub_split_punct_over": int(self.s_ds_pover.value()), "sub_split_words": int(self.s_ds_words.value()),
+             "sub_split_over": int(self.s_ds_over.value()), "sub_split_chars": int(self.s_ds_chars.value()),
+             "sub_split_breath": round(self.s_ds_breath.value(), 2), "sub_split_min_words": int(self.s_ds_minw.value()),
+             "sub_split_min_dur": round(self.s_ds_mindur.value(), 2)}
+        save_settings(d)
+        self.settings.update(d)
+        self._ds_rows()
+        if self.p and not self.loading:
+            self._refresh_overlay()
+
+    def _ds_note(self):
+        """Dòng xem trước: bao nhiêu câu sẽ hiện thành bao nhiêu mảnh."""
+        if not hasattr(self, "s_ds_note"):
+            return
+        m = self.s_ds_mode.currentData() or "off"
+        if m == "off":
+            self.s_ds_note.setText("Đang tắt – mỗi câu hiện cả câu 1 lần. Chọn 1 cách tách để chữ hiện từng mảnh theo "
+                                   "giọng đọc (không đổi câu, bản dịch, giọng lồng)")
+            return
+        if not self.p or not self.model.segs:
+            self.s_ds_note.setText("")
+            return
+        from .. import subsplit
+
+        try:
+            which = self.ov_which.currentData() or "trans"
+            segs = pipeline.subs_follow_dub(self.p, self.model.segs, self.collect_edit(), self.settings, which)
+            n, k = subsplit.count(segs, self.settings, which)
+        except Exception:  # noqa: BLE001 – giao diện chưa dựng xong
+            return
+        extra = " (chưa có giọng lồng: tách như dấu câu)" if m == "breath" and not pipeline.has_dub(self.p) else ""
+        self.s_ds_note.setText(f"{n}/{len(self.model.segs)} câu sẽ hiện thành {k} mảnh{extra} – áp cho khung xem "
+                               "trước, video xuất và SRT đã dịch" if n else
+                               "Không có câu nào đủ dài để tách theo mức này")
+
+    def _ds_defaults(self):
+        from ..subsplit import DEFAULTS
+
+        self._ds_loading = True
+        try:
+            self.s_ds_pover.setValue(DEFAULTS["punct_over"])
+            self.s_ds_words.setValue(DEFAULTS["words"])
+            self.s_ds_over.setValue(DEFAULTS["over"])
+            self.s_ds_chars.setValue(DEFAULTS["chars"])
+            self.s_ds_breath.setValue(DEFAULTS["breath"])
+            self.s_ds_minw.setValue(DEFAULTS["min_words"])
+            self.s_ds_mindur.setValue(DEFAULTS["min_dur"])
+        finally:
+            self._ds_loading = False
+        self._ds_changed()
+
+    def _sync_dsplit(self, st: dict):
+        """Ô tách phụ đề theo Cài đặt (mở dự án / lưu Cài đặt)."""
+        from ..subsplit import DEFAULTS
+
+        self._ds_loading = True
+        try:
+            set_combo(self.s_ds_mode, st.get("sub_split_mode", "off"))
+            for w, k in ((self.s_ds_pover, "punct_over"), (self.s_ds_words, "words"), (self.s_ds_over, "over"),
+                         (self.s_ds_chars, "chars"), (self.s_ds_breath, "breath"), (self.s_ds_minw, "min_words"),
+                         (self.s_ds_mindur, "min_dur")):
+                w.setValue(type(DEFAULTS[k])(st.get("sub_split_" + k, DEFAULTS[k])))
+        finally:
+            self._ds_loading = False
+        self._ds_rows()
+
     def _follow_defaults(self):
         self.loading = True
         try:
@@ -5925,8 +6096,17 @@ class ProjectPage(QWidget):
         segs = self.model.segs
         if which != "source":   # có giọng lồng: phụ đề đã dịch theo giờ HIỆN như video xuất (tab Phụ đề → Giờ hiện)
             segs = pipeline.subs_follow_dub(self.p, segs, self.collect_edit(), self.settings, which)
+        follow = segs is not self.model.segs
+        n0 = len(segs)
+        if which != "source":   # tách phụ đề hiển thị như video xuất (SRT gốc để dịch ngoài -> giữ nguyên câu)
+            segs = pipeline.subs_split(segs, self.settings, which)
         save_subtitles(segs, path, which, st, i.get("width") or 1920, i.get("height") or 1080)
-        note = " (giờ hiện theo giọng lồng)" if segs is not self.model.segs else ""
+        note = []
+        if follow:
+            note.append("giờ hiện theo giọng lồng")
+        if len(segs) > n0:
+            note.append(f"tách phụ đề: {n0} câu -> {len(segs)} dòng")
+        note = f" ({', '.join(note)})" if note else ""
         self.win.toast(f"Đã lưu {Path(path).name}{note}", "ok")
 
     def _fill_outputs(self):

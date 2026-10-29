@@ -10660,3 +10660,120 @@ def test_timewarp_gui_2127(sample_video):
     finally:
         win.close()
         p.delete()
+
+
+def test_subsplit_modes_2128():
+    """2.1.28: tách phụ đề HIỂN THỊ – 1 câu hiện thành nhiều mảnh nối nhau (câu, bản dịch, giọng lồng giữ nguyên)."""
+    from trami import subsplit as S
+
+    def run(text, st, which="trans", src="", start=0.0, end=5.0, **ex):
+        segs = [Segment(start, end, src, text, "S1", dict(ex))]
+        return S.split_segments(segs, st, which), segs
+
+    out, segs = run("Thuyền trưởng, lẩu anh nấu ăn không bị nóng trong,", {"sub_split_mode": "punct"})
+    assert [x.trans for x in out] == ["Thuyền trưởng,", "lẩu anh nấu ăn không bị nóng trong,"]
+    assert out[0].start == 0.0 and out[-1].end == 5.0 and out[0].end == out[1].start and out[1].text == ""
+    assert out[0].extra["_src"] == 0 and out[1].extra["_part"] == [1, 2] and segs[0].trans.startswith("Thuyền")
+    # theo số từ: câu > 12 từ hiện mỗi lần ≤ 7 từ, chia đều, không xé "Hoàn Kiếm"
+    long_ = "Hôm nay trời đẹp quá nên chúng ta cùng nhau đi dạo quanh hồ Hoàn Kiếm nhé anh"
+    out, _ = run(long_, {"sub_split_mode": "words"}, end=6.0)
+    assert len(out) == 3 and all(len(x.trans.split()) <= 7 for x in out) and " ".join(x.trans for x in out) == long_
+    assert not any(x.trans.endswith("Hoàn") for x in out)
+    out, _ = run("Một hai ba bốn năm sáu bảy tám chín mười mười một", {"sub_split_mode": "words"})
+    assert len(out) == 1                                              # 12 từ: chưa "dài hơn 12"
+    # dấu câu + số từ, số ký tự, tiếng Trung (mỗi chữ 1 "từ")
+    s = "Đúng vậy, sư huynh Thiên Kiếm Tông đã không chết sau ngàn năm bế quan tu luyện ở núi sau, thật là kỳ tích"
+    out, _ = run(s, {"sub_split_mode": "punct_words"}, end=8.0)
+    assert out[0].trans == "Đúng vậy," and all(len(x.trans.split()) <= 12 for x in out)
+    assert not any(x.trans.endswith(("bế", "không")) for x in out)
+    out, _ = run(s, {"sub_split_mode": "chars", "sub_split_chars": 42}, end=8.0)
+    assert len(out) >= 3 and all(len(x.trans) <= 42 for x in out)
+    out, _ = run("", {"sub_split_mode": "punct"}, which="source", src="船长，你煮的火锅不会上火吗？我们走吧。")
+    assert [x.text for x in out] == ["船长，", "你煮的火锅不会上火吗？", "我们走吧。"]
+    # theo chỗ ngắt hơi của giọng lồng: mảnh sau hiện đúng lúc giọng có tiếng lại
+    out, _ = run("Thuyền trưởng lẩu anh nấu ăn không bị nóng trong", {"sub_split_mode": "breath"},
+                 kv=[[0.2, 1.0], [1.6, 4.0]])
+    assert [x.trans for x in out] == ["Thuyền trưởng", "lẩu anh nấu ăn không bị nóng trong"]
+    assert abs(out[1].start - 1.6) < 1e-6 and out[1].extra["kv"] == [[1.6, 4.0]]
+    # câu quá ngắn / mảnh 1 từ / mảnh hiện < tối thiểu -> không tách
+    assert len(run("Thuyền trưởng, lẩu anh nấu ăn không bị nóng trong,", {"sub_split_mode": "punct"},
+                   end=1.0)[0]) == 1
+    assert len(run("Ừ, lẩu anh nấu ăn không bị nóng trong đâu", {"sub_split_mode": "punct",
+                                                                "sub_split_punct_over": 4})[0]) == 1
+    # karaoke: mốc thật từng từ chia đúng theo mảnh
+    kw = [[0.1 + 0.4 * i, 0.45 + 0.4 * i] for i in range(9)]
+    out, _ = run("Thuyền trưởng, lẩu anh nấu ăn không bị nóng", {"sub_split_mode": "punct"}, kw=kw)
+    assert [len(x.extra["kw"]) for x in out] == [2, 7] and abs(out[1].start - 0.9) < 1e-6
+    segs = [Segment(0, 5, "", "Thuyền trưởng, lẩu anh nấu ăn không bị nóng trong,")]
+    assert S.split_segments(segs, {"sub_split_mode": "off"}) is segs
+    assert S.count(segs, {"sub_split_mode": "punct"}) == (1, 2)
+
+
+def test_subsplit_export_2128(sample_video, tmp_path):
+    """Tách phụ đề áp cho video xuất (ASS ghép vào video) + SRT đã dịch; SRT gốc (để dịch ngoài) giữ nguyên câu."""
+    from trami import pipeline
+    from trami.config import DEFAULT_SETTINGS, _deep_merge
+    from trami.project import Project
+
+    p = Project.create("split2128")
+    try:
+        pipeline.attach_source(p, sample_video)
+        p.segments = [Segment(0.5, 4.5, "船长，你煮的火锅不会上火吗", "Thuyền trưởng, lẩu anh nấu ăn không bị nóng trong,"),
+                      Segment(4.8, 5.8, "好", "Được.")]
+        p.save()
+        st = _deep_merge(DEFAULT_SETTINGS, {"sub_split_mode": "punct", "dub_subs_follow": False})
+        srt = pipeline.export_subs(Project(p.id), "srt", "trans", st).read_text("utf-8-sig")
+        assert "Thuyền trưởng,\n" in srt and srt.count(" --> ") == 3
+        src = pipeline.export_subs(Project(p.id), "srt", "source", st).read_text("utf-8-sig")
+        assert src.count(" --> ") == 2
+        out = pipeline.render(Project(p.id), st)
+        assert out.exists()
+        ass = (p.work / "render" / "burn.ass").read_text("utf-8")
+        dl = [ln for ln in ass.splitlines() if ln.startswith("Dialogue:")]
+        assert any(ln.endswith("Thuyền trưởng,") for ln in dl) and len(dl) >= 3
+    finally:
+        p.delete()
+
+
+def test_subsplit_gui_and_textbox_height_2128(sample_video):
+    """Tab Phụ đề → Nối / tách câu: chọn cách tách phụ đề -> lưu Cài đặt, dòng đếm mảnh, khung xem trước hiện từng
+    mảnh; 2 ô Hồ sơ phim / Bảng tên riêng không còn bị ép 1 dòng (theme đặt min-height cho ô chữ nhiều dòng)."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from trami import pipeline
+    from trami.config import load_settings, save_settings
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.gui.widgets import set_combo
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    old = load_settings()
+    p = Project.create("splitgui")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [Segment(0.3, 4.5, "a", "Thuyền trưởng, lẩu anh nấu ăn không bị nóng trong,"),
+                  Segment(4.8, 5.8, "b", "Được.")]
+    p.save()
+    win = MainWindow()
+    try:
+        win.open_project(p.id)
+        pg = win.project_page
+        assert pg.profile_edit.minimumHeight() >= 120 and pg.glossary.minimumHeight() >= 120
+        assert not pg.ds_row2.isVisibleTo(pg) or pg.s_ds_mode.currentData() != "off"
+        set_combo(pg.s_ds_mode, "punct")
+        app.processEvents()
+        assert load_settings()["sub_split_mode"] == "punct" and pg.ds_pover_box.isVisibleTo(pg.ds_pover_box.parent())
+        pg._ds_note()
+        assert "1/2 câu sẽ hiện thành 2 mảnh" in pg.s_ds_note.text()
+        pg._refresh_overlay()
+        assert [x.trans for x in pg.player.segments][:2] == ["Thuyền trưởng,", "lẩu anh nấu ăn không bị nóng trong,"]
+        set_combo(pg.s_ds_mode, "off")
+        app.processEvents()
+        pg._refresh_overlay()
+        assert len(pg.player.segments) == 2
+    finally:
+        win.close()
+        p.delete()
+        save_settings(old)

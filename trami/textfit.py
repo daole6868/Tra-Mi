@@ -183,7 +183,8 @@ bao nhiêu|bao giờ|ở đâu|cái gì|làm gì|có thể|phải không|đượ
 sư huynh|sư tỷ|sư phụ|sư đệ|sư muội|sư tôn|sư thúc|sư bá|đại ca|đại sư|tiểu thư|công tử|ca ca|muội muội|tỷ tỷ|đệ đệ|
 huynh đệ|tông môn|hệ thống|thế giới|tu luyện|linh khí|đan dược|trưởng lão|chưởng môn|thiếu gia|lão gia|phu nhân|
 hoàng thượng|điện hạ|bệ hạ|nương nương|cô nương|tiền bối|vãn bối|thiếu chủ|gia chủ|tộc trưởng|đệ tử|cao thủ|
-ông chủ|bà chủ|cảm ơn|xin lỗi|không sao|đúng vậy|tất nhiên|chắc chắn|thật sự|thực sự|bởi vậy|tuy nhiên|nhưng không|
+ông chủ|bà chủ|bế quan|đột phá|cảnh giới|pháp bảo|linh thạch|tông chủ|nội môn|ngoại môn|kiếm khí|thần thức|
+cảm ơn|xin lỗi|không sao|đúng vậy|tất nhiên|chắc chắn|thật sự|thực sự|bởi vậy|tuy nhiên|nhưng không|
 một chút|một lát|một lúc|một người|một ngày|một lần|mọi người|chúng ta|chúng tôi|các người|bọn họ|bọn chúng|
 anh ấy|cô ấy|ông ấy|bà ấy|em ấy|nó ấy|cậu ấy""".replace("\n", "").split("|"))
 

@@ -72,8 +72,9 @@ QToolTip {{ background: {CARD3}; color: {TEXT}; border: 1px solid {BORDER}; padd
 
 QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTimeEdit, QDateTimeEdit {{
     background: #0F141D; border: 1px solid {BORDER}; border-radius: 9px; padding: 7px 10px;
-    selection-background-color: {ACCENT}; min-height: 20px;
+    selection-background-color: {ACCENT};
 }}
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTimeEdit, QDateTimeEdit {{ min-height: 20px; }}
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
     border: 1px solid {ACCENT2};
 }}

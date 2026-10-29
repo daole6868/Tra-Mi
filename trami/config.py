@@ -173,6 +173,9 @@ DEFAULT_SETTINGS: dict = {
     # câu dịch dài hơn N tiếng (quy đổi theo tốc độ nói của tiếng đích) có dấu phẩy ở cả câu gốc lẫn câu dịch -> tách
     # thành các vế sau khi dịch cả phim; vế sau nghỉ split_pause giây khi lồng tiếng (align.split_clauses)
     "split_long_trans": True, "split_long_units": 14, "split_pause": 0.25,
+    # tách phụ đề HIỂN THỊ (2.1.28, trami/subsplit.py): off / punct / words / punct_words / chars / breath
+    "sub_split_mode": "off", "sub_split_words": 7, "sub_split_over": 12, "sub_split_punct_over": 6,
+    "sub_split_chars": 42, "sub_split_breath": 0.3, "sub_split_min_words": 2, "sub_split_min_dur": 0.6,
     # Rút khoảng lặng / cắt bài hát (silence.py) – mức tìm đoạn để cắt, nhớ cho video sau
     "silence": {"by": "speech", "db": -30, "min": 4.0, "max": 60.0, "keep": 1.5, "where": "split",
                 "skip_songs": True, "skip_head": 0.0, "skip_tail": 0.0, "song_pad": 15.0},

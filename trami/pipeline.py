@@ -3968,6 +3968,15 @@ def subs_follow_dub(p: Project, segs: list, edit: dict | None = None, settings: 
     return follow_dub(segs, **follow_params(settings))
 
 
+def subs_split(segs: list, settings: dict | None = None, which: str = "trans") -> list:
+    """Tách phụ đề hiển thị (2.1.28, trami/subsplit.py – tab Phụ đề → Công cụ → Nối / tách câu → "Tách phụ đề"): 1 câu
+    hiện thành nhiều mảnh nối nhau theo giọng đọc. Câu / bản dịch / giọng lồng không đổi."""
+    from . import subsplit
+
+    settings = settings if settings is not None else load_settings()
+    return subsplit.split_segments(segs, settings, which)
+
+
 def follow_params(settings: dict) -> dict:
     """Cài đặt giờ hiện phụ đề (tab Phụ đề → Công cụ → Giờ hiện)."""
     mode = settings.get("sub_follow_mode", "always")
@@ -4755,6 +4764,8 @@ def export_subs(p: Project, fmt: str = "srt", which: str = "trans", settings: di
     out = p.output_dir / f"{name}.{suffix}.{fmt}"
     # phụ đề đã dịch khi có giọng lồng: theo giờ HIỆN (như video xuất – 2.0.96), phụ đề gốc theo giờ nói
     segs = subs_follow_dub(p, p.segments, None, settings, which) if which != "source" else p.segments
+    if which != "source":   # SRT gốc để dịch ở phần mềm khác rồi nạp lại -> không tách mảnh
+        segs = subs_split(segs, settings, which)
     save_subtitles(segs, out, which, {**(settings.get("sub_style") or {}), "lang": tl}, info.get("width") or 1920,
                    info.get("height") or 1080)
     p.add_output(out, "subtitle")
@@ -4919,6 +4930,7 @@ def render(p: Project, settings: dict | None = None, progress: Prog | None = Non
                     segs[i].extra["kw"] = v["kw"]
         # câu có giọng lồng đọc sớm / bị lùi / đọc dài: phụ đề hiện theo đúng lúc giọng đọc
         segs = subs_follow_dub(p, segs, e, settings, (e.get("subtitles") or {}).get("which", "trans"))
+        segs = subs_split(segs, settings, (e.get("subtitles") or {}).get("which", "trans"))   # tách phụ đề hiển thị
         pr = progress
         if progress and len(ratios) > 1:
             pr = (lambda x, m, k=k, ratio=ratio: progress(  # noqa: E731

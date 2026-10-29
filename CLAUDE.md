@@ -375,6 +375,24 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (`<bản lồng>.env10s_<mã>.npy` theo giờ gốc, đỉnh mỗi ô); karaoke `kw` đổi ngược `inv`. GUI tab Chỉnh sửa: "Làm chậm"
   `e_smode` (`timewarp.MODES`) + `e_speed` / `e_dubnat` (cả phim) / `e_grate` + `e_gmin` (đều) / `e_nrate` + `e_nmax`
   (theo câu dài) / `e_wnote` (`_smode_rows`, `_update_warp_note`); tab Xuất "Lấy khung đang xem" (`_out_time`) theo warp.
+- Tách phụ đề HIỂN THỊ (2.1.28, `trami/subsplit.py`) – khác "Tách câu dài" (`align.split_clauses`, tách hẳn câu + đọc lại
+  giọng): câu / bản dịch / giọng lồng / karaoke giữ nguyên, chỉ chữ HIỆN thành nhiều mảnh nối nhau, mỗi mảnh hiện đúng lúc
+  giọng đọc tới từ đầu mảnh (`karaoke.word_times` theo kv / kw; mảnh đầu từ đầu câu, mảnh cuối tới cuối câu). Cách
+  (`MODES`, Cài đặt `sub_split_mode`, chung mọi dự án): off / punct (sau , ; : … . ? !, câu dài hơn `sub_split_punct_over`
+  6 từ) / words (câu dài hơn `sub_split_over` 12 từ -> mỗi lần ≤ `sub_split_words` 7 từ, `_balanced` = quy hoạch động ít
+  mảnh nhất + đều nhất + điểm chỗ ngắt `textfit._break_score` + `_NO_END` phó từ "đã / không / sẽ…") / punct_words (dấu câu
+  rồi mảnh còn > over từ chia theo số từ) / chars (≤ `sub_split_chars` 42 ký tự – vừa 1 dòng) / breath (chỗ giọng lồng
+  ngừng ≥ `sub_split_breath` 0,3 s – `breath_gaps` từ kv, mảnh sau hiện lúc giọng có tiếng lại; kw -> khe giữa 2 từ; chưa
+  lồng -> như punct). `sub_split_min_words` 2 (mảnh ngắn hơn gộp vào mảnh bên cạnh `_merge_small`), `sub_split_min_dur`
+  0,6 s (không đủ thời gian -> bớt mảnh). Tiếng viết liền (Hán / Nhật / Thái): mỗi chữ 1 "từ". Mảnh: `extra["_src"]`,
+  `["_part"]`, kv cắt theo đoạn giọng của mảnh, kw cắt đúng từ; which "both" tách dòng dịch, dòng gốc hiện cả câu. Nhớ
+  kết quả từng câu `_CACHE` (3000 câu: lần đầu ~0,3 s, sau ~0,05 s). Áp: `pipeline.subs_split` sau `subs_follow_dub` trong
+  `render` + `export_subs` (trans / both – SRT gốc KHÔNG tách vì để dịch ngoài rồi nạp lại) + `project_page._export_sub` +
+  `_refresh_overlay` (xem trước: karaoke gắn vào câu rồi chia theo mảnh -> `kara` theo số mảnh). GUI tab Phụ đề → Công cụ →
+  Nối / tách câu hàng "Tách phụ đề" (`s_ds_mode` + `ds_pover_box` / `ds_words_box` / `ds_chars_box` / `ds_breath_box`
+  hiện theo cách – `_ds_rows`, `ds_row2` mảnh ngắn nhất / hiện ít nhất / Mặc định, `s_ds_note` "N/M câu sẽ hiện thành K
+  mảnh" – `_ds_note` hẹn 0,6 s; `_ds_changed` lưu Cài đặt, `_sync_dsplit` khi mở dự án). `textfit._VI_PAIRS` thêm từ
+  tiên hiệp (bế quan, đột phá, cảnh giới…).
 - Karaoke theo mốc thật từng từ (2.1.24, `trami/dubwords.py`): `<file giọng>.words.json` {rel raw | trim, src edge |
   whisper, sig, w [[giây, giây, chữ]]}. Edge: `_edge_comm(words=True)` (boundary "WordBoundary" – edge-tts 7 mặc định
   theo câu) + `save(audio, metadata)` -> `edge_jsonl`; đọc từng vế -> `dubwords.join` (dời theo chỗ nối). Giọng khác:
@@ -485,7 +503,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (251 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (254 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2205,7 +2223,22 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   W(4) = 5,84 s, giọng lồng câu 2 đúng 5,84 s, tiếng gốc ở khoảng nghỉ 440 Hz; FFmpeg 6.1 + 7.0 (đồ thị lọc ghi ra file);
   giao diện offscreen (ô theo cách, dòng kết quả, trình phát đổi tốc độ theo đoạn). Chưa nghe trên phim thật.
 
+- 2.1.28: (1) "2 ô Hồ sơ phim / Bảng tên riêng (tab Phụ đề → thẻ Kỹ năng dịch AI) bị lõm, không thấy gì": theme đặt
+  `min-height: 20px` cho QPlainTextEdit / QTextEdit -> ĐÈ `setMinimumHeight` của mọi ô chữ nhiều dòng (ô cao đúng 1 dòng
+  36 px dù đặt 64 / 140 / 160 / 200). Giờ `min-height` chỉ cho ô 1 dòng (QLineEdit / ô số / ô chọn) -> cả ô Cài đặt →
+  bảng thuật ngữ, Hàng loạt, mô tả đăng video, khung Câu đang chọn cũng cao đúng như đặt; 2 ô hồ sơ ≥ 126 px, thẻ không bị
+  kéo dẹp (`setCollapsible(1, False)`). (2) "chưa có tách PHỤ ĐỀ, mới chỉ tách câu – thêm tách phụ đề: sau dấu phẩy, theo
+  số từ (7 từ / lần với câu trên 12 từ), xem còn cách nào thêm" -> `trami/subsplit.py` (xem Cấu trúc) với 5 cách: dấu câu,
+  số từ, dấu câu + số từ, số ký tự (vừa 1 dòng), chỗ ngắt hơi giọng lồng. Thử: đúng 2 ví dụ người dùng ("Thuyền trưởng," |
+  "lẩu anh nấu ăn…"; 15 từ -> 3 mảnh ≤ 7 từ không xé "Hoàn Kiếm"), chữ Hán, ngắt hơi (mảnh sau hiện 1,6 s đúng lúc giọng có
+  tiếng lại), karaoke mốc thật chia theo mảnh, câu ngắn / mảnh 1 từ không tách; SRT đã dịch + video xuất (ASS) có mảnh,
+  SRT gốc giữ câu; giao diện offscreen (đổi cách -> lưu Cài đặt, khung xem trước hiện "Hôm nay trời đẹp quá" lúc 6 s).
+
 ## Vấn đề đang mở
+- 2.1.28: chờ người dùng thử tab Phụ đề → Công cụ → Nối / tách câu → "Tách phụ đề" (Dấu câu + số từ / Theo số từ 7 từ
+  khi dài hơn 12…) trên phim đã lồng: chữ đổi mảnh có đúng lúc giọng đọc tới không, có mảnh nào hiện quá nhanh không (tăng
+  "mỗi mảnh hiện ít nhất"), chỗ ngắt có xé cụm từ không (gửi câu bị ngắt sai để thêm vào danh sách từ ghép); xem lại 2 ô
+  Hồ sơ phim / Bảng tên riêng + các ô chữ ở Cài đặt / Hàng loạt sau khi sửa theme.
 - 2.1.27: chờ người dùng chọn tab Chỉnh sửa → "Làm chậm" = "Chỉ khoảng nghỉ – đều" (0,8×) hoặc "theo câu dài" trên 1 phim
   đã lồng: tool tự xếp lại giọng lồng; phát trong tool + xuất video – chỗ nói còn rè không, khoảng nghỉ chậm có tự nhiên
   không (hình chậm lộ quá thì tăng "Tốc độ khoảng nghỉ" / giảm "Thêm tối đa mỗi chỗ"), tiếng nền ở khoảng nghỉ có lạ
