@@ -1,0 +1,14 @@
+# ===== Lõi (bắt buộc) =====
+PySide6>=6.6               # giao diện desktop
+requests>=2.31
+numpy>=1.24
+faster-whisper>=1.0.3       # nhận dạng giọng nói Whisper (GPU/CPU)
+opencc-python-reimplemented>=0.1.7   # Phồn thể -> Giản thể
+jieba>=0.42.1               # tách từ tiếng Trung: không cắt câu giữa 1 từ (thường đã có sẵn cùng FunASR)
+pypinyin>=0.50               # âm đọc chữ Hán: tìm chỗ bộ nghe viết sai tên nhân vật (đọc giống tên)
+rapidocr-onnxruntime>=1.3.24          # OCR chữ Trung (kéo theo opencv-python)
+deep-translator>=1.11
+edge-tts>=7.3.1             # giọng đọc Microsoft (bản cũ bị Microsoft từ chối 403 từ 10/2026)
+yt-dlp>=2026.8.19           # tải video Douyin/Bilibili/YouTube… (cũ thì Bilibili báo 412)
+imageio-ffmpeg>=0.5.1       # FFmpeg dự phòng
+playwright>=1.49            # "Mở Chrome & điền sẵn" khi đăng video (dùng Chrome / Edge có sẵn, không tải trình duyệt)
