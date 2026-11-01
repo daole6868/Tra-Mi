@@ -10,7 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
-                               QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
+                               QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QSpinBox,
                                QStackedWidget, QVBoxLayout, QWidget)
 
 from .. import APP_NAME, APP_TAGLINE, __version__, pipeline, sitelogin, storage
@@ -362,6 +362,15 @@ class HomePage(QWidget):
             "trên trình duyệt.\nBilibili dùng đăng nhập bằng mã QR ở trên.")
         self.dl_browser.currentIndexChanged.connect(self._browser_changed)
         c2.add(hbox(label("Trang khác lấy đăng nhập từ:", "muted"), self.dl_browser, None))
+        self.dl_conns = QSpinBox()
+        self.dl_conns.setRange(1, 32)
+        self.dl_conns.setValue(int(st.get("dl_connections", 8) or 1))
+        self.dl_conns.setFixedWidth(90)
+        self.dl_conns.setToolTip(
+            "Tải mỗi file bằng nhiều kết nối cùng lúc (như IDM), hình và tiếng tải cùng lúc, Bilibili tự chọn máy chủ "
+            "nhanh nhất.\n8 là vừa; mạng mạnh có thể 16. Tải lỗi / bị chặn thì giảm xuống, 1 = 1 kết nối như trước.")
+        self.dl_conns.valueChanged.connect(lambda v: save_settings({"dl_connections": int(v)}))
+        c2.add(hbox(label("Số luồng tải:", "muted"), self.dl_conns, label("(1 = như cũ)", "muted"), None))
         self.ytdlp_lbl = label("", "muted")
         self.ytdlp_btn = button("Cập nhật trình tải", "refresh", on_click=self._update_ytdlp,
                                 tip="Bilibili / Douyin hay đổi cách chặn – tải lỗi (HTTP 412, Unable to extract…) thì "

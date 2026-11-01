@@ -11037,3 +11037,201 @@ def test_storage_page_gui_2129(monkeypatch):
         big.delete()
         small.delete()
         save_settings(old)
+
+
+def _range_server_2130(data: bytes, rate: float = 4e6, ranges: bool = True, status: int = 0, drop_every: int = 0):
+    """Máy chủ thử: Range (206), giới hạn tốc độ MỖI kết nối (như máy chủ video), đếm byte đã gửi; status = luôn trả mã
+    lỗi đó; drop_every = cứ N lần trả khúc thì ngắt giữa chừng 1 lần."""
+    import re as _re
+    import threading
+    import time as _t
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            srv = self.server
+            if srv.status:
+                self.send_response(srv.status)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            a, b = 0, len(srv.data) - 1
+            rng = self.headers.get("Range")
+            if rng and srv.ranges:
+                m = _re.match(r"bytes=(\d+)-(\d*)", rng)
+                a, b = int(m.group(1)), min(b, int(m.group(2) or b))
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {a}-{b}/{len(srv.data)}")
+            else:
+                self.send_response(200)
+            self.send_header("Content-Length", str(b - a + 1))
+            self.end_headers()
+            with srv.lock:
+                srv.reqs += 1
+                drop = srv.drop_every and srv.reqs % srv.drop_every == 0 and b - a > 200_000
+            pos, t0 = a, _t.time()
+            while pos <= b:
+                n = min(65536, b - pos + 1)
+                try:
+                    self.wfile.write(srv.data[pos:pos + n])
+                except OSError:
+                    return
+                pos += n
+                with srv.lock:
+                    srv.sent += n
+                if drop and pos - a > 100_000:
+                    self.close_connection = True
+                    return
+                lag = (pos - a) / srv.rate - (_t.time() - t0)
+                if lag > 0:
+                    _t.sleep(lag)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
+    srv.data, srv.rate, srv.ranges, srv.status, srv.drop_every = data, rate, ranges, status, drop_every
+    srv.lock, srv.reqs, srv.sent = threading.Lock(), 0, 0
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    srv.url = f"http://127.0.0.1:{srv.server_address[1]}/v.m4s"
+    return srv
+
+
+def test_fastdl_parallel_resume_race_2130(tmp_path, monkeypatch):
+    """Tải nhiều luồng: nhanh hơn nhiều lần khi máy chủ giới hạn từng kết nối, đúng từng byte, Huỷ giữa chừng rồi tải
+    tiếp chỉ phần còn thiếu, máy chủ ngắt giữa chừng thì thử lại khúc đó, chọn máy chủ nhanh nhất / máy chủ P2P Bilibili
+    xếp sau, máy chủ không cho Range -> 1 luồng, link bị từ chối -> Expired (để yt-dlp tải)."""
+    import time as _t
+
+    from trami import fastdl
+
+    for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(k, raising=False)
+    data = os.urandom(6 << 20)
+    srv = _range_server_2130(data, rate=2e6)
+    slow = _range_server_2130(data, rate=0.25e6)
+    norange = _range_server_2130(data[:400_000], ranges=False)
+    bad = _range_server_2130(data, status=403)
+    flaky = _range_server_2130(data, rate=8e6, drop_every=3)
+    try:
+        out = tmp_path / "a.m4s"
+        t0 = _t.time()
+        fastdl.fetch([srv.url], {}, None, out, 1)
+        one = _t.time() - t0
+        assert out.read_bytes() == data
+        t0 = _t.time()
+        seen = []
+        fastdl.fetch([srv.url], {"Referer": "x"}, None, out, 8, lambda n, tot: seen.append(tot))
+        eight = _t.time() - t0
+        assert out.read_bytes() == data and one / eight > 3 and seen[-1] == len(data)
+        assert not out.with_name(out.name + ".part").exists() and not out.with_name(out.name + ".part.json").exists()
+        # Huỷ giữa chừng -> .part + .part.json giữ các khúc đã xong -> lần sau chỉ tải phần còn thiếu
+        out2 = tmp_path / "b.m4s"
+        got = [0]
+
+        def count(n, tot):
+            got[0] += n
+        with pytest.raises(ff.Cancelled):
+            fastdl.fetch([srv.url], {}, None, out2, 4, count, cancel=lambda: got[0] >= 4.5e6)
+        state = json.loads(out2.with_name(out2.name + ".part.json").read_text())
+        assert 0 < len(state["done"]) < -(-len(data) // state["chunk"])
+        srv.sent = 0
+        fastdl.fetch([srv.url], {}, None, out2, 4)
+        assert out2.read_bytes() == data and srv.sent < len(data) * 0.9
+        # máy chủ ngắt giữa chừng -> thử lại đúng khúc đó
+        fastdl.fetch([flaky.url], {}, None, tmp_path / "c.m4s", 6)
+        assert (tmp_path / "c.m4s").read_bytes() == data and flaky.reqs > 6
+        # chọn máy chủ nhanh nhất; máy chủ P2P của Bilibili xếp sau
+        assert fastdl.race([slow.url, srv.url], {}, None, sec=3)[0] == srv.url
+        assert fastdl.order_hosts(["https://xy1.mcdn.bilivideo.cn:4483/a", "https://upos-sz-mirrorcos.bilivideo.com/a",
+                                   "https://upos-sz-mirrorcos.bilivideo.com/a"]) == \
+            ["https://upos-sz-mirrorcos.bilivideo.com/a", "https://xy1.mcdn.bilivideo.cn:4483/a"]
+        fastdl.fetch([bad.url, srv.url], {}, None, tmp_path / "d.m4s", 4)    # link chính bị từ chối -> link dự phòng
+        assert (tmp_path / "d.m4s").read_bytes() == data
+        # không cho Range -> 1 luồng; bị từ chối hết -> Expired
+        assert fastdl.probe(norange.url, {})[1] is False
+        fastdl.fetch([norange.url], {}, None, tmp_path / "e.m4s", 8)
+        assert (tmp_path / "e.m4s").read_bytes() == data[:400_000]
+        with pytest.raises(fastdl.Expired):
+            fastdl.fetch([bad.url], {}, None, tmp_path / "f.m4s", 8)
+        assert fastdl.chunk_size(len(data), 8) == 1 << 20 and fastdl.chunk_size(2 << 30, 8) == 16 << 20
+    finally:
+        for s in (srv, slow, norange, bad, flaky):
+            s.shutdown()
+
+
+def test_download_video_fast_merge_2130(tmp_path, monkeypatch):
+    """download_video tải nhiều luồng qua yt-dlp thật (dòng tiến độ có "luồng"); 2 dòng hình + tiếng riêng (như Bilibili
+    / YouTube) tải cùng lúc rồi ghép thành 1 mp4; link dự phòng Bilibili được ghi lại từ câu trả lời của trang;
+    dl_connections 1 = yt-dlp tải như cũ."""
+    pytest.importorskip("yt_dlp")
+    import yt_dlp
+
+    from trami import fastdl, pipeline
+
+    for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(k, raising=False)
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run([ff.ffmpeg_bin(), "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=320x240:r=25",
+                    "-f", "lavfi", "-i", "sine=f=440", "-t", "6", "-vf", "noise=alls=30:allf=t+u", "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p", "-b:v", "6M", "-c:a", "aac", "-shortest", str(src / "full.mp4")], check=True)
+    subprocess.run([ff.ffmpeg_bin(), "-loglevel", "error", "-y", "-i", str(src / "full.mp4"), "-an", "-c", "copy",
+                    str(src / "v.mp4")], check=True)
+    subprocess.run([ff.ffmpeg_bin(), "-loglevel", "error", "-y", "-i", str(src / "full.mp4"), "-vn", "-c", "copy",
+                    str(src / "a.m4a")], check=True)
+    monkeypatch.setattr(fastdl, "MIN_SPLIT", 200_000)     # file thử nhỏ: vẫn chia khúc
+    monkeypatch.setattr(fastdl, "CHUNK_MIN", 128_000)
+    full = _range_server_2130((src / "full.mp4").read_bytes(), rate=20e6)
+    vs = _range_server_2130((src / "v.mp4").read_bytes(), rate=20e6)
+    au = _range_server_2130((src / "a.m4a").read_bytes(), rate=20e6)
+    try:
+        url = full.url.replace("v.m4s", "clip.mp4")
+        msgs = []
+        path = pipeline.download_video(url, tmp_path / "dl", lambda x, m: msgs.append(m), settings={"dl_connections": 8})
+        assert path.exists() and path.suffix == ".mp4" and ff.probe(path).duration > 5
+        assert any("luồng" in m for m in msgs) and full.reqs > 3
+        before = full.reqs
+        path = pipeline.download_video(url, tmp_path / "dl1", None, settings={"dl_connections": 1})
+        assert path.exists() and full.reqs - before <= 2      # yt-dlp tự tải, 1 kết nối
+        # 2 dòng hình / tiếng -> tải cùng lúc + ghép
+        out_dir = tmp_path / "m"
+        out_dir.mkdir()
+
+        class FakeYDL:
+            cookiejar = None
+
+            def prepare_filename(self, info):
+                return str(out_dir / "Phim [BV1x].mp4")
+        info = {"duration": 6, "requested_formats": [
+            {"url": vs.url, "protocol": "http", "ext": "mp4", "vcodec": "avc1", "format_id": "80",
+             "http_headers": {"Referer": "https://www.bilibili.com"}},
+            {"url": au.url, "protocol": "http", "ext": "m4a", "vcodec": "none", "acodec": "mp4a", "format_id": "30280",
+             "http_headers": {}}]}
+        got = pipeline._fast_fetch(FakeYDL(), info, 8, None, None)
+        pr = ff.probe(got)
+        assert got.name == "Phim [BV1x].mp4" and pr.has_video and pr.has_audio and pr.duration > 5
+        assert sorted(p.name for p in out_dir.iterdir()) == ["Phim [BV1x].mp4"]       # file tạm đã xoá
+        assert pipeline._fast_fetch(FakeYDL(), {"requested_formats": [{"url": vs.url, "protocol": "m3u8_native"}]},
+                                    8, None, None) is None                          # nguồn chia mảnh -> yt-dlp
+    finally:
+        for s in (full, vs, au):
+            s.shutdown()
+    # Bilibili: ghi lại link dự phòng (backupUrl) yt-dlp bỏ qua
+    from yt_dlp.extractor.bilibili import BiliBiliIE
+
+    fastdl.patch_bili_backups()
+    ie = BiliBiliIE(yt_dlp.YoutubeDL({"quiet": True}))
+    play = {"support_formats": [], "dash": {
+        "video": [{"baseUrl": "https://xy1.mcdn.bilivideo.cn:4483/v1/resource/1-80.m4s", "id": 80, "codecs": "avc1",
+                   "backupUrl": ["https://upos-sz-mirrorcos.bilivideo.com/1-80.m4s"], "mimeType": "video/mp4"}],
+        "audio": [{"baseUrl": "https://upos-sz-mirrorali.bilivideo.com/1-30280.m4s", "id": 30280, "codecs": "mp4a",
+                   "backup_url": ["https://upos-sz-mirrorhw.bilivideo.com/1-30280.m4s"], "mimeType": "audio/mp4"}]}}
+    fmts = ie.extract_formats(play)
+    assert len(fmts) == 2
+    assert fastdl.BACKUPS["https://xy1.mcdn.bilivideo.cn:4483/v1/resource/1-80.m4s"] == \
+        ["https://upos-sz-mirrorcos.bilivideo.com/1-80.m4s"]
+    assert "https://upos-sz-mirrorali.bilivideo.com/1-30280.m4s" in fastdl.BACKUPS

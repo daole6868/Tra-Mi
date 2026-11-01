@@ -1,6 +1,7 @@
 """Các bước xử lý (dùng chung cho giao diện web và dòng lệnh)."""
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from typing import Callable
@@ -183,9 +184,21 @@ def download_video(url: str, dest_dir: Path, progress: Prog | None = None, cance
         "socket_timeout": 20,   # mạng lag / rớt: 20 s không có dữ liệu thì thử lại (mặc định chờ rất lâu)
         "http_headers": {"User-Agent": sitelogin.UA},
     }
+    # tải nhiều luồng (2.1.30): yt-dlp tải mỗi file 1 kết nối, hình xong mới tới tiếng -> chậm hơn trình duyệt / IDM
+    conns = max(1, min(32, int(settings.get("dl_connections", 8) or 1)))
+    opts["concurrent_fragment_downloads"] = conns    # nguồn chia mảnh (HLS…): yt-dlp tải nhiều mảnh cùng lúc
+    if conns > 1:
+        from . import fastdl
+
+        fastdl.patch_bili_backups()
 
     def run_once(extra: dict):
         with yt_dlp.YoutubeDL({**opts, **extra}) as ydl:
+            if conns > 1:   # yt-dlp lấy link + chọn chất lượng, tool tải file nhiều luồng; không được -> yt-dlp tải như cũ
+                info = ydl.extract_info(url, download=False)
+                path = _fast_fetch(ydl, info, conns, progress, cancel)
+                if path is not None:
+                    return info, path
             info = ydl.extract_info(url, download=True)
             return info, Path(ydl.prepare_filename(info))
 
@@ -238,6 +251,109 @@ def download_video(url: str, dest_dir: Path, progress: Prog | None = None, cance
     if progress:
         progress(1.0, "Đã tải xong video" + (f" ({h}p)" if h else ""))
     return path
+
+
+def _fast_fetch(ydl, info: dict, conns: int, progress: Prog | None, cancel) -> Path | None:
+    """Tải các dòng hình / tiếng yt-dlp đã chọn bằng `fastdl` (nhiều luồng, hình + tiếng cùng lúc, Bilibili chọn máy chủ
+    nhanh nhất) rồi ghép bằng FFmpeg. None = không tải được kiểu này (nguồn chia mảnh / link hết hạn / máy chủ không cho
+    tải theo khúc giữa chừng) -> người gọi để yt-dlp tải."""
+    from . import fastdl
+
+    fmts = info.get("requested_formats") or [info]
+    if not fmts or any((f.get("protocol") or "") not in ("http", "https") or not f.get("url") for f in fmts):
+        return None
+    cancel = cancel or (lambda: False)
+    base = Path(ydl.prepare_filename(info))
+    out = base.with_suffix(".mp4")
+    lock = threading.Lock()
+    got = [0] * len(fmts)
+    size = [int(f.get("filesize") or f.get("filesize_approx") or 0) for f in fmts]
+    hist: list[tuple[float, int]] = []
+    note = {"msg": "", "t": 0.0}     # dòng báo của bộ tải (chọn máy chủ / mất mạng) – hiện 3,5 s
+
+    def counter(i: int):
+        def cb(n: int, total: int):
+            with lock:
+                got[i] = max(0, got[i] + n)
+                if total:
+                    size[i] = total
+        return cb
+
+    def show():
+        if not progress:
+            return
+        with lock:
+            done, total = sum(got), sum(size)
+        now = time.time()
+        hist.append((now, done))
+        while len(hist) > 2 and now - hist[0][0] > 3:
+            hist.pop(0)
+        sp = (done - hist[0][1]) / max(0.5, now - hist[0][0]) if len(hist) > 1 else 0
+        frac = done / total if total else 0
+        msg = note["msg"] if now - note["t"] < 3.5 else (f"Đang tải video {int(frac * 100)}%" + (f" · {done / 1e6:.0f}/{total / 1e6:.0f} MB"
+                              if total else f" · {done / 1e6:.0f} MB") + (f" · {sp / 1e6:.1f} MB/s" if sp else "") +
+                              f" · {conns} luồng")
+        progress(min(0.94, frac * 0.94), msg)
+
+    def report(m: str):
+        note["msg"], note["t"] = m, time.time()
+
+    files: dict[int, Path] = {}
+    errors: list[BaseException] = []
+
+    def one(i: int, f: dict):
+        try:
+            tmp = base.with_name(f"{base.stem}.f{f.get('format_id') or i}.{f.get('ext') or 'bin'}")
+            urls = [f["url"]] + fastdl.BACKUPS.pop(f["url"], [])
+            video = (f.get("vcodec") or "none") != "none" or len(fmts) == 1
+            files[i] = fastdl.fetch(urls, f.get("http_headers") or {}, ydl.cookiejar, tmp,
+                                    conns if video else max(2, conns // 2), counter(i), cancel, report)
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+    ts = [threading.Thread(target=one, args=(i, f), daemon=True, name="trami-dl-file") for i, f in enumerate(fmts)]
+    for t in ts:
+        t.start()
+    while any(t.is_alive() for t in ts):
+        for t in ts:
+            t.join(0.4)
+        show()
+    for e in errors:
+        if isinstance(e, (ff.Cancelled, net.NetworkDown)):
+            raise e
+    if cancel():
+        raise ff.Cancelled()
+    if errors:
+        log_error(f"Tải nhiều luồng không được, để yt-dlp tải: {err_text(errors[0])[:200]}")
+        for p_ in files.values():
+            p_.unlink(missing_ok=True)
+        return None
+    dur = float(info.get("duration") or 0)
+    parts = [files[i] for i in range(len(fmts))]
+    try:
+        if len(parts) == 1:
+            if parts[0].suffix.lower() == ".mp4":
+                parts[0].replace(out)
+                parts = []
+            else:
+                ff.run(["-i", str(parts[0]), "-c", "copy", "-movflags", "+faststart", str(out)], dur, None, cancel,
+                       "Đang ghép video")
+        else:
+            if progress:
+                progress(0.96, "Đang ghép hình và tiếng…")
+            vi = next((i for i, f in enumerate(fmts) if (f.get("vcodec") or "none") != "none"), 0)
+            ai = 1 - vi if len(parts) == 2 else next(i for i in range(len(parts)) if i != vi)
+            try:
+                ff.run(["-i", str(parts[vi]), "-i", str(parts[ai]), "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
+                        "-movflags", "+faststart", str(out)], dur, None, cancel, "Đang ghép hình và tiếng")
+            except ff.FFmpegError:     # hình / tiếng không cho vào mp4 -> mkv
+                out.unlink(missing_ok=True)
+                out = base.with_suffix(".mkv")
+                ff.run(["-i", str(parts[vi]), "-i", str(parts[ai]), "-map", "0:v:0", "-map", "1:a:0", "-c", "copy",
+                        str(out)], dur, None, cancel, "Đang ghép hình và tiếng")
+    finally:
+        for p_ in parts:
+            p_.unlink(missing_ok=True)
+    return out
 
 
 def attach_source(p: Project, path: Path):

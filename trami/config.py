@@ -182,6 +182,7 @@ DEFAULT_SETTINGS: dict = {
     # Tải video từ link: Bilibili đăng nhập bằng mã QR (sitelogin); trang khác lấy cookie từ trình duyệt / file
     "dl_browser": "",                         # "" / firefox / edge / chrome / brave / opera / vivaldi
     "dl_cookie_file": "",                     # file cookies.txt (Netscape) người dùng xuất từ trình duyệt
+    "dl_connections": 8,                      # tải video nhiều luồng (2.1.30, như IDM); 1 = 1 kết nối như yt-dlp
     "dub_skip_songs": True,           # không lồng tiếng các câu đang hát -> giữ nguyên bài hát gốc
     "dub_drop_interj": True,          # lồng tiếng Việt: xoá câu chỉ có 1–2 tiếng cảm thán (A!, Ừm., Ái!) trước khi đọc
     "interj_inline": True,            # bỏ vế chỉ gồm từ cảm thán (theo danh sách interj_words) trong câu dài

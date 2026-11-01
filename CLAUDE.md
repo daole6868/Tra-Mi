@@ -148,6 +148,17 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (đứng 45 s -> ghi `data/hf_no_xet.txt`, `config` đặt `HF_HUB_DISABLE_XET=1`) -> HuggingFace tải thường (60 s) ->
   ModelScope chính hãng (`MS_MIRRORS`, tải thẳng vào kho HF: snapshot `ms_commit` + `refs/main`; được thì ghi
   `data/hf_prefer_modelscope.txt` -> lần sau ModelScope trước). `models._hf_snapshot` ưu tiên snapshot theo refs/main.
+- Tải video nhiều luồng (2.1.30, `trami/fastdl.py`): yt-dlp vẫn lấy link + chọn chất lượng (`extract_info(download=
+  False)`), `pipeline._fast_fetch` tải các dòng hình / tiếng (`requested_formats`, chỉ giao thức http/https – nguồn chia
+  mảnh HLS -> yt-dlp với `concurrent_fragment_downloads`) CÙNG LÚC, mỗi file `fastdl.fetch` nhiều kết nối (Cài đặt
+  `dl_connections` 8, ô "Số luồng tải" Trang chủ; 1 = yt-dlp như cũ): `probe` (Range 0-0 -> cỡ + có cho tải theo khúc
+  không), khúc `chunk_size` 1–16 MB (~4 khúc / luồng), luồng lấy khúc từ hàng đợi, ghi đúng chỗ trong `.part` + `.part.json`
+  (khúc đã xong – Huỷ / mất mạng rồi tải tiếp đúng phần thiếu), khúc lỗi thử lại `RETRIES` (mất mạng -> `_Net.wait` 1
+  luồng chờ có mạng), 429 / 503 chờ lâu hơn; file < `MIN_SPLIT` 3 MB / không cho Range -> `_single` (nối tiếp khi được);
+  401 / 403 / 404 / 410 / bỏ qua Range -> `Expired` -> thử link dự phòng -> hết thì để yt-dlp tải lại từ đầu. Bilibili:
+  `patch_bili_backups` bọc `BilibiliBaseIE.extract_formats` ghi `backupUrl` (yt-dlp bỏ qua) vào `BACKUPS` -> `race` tải
+  thử 1 MB đầu ở mỗi máy chủ cùng lúc, chọn nhanh nhất; máy chủ P2P (`_PCDN` mcdn.bilivideo / szbdyd…) xếp sau
+  (`order_hosts`). Ghép FFmpeg `-c copy` (+faststart; không vào được mp4 -> mkv), dòng tiến độ "… · x MB/s · N luồng".
 - `trami/sitelogin.py` – tải video từ link: `extract_url` (link / dòng chia sẻ của app / mã BV), `normalize_url`
   (link điện thoại / rút gọn -> dạng yt-dlp có bộ tải riêng), đăng nhập Bilibili
   bằng mã QR (`bili_qr_start/poll/status`, cookie Netscape `data/cookies/bilibili.txt`), `BROWSERS` cho cookie
@@ -525,7 +536,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (258 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (260 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2264,8 +2275,19 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   án đang mở giữ đệm nghe), tự dọn (đệm nghe 2 dự án gần nhất + dự án đang chạy việc, file tạm cũ, giữ 2 bản lồng bỏ bản
   cũ chưa ghim), đệm nghe 1 kênh (trộn ra 2 kênh bằng nhau, vá khớp giải mã cả file), wav 48 kHz -> 24 kHz đúng từng mẫu,
   giao diện offscreen (trang Dung lượng, hỏi lại rồi dọn, nút Ghim).
+- 2.1.30: "tải video từ link chậm hơn tải ở trình duyệt". Nguyên nhân: yt-dlp tải mỗi file bằng 1 kết nối, hình xong mới
+  tới tiếng; máy chủ video giới hạn tốc độ từng kết nối + mạng xa (VN ↔ Trung Quốc) làm 1 kết nối TCP chậm; IDM / trình
+  duyệt mở nhiều kết nối. Bilibili: yt-dlp chỉ dùng link chính (có khi là máy chủ P2P chậm), bỏ link dự phòng. Sửa: tải
+  nhiều luồng + chọn máy chủ nhanh nhất (xem Cấu trúc). Đo trên máy chủ thử giới hạn 1,5 MB/s mỗi kết nối, file 24 MB:
+  1 luồng 1,5 MB/s, 4 luồng 6, 8 luồng 12,1, 16 luồng 14,6 MB/s, đúng từng byte. Thử: Huỷ giữa chừng rồi tải tiếp (chỉ
+  tải phần thiếu), máy chủ ngắt giữa khúc, link chính bị từ chối -> link dự phòng, không cho Range -> 1 luồng, yt-dlp thật
+  tải qua đường mới + 2 dòng hình / tiếng ghép thành mp4, ghi link dự phòng từ câu trả lời Bilibili giả. Chưa chạy với
+  Bilibili / Douyin / YouTube thật (sandbox chặn).
 
 ## Vấn đề đang mở
+- 2.1.30: chờ người dùng dán link Bilibili / Douyin / YouTube vào Trang chủ -> "Chỉ tải về": dòng tiến độ có "· N
+  luồng", tốc độ so với trước / với trình duyệt; tải lỗi / bị chặn (403, 412) -> giảm "Số luồng tải" xuống 4 hoặc 1 rồi
+  báo lại. Tool tự lùi về yt-dlp khi tải nhiều luồng không được (ghi data\logs\loi.txt "Tải nhiều luồng không được").
 - 2.1.29: chờ người dùng mở trang Dung lượng (thanh bên) xem số GB thật từng dự án / mô hình, bấm Dọn đệm / Dọn rác thử
   1 dự án; mở lại dự án đó xem nghe thử / xuất vẫn bình thường (lần đầu giải mã lại đệm nghe ~1–2 phút). Lần đầu mở 1 dự
   án sau cập nhật, tự dọn xoá đệm nghe của mọi dự án khác (chỉ giữ dự án mở gần nhất). Giọng VieNeu cũ (48 kHz + .npy) tự
