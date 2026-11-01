@@ -1609,7 +1609,8 @@ def test_ocr_change_detector_any_color():
 
 def _cjk_font():
     for f in ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-              "C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simhei.ttf", "/System/Library/Fonts/PingFang.ttc"):
+              "C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simhei.ttf", "/System/Library/Fonts/PingFang.ttc",
+              "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"):
         if os.path.exists(f):
             return f
     return None
@@ -1618,7 +1619,8 @@ def _cjk_font():
 def test_ocr_region_multiline_and_colors(tmp_path):
     """Dò vùng phụ đề từ câu đầu tiên (nới lên / xuống, hết chiều ngang) + đọc đủ: chữ hồng, phụ đề 2–3 dòng (trước chỉ
     đọc được dòng dưới cùng), câu dài gần hết ngang; watermark góc không lẫn vào câu."""
-    pytest.importorskip("rapidocr_onnxruntime")
+    if importlib.util.find_spec("rapidocr") is None and importlib.util.find_spec("rapidocr_onnxruntime") is None:
+        pytest.skip("chưa cài bộ đọc chữ")
     font = _cjk_font()
     if not font:
         pytest.skip("không có font chữ Hán để vẽ video thử")
@@ -11235,3 +11237,227 @@ def test_download_video_fast_merge_2130(tmp_path, monkeypatch):
     assert fastdl.BACKUPS["https://xy1.mcdn.bilivideo.cn:4483/v1/resource/1-80.m4s"] == \
         ["https://upos-sz-mirrorcos.bilivideo.com/1-80.m4s"]
     assert "https://upos-sz-mirrorali.bilivideo.com/1-30280.m4s" in fastdl.BACKUPS
+
+
+# ------------------------------------------------------------------ 2.1.31: OCR quét nhanh, giờ đúng từng khung
+
+def _ocr_video_2131(path, dur=14.0, bg="noise", watermark=True):
+    """Video thử: nền nhiễu chuyển động (mỗi khung khác nhau), phụ đề đổi ở giờ lẻ (không trùng nhịp kiểm tra)."""
+    font = _cjk_font()
+    lines = ["没想到你也有这一天", "今天的天气真不错啊", "我们一起去吃饭好不好", "这件事情你别管了",
+             "师父说过不能下山", "快点跑别回头看"]
+    subs, t = [], 0.52
+    for k, txt in enumerate(lines):
+        d = (1.68, 2.04, 1.32, 2.36, 1.56, 1.88)[k]
+        subs.append((round(t, 2), round(t + d, 2), txt))
+        t += d + (0.0, 0.44, 0.0, 0.84, 0.0, 0.0)[k]
+    f = []
+    if bg == "noise":
+        f.append("noise=alls=60:allf=t")
+    for a, b, txt in subs:
+        f.append(f"drawtext=fontfile='{font}':text='{txt}':fontsize=40:fontcolor=white:borderw=3:bordercolor=black:"
+                 f"x=(w-tw)/2:y=h-90:enable='gte(t,{a})*lt(t,{b})'")
+    if watermark:
+        f.append(f"drawtext=fontfile='{font}':text='频道水印':fontsize=22:fontcolor=white:x=w-130:y=h-40")
+    subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i",
+                    f"color=c=0x406080:s=960x540:r=25:d={dur}", "-vf", ",".join(f), "-c:v", "libx264",
+                    "-preset", "veryfast", "-pix_fmt", "yuv420p", str(path)], check=True)
+    return subs
+
+
+def _need_ocr3():
+    if importlib.util.find_spec("rapidocr") is None:
+        pytest.skip("chưa cài rapidocr 3")
+    if not _cjk_font():
+        pytest.skip("không có font chữ Hán để vẽ video thử")
+
+
+def test_ocr_engine_2131():
+    """Bộ đọc RapidOCR 3: PP-OCRv6 có sẵn trong gói; tìm chữ trên dải rất dẹt (thêm lề); đọc dòng gom lô, độ rộng làm
+    tròn bậc; mô hình chưa tải -> dùng bản có sẵn + nhắc; nút cài bản card không gỡ onnxruntime đang được dùng."""
+    _need_ocr3()
+    import cv2
+    from PIL import Image, ImageDraw, ImageFont
+
+    from trami import ocr_engine as oe
+
+    assert oe.model_ready("v6_small") and oe.bundled("v6_small")
+    assert not oe.model_ready("v5_server") or (oe.OCR_DIR / "ch_PP-OCRv5_rec_server.onnx").exists()
+    font = ImageFont.truetype(_cjk_font(), 40)
+    im = Image.new("RGB", (1280, 70), (40, 60, 80))
+    ImageDraw.Draw(im).text((300, 12), "这是一句测试字幕没想到你也有这一天", font=font, fill=(255, 255, 255),
+                            stroke_width=2, stroke_fill=(0, 0, 0))
+    band = cv2.cvtColor(np.array(im), cv2.COLOR_RGB2GRAY)
+    e = oe.get({})
+    assert e.kind == "v3" and "PP-OCRv6" in e.label
+    boxes = e.detect(band, oe.SCAN_SIDE)                   # dải 1280×70 (rộng 18 lần cao): vẫn tìm được dòng chữ
+    assert len(boxes) == 1 and boxes[0][:, 1].min() >= 0 and boxes[0][:, 1].max() <= 70
+    (t, s), = e.recognize([oe._crop(band, boxes[0])])
+    assert t == "这是一句测试字幕没想到你也有这一天" and s > 0.9
+    assert oe.bucket(np.zeros((48, 100), np.uint8)).shape == (48, 192)    # tỉ lệ 2,08 -> làm tròn lên 4
+    assert oe.bucket(np.zeros((48, 192), np.uint8)).shape == (48, 192)
+    e2 = oe.Engine("v5_server")
+    if not oe.model_ready("v5_server"):
+        assert e2.key == "v6_small" and "Chưa tải" in e2.warn
+    with pytest.raises(RuntimeError, match="đang được tool dùng"):
+        oe.install_gpu()
+    assert isinstance(oe.ort_dists(), list) and isinstance(ff.hwdec_args(__file__, "x"), list)
+
+
+def test_ocr_scan_frame_exact_2131(tmp_path, monkeypatch):
+    """Quét mới: nền nhiễu chuyển động KHÔNG làm tách câu (theo dõi điểm ảnh nét chữ, không theo cả dải); giờ hiện / tắt
+    đúng tới 1 khung (chia đôi các khung giữa 2 mốc kiểm tra); mỗi câu đọc chữ ~1 lần; watermark trong vùng quét bị bỏ;
+    chia 3 khúc giải mã song song ra y hệt 1 khúc; khung chữ lưu theo đoạn giờ."""
+    _need_ocr3()
+    from trami import ocr
+    from trami.inpaint import BoxIndex
+
+    v = tmp_path / "noise.mp4"
+    subs = _ocr_video_2131(v)
+    reg = {"x": 0.0, "y": 0.75, "w": 1.0, "h": 0.25, "exact": True}
+
+    def check(segs, st):
+        assert [s.text for s in segs] == [txt for _, _, txt in subs], [s.text for s in segs]
+        for s, (a, b, _) in zip(segs, subs):
+            # chữ hiện từ khung đầu tiên có t ≥ a (lưới 0,04 s) -> lệch tối đa 1 khung
+            assert abs(s.start - a) <= 0.045 and abs(s.end - b) <= 0.045, (s.start, s.end, a, b)
+        assert st["spans"] <= 2 * len(subs) + 4 and st["ocr_runs"] <= 2 * st["spans"]
+        assert st["det"] < st["frames"] / 2                # không tìm chữ ở mọi khung
+    st: dict = {}
+    boxes = tmp_path / "b.json"
+    segs = ocr.extract_hardsubs(v, reg, stats=st, boxes_out=boxes)
+    check(segs, st)
+    d = json.loads(boxes.read_text("utf-8"))
+    assert d["spans"] and d["fps"] == 25.0
+    bi = BoxIndex(boxes)
+    a, b, _ = subs[1]
+    assert bi.at((a + b) / 2) and bi.at(subs[3][0] - 0.4) is not None
+    monkeypatch.setattr(ocr, "_chunks", lambda total: 3)    # 3 khúc giải mã song song: kết quả như 1 khúc
+    st3: dict = {}
+    check(ocr.extract_hardsubs(v, reg, stats=st3), st3)
+    assert st3["chunks"] == 3
+
+
+def test_recognize_ocr_exact_box_2131(tmp_path):
+    """"Nghe & tách câu" nguồn OCR: khung người dùng kéo (p.data["ocr_box"]) được quét ĐÚNG khung (ưu tiên hơn vùng tab
+    Xoá phụ đề); thông báo có số lần đọc chữ + bộ đọc; vùng xoá gợi ý = khung chữ thật."""
+    _need_ocr3()
+    from trami import pipeline
+    from trami.config import load_settings
+    from trami.project import Project
+
+    v = tmp_path / "plain.mp4"
+    subs = _ocr_video_2131(v, dur=7.0, bg="plain", watermark=False)
+    p = Project.create("ocrbox")
+    try:
+        pipeline.attach_source(p, v)
+        p.data["ocr_box"] = {"x": 0.05, "y": 0.78, "w": 0.9, "h": 0.17}
+        p.save()
+        assert pipeline.ocr_box(p)["exact"]
+        n = pipeline.recognize(p, "ocr", "zh", {"x": 0.0, "y": 0.1, "w": 1.0, "h": 0.1}, 4.0,
+                               {**load_settings(), "diarize": False})
+        p.reload()
+        assert n == len([x for x in subs if x[0] < 7.0]) and p.data["ocr_region"].get("exact")
+        assert abs(p.data["ocr_region"]["y"] - 0.78) < 1e-6
+        note = pipeline.ocr_note(p)
+        assert "đọc chữ" in note and "PP-OCRv6" in note
+        reg = p.edit["hardsub"]["regions"][0]
+        assert 0.78 <= reg["y"] < 0.9 and reg["w"] < 0.9               # vừa khít chữ, không phải cả khung quét
+    finally:
+        p.delete()
+
+
+def test_ocr_box_gui_2131(sample_video, monkeypatch):
+    """Tab Tự động nguồn OCR: khung vùng quét kéo trên video (ẩn phụ đề Việt / hiệu ứng che), lưu vào dự án; nguồn giọng
+    nói -> tắt khung, ẩn 2 hàng OCR; tab Xoá phụ đề vẫn chỉnh vùng che; Chụp khung & khoanh; Tự dò -> khung hết chiều
+    ngang chừa chỗ câu 2 dòng; Cài đặt có mục OCR."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QPointF
+    from PySide6.QtWidgets import QApplication, QDialog
+
+    from trami import pipeline
+    from trami.gui import project_page as PPm, theme
+    from trami.gui.editors import RegionEditor
+    from trami.gui.main import MainWindow
+    from trami.gui.widgets import set_combo
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    p = Project.create("ocrgui")
+    pipeline.attach_source(p, sample_video)
+    p.save()
+    win = MainWindow()
+    win.show()
+    win.open_project(p.id)
+    pp = win.project_page
+    try:
+        app.processEvents()
+        pp._tab_changed(0)
+        set_combo(pp.a_method, "ocr")
+        app.processEvents()
+        view = pp.player.view
+        ob = view.ocrbox
+        assert ob.editing and not view.hs.isVisible() and not view.sub.isVisible()
+        assert not pp.a_ocrbox.isHidden() and not pp.a_ocrmodel.isHidden()
+
+        class Ev:
+            def __init__(self, x, y):
+                self._p = QPointF(x, y)
+
+            def pos(self):
+                return self._p
+
+            def accept(self):
+                pass
+
+            def ignore(self):
+                pass
+        br = ob.boundingRect()
+        ob.mousePressEvent(Ev(br.width() * 0.1, br.height() * 0.7))
+        ob.mouseMoveEvent(Ev(br.width() * 0.9, br.height() * 0.9))
+        ob.mouseReleaseEvent(Ev(0, 0))
+        p.reload()
+        b = pipeline.ocr_box(p)
+        assert b and abs(b["x"] - 0.1) < 0.01 and abs(b["y"] - 0.7) < 0.01 and abs(b["w"] - 0.8) < 0.01
+        assert "Đã khoanh" in pp.a_ocrbox_lb.text()
+        ob.mousePressEvent(Ev(br.width() * 0.5, br.height() * 0.8))     # bấm giữa khung + kéo = dời khung
+        ob.mouseMoveEvent(Ev(br.width() * 0.5, br.height() * 0.75))
+        ob.mouseReleaseEvent(Ev(0, 0))
+        p.reload()
+        assert abs(pipeline.ocr_box(p)["y"] - 0.65) < 0.01 and abs(pipeline.ocr_box(p)["w"] - 0.8) < 0.01
+        set_combo(pp.a_method, "asr")
+        app.processEvents()
+        assert not ob.editing and view.sub.isVisible() and pp.a_ocrbox.isHidden()
+        set_combo(pp.a_method, "hybrid")
+        pp._tab_changed(pp.TAB_HARDSUB)
+        assert not ob.editing and view.hs.show_outline and view.hs.isVisible()
+        pp._tab_changed(0)
+        assert ob.editing
+
+        def fake_exec(dlg):
+            ed = dlg.findChild(RegionEditor)
+            assert ed is not None and ed.regions                         # khung đang có hiện sẵn trên ảnh chụp
+            ed.set_regions([{"x": 0.0, "y": 0.8, "w": 1.0, "h": 0.15}])
+            return 1
+        monkeypatch.setattr(QDialog, "exec", fake_exec)
+        monkeypatch.setattr(PPm, "run_async", lambda fn, done=None, err=None: done(fn()))
+        pp._ocr_capture()
+        p.reload()
+        assert pipeline.ocr_box(p) == {"x": 0.0, "y": 0.8, "w": 1.0, "h": 0.15, "exact": True}
+        assert not list(p.work.glob("ocr_frame_*.jpg"))
+        box = PPm.ocr_box_from_detect({"found": True, "line_h": 0.06,
+                                       "erase": {"x": 0.3, "y": 0.84, "w": 0.4, "h": 0.08}})
+        assert box["x"] == 0 and box["w"] == 1 and abs(box["y"] - 0.762) < 1e-6 and box["y"] + box["h"] <= 1.0
+        pp._ocr_box_set(None)
+        p.reload()
+        assert pipeline.ocr_box(p) is None and "Chưa khoanh" in pp.a_ocrbox_lb.text()
+        sp = win.settings_page
+        sp._ocr_gpu_status()
+        assert sp.ocr_model.count() == 4 and sp.ocr_device.count() == 2 and sp.ocr_gpu_lb.text()
+        assert {"ocr_model", "ocr_device", "ocr_hwdec", "ocr_clean"} <= set(sp.collect())
+    finally:
+        win.timer.stop()
+        pp.p = None
+        win.close()
+        p.delete()

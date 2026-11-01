@@ -71,7 +71,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   bandit_v2_multi.pt 149 MB; đọc checkpoint bằng weights_only, không được thì `_SafeUnpickler` (lớp lạ -> `_Dummy`, không
   chạy mã); suy luận mỗi kênh riêng, cửa sổ 8 s trượt `HOP_SEC` 2 s ghép Hann, từng đoạn `BLOCK_SEC` 300 s, card nửa độ
   chính xác (bf16 / fp16; lỗi -> fp32), lô theo dung lượng card `device_plan`; tab Tài liệu "sep_bandit"),
-  `lama.py` + `inpaint.py` (xoá chữ), `ocr.py` (RapidOCR),
+  `lama.py` + `inpaint.py` (xoá chữ), `ocr.py` + `ocr_engine.py` (OCR phụ đề cứng – xem mục 2.1.31),
   `skills.py` (kỹ năng dịch AI: sửa lỗi nghe & nối câu, hồ sơ phim, kiểm tra bản dịch, kỹ năng riêng – `gui/skills_dialog.py`),
   `translate.py` (`LLMClient` gọi HTTP: anthropic / OpenAI-compatible / gemini / deepseek / ollama; Google gtx;
   Hy-MT2 trên máy qua `hymt_worker.py`), `voicefix.py` (đọc số, phát hiện giọng AI hỏng, cân âm lượng),
@@ -468,6 +468,51 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   "_nguoi_noi" / "_speakers" -> `_keep_speakers` -> `speaker_genders` (đa số ≥ 2/3) -> `video_translate_note` ghi
   `p.data["speaker_gender"]` src "gemini" (`pipeline.speaker_genders` giữ, không đoán lại theo cao độ; tooltip bảng
   người nói "Gemini thấy trên hình") -> Tự gán giọng nam / nữ. Cuối `translate` `cleanup` file trên máy chủ Google.
+- OCR phụ đề cứng quét nhanh + giờ đúng từng khung (2.1.31): `trami/ocr_engine.py` – RapidOCR 3.x (Apache-2.0, gói
+  `rapidocr` ≥ 3.10; dự phòng `rapidocr_onnxruntime` 1.x = "v4"): `MODELS` / `SPEC` v6_small (PP-OCRv6 small CÓ SẴN trong
+  gói, `bundled`) / v6_medium / v5_server (tải ở tab Tài liệu `models.OCR_KEYS` ocr_v6m / ocr_v5s -> `download`: link +
+  SHA256 đọc từ `default_models.yaml` của gói rapidocr `_registry`, `fastdl.fetch` 4 luồng vào data/models/ocr;
+  ModelScope bị chặn ở máy thử – chưa tải thật), `Engine` (`detect(img, side)` – Det `limit_type` max cạnh `DET_SIDE` 960 /
+  `SCAN_SIDE` 736 thay mặc định phóng cạnh NGẮN lên 736 (dải 1280×160 bị phóng ~5900×736: bản cũ 1,97 s / lần, mới 0,19 s);
+  dải dẹt > `WIDE` 8 lần thêm lề trên / dưới; `recognize(crops)` đọc dòng gom lô, `bucket` lấp phải tỉ lệ rộng / cao tròn
+  bậc `REC_BUCKET` 2 bằng `REC_PAD` 127; khoá riêng tìm chữ / đọc dòng; v1 không tách bước), `get(settings)` (Cài đặt
+  `ocr_model` / `ocr_device` auto|cpu), card: `ort_kind` (CUDA / DirectML / CPU theo provider), `_prepare_cuda` (onnxruntime
+  `preload_dlls` + Windows nạp sẵn cudart / cublas / cudnn… từ torch\lib, KHÔNG import torch), `ort_dists` (đọc thông tin
+  gói, không import), `install_gpu` (nút Cài đặt "Cài bản chạy card": pip gỡ onnxruntime* rồi cài onnxruntime-gpu; từ chối
+  khi onnxruntime đã nạp trong tiến trình / bản exe), `gpu_install_cmd`. `ff.hwdec_args(src, codec)` – giải mã bằng card
+  (cuda khi có nvidia-smi, Windows d3d11va / dxva2) thử 5 khung của chính file, nhớ theo codec (Cài đặt `ocr_hwdec`).
+  `ocr.extract_hardsubs(settings=)`: chia `_chunks` (≥ 120 s: 2 khúc, ≥ 20 phút + ≥ 8 nhân: 3) giải mã SONG SONG (luồng
+  `_scan`: ffmpeg `-ss` khúc + `fps=F` (F = fps video ≤ `SCAN_FPS_MAX` 30) `crop,scale(≤ MAX_W 1280),format=gray`; card
+  không giải mã được -> CPU), đọc chữ ở luồng chính qua hàng đợi. `_Tracker` mỗi khúc: mốc kiểm tra mỗi `step` =
+  F / ocr_fps khung; đang KHÔNG có chữ: dấu nét (`_text_signature`) đổi so với khung đã tìm chữ gần nhất -> `detect`; có
+  khung chữ -> `_glyph_pixels` (điểm sáng sát điểm tối trong khung = thân chữ cạnh viền, ≤ `MASK_MAX` 6000) -> `_start`
+  chia đôi các khung chờ tìm khung ĐẦU TIÊN đã có nét đó (`_persist` ≥ `KEEP` 0,6, lệch ≤ `TOL` 40) -> `_Span`; đang có
+  chữ: nét còn ≥ KEEP -> cùng câu (nền đổi xung quanh không tính; `refine` 3 mốc đầu bỏ điểm "nét" thực ra là nền), dấu
+  nét đổi -> tìm chữ xem có chữ MỚI hiện thêm (≥ 0,25 × cao dòng²) -> tách câu ở khung chữ mới hiện; nét < KEEP -> chia đôi
+  tìm khung cuối còn nét cũ, xét lại từ khung đầu tiên đổi. => giờ hiện / tắt đúng tới 1 khung, nền chuyển động không
+  làm tách câu, chỉ tìm chữ khi cần. `_Reader.read`: `_clean_image` (khung giữa câu + ≤ `STACK` 8 khung mẫu, bỏ khung đầu /
+  cuối; điểm đổi > `MOVE_DIFF` 36 = chuyển động; ≥ `MOVE_SHARE` 8 % mới làm: điểm đứng yên (cụm ≥ `SPECK` 8, nới 1) giữ
+  khung giữa, điểm chuyển động = TRUNG BÌNH các khung -> ảnh sạch; ảnh "nền đen" chỉ để TÌM chữ lại (khung rộng hơn 1,15
+  lần `_cover` -> dùng) – tô đen làm vỡ nét chữ nên không đọc trên ảnh đó) -> đọc dòng trên khung chữ đã tìm (không tìm
+  lại = C); kém chắc < `WEAK` 0,75 / đổi khung -> đọc thêm khung gốc, chọn `q` = Σ số chữ × độ chắc²; chữ < min_score
+  chỉ giữ khi lần đọc kia ra giống. Sau đó lọc như cũ (chữ trong cảnh di chuyển, `_static_marks_spans` watermark theo thời
+  lượng ≥ 30 % và ≥ 10 s (video ngắn ≥ 80 %) + ≥ 3 đoạn, chiều cao chữ trung vị THEO THỜI GIAN, `_anchor_block` trừ khung
+  "exact"), gộp đoạn cùng câu (`_same_line`, khe ≤ max(2,5 × step / F, 0,15 s)), bỏ câu < `MIN_SEG` 0,2 s. `ocr_boxes.json`
+  mới {"fps", "spans": [{a, b, boxes}]} -> `inpaint.BoxIndex` tra theo đoạn (file cũ "frames" vẫn đọc). stats: frames,
+  ocr_runs, spans, det, cleaned, engine, engine_warn, hw, chunks, secs -> `p.data["ocr_stats"]` -> `pipeline.ocr_note`
+  (thông báo "1. Nghe & tách câu" + `auto`). `detect_subtitle_region(settings=)` dùng `Engine.ocr`.
+  Khung VÙNG QUÉT người dùng kéo: `p.data["ocr_box"]` -> `pipeline.ocr_box(p)` {x, y, w, h, exact} được `recognize` ưu
+  tiên (quét ĐÚNG khung, không nới, không lọc theo dòng mốc) hơn vùng tab Xoá phụ đề (`expand_region`) hơn tự dò; xuất
+  tự động dùng ocr_region "exact" làm vùng xoá dự phòng. GUI: `player.OcrBoxItem` (con của video item, xanh `COLOR`,
+  làm tối ngoài khung, kéo vẽ / dời / 4 cạnh + 4 góc qua `editors.hit_region` / `drag_region`; bấm nhầm < 2 % giữ khung
+  cũ) -> `Player.ocrBoxEdited`; `VideoView.set_tool(ocr=)` – tab Tự động + nguồn OCR / OCR + nghe: ẩn phụ đề Việt, hiệu ứng
+  che (`hs`), lớp chữ / logo (`hide_layers`). Tab Tự động nhóm 1: hàng "Vùng phụ đề" (`a_ocrbox_lb` + Chụp khung & khoanh
+  `_ocr_capture` -> ảnh đủ độ phân giải tại vị trí đang phát -> hộp `RegionEditor` 85 % màn hình; Tự dò `_ocr_detect` ->
+  `ocr_box_from_detect` hết ngang, 1,3 dòng trên dòng đầu tiên; Bỏ khung) + "Bộ đọc chữ" `a_ocrmodel` (= Cài đặt
+  `ocr_model`); `_method_rows` ẩn / hiện 2 hàng + `_refresh_tool`. Cài đặt → Nhận dạng giọng nói: Mô hình OCR, OCR chạy trên
+  (+ `ocr_gpu_lb` trạng thái onnxruntime, nút Cài bản chạy card -> việc "update"), Giải mã video bằng card, Lọc nền khi
+  đọc chữ. requirements: `rapidocr>=3.10` + `onnxruntime>=1.18` (+ rapidocr-onnxruntime dự phòng); Subvideo.spec gom
+  rapidocr / omegaconf / pyclipper / shapely. `C.OCR_FPS_HELP` / `OCR_BOX_HELP` / `OCR_MODEL_HELP`.
 - Dấu câu bản dịch (2.1.11): `translate.punct_fix` = `fix_commas` (bỏ dấu phẩy ngay sau `COMMA_GLUE` lượng từ / "của" khi
   chữ sau viết thường, trừ dãy số; dấu phẩy giữa các tiếng của tên trong bảng thuật ngữ `Translator.names`) + `end_punct`
   (thiếu dấu câu cuối -> theo câu gốc: ？/吗/么 -> ?, ！ -> !, … , dấu phẩy -> ",", còn lại "."; Nhật 。？！、, Thái không
@@ -536,7 +581,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (260 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (264 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2284,7 +2329,25 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   tải qua đường mới + 2 dòng hình / tiếng ghép thành mp4, ghi link dự phòng từ câu trả lời Bilibili giả. Chưa chạy với
   Bilibili / Douyin / YouTube thật (sandbox chặn).
 
+- 2.1.31: "làm công cụ quét màn hình tốc độ cao tách sub chính xác nhất" -> người dùng chọn A B C D E F + "cho khung kéo
+  chỗ phụ đề xuất hiện, tool chỉ quét khung đó, chụp khung đang phát để kéo cho đúng". Bản cũ: RapidOCR 1.x PP-OCRv4 CPU,
+  đọc lại mỗi giây + mỗi lần dấu nét cả dải đổi (nền chuyển động = đọc ở mọi mốc), giờ câu lệch tới 1/fps (0,25 s), bước
+  tìm chữ phóng dải 1280×160 lên ~5900×736. Làm: xem Cấu trúc "OCR phụ đề cứng quét nhanh + giờ đúng từng khung". Lỗi tìm ra
+  khi thử: so dấu nét CẢ dải -> nền chuyển động (testsrc2) tách 623 đoạn / 40 s -> theo dõi đúng điểm ảnh nét chữ; điểm
+  "nét" lấy theo phần sáng / tối nhất khung chữ dính mảng nền đứng yên -> đổi câu không nhận ra -> chỉ lấy điểm sáng sát điểm
+  tối; so ảnh thu nhỏ theo trung bình để dùng lại kết quả -> câu ngắn bị coi như dải chỉ có watermark (bỏ); mở ảnh 2×2 / 3×3
+  xoá mất nét chữ nhỏ -> lọc theo cụm; tô đen điểm chuyển động làm vỡ chữ -> trung bình các khung; khung có chữ mới bị nạp
+  vào câu cũ trước khi tách -> đọc ra nửa câu sau ở câu trước. Đo trên máy thử (CPU 4 nhân, không card), video 40 s 960×540
+  chữ trắng viền đen, câu đổi ở giờ lẻ: nền nhiễu chuyển động – cũ 112 s / lệch giờ TB 0,072 s (max 0,13), mới 17 s / 0,027 s
+  (max 0,03 = lưới khung của video thử); nền testsrc2 – cũ 97 s, mới 12 s; cả 2 đều 18/18 câu đúng chữ; 150 s 2 khúc song song
+  62/62. Chưa chạy trên card (onnxruntime-gpu / NVDEC) và chưa tải PP-OCRv5 server / v6 medium (ModelScope bị chặn).
+
 ## Vấn đề đang mở
+- 2.1.31: chờ người dùng `.venv\Scripts\python -m pip install -U rapidocr` rồi thử tab Tự động → Nguồn phụ đề "OCR" →
+  dừng video ở chỗ có phụ đề, kéo khung trên video (hoặc "Chụp khung & khoanh") → "1. Nghe & tách câu": thông báo có "quét …
+  khung · N lần chữ đổi, đọc chữ M lần · PP-OCRv6 · CPU/card · giải mã bằng card · x s", so tốc độ + số câu sai với trước;
+  Cài đặt → "Cài bản chạy card" (tắt mở lại tool trước khi bấm) rồi xem dòng trạng thái có "card (CUDA)" không (không
+  được -> gửi dòng ⚠ trong thông báo); thử tải PP-OCRv5 server / v6 medium ở tab Tài liệu (ModelScope từ VN).
 - 2.1.30: chờ người dùng dán link Bilibili / Douyin / YouTube vào Trang chủ -> "Chỉ tải về": dòng tiến độ có "· N
   luồng", tốc độ so với trước / với trình duyệt; tải lỗi / bị chặn (403, 412) -> giảm "Số luồng tải" xuống 4 hoặc 1 rồi
   báo lại. Tool tự lùi về yt-dlp khi tải nhiều luồng không được (ghi data\logs\loi.txt "Tải nhiều luồng không được").

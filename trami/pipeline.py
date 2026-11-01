@@ -1446,25 +1446,30 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         opr = progress if method == "ocr" else _sub(progress, 0.0, 0.4)
         from .ocr import detect_subtitle_region, expand_region, extract_hardsubs
 
-        if region:   # vùng khoanh ở tab Xoá phụ đề (vừa khít 1 dòng) -> mở rộng: hết ngang, thêm dòng trên / dưới
-            scan = expand_region(region)
+        box = ocr_box(p) or region
+        if box and box.get("exact"):   # 2.1.31: khung người dùng kéo trên video (tab Tự động) -> quét ĐÚNG khung đó
+            scan = {k: float(box[k]) for k in ("x", "y", "w", "h")}
+            scan.update({"found": True, "exact": True})
+        elif box:   # vùng khoanh ở tab Xoá phụ đề (vừa khít 1 dòng) -> mở rộng: hết ngang, thêm dòng trên / dưới
+            scan = expand_region(box)
         else:
             if progress:
                 progress(0.0, "Đang dò vùng phụ đề (kỹ ở 5 giây đầu và 5 giây cuối)…")
-            scan = detect_subtitle_region(src, _sub(opr, 0.0, 0.05))
+            scan = detect_subtitle_region(src, _sub(opr, 0.0, 0.05), settings=settings)
         boxes = p.work / "ocr_boxes.json"
         stats: dict = {}
         segs = extract_hardsubs(src, scan, fps=float(ocr_fps or 4), progress=_sub(opr, 0.05, 0.85),
-                                cancel=cancel, boxes_out=boxes, stats=stats)
+                                cancel=cancel, boxes_out=boxes, stats=stats, settings=settings)
         if on_draft and segs:
             on_draft([Segment(x.start, x.end, x.text) for x in segs])
         p.data["ocr_region"] = scan
         p.data["ocr_boxes"] = str(boxes)
-        p.data["ocr_stats"] = {"fps": float(ocr_fps or 4), "frames": stats.get("frames", 0),
-                               "ocr_runs": stats.get("ocr_runs", 0), "first_t": scan.get("first_t")}
+        p.data["ocr_stats"] = {"fps": float(ocr_fps or 4), "first_t": scan.get("first_t"),
+                               **{k: stats.get(k) for k in ("frames", "ocr_runs", "spans", "det", "cleaned", "engine",
+                                                             "engine_warn", "hw", "chunks", "secs")}}
         p.data["ocr_warning"] = "" if segs else (
             "Không đọc được câu phụ đề nào – video có thể không có chữ Trung in sẵn, hoặc chữ nằm ngoài vùng quét: "
-            "vào tab Xoá phụ đề bấm Tự dò / khoanh lại vùng chữ, hoặc dùng Nhận dạng giọng nói.")
+            "tab Tự động → Vùng phụ đề: kéo khung đúng chỗ chữ (hoặc bấm Tự dò), hoặc dùng Nhận dạng giọng nói.")
         # gợi ý luôn vùng xoá phụ đề: vừa khít chữ phụ đề đã đọc (không phải cả vùng quét rộng)
         ed = p.edit
         box = stats.get("text_box") or scan.get("erase")
@@ -4932,6 +4937,39 @@ def export_subs(p: Project, fmt: str = "srt", which: str = "trans", settings: di
     return out
 
 
+def ocr_box(p: Project) -> dict | None:
+    """Khung quét phụ đề người dùng kéo trên video (tab Tự động → Vùng phụ đề) – {x, y, w, h, exact}; None = chưa kéo."""
+    b = p.data.get("ocr_box")
+    if isinstance(b, dict) and all(k in b for k in ("x", "y", "w", "h")) and float(b["w"]) > 0.01 and float(b["h"]) > 0.01:
+        return {**{k: float(b[k]) for k in ("x", "y", "w", "h")}, "exact": True}
+    return None
+
+
+def ocr_note(p: Project) -> str:
+    """Dòng tóm tắt lần OCR gần nhất: số câu / lần đọc, bộ đọc, card, thời gian."""
+    o = p.data.get("ocr_stats") or {}
+    if not o.get("frames"):
+        return ""
+    msg = f"quét {o['frames']} khung"
+    if o.get("spans") is not None:
+        msg += f" · {o['spans']} lần chữ đổi, đọc chữ {o.get('ocr_runs', 0)} lần"
+        if o.get("cleaned"):
+            msg += f" ({o['cleaned']} câu đọc trên ảnh chữ đã lọc nền)"
+    else:
+        msg += f" ({o.get('fps', 4):g} lần/giây), đọc chữ {o.get('ocr_runs', 0)} lần"
+    if o.get("engine"):
+        msg += f" · {o['engine']}"
+    if o.get("hw"):
+        msg += " · giải mã bằng card"
+    if o.get("chunks", 1) and int(o.get("chunks") or 1) > 1:
+        msg += f" · {o['chunks']} khúc song song"
+    if o.get("secs"):
+        msg += f" · {o['secs']:g} s"
+    if o.get("engine_warn"):
+        msg += "  ⚠ " + str(o["engine_warn"])
+    return msg
+
+
 def old_sub_region(p: Project) -> dict | None:
     """Vùng phụ đề Trung cũ trên khung gốc (từ OCR, hoặc vùng người dùng khoanh để xoá)."""
     ed = p.edit
@@ -5194,6 +5232,8 @@ def auto(p: Project, opts: dict, progress: Prog | None = None, cancel=None) -> d
         result["message"] += "  · " + listen_note(p)
     if "recognize" in steps and p.data.get("snap_stats") and result.get("message"):
         result["message"] += "  · " + snap_note(p.data["snap_stats"])
+    if "recognize" in steps and opts.get("method") in ("ocr", "hybrid") and result.get("message") and ocr_note(p):
+        result["message"] += "  · OCR: " + ocr_note(p)
     if opts.get("dub") and not no_tr:
         result["message"] += "  · " + dub_summary(p)
     if p.data.get("skill_note") and not no_tr:
@@ -5305,11 +5345,12 @@ def _auto_steps(p: Project, opts: dict, steps: list, weights: dict, total_w: flo
                 ed["hardsub"]["mode"] = opts["hardsub_mode"]
                 if opts.get("hardsub_mode") != "none" and not ed["hardsub"].get("regions"):
                     # vùng xoá = khung vừa khít chữ phụ đề cũ (vùng quét OCR rộng hơn nhiều, không dùng để xoá)
-                    reg = (p.data.get("ocr_region") or {}).get("erase")
+                    orr = p.data.get("ocr_region") or {}
+                    reg = orr.get("erase") or (orr if orr.get("exact") else None)
                     if not reg:
                         from .ocr import detect_subtitle_region
 
-                        r = detect_subtitle_region(p.source)
+                        r = detect_subtitle_region(p.source, settings=settings)
                         reg = r.get("erase") or r
                     ed["hardsub"]["regions"] = [{k: reg[k] for k in ("x", "y", "w", "h")}]
             if "burn" in opts:

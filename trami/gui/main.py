@@ -703,7 +703,8 @@ class ConcatPage(QWidget):
 class SettingsPage(QWidget):
     KEYS = [  # (widget attr, setting key, kiểu)
         ("asr_engine", "asr_engine", "c"), ("qwen_model", "qwen_asr_model", "c"), ("asr_model", "asr_model", "c"),
-        ("ocr_fps", "ocr_fps", "c"),
+        ("ocr_fps", "ocr_fps", "c"), ("ocr_model", "ocr_model", "c"), ("ocr_device", "ocr_device", "c"),
+        ("ocr_hwdec", "ocr_hwdec", "b"), ("ocr_clean", "ocr_clean", "b"),
         ("asr_device", "asr_device", "c"),
         ("asr_max", "asr_max_chars", "i"), ("asr_beam", "asr_beam_size", "i"), ("asr_vad", "asr_vad", "b"),
         ("split_style", "split_style", "c"), ("asr_dual", "asr_dual", "b"), ("asr_ai", "asr_ai", "c"),
@@ -777,8 +778,32 @@ class SettingsPage(QWidget):
                                                          ("large-v3-turbo", "large-v3-turbo – nhanh"),
                                                          ("medium", "medium"), ("small", "small – máy yếu")]))
         self.asr_device = f.row("Thiết bị", combo([("auto", "Tự động (ưu tiên GPU)"), ("cuda", "GPU NVIDIA"), ("cpu", "CPU")]))
-        self.ocr_fps = f.row("Tốc độ quét phụ đề cứng (OCR)", combo(C.OCR_SPEEDS),
-                             "Lấy phụ đề bằng OCR chữ Trung in sẵn: quét vùng chữ bao nhiêu lần mỗi giây")
+        self.ocr_fps = f.row("Tốc độ quét phụ đề cứng (OCR)", combo(C.OCR_SPEEDS), C.OCR_FPS_HELP)
+        from ..ocr_engine import DEVICES as OCR_DEVICES, MODELS as OCR_MODELS
+
+        self.ocr_model = f.row("Mô hình OCR", combo(OCR_MODELS), C.OCR_MODEL_HELP)
+        self.ocr_device = combo(OCR_DEVICES)
+        self.ocr_gpu_lb = label("", "muted", wrap=True)
+        self.ocr_gpu_btn = button("Cài bản chạy card", "download", "Gỡ onnxruntime bản CPU rồi cài onnxruntime-gpu "
+                                  "(dùng thư viện CUDA của PyTorch đã cài). Cần mở lại tool sau khi cài", flat=True,
+                                  on_click=self._install_ocr_gpu)
+        ocr_dev_box = QVBoxLayout()
+        ocr_dev_box.setContentsMargins(0, 0, 0, 0)
+        ocr_dev_box.setSpacing(4)
+        ocr_dev_box.addWidget(flow(self.ocr_device, self.ocr_gpu_btn))
+        ocr_dev_box.addWidget(self.ocr_gpu_lb)
+        w_ocr_dev = QWidget()
+        w_ocr_dev.setLayout(ocr_dev_box)
+        f.row("OCR chạy trên", w_ocr_dev,
+              "Card đồ hoạ đọc chữ nhanh hơn CPU nhiều lần. Cần onnxruntime bản card (onnxruntime-gpu hoặc "
+              "onnxruntime-directml) – bấm \"Cài bản chạy card\"")
+        self.ocr_hwdec = f.row("Giải mã video bằng card khi quét", Switch(),
+                               "Giải mã hình bằng card (NVDEC / D3D11) khi quét phụ đề – nhanh hơn, CPU rảnh để đọc chữ. "
+                               "Card không giải mã được file đó thì tự dùng CPU")
+        self.ocr_clean = f.row("Lọc nền khi đọc chữ", Switch(),
+                               "Chữ phụ đề đứng yên còn nền chuyển động: dựng ảnh chữ sạch từ nhiều khung của câu (nền "
+                               "chuyển động tô đen) rồi mới đọc -> ít đọc sai khi nền rối. Kém chắc thì tự đọc thêm khung "
+                               "gốc và chọn bản tốt hơn")
         self.split_style = f.row("Kiểu tách câu", combo(C.SPLIT_STYLES), C.SPLIT_HELP)
         self.asr_dual = f.row("Nghe 2 bộ rồi so", Switch(), C.DUAL_HELP)
         from ..pipeline import join_engine_choices as _jec
@@ -1050,6 +1075,38 @@ class SettingsPage(QWidget):
                     tts.vieneu_available(), lama.available(), torch_info)
 
         run_async(check, self._show_status, lambda m: self.status.setText("Không kiểm tra được: " + m))
+        self._ocr_gpu_status()
+
+    def _ocr_gpu_status(self):
+        from ..ocr_engine import has_v3, ort_dists
+
+        d = ort_dists()
+        if not has_v3():
+            t = "Chưa cài RapidOCR 3 – đang dùng bộ đọc cũ PP-OCRv4. Cài: .venv\\Scripts\\python -m pip install -U rapidocr"
+        elif len(d) > 1:
+            t = f"⚠ Đang cài cùng lúc {', '.join(d)} (đè file của nhau) – bấm \"Cài bản chạy card\" để sửa"
+        elif d and d[0] != "onnxruntime":
+            t = f"✓ {d[0]} – OCR chạy trên card (CPU nếu card không khởi động được)"
+        elif d:
+            t = "onnxruntime bản CPU – OCR chạy CPU. Có card NVIDIA: bấm \"Cài bản chạy card\" (rồi mở lại tool)"
+        else:
+            t = "Chưa cài onnxruntime"
+        self.ocr_gpu_lb.setText(t)
+
+    def _install_ocr_gpu(self):
+        from ..ocr_engine import gpu_install_cmd, install_gpu
+
+        if QMessageBox.question(self, "Cài OCR chạy trên card", "Gỡ onnxruntime bản CPU rồi cài onnxruntime-gpu (~200 MB) "
+                                "vào môi trường Python của tool?\n\nNên tắt mọi việc đang chạy. Xong thì mở lại tool.\n\n"
+                                "Lệnh tương đương (chạy khi đã tắt tool):\n" + gpu_install_cmd()) != \
+                QMessageBox.StandardButton.Yes:
+            return
+
+        def fn(j):
+            return {"message": install_gpu("onnxruntime-gpu", j.update, j.cancelled)}
+        manager.submit("update", "Cài OCR chạy trên card (onnxruntime-gpu)", fn)
+        self.win.jobs_changed()
+        self.win.toast("Đang cài onnxruntime-gpu – xem tiến độ ở Việc đang làm", "ok")
 
     def _show_status(self, r):
         dev, sep_ok, fa_ok, dz_ok, vn_ok, lama_ok, torch_info = r

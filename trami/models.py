@@ -79,6 +79,10 @@ MODELS = [
     ModelInfo("gender", "Nhận giọng nam / nữ – ECAPA", "\"Tự gán giọng khác nhau\" chọn giọng nam cho nhân vật nam, "
               "giọng nữ cho nhân vật nữ (không tải vẫn đoán theo cao độ giọng, kém chắc hơn)", "16 MB",
               ("onnxruntime",), "users"),
+    ModelInfo("ocr_v6m", "OCR phụ đề – PP-OCRv6 medium", "Đọc phụ đề in sẵn kỹ hơn bản PP-OCRv6 có sẵn (chọn ở Cài đặt → "
+              "Mô hình OCR); chậm hơn – nên có card", "~100 MB", ("rapidocr",), "subtitles"),
+    ModelInfo("ocr_v5s", "OCR phụ đề – PP-OCRv5 server", "Bản lớn chuyên chữ Trung của PaddleOCR (chọn ở Cài đặt → Mô "
+              "hình OCR); chậm nhất – nên có card", "~170 MB", ("rapidocr",), "subtitles"),
     ModelInfo("lama", "Xoá phụ đề – AI LaMa", "Vẽ lại nền phía sau chữ Trung cũ", "206 MB", ("torch",), "eraser"),
     ModelInfo("vieneu", "Giọng đọc – VieNeu-TTS v3 Turbo", "25 giọng Việt + nhái giọng nhân vật", "~1–2 GB",
               ("vieneu",), "volume"),
@@ -92,6 +96,7 @@ BY_KEY = {m.key: m for m in MODELS}
 # ------------------------------------------------------------------ kiểm tra đã tải chưa
 
 SEP_KEYS = ("sep_kim", "sep_roformer", "sep_mdx", "sep_demucs", "sep_demucs_ft")
+OCR_KEYS = {"ocr_v6m": "v6_medium", "ocr_v5s": "v5_server"}   # mục tab Tài liệu -> mã mô hình OCR (ocr_engine)
 
 
 def _sep_file(key: str) -> str:
@@ -336,6 +341,10 @@ def is_ready(key: str, settings: dict | None = None) -> bool:
             from .gender import model_path
 
             return model_path() is not None
+        if key in OCR_KEYS:
+            from .ocr_engine import model_ready
+
+            return model_ready(OCR_KEYS[key])
         if key == "lama":
             from .lama import LAMA_FILE
 
@@ -422,6 +431,10 @@ def download(key: str, progress: Prog | None = None, cancel=None, settings: dict
 
         with tqdm_progress(progress, 0.0, 1.0, label, cancel, download=label):
             _encoder()
+    elif key in OCR_KEYS:
+        from .ocr_engine import download as ocr_download
+
+        ocr_download(OCR_KEYS[key], progress, cancel)
     elif key == "lama":
         from .lama import ensure_model
 

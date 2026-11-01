@@ -87,7 +87,11 @@ DEFAULT_SETTINGS: dict = {
     "asr_compute_type": "auto",       # auto/float16/int8_float16/int8
     "asr_beam_size": 5,
     "asr_vad": True,
-    "ocr_fps": "4",                   # OCR phụ đề cứng: số lần quét mỗi giây (2 nhanh / 4 chuẩn / 8 kỹ)
+    "ocr_fps": "4",                   # OCR phụ đề cứng: số lần kiểm tra chữ đổi mỗi giây (giờ câu vẫn đúng tới 1 khung)
+    "ocr_model": "v6_small",          # 2.1.31: bộ đọc chữ (ocr_engine.MODELS): v6_small có sẵn / v6_medium / v5_server / v4
+    "ocr_device": "auto",             # auto = card nếu onnxruntime có bản card (onnxruntime-gpu / -directml) | cpu
+    "ocr_hwdec": True,                # giải mã video bằng card khi quét phụ đề (NVDEC / D3D11; không được tự về CPU)
+    "ocr_clean": True,                # đọc trên ảnh chữ sạch dựng từ nhiều khung (nền chuyển động bị loại)
     "split_style": "dub",            # kiểu tách câu: dub = câu trọn ý (hợp lồng tiếng) / short = câu ngắn
     "asr_max_chars": 28,              # câu dài hơn số chữ Hán này mới chia đôi (ở dấu phẩy / chỗ nghỉ gần giữa)
     # Dịch

@@ -11,7 +11,8 @@ binaries = []
 hiddenimports = collect_submodules("trami") + ["PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets", "PySide6.QtSvg"]
 
 # Gói có dữ liệu / mô-đun nạp động -> gom đầy đủ (chỉ gom gói nào đã cài; gói lỗi khi gom thì bỏ qua, báo ra màn hình)
-PKGS = ("faster_whisper", "ctranslate2", "rapidocr_onnxruntime", "onnxruntime", "opencc", "jieba", "edge_tts", "yt_dlp",
+PKGS = ("faster_whisper", "ctranslate2", "rapidocr", "omegaconf", "pyclipper", "shapely", "rapidocr_onnxruntime",
+        "onnxruntime", "opencc", "jieba", "edge_tts", "yt_dlp",
         "deep_translator", "imageio_ffmpeg", "funasr", "modelscope", "audio_separator", "speechbrain", "hyperpyyaml",
         "vieneu", "vieneu_utils", "sea_g2p", "omnivoice", "transformers", "tokenizers", "safetensors", "accelerate",
         "huggingface_hub", "hf_xet", "librosa", "soundfile", "torchaudio", "torchcodec", "kaldi_native_fbank",

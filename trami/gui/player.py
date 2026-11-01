@@ -777,6 +777,147 @@ class HardsubOverlay(QGraphicsItem):
             self.on_changed(regs)
 
 
+class OcrBoxItem(QGraphicsItem):
+    """2.1.31: khung VÙNG QUÉT PHỤ ĐỀ (OCR) trên video – tab Tự động khi nguồn phụ đề là OCR / OCR + nghe: kéo chuột
+    vẽ khung, kéo giữa để dời, 4 cạnh + 4 góc đổi cỡ. Tool chỉ quét đúng khung này. Gắn vào video item nên đúng cả khi
+    phóng to / lật / xoay."""
+    COLOR = "#36D399"
+
+    def __init__(self, video):
+        super().__init__(video)
+        self.video = video
+        self.box: dict | None = None
+        self.editing = False
+        self.on_changed = None      # thả chuột -> on_changed(khung | None)
+        self._drag = None
+        self._hover = ""
+        self.setZValue(5)
+        self.setVisible(False)
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+
+    def boundingRect(self):
+        s = self.video.size()
+        return QRectF(0, 0, s.width(), s.height())
+
+    def set_box(self, box: dict | None):
+        if self._drag:
+            return
+        self.box = {k: float(box[k]) for k in ("x", "y", "w", "h")} if box else None
+        self.update()
+
+    def set_editing(self, on: bool):
+        self.editing = on
+        self.setVisible(on)
+        self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton if on else Qt.MouseButton.NoButton)
+        self.setAcceptHoverEvents(on)
+        if not on:
+            self.unsetCursor()
+        self.update()
+
+    def _rect(self) -> QRectF | None:
+        if not self.box:
+            return None
+        br = self.boundingRect()
+        b = self.box
+        return QRectF(br.width() * b["x"], br.height() * b["y"], br.width() * b["w"], br.height() * b["h"])
+
+    def _rel(self, pos):
+        br = self.boundingRect()
+        return (min(1.0, max(0.0, pos.x() / max(1.0, br.width()))),
+                min(1.0, max(0.0, pos.y() / max(1.0, br.height()))))
+
+    def paint(self, p: QPainter, opt, widget=None):
+        if not self.editing:
+            return
+        br = self.boundingRect()
+        r = self._rect()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if r is None:
+            if br.width() > 60:
+                p.setPen(QColor("#FFFFFF"))
+                p.setFont(theme.font(10, QFont.Weight.Bold))
+                t = QRectF(br.left(), br.top() + 8, br.width(), 28)
+                p.fillRect(QRectF(t.center().x() - 215, t.top(), 430, t.height()), QColor(0, 0, 0, 160))
+                p.drawText(t, Qt.AlignmentFlag.AlignCenter, "Kéo chuột trên video để khoanh vùng phụ đề cần quét")
+            return
+        # làm tối phần ngoài khung: nhìn rõ chỗ sẽ quét
+        dim = QColor(0, 0, 0, 90)
+        p.fillRect(QRectF(br.left(), br.top(), br.width(), max(0.0, r.top() - br.top())), dim)
+        p.fillRect(QRectF(br.left(), r.bottom(), br.width(), max(0.0, br.bottom() - r.bottom())), dim)
+        p.fillRect(QRectF(br.left(), r.top(), max(0.0, r.left() - br.left()), r.height()), dim)
+        p.fillRect(QRectF(r.right(), r.top(), max(0.0, br.right() - r.right()), r.height()), dim)
+        from .editors import paint_handles
+
+        pen = QPen(QColor(self.COLOR), 2.0, Qt.PenStyle.DashLine)
+        pen.setCosmetic(True)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(r)
+        paint_handles(p, r, self.COLOR)
+        tag = QRectF(r.left(), max(br.top(), r.top() - 18), 150, 16)
+        p.fillRect(tag, QColor(self.COLOR))
+        p.setPen(QColor("#0B1F16"))
+        p.setFont(theme.font(8, QFont.Weight.Bold))
+        p.drawText(tag.adjusted(5, 0, 0, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   "Vùng quét phụ đề (OCR)")
+
+    def _hit(self, pos) -> str:
+        from .editors import hit_region
+
+        r = self._rect()
+        return hit_region(r, pos) if r is not None else ""
+
+    def hoverMoveEvent(self, e):
+        from .editors import REGION_CURSORS
+
+        h = self._hit(e.pos())
+        if h != self._hover:
+            self._hover = h
+            self.setCursor(REGION_CURSORS.get(h, Qt.CursorShape.CrossCursor))
+
+    def mousePressEvent(self, e):
+        if not self.editing:
+            e.ignore()
+            return
+        x, y = self._rel(e.pos())
+        kind = self._hit(e.pos())
+        if kind:
+            self._drag = (kind, dict(self.box or {}), (x, y))
+        else:
+            self.box = {"x": x, "y": y, "w": 0.0, "h": 0.0}
+            self._drag = ("new", None, (x, y))
+        self.update()
+        e.accept()
+
+    def mouseMoveEvent(self, e):
+        if not self._drag:
+            return
+        from .editors import drag_region
+
+        kind, b0, (x0, y0) = self._drag
+        x, y = self._rel(e.pos())
+        if kind == "new":
+            self.box = {"x": min(x, x0), "y": min(y, y0), "w": abs(x - x0), "h": abs(y - y0)}
+        else:
+            self.box = drag_region(b0, kind, x - x0, y - y0)
+        self.update()
+
+    def mouseReleaseEvent(self, e):
+        if not self._drag:
+            return
+        kind, b0, _ = self._drag
+        self._drag = None
+        b = self.box
+        if not b or float(b["w"]) < 0.02 or float(b["h"]) < 0.02:   # bấm nhầm 1 cái: giữ khung cũ
+            self.box = b0 if kind != "new" else (dict(b0) if b0 else None)
+            self.update()
+            return
+        self.box = {k: round(float(v), 4) for k, v in b.items()}
+        self.update()
+        if self.on_changed:
+            self.on_changed(dict(self.box))
+
+
 class BackdropItem(QGraphicsItem):
     """Nền mờ thật khi đổi tỉ lệ khung (như video xuất): khung hình đang chiếu thu nhỏ rồi phóng to phủ kín khung."""
 
@@ -939,7 +1080,7 @@ class LayerItem(QGraphicsItem):
         """rel = giây kể từ lúc lớp hiện trên video xuất (None = không hiện lúc này)."""
         from .. import overlay
 
-        vis = rel is not None and not self.layer.get("hidden")
+        vis = rel is not None and not self.layer.get("hidden") and not getattr(self.view, "hide_layers", False)
         if vis:
             img = self._image()
             fr = self.view.canvas.rect()
@@ -1129,11 +1270,13 @@ class VideoView(QGraphicsView):
         self.layers: dict[str, LayerItem] = {}   # lớp phủ chữ / logo theo mã lớp
         self.layer_sel = ""
         self.layers_editable = True
+        self.hide_layers = False
         self.on_layer_select = None    # bấm 1 lớp trên video -> on_layer_select(mã)
         self.on_layer_changed = None   # kéo / phóng lớp xong -> on_layer_changed(mã, {khoá: giá trị})
         self.on_drop = None            # thả logo từ thư viện vào video -> on_drop(dữ liệu, x 0..1, y 0..1)
         self.setAcceptDrops(True)
         self.hs = HardsubOverlay(self.video)
+        self.ocrbox = OcrBoxItem(self.video)
         self.color = ColorEffect()
         self.color.setEnabled(False)
         self.video.setGraphicsEffect(self.color)
@@ -1321,17 +1464,25 @@ class VideoView(QGraphicsView):
     def video_rect(self) -> QRectF:
         return self.canvas.rect()
 
-    def set_tool(self, regions: bool, sub_frame: bool = False):
-        """regions: tab Xoá phụ đề – chuột chỉnh vùng che; còn lại chuột kéo phụ đề (sub_frame: tab Kiểu chữ) và lớp
-        phủ chữ / logo."""
+    def set_tool(self, regions: bool, sub_frame: bool = False, ocr: bool = False):
+        """regions: tab Xoá phụ đề – chuột chỉnh vùng che; ocr: tab Tự động (nguồn OCR) – chuột kéo khung vùng quét phụ
+        đề, ẩn phụ đề Việt / lớp phủ / hiệu ứng che để thấy rõ chữ gốc; còn lại chuột kéo phụ đề (sub_frame: tab Kiểu
+        chữ) và lớp phủ chữ / logo."""
+        busy = regions or ocr
         self.hs.set_editing(regions)
-        self.sub.show_frame = sub_frame and not regions
-        self.sub.set_editable(not regions)
-        self.layers_editable = not regions
+        self.hs.setVisible(not ocr)
+        self.ocrbox.set_editing(ocr)
+        self.sub.setVisible(not ocr)
+        self.sub.show_frame = sub_frame and not busy
+        self.sub.set_editable(not busy)
+        self.layers_editable = not busy
+        self.hide_layers = ocr          # đang khoanh vùng quét phụ đề: ẩn lớp chữ / logo cho thấy rõ chữ gốc
         for it in self.layers.values():
-            it.editable = not regions
-            it.setAcceptHoverEvents(not regions)
-            it.setAcceptedMouseButtons(Qt.MouseButton.NoButton if regions else Qt.MouseButton.LeftButton)
+            if ocr:
+                it.setVisible(False)
+            it.editable = not busy
+            it.setAcceptHoverEvents(not busy)
+            it.setAcceptedMouseButtons(Qt.MouseButton.NoButton if busy else Qt.MouseButton.LeftButton)
             it.update()
 
 
@@ -1497,6 +1648,7 @@ class Player(QWidget):
     mediaError = Signal(str)
     subtitleEdited = Signal(dict)     # kéo phụ đề / nền hộp trên video -> các khoá kiểu chữ mới
     regionsEdited = Signal(list)      # kéo / vẽ / xoá vùng che phụ đề cũ trên video
+    ocrBoxEdited = Signal(object)     # kéo / vẽ khung vùng quét phụ đề (OCR) trên video
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1577,6 +1729,7 @@ class Player(QWidget):
         self.view.on_layout = lambda: self.update_sub()
         self.view.sub.on_changed = self.subtitleEdited.emit
         self.view.hs.on_changed = self.regionsEdited.emit
+        self.view.ocrbox.on_changed = self.ocrBoxEdited.emit
 
     # ------------------------------------------------------------ điều khiển
     def _set_volume(self, v: int):

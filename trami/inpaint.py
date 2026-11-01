@@ -84,9 +84,16 @@ class BoxIndex:
         self.times: list[float] = []
         self.boxes: list[list] = []
         self.tol = 0.4
+        self.spans: list[tuple[float, float]] = []   # 2.1.31: khung chữ theo đoạn [a, b) – giờ đúng từng khung
         if path and Path(path).exists():
             d = json.loads(Path(path).read_text("utf-8"))
             self.tol = 1.5 / float(d.get("fps", 4))
+            for f in d.get("spans", []):
+                self.spans.append((float(f["a"]), float(f["b"])))
+                self.times.append(float(f["a"]))
+                self.boxes.append(f["boxes"])
+            if self.spans:
+                self.tol = 0.5 / float(d.get("fps", 25))
             for f in d.get("frames", []):
                 self.times.append(float(f["t"]))
                 self.boxes.append(f["boxes"])
@@ -97,6 +104,11 @@ class BoxIndex:
     def at(self, t: float) -> list | None:
         if not self.times:
             return None
+        if self.spans:
+            i = bisect.bisect_right(self.times, t + self.tol) - 1
+            if i >= 0 and self.spans[i][0] - self.tol <= t < self.spans[i][1] + self.tol:
+                return self.boxes[i]
+            return []
         i = bisect.bisect_left(self.times, t)
         best = None
         for j in (i - 1, i):

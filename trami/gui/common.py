@@ -75,8 +75,18 @@ SPLIT_STYLES = [("dub", "Câu trọn ý – hợp lồng tiếng (khuyên dùng)
 SPLIT_HELP = ("Câu trọn ý: tin dấu câu của bộ nghe, chỉ cắt ở chỗ nghỉ rất dài (≥ 1,6 s) hoặc dấu phẩy + nghỉ ≥ 0,7 s, "
               "tự nối dòng chưa hết câu → dịch và lồng tiếng liền mạch. Câu ngắn: cắt ở mọi chỗ nghỉ ≥ 0,8 s / dấu phẩy + "
               "nghỉ ≥ 0,45 s (cách tách cũ). Cả 2 kiểu đều không cắt giữa 1 từ và tự nối câu bị cắt ngang")
-OCR_SPEEDS = [("2", "Nhanh – 2 lần/giây (video dài, câu hiện lâu)"), ("4", "Chuẩn – 4 lần/giây (khuyên dùng)"),
-              ("8", "Kỹ – 8 lần/giây (câu đổi rất nhanh, chậm gấp đôi)")]
+OCR_SPEEDS = [("2", "Nhanh – kiểm tra 2 lần/giây (câu hiện lâu)"), ("4", "Chuẩn – 4 lần/giây (khuyên dùng)"),
+              ("8", "Kỹ – 8 lần/giây (câu hiện rất nhanh, dưới 0,3 giây)")]
+OCR_FPS_HELP = ("Khi lấy phụ đề bằng OCR: số lần mỗi giây tool kiểm tra chữ có đổi không. Giờ hiện / tắt câu luôn tìm "
+                "đúng tới từng khung hình (chia đôi các khung ở giữa), nên mức này chỉ ảnh hưởng câu hiện cực ngắn: câu "
+                "ngắn hơn 1 lần kiểm tra có thể bị sót")
+OCR_BOX_HELP = ("Khung chữ nhật tool sẽ quét để đọc phụ đề. Dừng video ở chỗ đang có phụ đề rồi kéo chuột trên video bên "
+                "phải (kéo giữa khung để dời, 4 cạnh / 4 góc để đổi cỡ), hoặc bấm \"Chụp khung & khoanh\" để khoanh trên "
+                "ảnh lớn. Chừa chỗ cho câu dài nhất và câu 2 dòng. Khung càng sát chữ, quét càng nhanh và ít đọc nhầm "
+                "chữ trong cảnh. Để trống: tool tự dò vùng phụ đề")
+OCR_MODEL_HELP = ("PP-OCRv6 có sẵn (không phải tải) đủ tốt cho phần lớn video. PP-OCRv6 medium / PP-OCRv5 server đọc kỹ "
+                  "hơn với chữ nhỏ / chữ kiểu nhưng chậm hơn – tải ở tab Tài liệu; nên có card (Cài đặt → OCR chạy trên). "
+                  "PP-OCRv4 = bộ đọc cũ")
 HARDSUB = [("none", "Giữ nguyên"), ("inpaint", "Xoá sạch bằng AI (LaMa)"), ("blur", "Làm mờ vùng phụ đề"),
            ("box", "Che bằng dải màu"), ("delogo", "Delogo (nhanh)"),
            ("patch", "Vá nền (chép nền sát bên, nhanh)"), ("stretch", "Kéo dọc (kéo dòng sát mép phủ kín chữ)")]

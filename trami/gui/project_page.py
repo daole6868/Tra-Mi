@@ -76,6 +76,16 @@ def _rowlbl(text: str) -> QWidget:
     return lb
 
 
+def ocr_box_from_detect(r: dict) -> dict:
+    """Kết quả "Tự dò" -> khung quét: hết chiều ngang, từ ~1,3 dòng trên dòng phụ đề đầu tiên (câu 2 dòng) tới sát
+    dưới chân chữ."""
+    e = r.get("erase") or r
+    lh = float(r.get("line_h") or min(0.1, float(e["h"])))
+    y0 = max(0.0, float(e["y"]) - 1.3 * lh)
+    y1 = min(1.0, float(e["y"]) + float(e["h"]) + 0.4 * lh)
+    return {"x": 0.0, "y": round(y0, 4), "w": 1.0, "h": round(y1 - y0, 4)}
+
+
 def _group(text: str, ic: str, first: bool = False) -> QWidget:
     """Tiêu đề nhóm trong 1 Form dài (tab Tự động – 2.1.11): vạch mảnh phía trên + icon + chữ đậm, chiếm cả 2 cột."""
     w = QWidget()
@@ -182,6 +192,7 @@ class ProjectPage(QWidget):
         self.player.mediaError.connect(self._media_error)
         self.player.subtitleEdited.connect(self._sub_edited)
         self.player.regionsEdited.connect(self._regions_edited)
+        self.player.ocrBoxEdited.connect(self._ocr_box_set)
         self.ov_which = combo([("trans", "Xem: Tiếng Việt"), ("both", "Xem: Song ngữ"), ("source", "Xem: Tiếng Trung")])
         self.ov_which.setToolTip("Phụ đề hiện trên khung xem trước: bản dịch / song ngữ / tiếng Trung gốc")
         self.ov_which.currentIndexChanged.connect(self._refresh_overlay)
@@ -335,10 +346,27 @@ class ProjectPage(QWidget):
         f.addRow(_group("1 · Nghe & tách câu", "mic", first=True))
         self.a_method = f.row("Nguồn phụ đề", combo(C.METHODS, "asr"))
         self.a_asr = f.row("Bộ nhận dạng", combo(C.ASR_ENGINES, s.get("asr_engine")))
-        self.a_ocrfps = f.row("Tốc độ quét phụ đề", combo(C.OCR_SPEEDS, str(s.get("ocr_fps", "4"))),
-                              "Khi lấy phụ đề bằng OCR: quét vùng chữ bao nhiêu lần mỗi giây. Câu hiện rất nhanh "
-                              "(dưới 0,5 giây) thì chọn Kỹ; video dài, câu hiện lâu thì chọn Nhanh")
+        self.a_ocrfps = f.row("Tốc độ quét phụ đề", combo(C.OCR_SPEEDS, str(s.get("ocr_fps", "4"))), C.OCR_FPS_HELP)
         self.a_ocrfps.setEnabled(False)
+        # 2.1.31: khung vùng quét phụ đề kéo ngay trên video + chụp khung đang phát để khoanh cho chuẩn
+        from ..ocr_engine import MODELS as OCR_MODELS
+
+        self.a_ocrbox_lb = label("", "muted", wrap=True)
+        self.a_ocrbox = QWidget()
+        bl = QVBoxLayout(self.a_ocrbox)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(6)
+        bl.addWidget(self.a_ocrbox_lb)
+        bl.addWidget(flow(button("Chụp khung && khoanh", "image", "Chụp khung hình đang phát (dừng video ở chỗ có phụ "
+                                 "đề trước) rồi kéo khung trên ảnh lớn", flat=True, on_click=self._ocr_capture),
+                          button("Tự dò", "search", "Tool tự tìm dòng phụ đề (quét kỹ 5 giây đầu + cuối) rồi đặt khung",
+                                 flat=True, on_click=self._ocr_detect),
+                          button("Bỏ khung", "x", "Bỏ khung: lúc chạy tool tự dò vùng phụ đề", flat=True,
+                                 on_click=lambda: self._ocr_box_set(None))))
+        f.row("Vùng phụ đề", self.a_ocrbox, C.OCR_BOX_HELP)
+        self.a_ocrmodel = f.row("Bộ đọc chữ", combo(OCR_MODELS, s.get("ocr_model", "v6_small")), C.OCR_MODEL_HELP)
+        self.a_ocrmodel.currentIndexChanged.connect(self._ocr_model_changed)
+        self._auto_form = f
         self.a_lang = f.row("Ngôn ngữ gốc", combo(C.LANGS, "zh"))
         self.a_sep = f.row("Tách giọng khỏi nhạc trước", Switch(bool(s.get("sep_before_asr", True))),
                            "Nhận dạng chính xác hơn với video có nhạc nền; cũng dùng để lồng tiếng giữ nhạc gốc")
@@ -479,9 +507,7 @@ class ProjectPage(QWidget):
         f.addRow(_group("4 · Phụ đề & video khi xuất", "export"))
         self.a_hardsub = f.row("Phụ đề Trung cũ", combo(C.HARDSUB, "none"))
         self.a_which = f.row("Ghép phụ đề vào video", combo(C.WHICH, "trans"))
-        self.a_method.currentIndexChanged.connect(
-            lambda: (self.a_asr.setEnabled(self.a_method.currentData() in ("asr", "hybrid")),
-                     self.a_ocrfps.setEnabled(self.a_method.currentData() in ("ocr", "hybrid"))))
+        self.a_method.currentIndexChanged.connect(self._method_rows)
         # 1 công cụ dịch cho cả tool: đổi ở đây = đổi ở Cài đặt (nút Dịch, AI rút gọn, dịch lại đều dùng chung)
         self.a_engine.currentIndexChanged.connect(self._engine_changed)
         self.a_style.currentIndexChanged.connect(self._engine_changed)
@@ -1589,6 +1615,120 @@ class ProjectPage(QWidget):
         self._save_edit_timer.start()
         self._live_timer.start()
 
+    # ------------------------------------------------------------------ 2.1.31: vùng quét phụ đề (OCR)
+    def _ocr_mode(self) -> bool:
+        return self.a_method.currentData() in ("ocr", "hybrid")
+
+    def _refresh_tool(self):
+        i = self.stack.currentIndex()
+        self.player.view.set_tool(regions=i == self.TAB_HARDSUB, sub_frame=i == self.TAB_STYLE,
+                                  ocr=i == 0 and self._ocr_mode() and bool(self.p and self.p.data.get("source")))
+
+    def _method_rows(self, *_):
+        ocr = self._ocr_mode()
+        self.a_asr.setEnabled(self.a_method.currentData() in ("asr", "hybrid"))
+        self.a_ocrfps.setEnabled(ocr)
+        f = getattr(self, "_auto_form", None)
+        if f is not None:
+            f.setRowVisible(self.a_ocrbox, ocr)
+            f.setRowVisible(self.a_ocrmodel, ocr)
+        self._refresh_tool()
+
+    def _ocr_box_label(self):
+        b = pipeline.ocr_box(self.p) if self.p else None
+        if b:
+            t = (f"Đã khoanh: rộng {b['w'] * 100:.0f} % · cao {b['h'] * 100:.0f} % khung hình, từ {b['y'] * 100:.0f} % "
+                 f"tới {(b['y'] + b['h']) * 100:.0f} % chiều cao. Tool chỉ quét đúng khung này – kéo khung / 4 cạnh trên "
+                 "video bên phải để sửa.")
+        else:
+            t = ("Chưa khoanh: dừng video ở chỗ có phụ đề rồi kéo chuột trên video bên phải để khoanh vùng chữ (nên chừa "
+                 "chỗ cho câu 2 dòng). Để trống thì lúc chạy tool tự dò.")
+        self.a_ocrbox_lb.setText(t)
+
+    def _ocr_box_set(self, box: dict | None):
+        """Lưu khung vùng quét phụ đề (kéo trên video / chụp khung / tự dò / bỏ)."""
+        if not self.p:
+            return
+        self.p.reload()
+        if box:
+            self.p.data["ocr_box"] = {k: round(float(box[k]), 4) for k in ("x", "y", "w", "h")}
+        else:
+            self.p.data.pop("ocr_box", None)
+        self.p.save()
+        self.player.view.ocrbox.set_box(pipeline.ocr_box(self.p))
+        self._ocr_box_label()
+
+    def _ocr_model_changed(self, *_):
+        if not self.loading:
+            self._save_setting("ocr_model", self.a_ocrmodel.currentData())
+
+    def _ocr_capture(self):
+        """Chụp khung hình ĐANG PHÁT (đủ độ phân giải) rồi khoanh vùng phụ đề trên ảnh lớn."""
+        if not self.p or not self.p.data.get("source") or pipeline.source_missing(self.p):
+            return self.win.toast("Dự án chưa có video", "warn")
+        from .. import ffmpeg as ff
+
+        if self.player.playing():
+            self.player.toggle()          # dừng ở đúng khung đang xem
+        t = self.player.position() or 0.0
+        out = self.p.work / f"ocr_frame_{int(t * 1000)}.jpg"
+        src = self.p.source
+
+        def job():
+            if not out.exists():
+                ff.snapshot(src, t, out)
+            return str(out)
+        run_async(job, self._ocr_capture_dialog, lambda m: self.win.toast("Không chụp được khung hình: " + m, "err"))
+
+    def _ocr_capture_dialog(self, path: str):
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox
+
+        from .player import OcrBoxItem
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Khoanh vùng phụ đề cần quét")
+        scr = self.screen().availableGeometry() if self.screen() else None
+        dlg.resize(int(scr.width() * 0.85) if scr else 1400, int(scr.height() * 0.85) if scr else 850)
+        ed = RegionEditor(multi=False)
+        ed.color = OcrBoxItem.COLOR
+        ed.label = "Vùng quét"
+        ed.hint = "Kéo chuột để khoanh vùng phụ đề"
+        ed.set_image(path)
+        b = pipeline.ocr_box(self.p)
+        if b:
+            ed.set_regions([{k: b[k] for k in ("x", "y", "w", "h")}])
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        v = QVBoxLayout(dlg)
+        v.addWidget(label("Kéo chuột quanh dòng phụ đề (chừa chỗ cho câu dài và câu 2 dòng). Kéo giữa khung để dời, kéo "
+                          "4 cạnh / 4 góc để đổi cỡ. Tool chỉ quét đúng khung này.", "muted", wrap=True))
+        v.addWidget(ed, 1)
+        v.addWidget(bb)
+        if dlg.exec() and ed.regions:
+            self._ocr_box_set(ed.regions[0])
+            self.win.toast("Đã lưu vùng quét phụ đề", "ok")
+        try:
+            Path(path).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _ocr_detect(self):
+        if not self.p or not self.p.data.get("source") or pipeline.source_missing(self.p):
+            return self.win.toast("Dự án chưa có video", "warn")
+        from ..ocr import detect_subtitle_region
+
+        self.win.toast("Đang dò vùng phụ đề (quét kỹ 5 giây đầu + 5 giây cuối)…")
+        src, st = self.p.source, dict(self.settings)
+
+        def done(r):
+            if not r.get("found"):
+                return self.win.toast("Không thấy phụ đề tiếng Trung rõ ràng – hãy tự kéo khung trên video", "warn")
+            self._ocr_box_set(ocr_box_from_detect(r))
+            self.win.toast("Đã đặt khung theo dòng phụ đề tìm được – kiểm tra lại trên video", "ok")
+        run_async(lambda: detect_subtitle_region(src, settings=st), done,
+                  lambda m: self.win.toast("Không dò được vùng phụ đề: " + m, "err"))
+
     def _regions_edited(self, regs: list):
         """Vẽ / kéo / đổi cỡ / xoá vùng che ngay trên video -> đồng bộ ảnh khoanh vùng + lưu."""
         if not self.p:
@@ -2119,8 +2259,11 @@ class ProjectPage(QWidget):
             self._refresh_overlay()
             self.inspector.set_row(self._sel_row)
             self.tracks.set_selected(self._sel_row)
+            self.player.view.ocrbox.set_box(pipeline.ocr_box(p))
+            self._ocr_box_label()
         finally:
             self.loading = False
+        self._method_rows()
         self._apply_live()
         self._load_timeline_assets()
 
@@ -2885,9 +3028,9 @@ class ProjectPage(QWidget):
             if o["method"] != "ocr":
                 msg += " · " + pipeline.speaker_note(p, st)
             if o["method"] in ("ocr", "hybrid"):
-                ost = p.data.get("ocr_stats") or {}
-                if ost.get("frames"):
-                    msg += f" · quét {ost['frames']} khung ({ost.get('fps', 4):g} lần/giây), đọc chữ {ost['ocr_runs']} lần"
+                note = pipeline.ocr_note(p)
+                if note:
+                    msg += " · " + note
                 if p.data.get("ocr_warning"):
                     msg = "⚠ " + p.data["ocr_warning"]
             return {"message": msg}
@@ -2943,8 +3086,8 @@ class ProjectPage(QWidget):
             self.a_denoise.setChecked(bool(pv["denoise"]))
             set_combo(self.a_asr, st.get("asr_engine"))
             set_combo(self.a_ocrfps, str(st.get("ocr_fps", "4")))
-            self.a_asr.setEnabled(pv["method"] in ("asr", "hybrid"))
-            self.a_ocrfps.setEnabled(pv["method"] in ("ocr", "hybrid"))
+            set_combo(self.a_ocrmodel, st.get("ocr_model", "v6_small"))
+            self._method_rows()
             self.a_dual.setChecked(bool(st.get("asr_dual", False)))
             self.a_chunk.setValue(int(st.get("asr_chunk_sec", 28) or 28))
             self.a_recheck.setChecked(bool(st.get("asr_recheck", True)))
@@ -6138,8 +6281,9 @@ class ProjectPage(QWidget):
     # ================================================================== khác
     def _tab_changed(self, i: int):
         self.stack.setCurrentIndex(i)
-        # tab Xoá phụ đề: chuột vẽ / kéo vùng che trên video; tab khác: chuột kéo phụ đề (tab Kiểu chữ hiện khung)
-        self.player.view.set_tool(regions=i == 2, sub_frame=i == 4)
+        # tab Xoá phụ đề: chuột vẽ / kéo vùng che trên video; tab Tự động (nguồn OCR): kéo khung vùng quét phụ đề;
+        # tab khác: chuột kéo phụ đề (tab Kiểu chữ hiện khung)
+        self._refresh_tool()
         self.player.update_sub()
         if i == 2 and not self.hs_editor.pix:
             self._grab_frame()

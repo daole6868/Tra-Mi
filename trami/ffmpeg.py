@@ -83,6 +83,56 @@ def encoder_works(name: str) -> bool:
     return ok
 
 
+_HWDEC: dict = {}
+
+
+def hwaccels() -> list[str]:
+    """Các cách giải mã bằng card mà bản FFmpeg này có (cuda, d3d11va, dxva2, vaapi…)."""
+    if "_list" not in _HWDEC:
+        try:
+            out = subprocess.run([ffmpeg_bin(), "-hide_banner", "-hwaccels"], capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace", creationflags=_NO_WINDOW, timeout=20).stdout or ""
+            _HWDEC["_list"] = [ln.strip() for ln in out.splitlines()[1:] if ln.strip()]
+        except Exception:  # noqa: BLE001
+            _HWDEC["_list"] = []
+    return _HWDEC["_list"]
+
+
+def hwdec_args(src: str | Path, codec: str = "") -> list[str]:
+    """Tham số giải mã video bằng card (NVDEC qua cuda; Windows: d3d11va / dxva2) – thử giải mã vài khung của
+    chính file đó; không được (không có card / codec card không hỗ trợ / FFmpeg không có) -> [] (giải mã CPU).
+    Nhớ kết quả theo codec."""
+    key = codec or Path(str(src)).suffix
+    if key in _HWDEC:
+        return _HWDEC[key]
+    cands = []
+    acc = hwaccels()
+    if "cuda" in acc:
+        try:
+            from .gpu import gpu_name
+
+            if gpu_name():
+                cands.append("cuda")
+        except Exception:  # noqa: BLE001
+            pass
+    if sys.platform == "win32":
+        cands += [a for a in ("d3d11va", "dxva2") if a in acc]
+    ok: list[str] = []
+    for a in cands:
+        try:
+            r = subprocess.run([ffmpeg_bin(), "-hide_banner", "-loglevel", "warning", "-hwaccel", a, "-i", str(src),
+                                "-an", "-frames:v", "5", "-f", "null", "-"], capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", creationflags=_NO_WINDOW, timeout=60)
+            err = (r.stderr or "").lower()
+            if r.returncode == 0 and "failed" not in err and "error" not in err:
+                ok = ["-hwaccel", a]
+                break
+        except Exception:  # noqa: BLE001
+            continue
+    _HWDEC[key] = ok
+    return ok
+
+
 def has_encoder(name: str) -> bool:
     try:
         out = subprocess.run([ffmpeg_bin(), "-hide_banner", "-encoders"], capture_output=True, text=True,
