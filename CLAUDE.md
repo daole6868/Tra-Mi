@@ -529,6 +529,27 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   giữ khi cùng hàng chữ Hán của câu hoặc đứng 1 mình đúng hàng + cỡ + tâm ngang phụ đề (`_han_band`, `_stray_ok`); h_sub chỉ
   tính chữ Hán; `_same_line` câu < 4 chữ phải giống hệt; `_other_shape` (khác chữ + khối chữ rộng hơn kém ≥ 0,6 cao dòng ->
   2 câu, không gộp – raw có bề rộng / cao dòng mỗi đoạn).
+- OCR làm rõ chữ + câu OCR không chắc (2.1.36): `ocr.eq_filter(settings)` (Cài đặt `ocr_eq` + `ocr_eq_brightness` /
+  `_contrast` / `_gamma` / `_sharpen`; `EQ_KEYS` không có bão hoà – bộ đọc chữ đọc ảnh XÁM, bão hoà chỉ đổi màu, không
+  đổi độ sáng) = `eq=…` (+ `unsharp=5:5:0.8:3:3:0.0`) chèn vào bước giải mã OCR `_scan(pre=)` (sau crop / scale, trước
+  format=gray) + `_sample(pre=)` của Tự dò – CHỈ ảnh đưa vào bộ đọc chữ, video xuất không đổi; `EQ_PRESETS` (off "Ảnh gốc",
+  white_dark −0,30 / 1,80 / 0,50 = `EQ_PRESET`, white_bright, dark_text, blurry + làm nét), `eq_values`, `eq_preset_of`
+  (giá trị -> mẫu / custom), `preview_scan(src, t, region, settings)` (PNG vùng quét gốc + đã lọc xám); stats["eq"] ->
+  `ocr_note` "đã lọc ảnh làm rõ chữ". Độ chắc từng câu OCR: gom đoạn chọn chữ nhiều phiếu nhất -> `extra["ocr_conf"]` =
+  trung bình theo thời lượng độ chắc các lần đọc ra đúng chữ đó (gộp câu nháy chữ -> trung bình). `pipeline.unsure_rows(segs,
+  thr, ocr_thr=None, asr=True)` (câu có asr_conf xét mức nghe, câu chỉ có ocr_conf xét `ocr_thr`), `OCR_UNSURE` 0,85,
+  `drop_unsure(asr=, ocr=)` (recognize bước 2i: `asr_drop_unsure` khi nguồn khác OCR, `ocr_drop_unsure` khi OCR / OCR +
+  nghe; `unsure_dropped` thêm ocr_n / ocr_thr / ocr_known -> `unsure_note`), "Khôi phục câu đã xoá" dùng chung. GUI tab Tự
+  động nhóm 1 (chỉ khi nguồn OCR / OCR + nghe – `_method_rows`): "Làm rõ chữ khi quét" `a_ocreq_box` (Mẫu
+  `a_ocreq_preset` – chọn là áp ngay `_ocr_eq_preset`; sửa ô `a_eq` / `a_eq_sharp` -> "Tuỳ chỉnh" `_ocr_eq_edited`; Về gốc
+  = mẫu Ảnh gốc; Lấy từ tab Chỉnh sửa `_ocr_eq_from_edit`; Xem thử `_ocr_eq_preview` hộp 2 ảnh; dòng nhắc `a_ocreq_hint`;
+  `_ocr_eq_save` lưu Cài đặt) – đang ở tab Tự động + nguồn OCR + có làm rõ: `_apply_live` cho trình phát màu làm rõ (độ
+  bão hoà 0 = đúng ảnh xám bộ đọc chữ thấy), `_tab_changed` làm mới; chọn nguồn OCR mà chưa làm rõ -> toast nhắc 1 lần
+  (`_ocr_eq_told`). "Xoá câu OCR không chắc" `a_ocrdrop` + mức `a_ocrconf` = `s_ocrconf` tab Phụ đề (hàng Không chắc: "nghe
+  chắc dưới" + "OCR đọc chắc dưới", `_ocr_conf_changed`, Cài đặt `ocr_pick_conf`) -> `SubsModel.ocr_thr` / `ocr_low`
+  (chữ gốc đỏ cam #F08A6E + tooltip), "Tích câu không chắc" (`_pick_unsure`) tích cả câu OCR. Cài đặt → Nhận dạng giọng
+  nói: Làm rõ chữ trước khi OCR, Xoá câu OCR không chắc, mức. Tab Chỉnh sửa → Màu sắc & hình ảnh nút "Về gốc"
+  (`_color_reset`). `autoflow.summary` ghi "(làm rõ chữ, xoá câu không chắc)". `C.OCR_EQ_HELP` / `OCR_UNSURE_HELP`.
 - Lọc từ (2.1.33, `trami/wordfilter.py`): `parse` (ô cách nhau bằng , ， ; | xuống dòng), `find` (khớp theo NFKC + chữ
   thường, bỏ khoảng trắng – "＠ 纵横" = "@纵横"; cụm dài trước), `strip_words` (bỏ cụm, `_tidy`: khoảng trắng đôi, 2 dấu ngắt
   liền nhau, cụm ở đầu / cuối câu thì bỏ dấu ngắt còn sót), `empty` (không còn chữ / số), `plan` (xem trước, không sửa),
@@ -643,7 +664,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (279 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
+- `tests/test_core.py` – `python -m pytest -q tests` (283 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2434,7 +2455,18 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   trống, gộp đoạn chồng, việc nền chèn câu + tích sẵn + ✓, Ctrl+Z, "Tách đoạn này" trên timeline). Lỗi tìm ra khi chụp
   giao diện: vách kéo ép khung mới chồng chữ (-> `_HfwBox`), nút Xem / ✕ cũ còn sót khi vẽ lại bảng.
 
+- 2.1.36: "phụ đề quét chưa chuẩn – đưa video về độ sáng −0,30 / tương phản 1,80 / bão hoà 0 / gamma 0,50 (thấy ở tab Chỉnh
+  sửa → Màu sắc) thì chữ rất rõ, hợp tách câu" + "OCR cũng xoá / đánh dấu câu không chắc theo mức như phần nghe" + "chọn
+  quét màn hình thì nhắc chỉnh màu trước; có mẫu chọn là áp; có nút về gốc". Xem Cấu trúc "OCR làm rõ chữ + câu OCR không
+  chắc". Bão hoà bỏ khỏi phần OCR (ảnh xám – đã kiểm: eq chỉ đổi kênh màu, độ sáng giữ nguyên). Thử: bộ lọc / mẫu / ảnh
+  xem thử, OCR thật có lọc đọc đúng 3/3 câu (độ chắc ≥ 0,85), xoá câu OCR không chắc + khôi phục, giao diện offscreen (mẫu
+  áp giá trị + lưu, Tuỳ chỉnh, Về gốc, trình phát hiện ảnh làm rõ chỉ ở tab Tự động, nhắc khi chọn OCR, tô màu + tích câu
+  OCR không chắc, Về gốc tab Chỉnh sửa).
+
 ## Vấn đề đang mở
+- 2.1.36: chờ người dùng thử tab Tự động → Nguồn phụ đề OCR → dừng video ở chỗ có phụ đề → Làm rõ chữ khi quét chọn Mẫu
+  (video bên phải đổi màu) / Xem thử → quét: so số câu sai chữ / sai giờ với lúc không làm rõ; xem câu chữ đỏ cam (OCR
+  không chắc) có đúng là câu đọc sai không, mức 0,85 có hợp không (nhiều câu đúng bị tô -> hạ mức).
 - 2.1.35: chờ người dùng thử tab Phụ đề → "Tách phụ đề theo đoạn": Tự tìm 10–60 s (hoặc đánh dấu đầu / cuối) → Xem từng
   đoạn → Tách: câu mới có đúng giờ / đúng chữ không, người nói có đúng không (so giọng với người nói đã có), thời gian tách
   bao lâu so với tách cả phim; đoạn ✓ "không có câu mới" nhiều -> thử đổi Cách tách (OCR ↔ Nghe giọng nói).

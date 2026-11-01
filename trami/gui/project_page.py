@@ -394,6 +394,60 @@ class ProjectPage(QWidget):
         # 2.1.32: giờ câu – đúng giờ chữ hiện trên hình, hoặc kết hợp: câu theo phụ đề + mốc chữ / chỗ ngừng theo giọng
         self.a_ocrtime = f.row("Giờ câu", combo(C.OCR_TIMINGS, s.get("ocr_timing", "sub")), C.OCR_TIMING_HELP)
         self.a_ocrtime.currentIndexChanged.connect(self._ocr_timing_changed)
+        # 2.1.36: làm rõ chữ trước khi quét (độ sáng / tương phản / gamma / làm nét – chỉ ảnh đưa vào OCR, xem ngay trên
+        # video bên phải khi đang ở tab này; video xuất không đổi)
+        from ..ocr import EQ_PRESETS, eq_preset_of, eq_values
+
+        self.a_ocreq_preset = QComboBox()
+        for k, t, _v in EQ_PRESETS:
+            self.a_ocreq_preset.addItem(t, k)
+        self.a_ocreq_preset.addItem("Tuỳ chỉnh", "custom")
+        self.a_ocreq_preset.setToolTip(C.OCR_EQ_HELP)
+        self.a_ocreq_preset.currentIndexChanged.connect(self._ocr_eq_preset)
+        self.a_eq: dict[str, QDoubleSpinBox] = {}
+        eqv = eq_values(s)
+        eq_row = []
+        for k, t, lo, hi in (("brightness", "Sáng", -1.0, 1.0), ("contrast", "Tương phản", 0.0, 3.0),
+                             ("gamma", "Gamma", 0.1, 3.0)):
+            sp = QDoubleSpinBox()
+            sp.setRange(lo, hi)
+            sp.setSingleStep(0.05)
+            sp.setDecimals(2)
+            sp.setMaximumWidth(84)
+            sp.setValue(eqv[k])
+            sp.valueChanged.connect(self._ocr_eq_edited)
+            self.a_eq[k] = sp
+            eq_row.append(hbox(label(t, "muted"), sp))
+        self.a_eq_sharp = Switch(bool(eqv["sharpen"]))
+        self.a_eq_sharp.toggled.connect(self._ocr_eq_edited)
+        eq_row.append(hbox(self.a_eq_sharp, label("Làm nét", "muted")))
+        set_combo(self.a_ocreq_preset, eq_preset_of(eqv, bool(s.get("ocr_eq", False))))
+        self.a_ocreq_hint = label("", "muted", wrap=True)
+        self.a_ocreq_box = QWidget()
+        eb = QVBoxLayout(self.a_ocreq_box)
+        eb.setContentsMargins(0, 0, 0, 0)
+        eb.setSpacing(6)
+        eb.addWidget(flow(hbox(label("Mẫu", "muted"), self.a_ocreq_preset),
+                          button("Về gốc", "refresh", "Bỏ hết chỉnh: ảnh gốc, không làm rõ chữ", flat=True,
+                                 on_click=lambda: set_combo(self.a_ocreq_preset, "off")),
+                          button("Lấy từ tab Chỉnh sửa", "image", "Chép độ sáng / tương phản / gamma / làm nét đang đặt ở "
+                                 "tab Chỉnh sửa → Màu sắc – nhớ bấm 'Về gốc' ở đó nếu không muốn video xuất bị đổi màu",
+                                 flat=True, on_click=self._ocr_eq_from_edit),
+                          button("Xem thử", "search", "Xem ảnh vùng quét tại vị trí đang phát: ảnh gốc và ảnh bộ đọc chữ "
+                                 "thấy sau khi làm rõ", flat=True, on_click=self._ocr_eq_preview)))
+        eb.addWidget(flow(*eq_row))
+        eb.addWidget(self.a_ocreq_hint)
+        self.a_ocreq_row = f.row("Làm rõ chữ khi quét", self.a_ocreq_box, C.OCR_EQ_HELP)
+        # câu OCR đọc không chắc: tô màu / tích được; bật Xoá thì bỏ luôn khi lấy phụ đề (như phần nghe)
+        self.a_ocrdrop = Switch(bool(s.get("ocr_drop_unsure", False)))
+        self.a_ocrdrop.setToolTip(C.OCR_UNSURE_HELP)
+        self.a_ocrdrop.toggled.connect(self._ocr_drop_changed)
+        self.a_ocrconf = _conf_spin(float(s.get("ocr_pick_conf", 0.85) or 0.85))
+        self.a_ocrconf.setRange(0.3, 0.99)
+        self.a_ocrconf.setToolTip(C.OCR_UNSURE_HELP)
+        self.a_ocrconf.valueChanged.connect(self._ocr_conf_changed)
+        self.a_ocrdrop_row = f.row("Xoá câu OCR không chắc", wrap(hbox(self.a_ocrdrop, label("đọc chắc dưới", "muted"),
+                                                                      self.a_ocrconf, None)), C.OCR_UNSURE_HELP)
         self._auto_form = f
         self.a_lang = f.row("Ngôn ngữ gốc", combo(C.LANGS, "zh"))
         self.a_sep = f.row("Tách giọng khỏi nhạc trước", Switch(bool(s.get("sep_before_asr", True))),
@@ -864,6 +918,11 @@ class ProjectPage(QWidget):
         # câu bộ nghe không chắc (độ chắc từng câu – 2.1.15): tích để nghe lại, câu là nhạc / tiếng ồn thì Xoá (2.1.16)
         self.s_conf = _conf_spin(float(self.settings.get("asr_pick_conf", 0.7) or 0.7))
         self.s_conf.valueChanged.connect(self._conf_changed)
+        self.s_ocrconf = _conf_spin(float(self.settings.get("ocr_pick_conf", 0.85) or 0.85))
+        self.s_ocrconf.setRange(0.3, 0.99)
+        self.s_ocrconf.setToolTip(C.OCR_UNSURE_HELP)
+        self.s_ocrconf.valueChanged.connect(self._ocr_conf_changed)
+        self.model.ocr_thr = float(self.s_ocrconf.value())
         pg_song = [
             "Nhạc / lời bài hát / tiếng động bị nghe thành lời thoại: đánh 🎵 (không lồng tiếng) hoặc đánh dấu để "
             "nghe lại rồi xoá",
@@ -880,12 +939,13 @@ class ProjectPage(QWidget):
                  button("Không phải nhạc", "x", "Bỏ đánh dấu các câu đã tích (câu thoại thật) – lần lọc sau không đánh "
                         "dấu lại", flat=True, on_click=self._voice_ok)),
             flow(_rowlbl("Không chắc"),
-                 button("Tích câu bộ nghe không chắc", "check", "Tích các câu bộ nghe chấm độ chắc thấp (thường là chỗ lẫn "
+                 button("Tích câu không chắc", "check", "Tích các câu bộ nghe chấm độ chắc thấp (thường là chỗ lẫn "
                         "nhạc, tiếng hét, nói nhanh – hoặc nhạc / tiếng ồn bị chép thành chữ) rồi bấm 'Bộ nghe nghe lại "
-                        "câu đã tích' để bộ nghe điền lại chữ. Rê chuột vào chữ gốc xem độ chắc. Câu đã được lần nghe "
-                        "khác xác nhận (nghe lại ra y hệt / 2 bộ nghe ra giống nhau) không tính", flat=True,
-                        on_click=self._pick_unsure),
-                 hbox(label("độ chắc dưới", "muted"), self.s_conf),
+                        "câu đã tích' để bộ nghe điền lại chữ; cả câu OCR đọc chữ không chắc (chữ gốc đỏ cam) để xem lại "
+                        "/ Xoá. Rê chuột vào chữ gốc xem độ chắc. Câu đã được lần nghe khác xác nhận (nghe lại ra y hệt "
+                        "/ 2 bộ nghe ra giống nhau) không tính", flat=True, on_click=self._pick_unsure),
+                 hbox(label("nghe chắc dưới", "muted"), self.s_conf),
+                 hbox(label("OCR đọc chắc dưới", "muted"), self.s_ocrconf),
                  button("Khôi phục câu đã xoá", "refresh", "Đưa lại các câu bước 'Xoá câu không chắc' (tab Tự động) đã "
                         "bỏ ở lần Nghe & tách câu gần nhất vào đúng chỗ – được tích sẵn để nghe lại", flat=True,
                         on_click=self._restore_unsure)),
@@ -1698,6 +1758,9 @@ class ProjectPage(QWidget):
         self.e_safe.toggledOn.connect(lambda *_: (sv(), self._update_safe()))
         # --- màu
         color = SectionCard("Màu sắc & hình ảnh", "palette")
+        color.head.addWidget(button("Về gốc", "refresh", "Trả độ sáng / tương phản / bão hoà / gamma về mặc định, tắt làm nét "
+                                    "/ khử nhiễu (màu gốc của video)", flat=True,
+                                    on_click=self._color_reset))
         f3 = Form()
         self.e_bright = f3.row("Độ sáng", SliderRow(-0.3, 0.3, 0.01, 0))
         self.e_contrast = f3.row("Tương phản", SliderRow(0.5, 1.8, 0.01, 1))
@@ -1981,7 +2044,17 @@ class ProjectPage(QWidget):
             f.setRowVisible(self.a_ocrbox, ocr)
             f.setRowVisible(self.a_ocrmodel, ocr)
             f.setRowVisible(self.a_ocrtime, self.a_method.currentData() == "ocr")   # OCR + nghe: giờ luôn theo giọng
+            f.setRowVisible(self.a_ocreq_box, ocr)
+            f.setRowVisible(self.a_ocrdrop_row, ocr)
+        self._ocr_eq_hint()
+        if ocr and not self.loading and hasattr(self, "a_ocreq_preset") and \
+                self.a_ocreq_preset.currentData() == "off" and not getattr(self, "_ocr_eq_told", False):
+            self._ocr_eq_told = True    # nhắc 1 lần mỗi phiên khi vừa chọn nguồn quét chữ trên hình
+            self.win.toast("Quét chữ trên hình: nên chỉnh 'Làm rõ chữ khi quét' trước (dừng video ở chỗ có phụ đề, chọn "
+                           "Mẫu – video bên phải đổi màu ngay) để bộ đọc chữ đọc chính xác hơn", "warn")
         self._refresh_tool()
+        if hasattr(self, "_live_timer"):
+            self._live_timer.start()
 
     def _ocr_box_label(self):
         b = pipeline.ocr_box(self.p) if self.p else None
@@ -2014,6 +2087,145 @@ class ProjectPage(QWidget):
     def _ocr_timing_changed(self, *_):
         if not self.loading:
             self._save_setting("ocr_timing", self.a_ocrtime.currentData())
+
+    # ---- 2.1.36: làm rõ chữ trước khi OCR + câu OCR không chắc
+    def _ocr_eq_save(self):
+        from ..config import save_settings
+
+        d = {"ocr_eq": self.a_ocreq_preset.currentData() != "off", "ocr_eq_sharpen": self.a_eq_sharp.isChecked(),
+             **{f"ocr_eq_{k}": round(sp.value(), 2) for k, sp in self.a_eq.items()}}
+        self.settings = save_settings(d)
+        self._ocr_eq_hint()
+        self._live_timer.start()      # video bên phải đổi màu ngay (đang ở tab Tự động)
+
+    def _ocr_eq_preset(self, *_):
+        """Chọn mẫu = áp ngay giá trị của mẫu (Ảnh gốc = về gốc: tắt làm rõ, ô về trung tính)."""
+        if self.loading:
+            return
+        from ..ocr import EQ_NEUTRAL, EQ_PRESETS
+
+        k = self.a_ocreq_preset.currentData()
+        if k == "custom":
+            return self._ocr_eq_save()
+        vals = next((v for kk, _n, v in EQ_PRESETS if kk == k), None) or EQ_NEUTRAL
+        was, self.loading = self.loading, True
+        try:
+            for kk, sp in self.a_eq.items():
+                sp.setValue(float(vals[kk]))
+            self.a_eq_sharp.setChecked(bool(vals["sharpen"]))
+        finally:
+            self.loading = was
+        self._ocr_eq_save()
+
+    def _ocr_eq_edited(self, *_):
+        """Sửa tay 1 ô -> mẫu thành "Tuỳ chỉnh" (đang "Ảnh gốc" mà sửa -> bật làm rõ)."""
+        if self.loading:
+            return
+        from ..ocr import eq_preset_of
+
+        vals = {k: sp.value() for k, sp in self.a_eq.items()}
+        vals["sharpen"] = self.a_eq_sharp.isChecked()
+        k = eq_preset_of(vals)
+        from ..ocr import EQ_NEUTRAL
+
+        if all(abs(vals[x] - EQ_NEUTRAL[x]) < 1e-6 for x in self.a_eq) and not vals["sharpen"]:
+            k = "off"
+        was, self.loading = self.loading, True
+        try:
+            set_combo(self.a_ocreq_preset, k)
+        finally:
+            self.loading = was
+        self._ocr_eq_save()
+
+    def _ocr_eq_hint(self):
+        """Nhắc chỉnh làm rõ chữ trước khi quét (nguồn OCR mà chưa chỉnh)."""
+        if not hasattr(self, "a_ocreq_hint"):
+            return
+        off = self.a_ocreq_preset.currentData() == "off"
+        self.a_ocreq_hint.setText(
+            "⚠ Chưa làm rõ chữ: dừng video ở chỗ có phụ đề, chọn 1 Mẫu (video bên phải đổi màu ngay) – chữ trắng nổi rõ "
+            "trên nền tối là tốt – rồi mới bấm quét. Phụ đề vốn rõ nét thì để Ảnh gốc" if off else
+            "Video bên phải đang hiện đúng độ sáng / tương phản bộ đọc chữ sẽ quét (ảnh xám) – chỉ khi đang ở tab này, "
+            "video xuất không đổi. 'Về gốc' để bỏ hết chỉnh")
+
+    def _ocr_eq_set(self, vals: dict):
+        """Đặt các ô làm rõ chữ (VD chép từ tab Chỉnh sửa) -> mẫu tương ứng / Tuỳ chỉnh."""
+        was, self.loading = self.loading, True
+        try:
+            for k, sp in self.a_eq.items():
+                sp.setValue(float(vals.get(k, sp.value())))
+            self.a_eq_sharp.setChecked(bool(vals.get("sharpen")))
+        finally:
+            self.loading = was
+        self._ocr_eq_edited()
+
+    def _ocr_eq_from_edit(self):
+        self._ocr_eq_set({"brightness": self.e_bright.value(), "contrast": self.e_contrast.value(),
+                          "gamma": self.e_gamma.value(), "sharpen": self.e_sharpen.isChecked()})
+        self.win.toast("Đã chép màu tab Chỉnh sửa vào 'Làm rõ chữ khi quét' (chỉ dùng khi OCR). Không muốn video xuất bị "
+                       "đổi màu thì bấm 'Về gốc' ở tab Chỉnh sửa → Màu sắc & hình ảnh", "ok")
+
+    def _ocr_drop_changed(self, *_):
+        if not self.loading:
+            self._save_setting("ocr_drop_unsure", self.a_ocrdrop.isChecked())
+
+    def _ocr_eq_preview(self):
+        """Ảnh vùng quét tại vị trí đang phát: gốc + bộ đọc chữ thấy (đã làm rõ, ảnh xám) – xếp trên / dưới."""
+        if not self.p or not self.p.data.get("source") or pipeline.source_missing(self.p):
+            return self.win.toast("Dự án chưa có video", "warn")
+        from PySide6.QtGui import QPixmap
+        from PySide6.QtWidgets import QDialog
+
+        from ..ocr import preview_scan
+
+        st = {**self.settings, **{f"ocr_eq_{k}": sp.value() for k, sp in self.a_eq.items()},
+              "ocr_eq_sharpen": self.a_eq_sharp.isChecked()}
+        reg = pipeline.ocr_box(self.p) or self.p.data.get("ocr_region")
+        a, b = preview_scan(self.p.source, self.player.position(), reg, st)
+        pa, pb = QPixmap(), QPixmap()
+        if not (a and pa.loadFromData(a)) or not (b and pb.loadFromData(b)):
+            return self.win.toast("Không chụp được khung hình ở vị trí này", "warn")
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Ảnh bộ đọc chữ thấy")
+        v = QVBoxLayout(dlg)
+        wmax = min(1100, max(pa.width(), 300))
+        for t, pm in (("Ảnh gốc (vùng quét)", pa), ("Sau khi làm rõ chữ – ảnh xám đưa vào OCR", pb)):
+            v.addWidget(label(t, "muted"))
+            lb = QLabel()
+            lb.setPixmap(pm.scaledToWidth(wmax, Qt.TransformationMode.SmoothTransformation) if pm.width() > wmax else pm)
+            v.addWidget(lb)
+        v.addWidget(label("Chữ trắng nổi rõ trên nền tối là tốt. Chữ bị cháy / mất nét -> giảm Tương phản hoặc tăng "
+                          "Gamma; nền còn sáng -> giảm Sáng", "muted", wrap=True))
+        dlg.exec()
+
+    def _color_reset(self):
+        """Nút "Về gốc" khung Màu sắc & hình ảnh (tab Chỉnh sửa): màu gốc của video."""
+        was, self.loading = self.loading, True
+        try:
+            self.e_bright.set(0)
+            self.e_contrast.set(1)
+            self.e_sat.set(1)
+            self.e_gamma.set(1)
+            self.e_sharpen.setChecked(False)
+            self.e_denoise.setChecked(False)
+        finally:
+            self.loading = was
+        self._save_edit_timer.start()
+        self._live_timer.start()
+        self.win.toast("Màu video về gốc", "ok")
+
+    def _ocr_conf_changed(self, v: float):
+        """Mức "đọc chắc dưới" của câu OCR – 1 giá trị chung (Cài đặt ocr_pick_conf) ở tab Tự động + tab Phụ đề."""
+        for w in (self.a_ocrconf, self.s_ocrconf):
+            if abs(w.value() - v) > 1e-9:
+                w.blockSignals(True)
+                w.setValue(v)
+                w.blockSignals(False)
+        self.model.set_ocr_thr(float(v))
+        if not self.loading:
+            from ..config import save_settings
+
+            self.settings = save_settings({"ocr_pick_conf": round(float(v), 2)})
 
     def _ocr_capture(self):
         """Chụp khung hình ĐANG PHÁT (đủ độ phân giải) rồi khoanh vùng phụ đề trên ảnh lớn."""
@@ -3467,6 +3679,20 @@ class ProjectPage(QWidget):
             for w in (self.s_conf, self.a_conf):
                 w.setValue(float(st.get("asr_pick_conf", 0.7) or 0.7))
             self.a_drop.setChecked(bool(st.get("asr_drop_unsure", False)))
+            from ..ocr import eq_values
+
+            from ..ocr import eq_preset_of
+
+            eqv = eq_values(st)
+            for k, sp in self.a_eq.items():
+                sp.setValue(eqv[k])
+            self.a_eq_sharp.setChecked(eqv["sharpen"])
+            set_combo(self.a_ocreq_preset, eq_preset_of(eqv, bool(st.get("ocr_eq", False))))
+            self._ocr_eq_hint()
+            self.a_ocrdrop.setChecked(bool(st.get("ocr_drop_unsure", False)))
+            for w in (self.s_ocrconf, self.a_ocrconf):
+                w.setValue(float(st.get("ocr_pick_conf", 0.85) or 0.85))
+            self.model.set_ocr_thr(float(self.s_ocrconf.value()))
         finally:
             self.loading = was
         self._update_engine_label()
@@ -6036,23 +6262,32 @@ class ProjectPage(QWidget):
 
     def _pick_unsure(self):
         """Tích câu bộ nghe không chắc (độ chắc < ô "độ chắc dưới"), xếp từ câu kém chắc nhất – nghe lại rồi sửa / Xoá."""
-        thr = float(self.s_conf.value())
+        thr, othr = float(self.s_conf.value()), float(self.s_ocrconf.value())
         segs = self.model.segs
-        known = [i for i, s in enumerate(segs) if s.extra.get("asr_conf") is not None]
+        known = [i for i, s in enumerate(segs) if s.extra.get("asr_conf") is not None
+                 or s.extra.get("ocr_conf") is not None]
         if not known:
-            return self.win.toast("Phụ đề này chưa có độ chắc của bộ nghe (nghe bằng bản trước 2.1.15, OCR, nạp SRT hoặc "
-                                  "SenseVoice / Whisper) – bấm '1. Nghe & tách câu' bằng Qwen3-ASR / FireRedASR2 để có",
-                                  "warn")
-        rows = pipeline.unsure_rows(segs, thr)
+            return self.win.toast("Phụ đề này chưa có độ chắc (nghe bằng bản trước 2.1.15 / OCR trước 2.1.36, nạp SRT hoặc "
+                                  "SenseVoice / Whisper) – bấm '1. Nghe & tách câu' bằng Qwen3-ASR / FireRedASR2 hoặc OCR "
+                                  "lại để có", "warn")
+        rows = pipeline.unsure_rows(segs, thr, othr)
         if not rows:
-            return self.win.toast(f"Không có câu nào độ chắc dưới {thr:.2f} – tăng mức ở ô bên cạnh để tích thêm", "ok")
+            return self.win.toast(f"Không có câu nào độ chắc dưới mức (nghe {thr:.2f} · OCR {othr:.2f}) – tăng mức ở ô bên "
+                                  "cạnh để tích thêm", "ok")
         self.model.set_picked(range(len(segs)), False)
         self.model.set_picked(rows)
-        worst = min(rows, key=lambda i: float(segs[i].extra["asr_conf"]))
+
+        def conf(i: int) -> float:
+            x = segs[i].extra
+            return float(x["asr_conf"]) if x.get("asr_conf") is not None else float(x["ocr_conf"]) - othr + thr
+        worst = min(rows, key=conf)
         self._select_line(worst, seek=True)
-        self.win.toast(f"Đã tích {len(rows)} câu bộ nghe không chắc (độ chắc dưới {thr:.2f}) – đang mở câu kém chắc "
-                       f"nhất ({float(segs[worst].extra['asr_conf']):.2f}). Bấm 'Bộ nghe nghe lại câu đã tích' để bộ "
-                       "nghe nghe lại và điền lại chữ", "ok")
+        n_ocr = sum(1 for i in rows if segs[i].extra.get("asr_conf") is None)
+        what = ("câu OCR đọc không chắc" if n_ocr == len(rows) else "câu bộ nghe không chắc" if not n_ocr else
+                f"câu không chắc ({n_ocr} câu OCR)")
+        self.win.toast(f"Đã tích {len(rows)} {what} – đang mở câu kém chắc nhất. " +
+                       ("Xem chữ trên hình rồi sửa / Xoá (nút Xoá trên bảng câu)" if n_ocr == len(rows) else
+                        "Bấm 'Bộ nghe nghe lại câu đã tích' để bộ nghe nghe lại và điền lại chữ"), "ok")
 
     def run_relisten(self):
         """Bộ nghe nghe lại các câu đã tích rồi tự điền lại chữ gốc cho đúng (2.1.16)."""
@@ -6665,6 +6900,12 @@ class ProjectPage(QWidget):
             from ..video import edit_for_ratio
 
             ed = edit_for_ratio(ed, self._ratio_view)
+        if self.tabs.cur == 0 and self._ocr_mode() and self.a_ocreq_preset.currentData() != "off":
+            # tab Tự động + nguồn OCR (2.1.36): video bên phải hiện đúng ảnh bộ đọc chữ sẽ quét (sáng / tương phản /
+            # gamma của "Làm rõ chữ khi quét", ảnh xám) – chỉ để xem, video xuất không đổi
+            ed = dict(ed, color={"brightness": self.a_eq["brightness"].value(),
+                                 "contrast": self.a_eq["contrast"].value(), "saturation": 0.0,
+                                 "gamma": self.a_eq["gamma"].value()})
         extra = []
         if getattr(self, "sil", None) is not None and self.sil.preview.isChecked():
             extra += self.sil.on_cuts()           # phát thử bản đã cắt
@@ -6775,6 +7016,7 @@ class ProjectPage(QWidget):
     # ================================================================== khác
     def _tab_changed(self, i: int):
         self.stack.setCurrentIndex(i)
+        self._live_timer.start()      # vào / ra tab Tự động: bật / tắt xem trước ảnh làm rõ chữ OCR (2.1.36)
         # tab Xoá phụ đề: chuột vẽ / kéo vùng che trên video; tab Tự động (nguồn OCR): kéo khung vùng quét phụ đề;
         # tab khác: chuột kéo phụ đề (tab Kiểu chữ hiện khung)
         self._refresh_tool()

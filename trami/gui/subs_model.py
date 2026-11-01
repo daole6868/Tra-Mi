@@ -144,6 +144,18 @@ class SubsModel(QAbstractTableModel):
         # (IndexError ở "Tạo lại giọng các câu đã tích" sau khi gộp câu)
         self._picked: dict[int, Segment] = {}
         self.voice_names: dict[str, str] = {}  # mã giọng -> tên hiển thị
+        self.ocr_thr = 0.85     # câu OCR đọc chắc dưới mức này tô đỏ cam (Cài đặt ocr_pick_conf – 2.1.36)
+
+    def ocr_low(self, s: Segment) -> bool:
+        c = s.extra.get("ocr_conf")
+        return c is not None and s.extra.get("asr_conf") is None and float(c) < self.ocr_thr \
+            and not s.extra.get("asr_same")
+
+    def set_ocr_thr(self, v: float):
+        if abs(v - self.ocr_thr) > 1e-9:
+            self.ocr_thr = float(v)
+            if self.segs:
+                self.dataChanged.emit(self.index(0, 0), self.index(len(self.segs) - 1, len(COLS) - 1))
 
     @property
     def selected(self) -> set[int]:
@@ -269,6 +281,8 @@ class SubsModel(QAbstractTableModel):
             if c == C_ZH:
                 if s.extra.get("noise"):
                     return QColor("#B98CFF")       # tím = nghi nhạc / tiếng động bị nghe thành lời
+                if self.ocr_low(s):
+                    return QColor("#F08A6E")       # đỏ cam = OCR đọc chữ không chắc (2.1.36)
                 if s.extra.get("asr_repeat"):
                     return QColor("#F28FB0")       # hồng = còn 1 cụm lặp liền nhau / 2 câu liền giống nhau
                 if s.extra.get("asr_unsure"):
@@ -296,6 +310,10 @@ class SubsModel(QAbstractTableModel):
                 return tip
             if c == C_ZH and s.extra.get("noise"):
                 return f"⚠ Nghi nghe nhầm: {s.extra['noise']}\nNghe lại câu này – đúng là nhạc / tiếng động thì Xoá"
+            if c == C_ZH and self.ocr_low(s):
+                return (f"⚠ OCR đọc chữ không chắc (độ chắc {float(s.extra['ocr_conf']):.2f}, dưới mức "
+                        f"{self.ocr_thr:.2f}) – xem chữ trên hình rồi sửa / Xoá. Mức ở tab Phụ đề → Công cụ → Lời hát & "
+                        "nghe nhầm → Không chắc")
             if c == C_ZH and s.extra.get("asr_repeat"):
                 return f"⚠ Nghi bộ nghe lặp lời: \"{s.extra['asr_repeat']}\" lặp liền nhau (hoặc câu bên cạnh gần giống " \
                        "hệt). Nghe lại – nói 1 lần thì sửa chữ / Xoá câu thừa; hoặc tab Phụ đề → Công cụ → Lời hát & " \

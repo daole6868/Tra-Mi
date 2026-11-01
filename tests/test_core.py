@@ -12054,3 +12054,153 @@ def test_span_gui_2135(sample_video, monkeypatch):
         pp.p = None
         win.close()
         p.delete()
+
+
+# ------------------------------------------------------------------ 2.1.36: làm rõ chữ trước khi OCR + câu OCR không chắc
+
+def test_ocr_eq_filter_2136(sample_video):
+    """Bộ lọc làm rõ chữ: tắt / trung tính -> không lọc; mẫu chữ trắng nền tối -> eq đúng giá trị; làm nét -> unsharp;
+    nhận ra mẫu theo giá trị; 'Xem thử' ra 2 ảnh PNG (gốc + ảnh xám đã lọc)."""
+    from trami import ocr
+
+    assert ocr.eq_filter({}) == "" and ocr.eq_filter({"ocr_eq": True, "ocr_eq_brightness": 0, "ocr_eq_contrast": 1,
+                                                     "ocr_eq_gamma": 1}) == ""
+    f = ocr.eq_filter({"ocr_eq": True})
+    assert f == "eq=brightness=-0.300:contrast=1.800:gamma=0.500"
+    assert ocr.eq_filter({"ocr_eq": True, "ocr_eq_sharpen": True}).endswith(",unsharp=5:5:0.8:3:3:0.0")
+    assert ocr.eq_preset_of(ocr.eq_values({})) == "white_dark" and ocr.eq_preset_of({}, on=False) == "off"
+    assert ocr.eq_preset_of({"brightness": 0.1, "contrast": 1.0, "gamma": 1.0, "sharpen": False}) == "custom"
+    a, b = ocr.preview_scan(sample_video, 1.0, {"x": 0, "y": 0.7, "w": 1, "h": 0.3}, {"ocr_eq": True})
+    assert a.startswith(b"\x89PNG") and b.startswith(b"\x89PNG") and a != b
+
+
+def test_ocr_eq_conf_real_2136(tmp_path):
+    """OCR thật có làm rõ chữ: đọc đúng chữ, mỗi câu có độ chắc đọc chữ (ocr_conf), thống kê ghi đã lọc ảnh."""
+    _need_ocr3()
+    from trami import ocr
+
+    v = tmp_path / "v.mp4"
+    subs = _ocr_video_2131(v, dur=8.0, bg="none", watermark=False)
+    st: dict = {}
+    out = ocr.extract_hardsubs(v, {"x": 0, "y": 0.7, "w": 1, "h": 0.3, "exact": True}, fps=4, stats=st,
+                               settings={"ocr_eq": True})
+    want = [t for a, b, t in subs if b <= 8.0]
+    assert [s.text for s in out][:len(want)] == want and st["eq"]
+    assert all(0.85 <= s.extra["ocr_conf"] <= 1.0 for s in out)
+
+
+def test_ocr_unsure_2136(tmp_path, monkeypatch):
+    """Câu OCR đọc không chắc: tích được theo mức OCR riêng (không lẫn mức của bộ nghe); bật xoá -> bỏ khi lấy phụ đề,
+    thông báo + khôi phục được; tắt -> giữ (chỉ đánh dấu)."""
+    from trami import ocr, pipeline
+    from trami.config import load_settings
+    from trami.project import Project
+    from trami.subtitle import Segment
+
+    segs = [Segment(0, 1, "一", extra={"ocr_conf": 0.95}), Segment(1, 2, "二", extra={"ocr_conf": 0.62}),
+            Segment(2, 3, "三", extra={"asr_conf": 0.5}), Segment(3, 4, "四", extra={"ocr_conf": 0.7, "song": True})]
+    assert pipeline.unsure_rows(segs, 0.7) == [2]
+    assert pipeline.unsure_rows(segs, 0.7, 0.85) == [1, 2] and pipeline.unsure_rows(segs, 0.7, 0.85, asr=False) == [1]
+    src = tmp_path / "phim.mp4"
+    src.write_bytes(b"x")
+    p = Project.create("ocrunsure")
+    p.data["source"] = str(src)
+    p.save()
+    monkeypatch.setattr(ocr, "extract_hardsubs", lambda *a, **k: [
+        Segment(1.0, 2.0, "清楚的字", extra={"ocr_conf": 0.97}), Segment(2.5, 3.0, "糊字", extra={"ocr_conf": 0.6}),
+        Segment(3.5, 4.0, "再见", extra={"ocr_conf": 0.91})])
+    monkeypatch.setattr(pipeline, "ocr_box", lambda q: {"x": 0, "y": 0.8, "w": 1, "h": 0.2, "exact": True})
+    try:
+        st = {**load_settings(), "diarize": False, "ocr_timing": "sub", "asr_drop_unsure": True}
+        pipeline.recognize(p, "ocr", "zh", None, 4.0, st)
+        p.reload()
+        assert [s.text for s in p.segments] == ["清楚的字", "糊字", "再见"] and p.segments[1].extra["ocr_conf"] == 0.6
+        pipeline.recognize(p, "ocr", "zh", None, 4.0, {**st, "ocr_drop_unsure": True, "ocr_pick_conf": 0.85})
+        p.reload()
+        assert [s.text for s in p.segments] == ["清楚的字", "再见"]
+        note = pipeline.listen_note(p)
+        assert "xoá 1 câu OCR đọc không chắc (dưới 0,85)" in note and "bộ nghe" not in note
+        assert pipeline.restore_unsure(p) == [1] and len(p.segments) == 3
+    finally:
+        p.delete()
+
+
+def test_ocr_eq_gui_2136(sample_video, monkeypatch):
+    """Tab Tự động (nguồn OCR): chọn Mẫu = áp giá trị + lưu Cài đặt, sửa ô -> Tuỳ chỉnh, Về gốc -> tắt; video bên phải
+    hiện màu làm rõ chữ (chỉ ở tab Tự động), video xuất không đổi; nhắc khi chọn nguồn OCR; tab Chỉnh sửa 'Về gốc';
+    câu OCR không chắc tô màu + 'Tích câu không chắc' theo mức OCR."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+
+    from trami import pipeline
+    from trami.config import load_settings, save_settings
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+    from trami.subtitle import Segment
+
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    p = Project.create("ocreqgui")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [Segment(0.2, 1.0, "清楚", extra={"ocr_conf": 0.97}), Segment(1.5, 2.0, "糊字", extra={"ocr_conf": 0.6})]
+    p.save()
+    win = MainWindow()
+    win.show()
+    win.open_project(p.id)
+    pp = win.project_page
+    toasts = []
+    monkeypatch.setattr(win, "toast", lambda m, *a, **k: toasts.append(m))
+    seen = []
+    real = pp.player.set_edit
+    monkeypatch.setattr(pp.player, "set_edit", lambda ed, *a, **k: (seen.append(ed.get("color")), real(ed, *a, **k)))
+    try:
+        app.processEvents()
+        pp.tabs.set_current(0)
+        from trami.gui.widgets import set_combo
+
+        set_combo(pp.a_method, "asr")
+        set_combo(pp.a_ocreq_preset, "off")
+        pp._ocr_eq_told = False
+        toasts.clear()
+        set_combo(pp.a_method, "ocr")
+        app.processEvents()
+        assert any("Làm rõ chữ khi quét" in t for t in toasts) and "⚠" in pp.a_ocreq_hint.text()
+        set_combo(pp.a_ocreq_preset, "white_dark")
+        st = load_settings()
+        assert st["ocr_eq"] and st["ocr_eq_contrast"] == 1.8 and pp.a_eq["gamma"].value() == 0.5
+        pp._apply_live()
+        assert seen[-1] == {"brightness": -0.3, "contrast": 1.8, "saturation": 0.0, "gamma": 0.5}
+        assert (pp.collect_edit().get("color") or {}).get("contrast", 1) == 1      # video xuất không đổi
+        pp.a_eq["contrast"].setValue(1.5)
+        assert pp.a_ocreq_preset.currentData() == "custom" and load_settings()["ocr_eq_contrast"] == 1.5
+        pp.a_eq_sharp.setChecked(True)
+        assert load_settings()["ocr_eq_sharpen"]
+        set_combo(pp.a_ocreq_preset, "off")                                      # Về gốc
+        st = load_settings()
+        assert not st["ocr_eq"] and pp.a_eq["contrast"].value() == 1.0 and not pp.a_eq_sharp.isChecked()
+        pp.tabs.set_current(3)
+        pp.e_contrast.set(1.6)
+        pp._color_reset()
+        assert pp.e_contrast.value() == 1.0
+        # câu OCR không chắc
+        pp.tabs.set_current(1)
+        ix = pp.model.index(1, 2)
+        from trami.gui.subs_model import C_ZH
+
+        ix = pp.model.index(1, C_ZH)
+        assert pp.model.data(ix, Qt.ItemDataRole.ForegroundRole).name().lower() == "#f08a6e"
+        assert "OCR đọc chữ không chắc" in pp.model.data(ix, Qt.ItemDataRole.ToolTipRole)
+        pp._pick_unsure()
+        assert sorted(pp.model.selected) == [1]
+        pp.s_ocrconf.setValue(0.5)
+        assert pp.a_ocrconf.value() == 0.5 and load_settings()["ocr_pick_conf"] == 0.5
+        assert pp.model.data(ix, Qt.ItemDataRole.ForegroundRole).name().lower() != "#f08a6e"
+    finally:
+        save_settings({"ocr_eq": False, "ocr_eq_contrast": 1.8, "ocr_eq_sharpen": False, "ocr_pick_conf": 0.85,
+                       "ocr_eq_brightness": -0.3, "ocr_eq_gamma": 0.5})
+        win.timer.stop()
+        pp.p = None
+        win.close()
+        p.delete()

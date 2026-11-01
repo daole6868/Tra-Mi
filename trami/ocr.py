@@ -347,14 +347,78 @@ class _Tracker:
             pend = pend[hi:] if hi < len(pend) else []
 
 
+EQ_KEYS = ("brightness", "contrast", "gamma")   # bộ đọc chữ đọc ẢNH XÁM -> bão hoà màu không có tác dụng (bỏ)
+EQ_NEUTRAL = {"brightness": 0.0, "contrast": 1.0, "gamma": 1.0, "sharpen": False}
+# mẫu làm rõ chữ (chọn là áp ngay): (mã, tên, giá trị | None = tắt)
+EQ_PRESETS = [
+    ("off", "Ảnh gốc – không chỉnh", None),
+    ("white_dark", "Chữ trắng viền đen – nền tối", {"brightness": -0.30, "contrast": 1.80, "gamma": 0.50,
+                                                    "sharpen": False}),
+    ("white_bright", "Chữ trắng viền đen – nền sáng / đổi liên tục", {"brightness": -0.10, "contrast": 1.40,
+                                                                      "gamma": 0.80, "sharpen": False}),
+    ("dark_text", "Chữ đen / màu tối – nền sáng", {"brightness": 0.15, "contrast": 1.60, "gamma": 1.60,
+                                                   "sharpen": False}),
+    ("blurry", "Chữ mờ / nhoè – tăng nét", {"brightness": 0.0, "contrast": 1.30, "gamma": 0.90, "sharpen": True}),
+]
+EQ_PRESET = EQ_PRESETS[1][2]
+
+
+def eq_values(settings: dict | None) -> dict:
+    """Giá trị làm rõ chữ trước khi OCR (Cài đặt ocr_eq_<khoá> + ocr_eq_sharpen, chưa đặt -> mẫu chữ trắng nền tối)."""
+    st = settings or {}
+    out = {k: float(st.get(f"ocr_eq_{k}", EQ_PRESET[k])) for k in EQ_KEYS}
+    out["sharpen"] = bool(st.get("ocr_eq_sharpen", EQ_PRESET["sharpen"]))
+    return out
+
+
+def eq_preset_of(vals: dict, on: bool = True) -> str:
+    """Mã mẫu khớp giá trị đang đặt (không khớp mẫu nào -> "custom")."""
+    if not on:
+        return "off"
+    for k, _n, v in EQ_PRESETS:
+        if v and all(abs(float(vals.get(x, 0)) - v[x]) < 1e-3 for x in EQ_KEYS) and \
+                bool(vals.get("sharpen")) == v["sharpen"]:
+            return k
+    return "custom"
+
+
+def eq_filter(settings: dict | None) -> str:
+    """Lọc ảnh làm rõ chữ trước khi quét OCR (2.1.36, Cài đặt ocr_eq – chỉ ảnh đưa vào bộ đọc chữ, video xuất không đổi):
+    eq độ sáng / tương phản / gamma như tab Chỉnh sửa → Màu sắc (+ làm nét). Mẫu chữ trắng -0,30 / 1,80 / 0,50: nền tối
+    hẳn, chữ trắng viền đen nổi rõ. Tắt / giá trị trung tính -> ""."""
+    st = settings or {}
+    if not st.get("ocr_eq"):
+        return ""
+    v = eq_values(st)
+    parts = []
+    if any(abs(v[k] - EQ_NEUTRAL[k]) > 1e-6 for k in EQ_KEYS):
+        parts.append(f"eq=brightness={v['brightness']:.3f}:contrast={v['contrast']:.3f}:gamma={v['gamma']:.3f}")
+    if v["sharpen"]:
+        parts.append("unsharp=5:5:0.8:3:3:0.0")
+    return ",".join(parts)
+
+
+def preview_scan(src: str | Path, t: float, region: dict | None, settings: dict | None) -> tuple[bytes, bytes]:
+    """Ảnh vùng quét tại giây t: (ảnh gốc, ảnh bộ đọc chữ thấy – đã lọc + xám) dạng PNG – nút "Xem thử" tab Tự động."""
+    r = region or {"x": 0.0, "y": 0.66, "w": 1.0, "h": 0.34}
+    crop = (f"crop=trunc(iw*{float(r['w']):.4f}/2)*2:trunc(ih*{float(r['h']):.4f}/2)*2:"
+            f"trunc(iw*{float(r['x']):.4f}):trunc(ih*{float(r['y']):.4f})")
+    out = []
+    for vf in (crop, ",".join(x for x in (crop, eq_filter({**(settings or {}), "ocr_eq": True}), "format=gray") if x)):
+        cmd = [ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-ss", f"{max(0.0, t):.3f}", "-i", str(src),
+               "-frames:v", "1", "-an", "-vf", vf, "-f", "image2pipe", "-vcodec", "png", "pipe:1"]
+        out.append(subprocess.run(cmd, capture_output=True, creationflags=_NO_WINDOW).stdout)
+    return out[0], out[1]
+
+
 def _scan(src: str, rect, size, fps: float, f0: int, count: int | None, step: int, hw: list, detect, emit,
-          stop: threading.Event, seen: list) -> tuple[int, int]:
+          stop: threading.Event, seen: list, pre: str = "") -> tuple[int, int]:
     """Giải mã 1 khúc video (từ khung f0, count khung) chỉ lấy dải phụ đề ảnh xám -> các câu (_Span, số khung tính từ
-    đầu video). Trả (số khung đã đọc, số lần tìm chữ)."""
+    đầu video). Trả (số khung đã đọc, số lần tìm chữ). pre: lọc ảnh làm rõ chữ (eq_filter) trước khi chuyển xám."""
     x, y, w, h = rect
     ow, oh = size
     vf = f"fps={fps:.6f},crop={w}:{h}:{x}:{y}" + (f",scale={ow}:{oh}:flags=area" if (ow, oh) != (w, h) else "") + \
-         ",format=gray"
+         (f",{pre}" if pre else "") + ",format=gray"
     cmd = [ffmpeg_bin(), "-hide_banner", "-loglevel", "error", *hw]
     if f0:
         cmd += ["-ss", f"{f0 / fps:.4f}"]
@@ -542,6 +606,7 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
                   for k in range(nch)]
     todo = list(bounds)
     todo_lock = threading.Lock()
+    pre = eq_filter(st)
     # hàng đợi có giới hạn: đọc chữ chậm hơn giải mã (máy chỉ CPU) thì luồng giải mã chờ – mỗi câu giữ ≤ 16 khung mẫu,
     # không giới hạn thì phim dài có thể dồn hàng nghìn câu (vài GB RAM)
     q: queue.Queue = queue.Queue(maxsize=QUEUE_MAX)
@@ -572,10 +637,11 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
                     if not todo:
                         return
                     f0, count = todo.pop(0)
-                got, nd = _scan(src, rect, size, F, f0, count, step, hw if used_hw[0] else [], detect, put, stop, seen)
+                got, nd = _scan(src, rect, size, F, f0, count, step, hw if used_hw[0] else [], detect, put, stop, seen,
+                                pre)
                 if got == 0 and used_hw[0] and not stop.is_set():   # card không giải mã được file này -> giải mã CPU
                     used_hw[0] = False
-                    got, nd = _scan(src, rect, size, F, f0, count, step, [], detect, put, stop, seen)
+                    got, nd = _scan(src, rect, size, F, f0, count, step, [], detect, put, stop, seen, pre)
                 n_det[0] += nd
         except Exception as e:  # noqa: BLE001
             errs.append(e)
@@ -694,7 +760,12 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
                 votes: dict[str, float] = {}
                 for ca, cb, ct, cs, _w, _h in cur:
                     votes[ct] = votes.get(ct, 0.0) + (cb - ca) * max(cs, 0.05)
-                segs.append(Segment(round(cur[0][0], 3), round(min(total, cur[-1][1]), 3), max(votes, key=votes.get)))
+                best = max(votes, key=votes.get)
+                # độ chắc câu (2.1.36) = độ chắc trung bình (theo thời lượng) của các lần đọc ra đúng chữ đã chọn
+                bd = [(cb - ca, cs) for ca, cb, ct, cs, _w, _h in cur if ct == best]
+                conf = sum(d * c for d, c in bd) / max(1e-6, sum(d for d, _ in bd))
+                segs.append(Segment(round(cur[0][0], 3), round(min(total, cur[-1][1]), 3), best,
+                                    extra={"ocr_conf": round(float(conf), 3)}))
                 shapes.append((ref[4], ref[5]))
             cur = []
         if text:
@@ -704,7 +775,10 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
     for s, shp in zip(segs, shapes):   # gộp câu trùng lặp sát nhau (do nháy chữ)
         if merged and _same_line(merged[-1].text, s.text) and s.start - merged[-1].end < 0.6 and \
                 not _other_shape(s.text, merged[-1].text, shp[0], mshape[-1][0], max(shp[1], mshape[-1][1])):
-            merged[-1].end = s.end
+            m, da, db = merged[-1], merged[-1].end - merged[-1].start, s.end - s.start
+            m.extra["ocr_conf"] = round((m.extra.get("ocr_conf", 1.0) * da + s.extra.get("ocr_conf", 1.0) * db) /
+                                        max(1e-6, da + db), 3)
+            m.end = s.end
         else:
             merged.append(s)
             mshape.append(shp)
@@ -721,6 +795,7 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
         stats.update({"frames": seen[0], "ocr_runs": reader.n["ocr"], "lines": len(merged), "fps": F,
                       "spans": reader.n["spans"], "det": n_det[0], "cleaned": reader.n["cleaned"], "engine": eng.label,
                       "engine_warn": eng.warn, "hw": used_hw[0], "chunks": nch, "secs": round(_time.time() - t_start, 1),
+                      "eq": bool(pre),
                       "text_box": _text_box(boxes, W, H)})
     if progress:
         progress(1.0, f"OCR xong {len(merged)} câu")
@@ -810,12 +885,14 @@ def _text_box(boxes: list[dict], W: int, H: int) -> dict | None:
 UP_LINES, DOWN_LINES = 2.2, 1.2   # vùng quét: thêm ~2 dòng phía trên + ~1 dòng phía dưới dòng phụ đề đầu tiên
 
 
-def _sample(src: str, start: float, dur: float, fps: float, W: int, H: int, max_side: int = 960):
-    """Các khung hình trong [start, start+dur] (fps khung/giây), thu nhỏ cạnh dài ≤ max_side – 1 lần gọi ffmpeg."""
+def _sample(src: str, start: float, dur: float, fps: float, W: int, H: int, max_side: int = 960, pre: str = ""):
+    """Các khung hình trong [start, start+dur] (fps khung/giây), thu nhỏ cạnh dài ≤ max_side – 1 lần gọi ffmpeg.
+    pre: lọc ảnh làm rõ chữ (eq_filter)."""
     sc = min(1.0, max_side / max(W, H))
     w2, h2 = int(W * sc) // 2 * 2, int(H * sc) // 2 * 2
     cmd = [ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-ss", f"{max(0.0, start):.3f}", "-t", f"{dur:.3f}",
-           "-i", src, "-an", "-vf", f"fps={fps},scale={w2}:{h2}", "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1"]
+           "-i", src, "-an", "-vf", f"fps={fps},scale={w2}:{h2}" + (f",{pre}" if pre else ""), "-f", "rawvideo",
+           "-pix_fmt", "bgr24", "pipe:1"]
     buf = subprocess.run(cmd, capture_output=True, creationflags=_NO_WINDOW).stdout
     n = len(buf) // (w2 * h2 * 3)
     return [(start + i / fps, np.frombuffer(buf[i * w2 * h2 * 3:(i + 1) * w2 * h2 * 3], np.uint8).reshape(h2, w2, 3),
@@ -841,12 +918,13 @@ def detect_subtitle_region(src: str | Path, progress: Callable[[float, str], Non
         return fallback
     eng = get_engine(settings)
     dur = info.duration or 10
-    frames = _sample(src, 0, min(5.0, dur), 4, W, H)
+    pre = eq_filter(settings)
+    frames = _sample(src, 0, min(5.0, dur), 4, W, H, pre=pre)
     if dur > 10:
-        frames += _sample(src, dur - 5, 5, 2, W, H)
+        frames += _sample(src, dur - 5, 5, 2, W, H, pre=pre)
     if dur > 15:
         for k in range(8):
-            frames += _sample(src, 5 + (dur - 10) * (k + 0.5) / 8, 0.3, 4, W, H)[:1]
+            frames += _sample(src, 5 + (dur - 10) * (k + 0.5) / 8, 0.3, 4, W, H, pre=pre)[:1]
     reads: list[tuple[float, list]] = []
 
     def ocr_all(fr):
@@ -865,7 +943,7 @@ def detect_subtitle_region(src: str | Path, progress: Callable[[float, str], Non
     ocr_all(frames)
     head = [it for t, its in reads if t <= 5 for it in its]
     if not head and dur > 10:   # 5 giây đầu chưa có chữ (đoạn mở đầu) -> quét tiếp tới giây 30
-        more = _sample(src, 5, min(25.0, dur - 10), 1, W, H)
+        more = _sample(src, 5, min(25.0, dur - 10), 1, W, H, pre=pre)
         ocr_all(more)
         frames += more
 

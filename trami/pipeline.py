@@ -1696,7 +1696,7 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         p.data["ocr_boxes"] = str(boxes)
         p.data["ocr_stats"] = {"fps": float(ocr_fps or 4), "first_t": scan.get("first_t"),
                                **{k: stats.get(k) for k in ("frames", "ocr_runs", "spans", "det", "cleaned", "engine",
-                                                             "engine_warn", "hw", "chunks", "secs")}}
+                                                             "engine_warn", "hw", "chunks", "secs", "eq")}}
         p.data["ocr_warning"] = "" if segs else (
             "Không đọc được câu phụ đề nào – video có thể không có chữ Trung in sẵn, hoặc chữ nằm ngoài vùng quét: "
             "tab Tự động → Vùng phụ đề: kéo khung đúng chỗ chữ (hoặc bấm Tự dò), hoặc dùng Nhận dạng giọng nói.")
@@ -2006,8 +2006,10 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
     # 2i) lớp lọc CUỐI CÙNG trước khi dịch (2.1.19): bỏ hẳn câu bộ nghe không chắc – sau mọi bước nghe lại / 2 bộ nghe
     p.data.pop("unsure_dropped", None)
     p.data.pop("unsure_removed", None)
-    if segs and method != "ocr" and settings.get("asr_drop_unsure"):
-        segs = drop_unsure(p, segs, settings)
+    asr_drop = method != "ocr" and bool(settings.get("asr_drop_unsure"))
+    ocr_drop = method in ("ocr", "hybrid") and bool(settings.get("ocr_drop_unsure"))   # câu OCR đọc không chắc (2.1.36)
+    if segs and (asr_drop or ocr_drop):
+        segs = drop_unsure(p, segs, settings, asr=asr_drop, ocr=ocr_drop)
     # 2j) lọc từ (2.1.33, Cài đặt sub_filter_auto): bỏ cụm người dùng điền (logo / watermark OCR đọc dính "@纵横") ở
     # mọi câu, câu chỉ có cụm đó thì bỏ cả câu; giờ các câu không đổi
     p.data.pop("word_filtered", None)
@@ -3002,28 +3004,43 @@ def listen_note(p: Project) -> str:
 UNSURE_CONF = 0.7    # mức mặc định "độ chắc dưới" (Cài đặt asr_pick_conf – chung tab Tự động / tab Phụ đề)
 
 
-def unsure_rows(segs, thr: float = UNSURE_CONF) -> list[int]:
-    """Câu bộ nghe KHÔNG CHẮC (dùng chung: nút "Tích câu bộ nghe không chắc" tab Phụ đề và bước "Xoá câu không chắc"):
-    độ chắc `asr_conf` dưới mức `thr`. Bỏ qua câu 🎵, câu chưa có độ chắc (OCR, SRT, SenseVoice / Whisper) và câu đã có
-    lần nghe khác xác nhận (`asr_same`: nghe lại ra y hệt / 2 bộ nghe ra giống nhau)."""
+OCR_UNSURE = 0.85    # câu OCR đọc chắc dưới mức này = không chắc (Cài đặt ocr_pick_conf; chữ rõ thường ≥ 0,9)
+
+
+def unsure_rows(segs, thr: float = UNSURE_CONF, ocr_thr: float | None = None, asr: bool = True) -> list[int]:
+    """Câu KHÔNG CHẮC (dùng chung: nút "Tích câu không chắc" tab Phụ đề và bước "Xoá câu không chắc"): câu bộ nghe có độ
+    chắc `asr_conf` dưới `thr` (asr=True); câu OCR có độ chắc đọc chữ `ocr_conf` dưới `ocr_thr` (2.1.36, ocr_thr None =
+    không xét câu OCR). Bỏ qua câu 🎵, câu chưa có độ chắc (SRT, SenseVoice / Whisper) và câu đã có lần nghe khác xác
+    nhận (`asr_same`: nghe lại ra y hệt / 2 bộ nghe ra giống nhau)."""
     out = []
     for i, s in enumerate(segs):
-        c = s.extra.get("asr_conf")
-        if c is None or s.extra.get("song") or s.extra.get("asr_same"):
+        if s.extra.get("song") or s.extra.get("asr_same"):
             continue
-        if float(c) < thr:
+        c = s.extra.get("asr_conf")
+        if c is not None:
+            if asr and float(c) < thr:
+                out.append(i)
+            continue
+        oc = s.extra.get("ocr_conf")
+        if oc is not None and ocr_thr is not None and float(oc) < ocr_thr:
             out.append(i)
     return out
 
 
-def drop_unsure(p: Project, segs, settings: dict) -> list:
+def drop_unsure(p: Project, segs, settings: dict, asr: bool = True, ocr: bool = False) -> list:
     """Bước cuối "1. Nghe & tách câu" / Tự động khi bật "Xoá câu không chắc" (Cài đặt `asr_drop_unsure`, mức
-    `asr_pick_conf`): bỏ hẳn các câu `unsure_rows` để không gửi đi dịch / lồng tiếng. Câu bỏ cất vào
-    p.data["unsure_removed"] (nút "Khôi phục câu đã xoá" tab Phụ đề). Trả danh sách câu còn lại."""
+    `asr_pick_conf`) / "Xoá câu OCR không chắc" (`ocr_drop_unsure`, mức `ocr_pick_conf` – 2.1.36): bỏ hẳn các câu
+    `unsure_rows` để không gửi đi dịch / lồng tiếng. Câu bỏ cất vào p.data["unsure_removed"] (nút "Khôi phục câu đã
+    xoá" tab Phụ đề). Trả danh sách câu còn lại."""
     thr = float(settings.get("asr_pick_conf", UNSURE_CONF) or UNSURE_CONF)
-    rows = set(unsure_rows(segs, thr))
-    known = sum(1 for s in segs if s.extra.get("asr_conf") is not None)
-    p.data["unsure_dropped"] = {"n": len(rows), "thr": thr, "known": known}
+    othr = float(settings.get("ocr_pick_conf", OCR_UNSURE) or OCR_UNSURE) if ocr else None
+    rows = set(unsure_rows(segs, thr, othr, asr=asr))
+    known = sum(1 for s in segs if s.extra.get("asr_conf") is not None) if asr else 0
+    ocr_rows = [i for i in rows if segs[i].extra.get("asr_conf") is None]
+    p.data["unsure_dropped"] = {"n": len(rows) - len(ocr_rows), "thr": thr, "known": known, "asr": asr}
+    if ocr:
+        p.data["unsure_dropped"].update({"ocr_n": len(ocr_rows), "ocr_thr": othr,
+                                         "ocr_known": sum(1 for s in segs if s.extra.get("ocr_conf") is not None)})
     if not rows:
         return segs
     p.data["unsure_removed"] = [segs[i].to_dict() for i in sorted(rows)]
@@ -3033,13 +3050,25 @@ def drop_unsure(p: Project, segs, settings: dict) -> list:
 def unsure_note(st: dict | None) -> str:
     if not st:
         return ""
-    thr = f"{float(st.get('thr', UNSURE_CONF)):.2f}".replace(".", ",")
-    if not st.get("known", 1):
-        return "chưa lọc được câu không chắc: bộ nghe này không chấm độ chắc (chỉ Qwen3-ASR / FireRedASR2 có)"
-    if not st.get("n"):
-        return f"lọc câu không chắc: không có câu nào độ chắc dưới {thr}"
-    return (f"xoá {st['n']} câu bộ nghe không chắc (độ chắc dưới {thr}) – lấy lại: tab Phụ đề → Công cụ → Lời hát & "
-            "nghe nhầm → 'Khôi phục câu đã xoá'")
+    out = []
+    back = " – lấy lại: tab Phụ đề → Công cụ → Lời hát & nghe nhầm → 'Khôi phục câu đã xoá'"
+    if st.get("asr", True):
+        thr = f"{float(st.get('thr', UNSURE_CONF)):.2f}".replace(".", ",")
+        if not st.get("known", 1):
+            out.append("chưa lọc được câu không chắc: bộ nghe này không chấm độ chắc (chỉ Qwen3-ASR / FireRedASR2 có)")
+        elif not st.get("n"):
+            out.append(f"lọc câu không chắc: không có câu nào độ chắc dưới {thr}")
+        else:
+            out.append(f"xoá {st['n']} câu bộ nghe không chắc (độ chắc dưới {thr})" + back)
+    if "ocr_thr" in st:   # câu OCR đọc không chắc (2.1.36)
+        othr = f"{float(st['ocr_thr']):.2f}".replace(".", ",")
+        if not st.get("ocr_known"):
+            out.append("chưa lọc được câu OCR không chắc (bản OCR trước 2.1.36 chưa có độ chắc – OCR lại)")
+        elif not st.get("ocr_n"):
+            out.append(f"lọc câu OCR không chắc: không có câu nào đọc chắc dưới {othr}")
+        else:
+            out.append(f"xoá {st['ocr_n']} câu OCR đọc không chắc (dưới {othr})" + ("" if st.get("n") else back))
+    return " · ".join(out)
 
 
 def restore_unsure(p: Project) -> list[int]:
@@ -5407,6 +5436,8 @@ def ocr_note(p: Project) -> str:
         msg += f" · {o['engine']}"
     if o.get("hw"):
         msg += " · giải mã bằng card"
+    if o.get("eq"):
+        msg += " · đã lọc ảnh làm rõ chữ"
     if o.get("chunks", 1) and int(o.get("chunks") or 1) > 1:
         msg += f" · {o['chunks']} khúc song song"
     if o.get("secs"):

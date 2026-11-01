@@ -94,6 +94,11 @@ DEFAULT_SETTINGS: dict = {
     "ocr_clean": True,                # đọc trên ảnh chữ sạch dựng từ nhiều khung (nền chuyển động bị loại)
     "sub_filter_words": "",           # 2.1.33: lọc từ (tab Phụ đề → Công cụ → Sửa câu): cụm cần xoá ở mọi câu ("@纵横")
     "sub_filter_auto": False,         # ... tự lọc mỗi lần lấy phụ đề mới (Nghe & tách câu / OCR / Tự động)
+    # OCR (2.1.36): lọc ảnh làm rõ chữ trước khi quét (chỉ ảnh đưa vào bộ đọc chữ – video xuất không đổi) + câu đọc
+    # không chắc (độ chắc đọc chữ dưới mức: tô màu / tích được; bật xoá -> bỏ khi lấy phụ đề như phần nghe)
+    "ocr_eq": False, "ocr_eq_brightness": -0.30, "ocr_eq_contrast": 1.80, "ocr_eq_gamma": 0.50,
+    "ocr_eq_sharpen": False,
+    "ocr_pick_conf": 0.85, "ocr_drop_unsure": False,
     # tách phụ đề theo đoạn (2.1.35, tab Phụ đề): tìm khoảng chưa có phụ đề dài từ … đến … giây (0 = không giới hạn)
     "span_gap_min": 10.0, "span_gap_max": 60.0, "span_songs": False,
     "span_mode": "keep",              # keep: giữ câu cũ, chỉ thêm câu còn thiếu | replace: thay câu cũ trong đoạn

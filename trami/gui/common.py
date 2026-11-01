@@ -93,6 +93,16 @@ WORD_FILTER_HELP = ("Xoá đúng cụm chữ này ở mọi câu phụ đề –
                     "các chữ. Nhiều cụm cách nhau bằng dấu phẩy. OCR đọc logo mỗi lần 1 kiểu (@纵横 / @凯横 / @黄AGC): "
                     "@* = @ và tối đa 8 chữ sau nó, tới hết câu / dấu câu / khoảng trắng (logo dính cuối câu); @?? = @ "
                     "và đúng 2 chữ sau nó (logo dính đầu câu). Ctrl+Z hoàn tác")
+OCR_EQ_HELP = ("Chỉnh ảnh trước khi bộ đọc chữ quét (độ sáng / tương phản / gamma như tab Chỉnh sửa → Màu sắc, + làm nét): "
+               "chọn Mẫu là áp ngay, video bên phải hiện đúng ảnh bộ đọc chữ sẽ quét (ảnh xám – bão hoà màu không có tác "
+               "dụng nên không có ô này). Phụ đề chữ trắng viền đen trên phim tối -> mẫu 'Chữ trắng viền đen – nền tối' "
+               "(sáng -0,30 · tương phản 1,80 · gamma 0,50): nền tối hẳn, chữ trắng nổi rõ -> đọc chữ đúng hơn, tách câu "
+               "đúng giờ hơn. CHỈ ảnh đưa vào OCR – video xuất không đổi. 'Về gốc' = bỏ hết chỉnh. 'Xem thử' = ảnh vùng "
+               "quét trước / sau khi làm rõ")
+OCR_UNSURE_HELP = ("Bộ đọc chữ chấm độ chắc từng câu (0–1; chữ rõ thường ≥ 0,9). Câu đọc chắc dưới mức này: chữ gốc tô đỏ "
+                   "cam ở tab Phụ đề (rê chuột xem độ chắc), 'Tích câu không chắc' tích được; bật Xoá thì bỏ luôn lúc lấy "
+                   "phụ đề (OCR / OCR + nghe / Bắt đầu dịch tự động) – lấy lại bằng 'Khôi phục câu đã xoá'. Mức cao hơn = "
+                   "nhiều câu hơn")
 OCR_TIMINGS = [("sub", "Theo giờ phụ đề trên hình"), ("mix", "Kết hợp: câu theo phụ đề + chỗ ngừng theo giọng nói")]
 OCR_TIMING_HELP = ("Giờ câu khi lấy phụ đề bằng OCR. Theo giờ phụ đề: đúng lúc chữ hiện / tắt trên hình (nhanh, không cần "
                    "tách giọng). Kết hợp: chữ và cách chia câu giữ đúng phụ đề, nhưng tool tách giọng rồi đo từng chữ "
