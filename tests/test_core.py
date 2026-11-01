@@ -11758,3 +11758,87 @@ def test_word_filter_gui_2133(sample_video, monkeypatch):
         pp.p = None
         win.close()
         p.delete()
+
+
+def test_word_filter_wildcard_2134():
+    """Ký tự đại diện: "@*" = "@" + mọi chữ sau tới khoảng trắng / dấu câu / hết câu (logo OCR đọc mỗi lần 1 kiểu dính
+    cuối câu), "@??" = "@" + 2 chữ; "？" / "＊" toàn khổ là chữ thật; cụm chỉ có * ? bị bỏ qua (không xoá cả câu)."""
+    from trami import wordfilter as wf
+    from trami.subtitle import Segment
+
+    A = ["@*"]
+    assert wf.strip_words("我现在身上仅剩下两块元石@黄AGC", A)[0] == "我现在身上仅剩下两块元石"
+    assert wf.strip_words("啊是酒虫@凯横", A)[0] == "啊是酒虫"
+    assert wf.strip_words("元石@黄AGC，好", A)[0] == "元石，好"          # "*" dừng ở dấu câu
+    assert wf.find("@纵横排队一个个的进来", A) == [] and wf.find("我@abcdefghij", A) == []   # > 8 chữ: không nuốt cả câu
+    assert wf.strip_words("@纵横 排队", A)[0] == "排队"
+    assert wf.strip_words("@凯横排队一个个", ["@??"])[0] == "排队一个个"
+    assert wf.strip_words("哈？好", ["？"])[0] == "哈好" and wf.find("哈？好", ["*"]) == [] and not wf.contains("全文", ["**"])
+    assert wf.literal_len("@??") == 1 and wf.literal_len("*?") == 0
+    assert wf.contains("啊是酒虫@凯横", A) and not wf.contains("纵横天下", ["@纵横"])
+    segs = [Segment(0, 1, "我现在身上仅剩下两块元石@黄AGC"), Segment(1, 2, "啊是酒虫@凯横"), Segment(2, 3, "＠纵横"),
+            Segment(3, 4, "大家好"), Segment(4, 5, "@纵横排队一个个的进来")]
+    res = wf.apply(segs, A)
+    assert [s.text for s in res["segs"]] == ["我现在身上仅剩下两块元石", "啊是酒虫", "大家好", "@纵横排队一个个的进来"]
+    assert res["dropped"] == [2]
+
+
+def test_word_find_gui_2134(sample_video, monkeypatch):
+    """Nút "Lọc" / Enter: bảng câu tab Phụ đề chỉ hiện câu có cụm (như tìm kiếm, không sửa gì), dòng đếm ghi "hiện k/n",
+    sửa ô khi đang lọc -> lọc lại; "Xoá chữ này" hỏi lại kèm ví dụ rồi bỏ lọc; "Bỏ lọc" hiện lại mọi câu; mở dự án khác bỏ
+    lọc."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from trami import pipeline
+    from trami.config import save_settings
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+    from trami.subtitle import Segment
+
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    p = Project.create("wffind")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [Segment(0.5, 1.0, "我现在身上仅剩下两块元石@黄AGC"), Segment(1.0, 1.5, "大家好"),
+                  Segment(1.5, 2.0, "啊是酒虫@凯横"), Segment(2.0, 2.5, "@纵横"), Segment(2.6, 3.0, "再见")]
+    p.save()
+    win = MainWindow()
+    win.show()
+    win.open_project(p.id)
+    pp = win.project_page
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.StandardButton.Yes)
+    try:
+        app.processEvents()
+        pp.s_wf.setText("@*")
+        pp.s_wf.returnPressed.emit()
+        app.processEvents()
+        rows = [pp.proxy.mapToSource(pp.proxy.index(r, 0)).row() for r in range(pp.proxy.rowCount())]
+        assert rows == [0, 2, 3] and len(pp.model.segs) == 5 and not asked          # chỉ lọc, không xoá
+        assert "hiện 3/5" in pp.seg_count.text() and not pp.s_wf_chip.isHidden()
+        pp.s_wf.setText("@凯横")
+        pp._wf_timer.timeout.emit()
+        assert pp.proxy.rowCount() == 1
+        pp._word_unfind()
+        assert pp.proxy.rowCount() == 5 and pp.s_wf_chip.isHidden() and "hiện" not in pp.seg_count.text()
+        pp.s_wf.setText("@*")
+        pp._word_find()
+        pp._word_filter()
+        app.processEvents()
+        assert asked and "xoá hẳn 1 câu" in asked[0] and "→" in asked[0] and "啊是酒虫" in asked[0]
+        assert [(s.start, s.end, s.text) for s in pp.model.segs] == [
+            (0.5, 1.0, "我现在身上仅剩下两块元石"), (1.0, 1.5, "大家好"), (1.5, 2.0, "啊是酒虫"), (2.6, 3.0, "再见")]
+        assert not pp.proxy.words and pp.proxy.rowCount() == 4
+        pp.s_wf.setText("大家")
+        pp._word_find()
+        assert pp.proxy.rowCount() == 1
+        pp.populate()                     # mở lại / dự án khác -> bỏ lọc
+        assert not pp.proxy.words and pp.proxy.rowCount() == 4
+    finally:
+        save_settings({"sub_filter_words": ""})
+        win.timer.stop()
+        pp.p = None
+        win.close()
+        p.delete()

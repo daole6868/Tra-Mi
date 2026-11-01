@@ -2,11 +2,17 @@
 ("@纵横排队一个个的进来" -> "排队一个个的进来"), câu chỉ có cụm đó thì bỏ cả câu. Giờ các câu không đổi.
 
 So khớp: đúng thứ tự chữ, không phân biệt chữ hoa / thường, chữ toàn khổ / nửa khổ ("＠" = "@") và khoảng trắng giữa
-các chữ ("@ 纵横" = "@纵横")."""
+các chữ ("@ 纵横" = "@纵横").
+
+Ký tự đại diện (2.1.34, gõ * ? kiểu thường – "＊" "？" toàn khổ là chữ thường): "?" = đúng 1 chữ bất kỳ, "*" = tối đa
+`ANY_MAX` 8 chữ liền sau, phải chạm khoảng trắng / dấu câu / hết câu. OCR đọc logo mỗi lần 1 kiểu ("@纵横" / "@凯横" /
+"@黄AGC") -> "@*" bắt cả 3 khi logo dính ở CUỐI câu (hoặc đứng riêng / trước dấu phẩy), không đụng "@纵横排队一个个的进来";
+"@??" = "@" + 2 chữ (logo dính ở đầu câu). Cụm phải có ít nhất 1 chữ thật (không nhận "*")."""
 from __future__ import annotations
 
 import re
 import unicodedata
+from functools import lru_cache
 
 SEP_RE = re.compile(r"[\n\r,，;；|]+")
 _WORD_RE = re.compile(r"\w", re.UNICODE)                  # câu còn chữ / số
@@ -15,6 +21,10 @@ _LEAD_RE = re.compile(r"^[\s,，、;；:：·•\-–—|/]+")          # dấu 
 _TRAIL_RE = re.compile(r"[\s,，、;；:：·•\-–—|/]+$")         # ... ở cuối câu
 _DUP_RE = re.compile(r"([,，、;；:：])(?:\s*[,，、;；:：])+")    # "排队，，进来" -> "排队，进来"
 _WS_RE = re.compile(r"\s{2,}")
+_ANY, _ONE = "\ue000", "\ue001"        # ký tự đại diện sau khi tách (khác chữ "?" / "*" thật của cụm toàn khổ)
+ANY_MAX = 8      # "*" bắt tối đa 8 chữ (logo ngắn) – "@*" không nuốt cả câu "@纵横排队一个个的进来" (logo dính đầu câu)
+# "*" dừng ở khoảng trắng / dấu câu (cả dấu toàn khổ sau NFKC)
+_STOP = r"\s,.!?;:、。…\"'“”‘’()（）\[\]{}《》〈〉【】「」『』<>|/\\·•\-–—~"
 
 
 def parse(text: str | None) -> list[str]:
@@ -31,35 +41,96 @@ def _norm(ch: str) -> str:
     return unicodedata.normalize("NFKC", ch).casefold()
 
 
-def _norm_map(text: str) -> tuple[str, list[int]]:
-    """Chuỗi để so khớp (NFKC, chữ thường, bỏ khoảng trắng) + vị trí ký tự gốc của từng ký tự."""
+def _key(word: str) -> str:
+    return "".join(c for c in _norm(word) if not c.isspace())
+
+
+def _tokens(word: str) -> list[str]:
+    """Cụm người dùng điền -> từng phần: chữ (đã NFKC, chữ thường) hoặc ký tự đại diện "*" / "?" (gõ kiểu thường)."""
+    out: list[str] = []
+    for ch in word:
+        if ch == "*":
+            if not (out and out[-1] == _ANY):
+                out.append(_ANY)
+        elif ch == "?":
+            out.append(_ONE)
+        else:
+            out.extend(c for c in _norm(ch) if not c.isspace())
+    return out
+
+
+def literal_len(word: str) -> int:
+    """Số chữ thật (không tính * ?) – cụm không có chữ thật nào bị bỏ qua (tránh "*" xoá cả câu)."""
+    return sum(1 for t in _tokens(word) if t not in (_ANY, _ONE))
+
+
+@lru_cache(maxsize=64)
+def _compile(word: str):
+    toks = _tokens(word)
+    if not any(t not in (_ANY, _ONE) for t in toks):
+        return None
+    parts = []
+    for t in toks:
+        if t == _ONE:
+            parts.append(r"[^\s]")
+        elif t == _ANY:
+            parts.append(f"[^{_STOP}]{{0,{ANY_MAX}}}")
+        else:
+            parts.append(re.escape(t))
+    pat = r"\s*".join(parts)
+    if toks[-1] == _ANY:       # "*" cuối cụm phải chạm hết câu / dấu câu / khoảng trắng (không cắt giữa chữ câu)
+        pat += f"(?=[{_STOP}]|$)"
+    return re.compile(pat)
+
+
+def matchers(words) -> list:
+    """Các cụm -> biểu thức so khớp (cụm nhiều chữ thật trước), bỏ cụm rỗng / chỉ có ký tự đại diện."""
+    return _matchers(tuple(words or ()))
+
+
+@lru_cache(maxsize=32)
+def _matchers(words: tuple) -> list:
+    ws = sorted({w for w in words if w and w.strip()}, key=lambda w: (-literal_len(w), w))
+    return [m for m in (_compile(w) for w in ws) if m is not None]
+
+
+def _norm_text(text: str) -> tuple[str, list[int]]:
+    """Chuỗi để so khớp (NFKC, chữ thường, khoảng trắng giữ 1 ký tự) + vị trí ký tự gốc của từng ký tự."""
     out, idx = [], []
     for i, ch in enumerate(text):
         for c in _norm(ch):
-            if not c.isspace():
-                out.append(c)
-                idx.append(i)
+            if c.isspace():
+                c = " "
+            out.append(c)
+            idx.append(i)
     return "".join(out), idx
-
-
-def _key(word: str) -> str:
-    return "".join(c for c in _norm(word) if not c.isspace())
 
 
 def find(text: str, words: list[str]) -> list[tuple[int, int]]:
     """Các đoạn [đầu, cuối) trong `text` trùng 1 cụm cần lọc (cụm dài trước, không chồng nhau)."""
     if not text or not words:
         return []
-    norm, idx = _norm_map(text)
+    ms = matchers(words)
+    if not ms:
+        return []
+    norm, idx = _norm_text(text)
     spans: list[tuple[int, int]] = []
-    for w in sorted({_key(w) for w in words if _key(w)}, key=len, reverse=True):
-        k = norm.find(w)
-        while k >= 0:
-            a, b = idx[k], idx[k + len(w) - 1] + 1
+    for m in ms:
+        for r in m.finditer(norm):
+            if r.end() <= r.start():
+                continue
+            a, b = idx[r.start()], idx[r.end() - 1] + 1
             if not any(a < y and x < b for x, y in spans):
                 spans.append((a, b))
-            k = norm.find(w, k + len(w))
     return sorted(spans)
+
+
+def contains(text: str, words: list[str]) -> bool:
+    """Câu có ít nhất 1 cụm cần lọc (bảng câu tab Phụ đề lọc theo cái này – như ô tìm kiếm)."""
+    if not text or not words:
+        return False
+    norm = _norm_text(text)[0]
+    return any(m.search(norm) for m in matchers(words))
 
 
 def _tidy(text: str, head: bool, tail: bool) -> str:

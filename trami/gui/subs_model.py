@@ -380,19 +380,34 @@ class SubsModel(QAbstractTableModel):
 
 
 class SubsFilter(QSortFilterProxyModel):
+    """Ô tìm kiếm + "Lọc từ" (2.1.34: chỉ hiện câu có cụm cần lọc – chữ gốc hoặc bản dịch, cùng cách so khớp với nút
+    xoá cụm `wordfilter`); có cả 2 thì câu phải khớp cả 2."""
+
     def __init__(self):
         super().__init__()
         self.q = ""
+        self.words: list[str] = []
 
     def set_query(self, q: str):
         self.q = q.lower().strip()
         self.invalidateFilter()
 
+    def set_words(self, words):
+        self.words = list(words or [])
+        self.invalidateFilter()
+
     def filterAcceptsRow(self, row, parent):
-        if not self.q:
+        if not self.q and not self.words:
             return True
         m = self.sourceModel()
         s = m.segs[row]
+        if self.words:
+            from .. import wordfilter
+
+            if not (wordfilter.contains(s.text or "", self.words) or wordfilter.contains(s.trans or "", self.words)):
+                return False
+        if not self.q:
+            return True
         return self.q in s.text.lower() or self.q in s.trans.lower() or self.q == s.speaker.lower()
 
 

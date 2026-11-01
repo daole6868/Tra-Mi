@@ -663,10 +663,19 @@ class ProjectPage(QWidget):
                                   "ngắt hơi). Tắt: chỉ nhìn độ to giọng – nhanh")
         # lọc từ (2.1.33): logo / watermark OCR đọc dính vào câu ("@纵横排队…") -> xoá đúng cụm đó ở mọi câu
         self.s_wf = QLineEdit(str(self.settings.get("sub_filter_words", "") or ""))
-        self.s_wf.setPlaceholderText("VD: @纵横, @abc")
+        self.s_wf.setPlaceholderText("VD: @纵横, @*, @??")
         self.s_wf.setMinimumWidth(260)
         self.s_wf.setToolTip(C.WORD_FILTER_HELP)
-        self.s_wf.returnPressed.connect(self._word_filter)
+        self.s_wf.returnPressed.connect(self._word_find)      # Enter = lọc bảng (như tìm kiếm), không xoá
+        self._wf_timer = QTimer(self, singleShot=True, interval=300)
+        self._wf_timer.timeout.connect(lambda: self._word_find(refresh=True))
+        self.s_wf.textChanged.connect(lambda *_: self.proxy.words and self._wf_timer.start())
+        # "Bỏ lọc": 1 nút ở hàng Lọc từ + 1 nút cạnh ô tìm kiếm (khi đang ở trang Công cụ khác vẫn thấy)
+        self.s_wf_clear = button("Bỏ lọc", "x", "Hiện lại mọi câu", flat=True, on_click=self._word_unfind)
+        self.s_wf_chip = button("Bỏ lọc từ", "x", "Bảng đang chỉ hiện câu có cụm ở ô Lọc từ (tab Phụ đề → Công cụ → "
+                                "Sửa câu) – bấm để hiện lại mọi câu", flat=True, on_click=self._word_unfind)
+        self.s_wf_clear.hide()
+        self.s_wf_chip.hide()
         self.s_wf_auto = Switch(bool(self.settings.get("sub_filter_auto", False)))
         self.s_wf_auto.setToolTip("Bật: mỗi lần lấy phụ đề mới (1. Nghe & tách câu, OCR, Bắt đầu dịch tự động – mọi dự án) "
                                   "tự lọc các cụm trong ô bên cạnh")
@@ -700,8 +709,11 @@ class ProjectPage(QWidget):
                         on_click=self.run_snap),
                  hbox(self.s_snap_ct, label("đo lại mốc từng chữ", "muted"))),
             flow(_rowlbl("Lọc từ"), self.s_wf,
-                 button("Lọc từ", "wand", C.WORD_FILTER_HELP, on_click=self._word_filter),
-                 hbox(self.s_wf_auto, label("tự lọc khi lấy phụ đề mới", "muted")))]
+                 button("Lọc", "search", "Bảng câu chỉ hiện các câu có cụm này (như ô tìm kiếm) – xem trước rồi mới xoá. "
+                        "Enter trong ô cũng lọc", on_click=self._word_find),
+                 self.s_wf_clear,
+                 button("Xoá chữ này", "trash", C.WORD_FILTER_HELP, danger=True, on_click=self._word_filter),
+                 hbox(self.s_wf_auto, label("tự xoá khi lấy phụ đề mới", "muted")))]
         # câu dịch dài: tách ở chỗ hết câu (? ! .) / dấu phẩy thành nhiều dòng phụ đề + đoạn giọng, giữa 2 vế nghỉ 1 nhịp
         self.s_split = Switch(bool(self.settings.get("split_long_trans", True)))
         self.s_split.setToolTip("Sau khi dịch cả phim: câu dịch dài hơn mức đặt có dấu ? ! . hoặc dấu phẩy ở giữa câu (cả câu gốc lẫn "
@@ -1025,7 +1037,7 @@ class ProjectPage(QWidget):
         v.setSpacing(theme.GAP)
         v.addWidget(tr_card)
         v.addWidget(tools)
-        v.addLayout(hbox(self.search, self.seg_count, self.s_del, label("Tự cuộn", "muted"), self.follow))
+        v.addLayout(hbox(self.search, self.seg_count, self.s_wf_chip, self.s_del, label("Tự cuộn", "muted"), self.follow))
         v.addWidget(split, 1)
         self.subs_scroll = scroll(w)
         return self.subs_scroll
@@ -2259,6 +2271,7 @@ class ProjectPage(QWidget):
             if reload_media:
                 self._load_media()
                 self._sel_row = -1
+                self._word_unfind(quiet=True)       # dự án khác: bỏ lọc từ của dự án trước
                 self.tracks.set_thumbs(None, 0, 0)
                 self.tracks.set_wave(None, 0.05)
             self.model.set_segments(p.segments)
@@ -4210,8 +4223,11 @@ class ProjectPage(QWidget):
         n = len(segs)
         spk = len({s.speaker for s in segs if s.speaker})
         k = len(self.model.selected)
-        self.seg_count.setText(f"{n} câu · đã dịch {sum(1 for s in segs if s.trans)}" + (f" · {spk} người nói" if spk else "")
-                               + (f" · đã tích {k}" if k else ""))
+        head = ""
+        if self.proxy.words:      # đang lọc từ: bảng chỉ hiện câu có cụm đó
+            head = f"Lọc {', '.join(self.proxy.words)}: hiện {self.proxy.rowCount()}/"
+        self.seg_count.setText(f"{head}{n} câu · đã dịch {sum(1 for s in segs if s.trans)}"
+                               + (f" · {spk} người nói" if spk else "") + (f" · đã tích {k}" if k else ""))
         self.s_del.setText(f"Xoá {k} câu đã tích" if k else "Xoá")
 
     def _delete_lines(self):
@@ -5800,27 +5816,92 @@ class ProjectPage(QWidget):
             msg += " – đã tích sẵn các câu này: bấm 'Tạo lại giọng các câu đã tích' để giọng lồng lên / xuống giọng theo dấu mới"
         self.win.toast(msg, "ok")
 
+    def _wf_words(self) -> list[str] | None:
+        """Các cụm trong ô Lọc từ (lưu Cài đặt khi đổi); ô trống / chỉ có * ? -> None."""
+        from .. import wordfilter
+
+        raw = self.s_wf.text().strip()
+        words = [w for w in wordfilter.parse(raw) if wordfilter.literal_len(w)]
+        if not words:
+            return None
+        if raw != str(self.settings.get("sub_filter_words", "") or ""):
+            self._save_setting("sub_filter_words", raw)
+        return words
+
+    def _word_find(self, refresh: bool = False):
+        """Nút "Lọc" (2.1.34): bảng câu tab Phụ đề chỉ hiện các câu có cụm trong ô (chữ gốc hoặc bản dịch) – như ô tìm
+        kiếm, không sửa gì. Xem xong bấm "Xoá chữ này" / tích rồi Xoá / Bỏ lọc. Đang lọc mà sửa ô -> lọc lại sau 0,3 s."""
+        from .. import wordfilter
+
+        words = self._wf_words()
+        if not words:
+            if refresh:
+                return self._word_unfind(quiet=True)
+            return self.win.toast("Điền cụm chữ cần lọc vào ô (VD: @纵横), nhiều cụm cách nhau bằng dấu phẩy. "
+                                  "@* = @ và tối đa 8 chữ sau nó tới hết câu; @?? = @ và 2 chữ sau nó", "warn")
+        self.proxy.set_words(words)
+        self.s_wf_clear.show()
+        self.s_wf_chip.show()
+        self._update_count()
+        self._fit_rows()
+        self.table.scrollToTop()
+        if refresh:
+            return
+        k = self.proxy.rowCount()
+        shown = ", ".join(words)
+        if not k:
+            return self.win.toast(f"Không câu nào có {shown}", "ok")
+        drop = len(wordfilter.plan(self.model.segs, words)["dropped"])
+        self.win.toast(f"Đang hiện {k} câu có {shown}" + (f" ({drop} câu chỉ có chữ đó)" if drop else "") +
+                       " – bấm 'Xoá chữ này' để bỏ chữ đó ở các câu này, hoặc bấm tiêu đề cột Chọn để tích hết rồi "
+                       "Xoá / Dịch câu đã tích · 'Bỏ lọc' để hiện lại mọi câu", "ok")
+
+    def _word_unfind(self, quiet: bool = False):
+        if not self.proxy.words and quiet:
+            return
+        self.proxy.set_words([])
+        self.s_wf_clear.hide()
+        self.s_wf_chip.hide()
+        self._update_count()
+        self._fit_rows()
+        sel = self._selected_row()
+        if 0 <= sel < len(self.model.segs):     # về đúng câu đang chọn trong bảng đầy đủ
+            self.table.scrollTo(self.proxy.mapFromSource(self.model.index(sel, 0)),
+                                QAbstractItemView.ScrollHint.PositionAtCenter)
+
     def _word_filter(self):
-        """Nút "Lọc từ" (2.1.33): xoá đúng các cụm trong ô ở mọi câu (chữ gốc + bản dịch nếu có), câu chỉ có cụm đó thì
-        xoá cả câu (đã lồng: giọng câu đó bỏ khỏi bản lồng); giờ các câu không đổi; Ctrl+Z hoàn tác."""
+        """Nút "Xoá chữ này" (2.1.33): xoá đúng các cụm trong ô ở mọi câu (chữ gốc + bản dịch nếu có), câu chỉ có cụm
+        đó thì xoá cả câu (đã lồng: giọng câu đó bỏ khỏi bản lồng); giờ các câu không đổi; hỏi lại kèm vài ví dụ trước →
+        sau; Ctrl+Z hoàn tác. Đang lọc (nút Lọc) thì đúng các câu đang hiện."""
         from .. import wordfilter
 
         if not self.p:
             return
-        raw = self.s_wf.text().strip()
-        words = wordfilter.parse(raw)
+        if self._live_draft:
+            return self.win.toast("Đang hiện câu nháp lúc dịch tự động – chờ việc chạy xong rồi lọc", "warn")
+        words = self._wf_words()
         if not words:
             return self.win.toast("Điền cụm chữ cần lọc vào ô (VD: @纵横), nhiều cụm cách nhau bằng dấu phẩy", "warn")
-        if raw != str(self.settings.get("sub_filter_words", "") or ""):
-            self._save_setting("sub_filter_words", raw)
         segs = self.model.segs
         pl = wordfilter.plan(segs, words)
         shown = ", ".join(words)
         if not pl["hits"]:
             return self.win.toast(f"Không câu nào có {shown}", "ok")
-        if pl["dropped"] and QMessageBox.question(
-                self, "Lọc từ", f"Lọc {shown}:\n• bỏ chữ đó ở {len(pl['changed'])} câu\n• xoá hẳn {len(pl['dropped'])} câu "
-                "chỉ có chữ đó\nGiờ các câu khác giữ nguyên. Ctrl+Z để hoàn tác. Tiếp tục?") != QMessageBox.StandardButton.Yes:
+        ex = []
+        for i in (pl["changed"] + pl["dropped"])[:200]:
+            t = segs[i].text or ""
+            new, n, _ = wordfilter.strip_words(t, words)
+            if n:
+                ex.append(f"#{i + 1}  {t}  →  {new if not wordfilter.empty(new) else '(xoá câu)'}")
+            if len(ex) >= 4:
+                break
+        msg = f"Xoá {shown}:\n• bỏ chữ đó ở {len(pl['changed'])} câu"
+        if pl["dropped"]:
+            msg += f"\n• xoá hẳn {len(pl['dropped'])} câu chỉ có chữ đó"
+        if ex:
+            msg += "\n\nVí dụ:\n" + "\n".join(ex)
+        msg += "\n\nGiờ các câu giữ nguyên. Ctrl+Z để hoàn tác. Tiếp tục?"
+        if QMessageBox.question(self, "Xoá chữ", msg) != QMessageBox.StandardButton.Yes:
             return
         self.flush()
         res = wordfilter.apply(segs, words)
@@ -5831,9 +5912,11 @@ class ProjectPage(QWidget):
             self._fit_rows()
             self._segs_edited()
         self._save_segs_now()
+        if self.proxy.words:      # các câu đã hết cụm đó -> bảng lọc trống: hiện lại mọi câu
+            self._word_unfind()
         segs = self.model.segs
         rows = [i for i, x in enumerate(segs) if any(x is c for c in res["changed"])]
-        msg = f"Đã lọc {shown}: bỏ ở {len(rows)} câu"
+        msg = f"Đã xoá {shown}: bỏ ở {len(rows)} câu"
         if res["dropped"]:
             msg += f", xoá {len(res['dropped'])} câu chỉ có chữ đó"
         need = [i for i in rows if (segs[i].trans or "").strip()]

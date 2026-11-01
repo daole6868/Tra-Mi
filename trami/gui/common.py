@@ -88,8 +88,11 @@ OCR_MODEL_HELP = ("PP-OCRv6 có sẵn (không phải tải) đủ tốt cho ph�
                   "hơn với chữ nhỏ / chữ kiểu nhưng chậm hơn – tải ở tab Tài liệu; nên có card (Cài đặt → OCR chạy trên). "
                   "PP-OCRv4 = bộ đọc cũ")
 WORD_FILTER_HELP = ("Xoá đúng cụm chữ này ở mọi câu phụ đề – logo / watermark bị đọc dính vào câu (\"@纵横排队一个个的进来\" "
-                    "-> \"排队一个个的进来\"); câu chỉ có cụm đó thì xoá cả câu. Giờ các câu không đổi. Không phân biệt "
-                    "chữ hoa / thường, ＠ / @, khoảng trắng giữa các chữ. Nhiều cụm cách nhau bằng dấu phẩy. Ctrl+Z hoàn tác")
+                    "-> \"排队一个个的进来\"); câu chỉ có cụm đó thì xoá cả câu. Giờ các câu không đổi. Bấm \"Lọc\" trước để "
+                    "bảng chỉ hiện các câu có cụm đó (xem trước). Không phân biệt chữ hoa / thường, ＠ / @, khoảng trắng giữa "
+                    "các chữ. Nhiều cụm cách nhau bằng dấu phẩy. OCR đọc logo mỗi lần 1 kiểu (@纵横 / @凯横 / @黄AGC): "
+                    "@* = @ và tối đa 8 chữ sau nó, tới hết câu / dấu câu / khoảng trắng (logo dính cuối câu); @?? = @ "
+                    "và đúng 2 chữ sau nó (logo dính đầu câu). Ctrl+Z hoàn tác")
 OCR_TIMINGS = [("sub", "Theo giờ phụ đề trên hình"), ("mix", "Kết hợp: câu theo phụ đề + chỗ ngừng theo giọng nói")]
 OCR_TIMING_HELP = ("Giờ câu khi lấy phụ đề bằng OCR. Theo giờ phụ đề: đúng lúc chữ hiện / tắt trên hình (nhanh, không cần "
                    "tách giọng). Kết hợp: chữ và cách chia câu giữ đúng phụ đề, nhưng tool tách giọng rồi đo từng chữ "

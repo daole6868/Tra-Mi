@@ -533,10 +533,18 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   thường, bỏ khoảng trắng – "＠ 纵横" = "@纵横"; cụm dài trước), `strip_words` (bỏ cụm, `_tidy`: khoảng trắng đôi, 2 dấu ngắt
   liền nhau, cụm ở đầu / cuối câu thì bỏ dấu ngắt còn sót), `empty` (không còn chữ / số), `plan` (xem trước, không sửa),
   `apply` (chữ gốc + bản dịch nếu có cụm; câu gốc rỗng -> bỏ câu; giờ giữ nguyên; `ct` bỏ đúng mốc chữ đã xoá – `_ct_after`;
-  `extra["word_filtered"]` = chữ cũ), `note`. GUI tab Phụ đề → Công cụ → Sửa câu hàng "Lọc từ": ô `s_wf` (Cài đặt
-  `sub_filter_words`, Enter = lọc) + nút -> `project_page._word_filter` (có câu bị xoá -> hỏi lại; xoá qua `_sub_op("delete")`
-  – đã lồng thì xếp lại; câu đổi đã dịch tích sẵn; 1 bước Ctrl+Z) + công tắc `s_wf_auto` (Cài đặt `sub_filter_auto`, mặc
-  định tắt) -> `recognize` bước 2j (sau Xoá câu không chắc, mọi nguồn phụ đề) `p.data["word_filtered"]` -> `listen_note`.
+  `extra["word_filtered"]` = chữ cũ), `note`. Ký tự đại diện (2.1.34, chỉ * ? gõ kiểu thường – `_tokens` -> `_ANY` /
+  `_ONE`, "＊" "？" toàn khổ là chữ thật): "?" = 1 chữ bất kỳ, "*" = ≤ `ANY_MAX` 8 chữ không phải dấu câu / khoảng trắng
+  (`_STOP`), "*" cuối cụm phải chạm dấu câu / khoảng trắng / hết câu ("@*" bắt "@黄AGC" / "@凯横" dính cuối câu, KHÔNG nuốt
+  "@纵横排队一个个的进来"; logo đầu câu -> "@??"); cụm không có chữ thật (`literal_len` 0) bỏ qua; `_compile` / `matchers`
+  (nhớ, cụm nhiều chữ thật trước) chạy trên `_norm_text` (NFKC + chữ thường, khoảng trắng giữ 1 ký tự, giữa các phần
+  `\s*`); `contains`. GUI tab Phụ đề → Công cụ → Sửa câu hàng "Lọc từ": ô `s_wf` (Cài đặt `sub_filter_words`; Enter / nút
+  "Lọc" = `_word_find`: `SubsFilter.set_words` -> bảng câu chỉ hiện câu có cụm (chữ gốc hoặc bản dịch, AND với ô tìm kiếm),
+  dòng đếm "Lọc …: hiện k/n câu", nút "Bỏ lọc" `s_wf_clear` + `s_wf_chip` cạnh ô tìm kiếm -> `_word_unfind`; đang lọc mà sửa
+  ô -> lọc lại sau 0,3 s `_wf_timer`; mở dự án khác bỏ lọc) + nút "Xoá chữ này" -> `project_page._word_filter` (luôn hỏi lại
+  kèm ≤ 4 ví dụ "trước → sau"; xoá qua `_sub_op("delete")` – đã lồng thì xếp lại; câu đổi đã dịch tích sẵn; 1 bước Ctrl+Z;
+  xong thì bỏ lọc) + công tắc `s_wf_auto` "tự xoá khi lấy phụ đề mới" (Cài đặt `sub_filter_auto`, mặc định tắt) ->
+  `recognize` bước 2j (sau Xoá câu không chắc, mọi nguồn phụ đề) `p.data["word_filtered"]` -> `listen_note`.
   `C.WORD_FILTER_HELP`.
 - Dấu câu bản dịch (2.1.11): `translate.punct_fix` = `fix_commas` (bỏ dấu phẩy ngay sau `COMMA_GLUE` lượng từ / "của" khi
   chữ sau viết thường, trừ dãy số; dấu phẩy giữa các tiếng của tên trong bảng thuật ngữ `Translator.names`) + `end_punct`
@@ -606,7 +614,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (272 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
+- `tests/test_core.py` – `python -m pytest -q tests` (274 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2383,9 +2391,16 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (đầu / giữa / cuối câu, ＠ toàn khổ, khoảng trắng giữa chữ, kèm dấu phẩy), "纵横天下" (thiếu @) không đụng, giờ + mốc từng
   chữ còn lại giữ nguyên; tự lọc khi lấy phụ đề; giao diện offscreen (hỏi lại, xoá câu, tích câu đã dịch, Ctrl+Z).
 
+- 2.1.34: ảnh bảng câu: logo OCR đọc mỗi câu 1 kiểu ("我现在身上仅剩下两块元石@黄AGC", "啊是酒虫@凯横") + "bấm lọc là tool tự lọc
+  những câu ra ở trong tab này, kiểu như tìm kiếm". Nút "Lọc" (Enter trong ô) giờ CHỈ lọc bảng câu (xem trước, không sửa),
+  xoá bằng nút riêng "Xoá chữ này" (hỏi lại kèm ví dụ), ký tự đại diện "@*" / "@??" (xem Cấu trúc "Lọc từ"). Lỗi tìm ra khi
+  chụp giao diện: "*" không giới hạn sẽ coi "@纵横排队一个个的进来" là câu chỉ có logo (xoá cả câu) -> "*" ≤ 8 chữ + phải chạm
+  hết câu / dấu câu. Thử: lọc 3/5 câu, sửa ô lọc lại, Bỏ lọc, xoá @* bỏ đúng 3 câu (1 câu chỉ có logo xoá hẳn), mở lại bỏ lọc.
+
 ## Vấn đề đang mở
-- 2.1.33: chờ người dùng thử tab Phụ đề → Công cụ → Sửa câu → ô "Lọc từ" điền @纵横 → bấm Lọc từ trên dự án OCR có logo
-  dính; muốn mọi video sau tự lọc thì bật "tự lọc khi lấy phụ đề mới". OCR đọc logo lệch chữ (VD "@纵模") -> điền thêm cụm đó.
+- 2.1.34: chờ người dùng thử tab Phụ đề → Công cụ → Sửa câu → ô "Lọc từ" điền @ (hoặc @*) → Lọc: bảng chỉ còn câu dính
+  logo, xem đủ các kiểu OCR đọc; "Xoá chữ này" -> xem ví dụ trong hộp hỏi rồi Có. Logo dính đầu câu -> @?? (số ? = số chữ
+  logo) hoặc điền từng kiểu. Muốn mọi video sau tự xoá thì bật "tự xoá khi lấy phụ đề mới".
 - 2.1.32: chờ người dùng chọn tab Tự động → Nguồn phụ đề "OCR" → Giờ câu "Kết hợp…" rồi chạy "1. Nghe & tách câu" trên
   video có phụ đề in sẵn: thông báo có "giờ câu kết hợp: N/M câu theo giọng nói, thêm dấu phẩy ở K chỗ"; xem timeline khối
   phụ đề có khớp sóng âm Tiếng gốc không, câu có chỗ nhân vật ngừng giọng lồng có nghỉ đúng không (cần Dịch sau bước này để
