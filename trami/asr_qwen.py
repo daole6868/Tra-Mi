@@ -658,8 +658,9 @@ def qwen_decoder(settings: dict, language: str, work: Path,
 
 
 def align_qwen(segs: list[Segment], wav: str | Path, language: str, settings: dict, progress: Prog | None = None,
-               cancel=None, engine: str = "qwen3", pad: float = 0.3) -> int:
+               cancel=None, engine: str = "qwen3", pad: float = 0.3, windows: list | None = None) -> int:
     """Đo mốc từng chữ (extra["ct"]) cho các câu chưa có – câu từ bộ nhận dạng khác, câu nghe lại, câu đã sửa lời.
+    windows: khoảng căn riêng từng câu [(đầu, cuối)] (cùng thứ tự segs) thay cho [đầu − pad, cuối + pad].
     Trả về số câu đo được."""
     from .align import CJK, _char_positions, times_from_words
 
@@ -670,8 +671,11 @@ def align_qwen(segs: list[Segment], wav: str | Path, language: str, settings: di
     items = []
     for k in todo:   # pad: câu OCR (giờ hiện chữ, có thể lệch lúc nói ~0,5 s) căn trong khoảng rộng hơn
         s = segs[k]
-        a = max(0.0, s.start - pad)
-        items.append([a, s.end + pad, s.text])
+        if windows is not None:
+            a, b = max(0.0, float(windows[k][0])), float(windows[k][1])
+        else:
+            a, b = max(0.0, s.start - pad), s.end + pad
+        items.append([a, b, s.text])
     r = asr_worker(engine, settings).call({"cmd": "align", "wav": _wav_path(wav), "items": items,
                                            "language": language}, progress, cancel)
     if r.get("align_error"):

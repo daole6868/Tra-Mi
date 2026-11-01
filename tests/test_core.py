@@ -7616,7 +7616,7 @@ def test_hybrid_ocr_listen(monkeypatch, tmp_path, sample_video):
                                                                                "keep": True}
         assert out[0].start == pytest.approx(1.25) and out[0].end == pytest.approx(1.73)
         assert out[0].extra["ocr_time"] == [1.0, 2.5] and out[2].extra["from_asr"] and "from_asr" not in out[0].extra
-        assert p.data["hybrid"] == {"lines": 2, "timed": 2, "added": 1}
+        assert p.data["hybrid"] == {"lines": 2, "timed": 2, "added": 1, "opened": 0, "breaths": 0}
         assert "2/2 câu phụ đề căn giờ" in pipeline.hybrid_note(p.data["hybrid"])
         p.data["sub_source"] = "hybrid"
         assert "bộ nghe thêm 1 câu" in pipeline.listen_note(p)
@@ -11400,6 +11400,12 @@ def test_ocr_box_gui_2131(sample_video, monkeypatch):
         ob = view.ocrbox
         assert ob.editing and not view.hs.isVisible() and not view.sub.isVisible()
         assert not pp.a_ocrbox.isHidden() and not pp.a_ocrmodel.isHidden()
+        from trami.config import load_settings
+        assert not pp.a_ocrtime.isHidden()                              # 2.1.32: ô Giờ câu chỉ khi nguồn OCR
+        set_combo(pp.a_ocrtime, "mix")
+        assert load_settings()["ocr_timing"] == "mix"
+        set_combo(pp.a_ocrtime, "sub")
+        assert load_settings()["ocr_timing"] == "sub"
 
         class Ev:
             def __init__(self, x, y):
@@ -11430,6 +11436,7 @@ def test_ocr_box_gui_2131(sample_video, monkeypatch):
         app.processEvents()
         assert not ob.editing and view.sub.isVisible() and pp.a_ocrbox.isHidden()
         set_combo(pp.a_method, "hybrid")
+        assert pp.a_ocrtime.isHidden() and not pp.a_ocrbox.isHidden()  # OCR + nghe: giờ luôn theo giọng
         pp._tab_changed(pp.TAB_HARDSUB)
         assert not ob.editing and view.hs.show_outline and view.hs.isVisible()
         pp._tab_changed(0)
@@ -11455,9 +11462,184 @@ def test_ocr_box_gui_2131(sample_video, monkeypatch):
         sp = win.settings_page
         sp._ocr_gpu_status()
         assert sp.ocr_model.count() == 4 and sp.ocr_device.count() == 2 and sp.ocr_gpu_lb.text()
-        assert {"ocr_model", "ocr_device", "ocr_hwdec", "ocr_clean"} <= set(sp.collect())
+        assert {"ocr_model", "ocr_device", "ocr_hwdec", "ocr_clean", "ocr_timing"} <= set(sp.collect())
+        assert sp.ocr_timing.count() == 2
     finally:
         win.timer.stop()
         pp.p = None
         win.close()
         p.delete()
+
+
+# ------------------------------------------------------------------ 2.1.32: câu chỉ có số, câu liền nhau gần giống,
+# giờ câu OCR kết hợp giọng nói
+
+def test_ocr_numbers_and_neighbours_2132():
+    """Câu chỉ có số / chữ Latin đúng hàng phụ đề được giữ (trước bị bỏ vì không có chữ Hán), số / chữ Latin nằm chỗ khác
+    vẫn bỏ; câu 1–3 chữ phải giống hệt mới gộp ("4" -> "5"); 2 câu liền nhau gần giống mà khối chữ rộng hẳn nhau là 2 câu."""
+    from trami import ocr
+
+    assert not ocr._same_line("4", "5") and not ocr._same_line("但", "哼") and ocr._same_line("刚刚", "刚刚")
+    assert ocr._same_line("没想到你也有这一天", "没想到你也有这—天")
+    assert ocr._same_line("是不喜欢吗", "是我不喜欢吗")                     # chữ gần giống ...
+    assert ocr._other_shape("是不喜欢吗", "是我不喜欢吗", 250, 300, 50)      # ... nhưng khối chữ rộng hơn 1 chữ
+    assert not ocr._other_shape("没想到你也有这一天", "没想到你也有这—天", 450, 452, 50)
+    assert not ocr._other_shape("刚刚", "刚刚", 100, 300, 50)
+
+    def it(x0, y0, x1, y1, t, sc=0.95):
+        return (np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], np.float32), t, sc)
+    reads = [[it(440, 100, 840, 150, "没想到你也有这一天")], [it(470, 101, 810, 149, "今天的天气真不错啊")],
+             [it(500, 100, 780, 150, "我们一起去吃饭")], [it(600, 104, 680, 146, "43")]]
+    band = ocr._han_band(reads, [], 50.0, 1280)
+    assert band and band[2] is not None and abs(band[2] - 640) < 10
+    assert ocr._stray_ok(reads[3][0], [], 50.0, band)                      # "43" đứng 1 mình đúng chỗ phụ đề
+    assert not ocr._stray_ok(it(600, 5, 680, 45, "120"), [], 50.0, band)   # số ở chỗ khác (điểm game, đồng hồ)
+    assert not ocr._stray_ok(it(1100, 104, 1180, 146, "99"), [], 50.0, band)   # lệch hẳn sang mép
+    assert not ocr._stray_ok(it(620, 110, 660, 130, "4"), [], 50.0, band)  # chữ nhỏ hơn hẳn chữ phụ đề
+    han = [it(400, 100, 700, 150, "我买了")]
+    assert ocr._stray_ok(it(720, 104, 860, 148, "iPhone"), han, 50.0, band)    # cùng hàng với chữ Hán của câu
+    assert not ocr._stray_ok(it(720, 300, 860, 344, "iPhone"), han, 50.0, band)
+    r = ocr._Reader(None, False, 0.6, 0.5)
+    kept = r._keep([it(0, 0, 10, 10, "4", 0.9), it(0, 20, 10, 30, "5", 0.7), it(0, 40, 10, 50, "，", 0.99),
+                    it(0, 60, 10, 70, "好", 0.55)])
+    assert [t for _, t, _ in kept] == ["4", "好"]
+
+
+def test_ocr_scan_numbers_and_near_lines_2132(tmp_path):
+    """Quét thật: câu đếm số "43" được đọc; "是不喜欢吗" -> "是我不喜欢吗" liền nhau ra đúng 2 câu; câu 1 chữ 0,3 s giữ."""
+    _need_ocr3()
+    from trami import ocr
+
+    font = _cjk_font()
+    subs = [(0.52, 1.84, "没想到你也有这一天"), (1.84, 2.6, "43"), (2.6, 3.72, "是不喜欢吗"), (3.72, 4.96, "是我不喜欢吗"),
+            (5.32, 5.64, "但"), (5.64, 7.0, "今天的天气真不错啊")]
+    f = [f"drawtext=fontfile='{font}':text='{t}':fontsize=40:fontcolor=white:borderw=3:bordercolor=black:"
+         f"x=(w-tw)/2:y=h-90:enable='gte(t,{a})*lt(t,{b})'" for a, b, t in subs]
+    v = tmp_path / "num.mp4"
+    subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=0x406080:s=960x540:r=25:d=7.6",
+                    "-vf", ",".join(f), "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", str(v)],
+                   check=True)
+    segs = ocr.extract_hardsubs(v, {"x": 0.0, "y": 0.75, "w": 1.0, "h": 0.25, "exact": True})
+    assert [s.text for s in segs] == [t for _, _, t in subs], [s.text for s in segs]
+    for s, (a, b, _) in zip(segs, subs):
+        assert abs(s.start - a) <= 0.045 and abs(s.end - b) <= 0.045, (s.text, s.start, s.end, a, b)
+
+
+def _mix_project(tmp_path, monkeypatch):
+    from trami import pipeline
+    from trami.project import Project
+    from trami.subtitle import Segment
+
+    src = tmp_path / "phim.mp4"
+    src.write_bytes(b"x")
+    p = Project.create("mix2132")
+    p.data["source"] = str(src)
+    env = np.full(2000, -60.0, np.float32)                 # 20 s, mỗi 10 ms
+    for a, b in ((10.2, 11.0), (11.6, 12.4), (12.8, 13.7)):
+        env[int(a * 100):int(b * 100)] = -20.0
+    voc = tmp_path / "vocals.wav"
+    voc.write_bytes(b"x")
+    monkeypatch.setattr(pipeline, "_listen_audio", lambda *a, **k: (voc, tmp_path / "v16.wav"))
+    monkeypatch.setattr(pipeline, "voice_env", lambda *a, **k: (env, 0.01, "vocals"))
+    segs = [Segment(10.0, 12.6, "说好要卖的怎么又不卖了"), Segment(12.6, 14.0, "你说什么")]
+    return p, segs
+
+
+def test_ocr_mix_timing_voice_2132(tmp_path, monkeypatch):
+    """Giờ câu kết hợp không có bộ căn: chữ chia theo cụm có tiếng của giọng (không cắt đôi "怎么"), câu vẫn đúng phụ đề,
+    đầu / cuối câu theo lúc nói, chỗ nhân vật ngừng có dấu phẩy -> giọng lồng nghỉ đúng chỗ."""
+    from trami import asr_firered, asr_qwen, pipeline
+    from trami.config import load_settings
+
+    p, segs = _mix_project(tmp_path, monkeypatch)
+    monkeypatch.setattr(asr_qwen, "available", lambda: False)
+    monkeypatch.setattr(asr_firered, "ready", lambda: False)
+    try:
+        out = pipeline.ocr_voice_timing(p, segs, {**load_settings(), "dub_pause_min": 0.3}, "zh", "qwen3")
+        a, b = out
+        assert a.text == "说好要卖的，怎么又不卖了" and a.extra["breaths"] == 1 and a.extra["ct_voice"]
+        assert a.extra["ocr_time"] == [10.0, 12.6]
+        assert abs(a.start - 10.15) < 0.02 and abs(a.end - 12.45) < 0.02
+        assert a.extra["ct"][4][1] <= 11.0 + 1e-6 and a.extra["ct"][5][0] >= 11.6 - 1e-6   # khe đúng chỗ ngừng
+        assert abs(b.start - 12.75) < 0.02 and abs(b.end - 13.75) < 0.02
+        st = p.data["ocr_mix"]
+        assert st["voice"] == 2 and st["aligned"] == 0 and st["breaths"] == 1 and st.get("no_aligner")
+        p.data["sub_source"], p.data["ocr_timing"] = "ocr", "mix"
+        n = pipeline.ocr_timing_note(p)
+        assert "2/2 câu theo giọng nói" in n and "dấu phẩy ở 1 chỗ" in n
+        p.data["ocr_timing"] = "sub"
+        assert "đúng giờ hiện / tắt chữ" in pipeline.ocr_timing_note(p)
+    finally:
+        p.delete()
+
+
+def test_ocr_mix_timing_aligner_2132(tmp_path, monkeypatch):
+    """Có bộ căn: khoảng căn = giờ hiện chữ + khoảng trống 2 bên, câu liền câu trước chỉ lấn 0,1 s; mốc tốt được giữ,
+    mốc rơi vào chỗ lặng -> chia lại theo cụm có tiếng; không thấy tiếng nói -> giữ giờ phụ đề."""
+    from trami import asr_qwen, pipeline
+    from trami.config import load_settings
+    from trami.subtitle import Segment
+
+    p, segs = _mix_project(tmp_path, monkeypatch)
+    segs.append(Segment(15.0, 16.0, "没有声音"))
+    seen = {}
+
+    def fake_align(sg, wav, lang, settings, progress=None, cancel=None, engine="qwen3", pad=0.3, windows=None):
+        seen["w"] = windows
+        good = [[10.2 + 0.16 * k, 10.36 + 0.16 * k] for k in range(5)] + \
+               [[11.6 + 0.133 * k, 11.733 + 0.133 * k] for k in range(6)]
+        sg[0].extra["ct"] = good
+        sg[1].extra["ct"] = [[13.9 + 0.1 * k, 14.0 + 0.1 * k] for k in range(4)]   # rơi vào chỗ lặng
+        return 2
+    monkeypatch.setattr(asr_qwen, "available", lambda: True)
+    monkeypatch.setattr(asr_qwen, "align_qwen", fake_align)
+    monkeypatch.setattr(asr_qwen, "release", lambda: None)
+    try:
+        a, b, c = pipeline.ocr_voice_timing(p, segs, load_settings(), "zh", "qwen3")
+        w = seen["w"]
+        assert w[0] == (9.6, 12.7) and w[1] == (12.5, 14.4) and w[2] == (14.6, 16.4)
+        assert not a.extra.get("ct_voice") and a.text == "说好要卖的，怎么又不卖了"
+        assert b.extra.get("ct_voice") and abs(b.start - 12.75) < 0.02
+        assert "ct" not in c.extra and (c.start, c.end) == (15.0, 16.0)
+        st = p.data["ocr_mix"]
+        assert (st["aligned"], st["voice"], st["kept"]) == (1, 1, 1)
+    finally:
+        p.delete()
+
+
+def test_recognize_ocr_timing_modes_2132(tmp_path, monkeypatch):
+    """"Nghe & tách câu" nguồn OCR: giờ theo phụ đề -> giữ đúng giờ hiện chữ (không bám mép theo giọng kể cả khi đã có
+    bản tách); giờ kết hợp -> chạy bước đo theo giọng."""
+    from trami import ocr, pipeline
+    from trami.config import load_settings
+    from trami.project import Project
+    from trami.subtitle import Segment
+
+    src = tmp_path / "phim.mp4"
+    src.write_bytes(b"x")
+    p = Project.create("mode2132")
+    p.data["source"] = str(src)
+    p.save()
+    monkeypatch.setattr(ocr, "extract_hardsubs", lambda *a, **k: [Segment(1.0, 2.0, "你好"), Segment(2.5, 3.5, "再见")])
+    monkeypatch.setattr(pipeline, "ocr_box", lambda p: {"x": 0, "y": 0.8, "w": 1, "h": 0.2, "exact": True})
+    monkeypatch.setattr(pipeline, "stems", lambda p: {"vocals": "v.wav", "instrumental": "i.wav"})
+    calls = []
+    monkeypatch.setattr(pipeline, "snap_edges", lambda *a, **k: calls.append("snap"))
+
+    def fake_mix(p, segs, *a, **k):
+        calls.append("mix")
+        p.data["ocr_mix"] = {"lines": len(segs)}
+        return segs
+    monkeypatch.setattr(pipeline, "ocr_voice_timing", fake_mix)
+    try:
+        st = {**load_settings(), "diarize": False, "ocr_timing": "sub"}
+        pipeline.recognize(p, "ocr", "zh", None, 4.0, st)
+        p.reload()
+        assert calls == [] and [(s.start, s.end) for s in p.segments] == [(1.0, 2.0), (2.5, 3.5)]
+        assert p.data["ocr_timing"] == "sub" and "ocr_mix" not in p.data
+        pipeline.recognize(p, "ocr", "zh", None, 4.0, {**st, "ocr_timing": "mix"})
+        p.reload()
+        assert calls == ["mix", "snap"] and p.data["ocr_timing"] == "mix"
+    finally:
+        p.delete()
+

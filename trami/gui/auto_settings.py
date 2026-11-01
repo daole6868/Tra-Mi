@@ -27,6 +27,7 @@ class AutoSettingsDialog(QDialog):
         self.method = f.row("Nguồn phụ đề", combo(C.METHODS, pv["method"]))
         self.asr = f.row("Bộ nhận dạng", combo(C.ASR_ENGINES, s.get("asr_engine")))
         self.ocrfps = f.row("Tốc độ quét phụ đề (OCR)", combo(C.OCR_SPEEDS, str(s.get("ocr_fps", "4"))))
+        self.ocrtime = f.row("Giờ câu khi OCR", combo(C.OCR_TIMINGS, s.get("ocr_timing", "sub")), C.OCR_TIMING_HELP)
         self.lang = f.row("Ngôn ngữ gốc", combo(C.LANGS, pv["language"]))
         self.sep = f.row("Tách giọng khỏi nhạc trước", Switch(bool(s.get("sep_before_asr", True))))
         self.spk = f.row("Phân biệt người nói", Switch(bool(s.get("diarize", True))))
@@ -82,6 +83,7 @@ class AutoSettingsDialog(QDialog):
 
     def values(self) -> dict:
         return {"asr_engine": self.asr.currentData(), "ocr_fps": self.ocrfps.currentData(),
+                "ocr_timing": self.ocrtime.currentData(),
                 "sep_before_asr": self.sep.isChecked(), "diarize": self.spk.isChecked(),
                 "split_style": self.split.currentData(), "ai_join_engine": self.joinai.currentData(),
                 "translate_engine": self.engine.currentData(), "target_lang": self.target.currentData(),

@@ -513,6 +513,22 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (+ `ocr_gpu_lb` trạng thái onnxruntime, nút Cài bản chạy card -> việc "update"), Giải mã video bằng card, Lọc nền khi
   đọc chữ. requirements: `rapidocr>=3.10` + `onnxruntime>=1.18` (+ rapidocr-onnxruntime dự phòng); Subvideo.spec gom
   rapidocr / omegaconf / pyclipper / shapely. `C.OCR_FPS_HELP` / `OCR_BOX_HELP` / `OCR_MODEL_HELP`.
+- Giờ câu phụ đề OCR (2.1.32): Cài đặt `ocr_timing` (`pipeline.OCR_TIMINGS`, ô "Giờ câu" tab Tự động nhóm 1 `a_ocrtime` –
+  chỉ hiện khi nguồn "OCR", `_ocr_timing_changed`; Cài đặt → Nhận dạng giọng nói "Giờ câu khi OCR"; hộp Thiết lập tự động;
+  `C.OCR_TIMINGS` / `OCR_TIMING_HELP`; `autoflow.summary` ghi "(giờ kết hợp giọng nói)"): "sub" (mặc định) = đúng giờ chữ
+  hiện / tắt trên hình – `recognize` bước 4 KHÔNG bám mép theo giọng dù đã có bản tách; "mix" = `pipeline.ocr_voice_timing`:
+  luôn tách giọng (`_listen_audio(sep_before_asr=True)`), `extra["ocr_time"]` = giờ hiện chữ, khoảng căn `_mix_windows` = giờ
+  hiện chữ + khoảng trống 2 bên ≤ `MIX_LEAD` 0,4 s + lấn câu bên cạnh `MIX_BACK` 0,1 s -> `asr_qwen.align_qwen(windows=)`
+  (khoảng riêng từng câu); mốc tốt (trong khoảng, < `MIX_SIL` 30 % chữ trong chỗ lặng – `snap._sil_frac`) giữ, không thì
+  `_mix_alloc` chia chữ theo cụm có tiếng (`align.alloc_chars` – từ 2.1.32 dời chỗ chia ±1–2 chữ về ranh giới từ jieba, không
+  cắt đôi "怎么"; `ct_voice`), không thấy tiếng -> giữ giờ phụ đề; mép câu theo chữ đầu / cuối ± PAD, không quá `MIX_EDGE` 0,6 s
+  ngoài giờ hiện chữ; `fix_overlaps`; `_voice_pauses` = `snap.open_pauses` + `align.mark_breaths` ("说好要卖的，怎么又不卖了" ->
+  bản dịch giữ vế, giọng lồng nghỉ đúng chỗ) – dùng cả cho "OCR + nghe" (`hybrid_listen`, st opened / breaths); thống kê
+  `p.data["ocr_mix"]` {lines, aligned, voice, kept, opened, breaths, no_vocals, no_aligner, error}, `p.data["ocr_timing"]` ->
+  `ocr_timing_note` (nối vào `ocr_note`). Lọc OCR (2.1.32): câu chỉ có số / chữ Latin (`_ALNUM`, đọc chắc ≥ `NONHAN_MIN` 0,8)
+  giữ khi cùng hàng chữ Hán của câu hoặc đứng 1 mình đúng hàng + cỡ + tâm ngang phụ đề (`_han_band`, `_stray_ok`); h_sub chỉ
+  tính chữ Hán; `_same_line` câu < 4 chữ phải giống hệt; `_other_shape` (khác chữ + khối chữ rộng hơn kém ≥ 0,6 cao dòng ->
+  2 câu, không gộp – raw có bề rộng / cao dòng mỗi đoạn).
 - Dấu câu bản dịch (2.1.11): `translate.punct_fix` = `fix_commas` (bỏ dấu phẩy ngay sau `COMMA_GLUE` lượng từ / "của" khi
   chữ sau viết thường, trừ dãy số; dấu phẩy giữa các tiếng của tên trong bảng thuật ngữ `Translator.names`) + `end_punct`
   (thiếu dấu câu cuối -> theo câu gốc: ？/吗/么 -> ?, ！ -> !, … , dấu phẩy -> ",", còn lại "."; Nhật 。？！、, Thái không
@@ -581,7 +597,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (264 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
+- `tests/test_core.py` – `python -m pytest -q tests` (269 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2342,7 +2358,22 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (max 0,03 = lưới khung của video thử); nền testsrc2 – cũ 97 s, mới 12 s; cả 2 đều 18/18 câu đúng chữ; 150 s 2 khúc song song
   62/62. Chưa chạy trên card (onnxruntime-gpu / NVDEC) và chưa tải PP-OCRv5 server / v6 medium (ModelScope bị chặn).
 
+- 2.1.32: người dùng gửi 1 file SRT phụ đề hoàn chỉnh (2865 câu, 2 giờ 6 phút, mốc đúng lưới 30 khung/giây, gần như không
+  dấu câu, ≤ 15 chữ / câu, 1482/2864 câu liền nhau không khoảng trống) hỏi "OCR như vậy bao nhiêu câu không quét được" + "thêm
+  lựa chọn căn theo giờ phụ đề hoặc kết hợp phụ đề + giờ giọng nói – câu vẫn chuẩn mà chỗ ngắt chính xác ("说好要卖的怎么又不卖了"
+  nhân vật vừa nói vừa nghỉ thì tool tự chia, nghỉ đúng chỗ)". Đếm trên file: câu ngắn nhất 0,267 s (8 khung) – mức Chuẩn
+  kiểm tra mỗi 8 khung nên không câu nào sót vì quá ngắn (mức Nhanh sót được ~2–3 câu < 0,5 s); 6 câu chỉ có số / chữ Latin
+  ("4", "2", "5", "43", "2 1", "ah") bị bộ lọc "phải có chữ Hán" bỏ; 1 cặp liền nhau "是不喜欢吗" | "是我不喜欢吗" bị gộp
+  (`_same_line` cho lệch 1 chữ) -> sửa cả 2 (tổng ~7/2865 = 0,25 % -> ~0). Làm "Giờ câu" (xem Cấu trúc "Giờ câu phụ đề
+  OCR"). Thử: video vẽ chữ có "43" + 2 câu gần giống liền nhau + câu 1 chữ 0,32 s -> đọc đủ, giờ ±1 khung; giờ kết hợp với độ
+  to giọng giả (2 cụm tiếng cách 0,6 s): không bộ căn -> chia 5 | 6 chữ ở "的", thêm "，", đầu câu 10,15 s (chữ hiện 10,0 s);
+  có bộ căn giả: mốc tốt giữ, mốc rơi vào lặng chia lại, câu không tiếng giữ giờ phụ đề. Chưa chạy với Qwen3 / giọng tách thật.
+
 ## Vấn đề đang mở
+- 2.1.32: chờ người dùng chọn tab Tự động → Nguồn phụ đề "OCR" → Giờ câu "Kết hợp…" rồi chạy "1. Nghe & tách câu" trên
+  video có phụ đề in sẵn: thông báo có "giờ câu kết hợp: N/M câu theo giọng nói, thêm dấu phẩy ở K chỗ"; xem timeline khối
+  phụ đề có khớp sóng âm Tiếng gốc không, câu có chỗ nhân vật ngừng giọng lồng có nghỉ đúng không (cần Dịch sau bước này để
+  bản dịch có dấu phẩy); câu nào đầu / cuối lệch nhiều -> gửi giờ câu để chỉnh MIX_EDGE / MIX_LEAD.
 - 2.1.31: chờ người dùng `.venv\Scripts\python -m pip install -U rapidocr` rồi thử tab Tự động → Nguồn phụ đề "OCR" →
   dừng video ở chỗ có phụ đề, kéo khung trên video (hoặc "Chụp khung & khoanh") → "1. Nghe & tách câu": thông báo có "quét …
   khung · N lần chữ đổi, đọc chữ M lần · PP-OCRv6 · CPU/card · giải mã bằng card · x s", so tốc độ + số câu sai với trước;

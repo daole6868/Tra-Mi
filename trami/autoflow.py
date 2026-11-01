@@ -52,7 +52,7 @@ def summary(settings: dict | None = None) -> str:
 
     parts = []
     if o["method"] == "ocr":
-        parts.append("OCR phụ đề cứng")
+        parts.append("OCR phụ đề cứng" + (" (giờ kết hợp giọng nói)" if st.get("ocr_timing") == "mix" else ""))
     elif o["method"] == "hybrid":
         parts.append("OCR + nghe bằng " + name(C.ASR_ENGINES, o["asr_engine"]))
     else:

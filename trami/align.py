@@ -214,6 +214,12 @@ def alloc_chars(groups: list[tuple[float, float]], text: str, pos: list[int]) ->
     punct = {k for k in range(n - 1) if any(not CJK.match(ch) and not ch.isspace()
                                              for ch in text[pos[k] + 1:pos[k + 1]])}
     cuts = [int(c) - 1 for c in np.cumsum(cnt)[:-1]]     # cắt SAU chữ thứ c
+    ends: list = []
+
+    def word_end(k: int) -> bool:     # (jieba) chữ thứ k là chữ cuối 1 từ – không cắt đôi "怎么" (2.1.32)
+        if not ends:
+            ends.append(_word_ends(text) or set())
+        return pos[k] in ends[0]
     for j, c in enumerate(cuts):
         if c in punct:
             continue
@@ -223,6 +229,12 @@ def alloc_chars(groups: list[tuple[float, float]], text: str, pos: list[int]) ->
             if lo <= c + d <= hi and c + d in punct:
                 cuts[j] = c + d
                 break
+        else:
+            if not word_end(c):
+                for d in (-1, 1, -2, 2):
+                    if lo <= c + d <= hi and word_end(c + d):
+                        cuts[j] = c + d
+                        break
     bounds = [0] + [c + 1 for c in cuts] + [n]
     out: list[tuple[float, float]] = []
     for (a, b), x, y in zip(groups, bounds, bounds[1:]):

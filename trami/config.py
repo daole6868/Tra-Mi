@@ -92,6 +92,8 @@ DEFAULT_SETTINGS: dict = {
     "ocr_device": "auto",             # auto = card nếu onnxruntime có bản card (onnxruntime-gpu / -directml) | cpu
     "ocr_hwdec": True,                # giải mã video bằng card khi quét phụ đề (NVDEC / D3D11; không được tự về CPU)
     "ocr_clean": True,                # đọc trên ảnh chữ sạch dựng từ nhiều khung (nền chuyển động bị loại)
+    "ocr_timing": "sub",              # 2.1.32: giờ câu khi lấy phụ đề bằng OCR: sub = đúng giờ hiện / tắt chữ trên hình |
+                                      # mix = kết hợp: câu theo phụ đề, mốc từng chữ + chỗ ngừng giữa câu theo giọng nói
     "split_style": "dub",            # kiểu tách câu: dub = câu trọn ý (hợp lồng tiếng) / short = câu ngắn
     "asr_max_chars": 28,              # câu dài hơn số chữ Hán này mới chia đôi (ở dấu phẩy / chỗ nghỉ gần giữa)
     # Dịch

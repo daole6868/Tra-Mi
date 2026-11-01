@@ -704,7 +704,7 @@ class SettingsPage(QWidget):
     KEYS = [  # (widget attr, setting key, kiểu)
         ("asr_engine", "asr_engine", "c"), ("qwen_model", "qwen_asr_model", "c"), ("asr_model", "asr_model", "c"),
         ("ocr_fps", "ocr_fps", "c"), ("ocr_model", "ocr_model", "c"), ("ocr_device", "ocr_device", "c"),
-        ("ocr_hwdec", "ocr_hwdec", "b"), ("ocr_clean", "ocr_clean", "b"),
+        ("ocr_hwdec", "ocr_hwdec", "b"), ("ocr_clean", "ocr_clean", "b"), ("ocr_timing", "ocr_timing", "c"),
         ("asr_device", "asr_device", "c"),
         ("asr_max", "asr_max_chars", "i"), ("asr_beam", "asr_beam_size", "i"), ("asr_vad", "asr_vad", "b"),
         ("split_style", "split_style", "c"), ("asr_dual", "asr_dual", "b"), ("asr_ai", "asr_ai", "c"),
@@ -782,6 +782,7 @@ class SettingsPage(QWidget):
         from ..ocr_engine import DEVICES as OCR_DEVICES, MODELS as OCR_MODELS
 
         self.ocr_model = f.row("Mô hình OCR", combo(OCR_MODELS), C.OCR_MODEL_HELP)
+        self.ocr_timing = f.row("Giờ câu khi OCR", combo(C.OCR_TIMINGS), C.OCR_TIMING_HELP)
         self.ocr_device = combo(OCR_DEVICES)
         self.ocr_gpu_lb = label("", "muted", wrap=True)
         self.ocr_gpu_btn = button("Cài bản chạy card", "download", "Gỡ onnxruntime bản CPU rồi cài onnxruntime-gpu "

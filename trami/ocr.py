@@ -23,6 +23,9 @@ from .subtitle import Segment
 _engine = None
 _engine_lock = threading.Lock()
 _CJK = re.compile(r"[㐀-鿿]")
+_ALNUM = re.compile(r"[0-9A-Za-z０-９Ａ-Ｚａ-ｚ]")
+NONHAN_MIN = 0.8    # 2.1.32: câu chỉ có số / chữ Latin ("4", "43", "2 1", "OK") giữ khi đọc chắc ≥ 0,8 và nằm đúng hàng
+                    # phụ đề (trước: bỏ mọi chữ không có chữ Hán -> câu đếm số mất hẳn)
 
 
 def get_engine(settings: dict | None = None):
@@ -109,9 +112,12 @@ def _same_line(a: str, b: str) -> bool:
         return False
     if a == b:
         return True
+    n = min(len(a), len(b))
+    if n < 4:      # 2.1.32: câu 1–3 chữ phải giống hệt ("4" -> "5", "但" -> "哼" là 2 câu, trước bị gộp vì lệch 1 chữ)
+        return False
     edits = sum(max(i2 - i1, j2 - j1) for op, i1, i2, j1, j2 in
                 difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes() if op != "equal")
-    return edits <= max(1, min(len(a), len(b)) // 6)
+    return edits <= max(1, n // 6)
 
 
 def _bbox(pts) -> tuple[float, float, float, float]:
@@ -430,7 +436,8 @@ class _Reader:
         self.n = {"ocr": 0, "cleaned": 0, "spans": 0}
 
     def _keep(self, items: list) -> list:
-        return _reading_order([(pts, t.strip(), s) for pts, t, s in items if s >= self.low_score and _CJK.search(t)])
+        return _reading_order([(pts, t.strip(), s) for pts, t, s in items if s >= self.low_score and (
+            _CJK.search(t) or (s >= NONHAN_MIN and _ALNUM.search(t)))])
 
     def _read(self, img: np.ndarray, boxes: list) -> list:
         from .ocr_engine import _crop
@@ -613,7 +620,7 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
     marks = _static_marks_spans(times, reads, total)
     # chiều cao chữ phụ đề = trung vị theo THỜI GIAN hiện (1 đoạn dài nặng hơn 1 đoạn ngắn – như khi đếm từng khung)
     hw_ = [(_bbox(it[0])[3] - _bbox(it[0])[1], b - a) for (a, b), items in zip(times, reads) for it in items
-           if not _is_mark(it, marks)]
+           if not _is_mark(it, marks) and _CJK.search(it[1])]
     h_sub = 0.0
     if len(hw_) >= 3 and sum(d for _, d in hw_) >= 2.0:
         hw_.sort()
@@ -623,17 +630,26 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
             if acc >= half:
                 h_sub = float(hh)
                 break
+    band = _han_band(reads, marks, h_sub, size[0])
     kept = []
     for items in reads:
         keep = [it for it in items if not _is_mark(it, marks)
                 and (not h_sub or _bbox(it[0])[3] - _bbox(it[0])[1] >= 0.7 * h_sub)]
+        han = [it for it in keep if _CJK.search(it[1])]
+        keep = [it for it in keep if _CJK.search(it[1]) or _stray_ok(it, han, h_sub, band)]
         kept.append(_anchor_block(keep, anchor_y, line_h or h_sub))
 
     boxes: list[dict] = []
-    raw: list[tuple[float, float, str, float]] = []
+    raw: list[tuple[float, float, str, float, float, float]] = []
     for (a, b), items in zip(times, kept):
         text = "".join(it[1] for it in items)
-        raw.append((a, b, text, float(np.mean([it[2] for it in items])) if items else 0.0))
+        if items:
+            bbs = [_bbox(it[0]) for it in items]
+            wid = max(bb[2] for bb in bbs) - min(bb[0] for bb in bbs)
+            lh = float(np.median([bb[3] - bb[1] for bb in bbs]))
+        else:
+            wid = lh = 0.0
+        raw.append((a, b, text, float(np.mean([it[2] for it in items])) if items else 0.0, wid, lh))
         if items:
             bxs = []
             for pts, _, _ in items:
@@ -645,27 +661,33 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
     # gom các đoạn liền nhau cùng nội dung thành 1 câu (đọc lệch vài chữ vẫn là 1 câu; chọn bản đọc nhiều thời gian nhất)
     gap = max(2.5 * step / F, 0.15)
     segs: list[Segment] = []
+    shapes: list[tuple[float, float]] = []      # (bề rộng khối chữ, cao dòng) của từng câu – để không gộp nhầm
     cur: list = []
-    for a, b, text, score in raw + [(total + 1, total + 1, "", 0.0)]:
+    for a, b, text, score, wid, lh in raw + [(total + 1, total + 1, "", 0.0, 0.0, 0.0)]:
         if cur:
-            ref = max(cur, key=lambda c: (c[1] - c[0]) * c[3])[2]
-            if text and _same_line(text, ref) and a - cur[-1][1] <= gap:
-                cur.append((a, b, text, score))
+            ref = max(cur, key=lambda c: (c[1] - c[0]) * c[3])
+            if text and _same_line(text, ref[2]) and a - cur[-1][1] <= gap and \
+                    not _other_shape(text, ref[2], wid, ref[4], max(lh, ref[5])):
+                cur.append((a, b, text, score, wid, lh))
                 continue
             if cur[-1][1] - cur[0][0] >= MIN_SEG:
                 votes: dict[str, float] = {}
-                for ca, cb, ct, cs in cur:
+                for ca, cb, ct, cs, _w, _h in cur:
                     votes[ct] = votes.get(ct, 0.0) + (cb - ca) * max(cs, 0.05)
                 segs.append(Segment(round(cur[0][0], 3), round(min(total, cur[-1][1]), 3), max(votes, key=votes.get)))
+                shapes.append((ref[4], ref[5]))
             cur = []
         if text:
-            cur = [(a, b, text, score)]
+            cur = [(a, b, text, score, wid, lh)]
     merged: list[Segment] = []
-    for s in segs:   # gộp câu trùng lặp sát nhau (do nháy chữ)
-        if merged and _same_line(merged[-1].text, s.text) and s.start - merged[-1].end < 0.6:
+    mshape: list[tuple[float, float]] = []
+    for s, shp in zip(segs, shapes):   # gộp câu trùng lặp sát nhau (do nháy chữ)
+        if merged and _same_line(merged[-1].text, s.text) and s.start - merged[-1].end < 0.6 and \
+                not _other_shape(s.text, merged[-1].text, shp[0], mshape[-1][0], max(shp[1], mshape[-1][1])):
             merged[-1].end = s.end
         else:
             merged.append(s)
+            mshape.append(shp)
     try:
         from .asr import to_simplified
 
@@ -683,6 +705,51 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
     if progress:
         progress(1.0, f"OCR xong {len(merged)} câu")
     return merged
+
+
+def _other_shape(a: str, b: str, wa: float, wb: float, lh: float) -> bool:
+    """2 lần đọc khác chữ mà khối chữ rộng hẳn nhau (≥ 0,6 cao dòng ~ hơn kém 1 chữ) = 2 câu khác nhau dù chữ gần giống
+    ("是不喜欢吗" -> "是我不喜欢吗" liền nhau). Cùng 1 câu đọc lệch chữ thì khung chữ gần như y hệt (2.1.32)."""
+    return a != b and lh > 0 and abs(wa - wb) >= 0.6 * lh
+
+
+def _han_band(reads: list, marks, h_sub: float, scan_w: float):
+    """Hàng của dòng phụ đề chữ Hán: (đỉnh, đáy) chứa 80 % tâm dòng, tâm ngang trung vị + sai số (None khi phụ đề không
+    căn giữa) – để nhận câu chỉ có số / chữ Latin nằm đúng chỗ phụ đề (2.1.32)."""
+    ys, xs = [], []
+    for items in reads:
+        han = [_bbox(it[0]) for it in items if _CJK.search(it[1]) and not _is_mark(it, marks)]
+        if not han:
+            continue
+        ys += [(bb[1] + bb[3]) / 2 for bb in han]
+        xs.append((min(bb[0] for bb in han) + max(bb[2] for bb in han)) / 2)
+    if len(ys) < 3 or not h_sub:
+        return None
+    y0, y1 = (float(v) for v in np.percentile(ys, [10, 90]))
+    q1, mx, q3 = (float(v) for v in np.percentile(xs, [25, 50, 75]))
+    centred = q3 - q1 <= 0.1 * scan_w
+    return y0, y1, (mx if centred else None), max(2.0 * h_sub, 0.08 * scan_w)
+
+
+def _stray_ok(it, han: list, h_sub: float, band) -> bool:
+    """Mảnh chữ không có chữ Hán (số / chữ Latin) có phải phụ đề không: cùng hàng với chữ Hán của câu ("我买了" + "iPhone"
+    bị tìm thành 2 khung), hoặc đứng 1 mình đúng hàng + cỡ chữ + tâm ngang của phụ đề ("4", "43")."""
+    bb = _bbox(it[0])
+    h = bb[3] - bb[1]
+    if han:
+        for o in han:
+            ob = _bbox(o[0])
+            oh = ob[3] - ob[1]
+            if min(bb[3], ob[3]) - max(bb[1], ob[1]) >= 0.5 * min(h, oh) and \
+                    max(ob[0] - bb[2], bb[0] - ob[2], 0.0) <= 3.0 * oh:
+                return True
+        return False
+    if band is None or not h_sub or len(it[1]) > 16 or not 0.7 * h_sub <= h <= 1.5 * h_sub:
+        return False
+    y0, y1, cx, tol = band
+    if not y0 - 0.5 * h_sub <= (bb[1] + bb[3]) / 2 <= y1 + 0.5 * h_sub:
+        return False
+    return cx is None or abs((bb[0] + bb[2]) / 2 - cx) <= tol
 
 
 def _static_marks_spans(times: list, reads: list, total: float, min_share: float = 0.3,

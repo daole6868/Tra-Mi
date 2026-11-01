@@ -366,6 +366,9 @@ class ProjectPage(QWidget):
         f.row("Vùng phụ đề", self.a_ocrbox, C.OCR_BOX_HELP)
         self.a_ocrmodel = f.row("Bộ đọc chữ", combo(OCR_MODELS, s.get("ocr_model", "v6_small")), C.OCR_MODEL_HELP)
         self.a_ocrmodel.currentIndexChanged.connect(self._ocr_model_changed)
+        # 2.1.32: giờ câu – đúng giờ chữ hiện trên hình, hoặc kết hợp: câu theo phụ đề + mốc chữ / chỗ ngừng theo giọng
+        self.a_ocrtime = f.row("Giờ câu", combo(C.OCR_TIMINGS, s.get("ocr_timing", "sub")), C.OCR_TIMING_HELP)
+        self.a_ocrtime.currentIndexChanged.connect(self._ocr_timing_changed)
         self._auto_form = f
         self.a_lang = f.row("Ngôn ngữ gốc", combo(C.LANGS, "zh"))
         self.a_sep = f.row("Tách giọng khỏi nhạc trước", Switch(bool(s.get("sep_before_asr", True))),
@@ -1632,6 +1635,7 @@ class ProjectPage(QWidget):
         if f is not None:
             f.setRowVisible(self.a_ocrbox, ocr)
             f.setRowVisible(self.a_ocrmodel, ocr)
+            f.setRowVisible(self.a_ocrtime, self.a_method.currentData() == "ocr")   # OCR + nghe: giờ luôn theo giọng
         self._refresh_tool()
 
     def _ocr_box_label(self):
@@ -1661,6 +1665,10 @@ class ProjectPage(QWidget):
     def _ocr_model_changed(self, *_):
         if not self.loading:
             self._save_setting("ocr_model", self.a_ocrmodel.currentData())
+
+    def _ocr_timing_changed(self, *_):
+        if not self.loading:
+            self._save_setting("ocr_timing", self.a_ocrtime.currentData())
 
     def _ocr_capture(self):
         """Chụp khung hình ĐANG PHÁT (đủ độ phân giải) rồi khoanh vùng phụ đề trên ảnh lớn."""
@@ -3087,6 +3095,7 @@ class ProjectPage(QWidget):
             set_combo(self.a_asr, st.get("asr_engine"))
             set_combo(self.a_ocrfps, str(st.get("ocr_fps", "4")))
             set_combo(self.a_ocrmodel, st.get("ocr_model", "v6_small"))
+            set_combo(self.a_ocrtime, st.get("ocr_timing", "sub"))
             self._method_rows()
             self.a_dual.setChecked(bool(st.get("asr_dual", False)))
             self.a_chunk.setValue(int(st.get("asr_chunk_sec", 28) or 28))

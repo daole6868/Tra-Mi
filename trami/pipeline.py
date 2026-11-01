@@ -1317,6 +1317,8 @@ def hybrid_listen(p: Project, segs, settings: dict, language: str, engine: str, 
             for x in segs:
                 if id(x) not in before:
                     x.extra["from_asr"] = True
+        if audio_in != Path(p.source):   # chỗ nhân vật ngừng giữa câu -> khe + dấu phẩy (giọng lồng nghỉ đúng chỗ)
+            st.update(_voice_pauses(p, segs, settings, language, cancel))
         p.data["hybrid"] = st
         p.data["asr_engine_used"] = engine
         p.data["language"] = language
@@ -1348,8 +1350,196 @@ def hybrid_note(st: dict | None) -> str:
     t = f"OCR + nghe: {st.get('timed', 0)}/{st.get('lines', 0)} câu phụ đề căn giờ theo giọng nói"
     if st.get("added"):
         t += f", bộ nghe thêm {st['added']} câu phụ đề không có (chữ cam nhạt – nên xem lại)"
+    t += _pauses_note(st)
     if st.get("error"):
         t += f" · ⚠ căn giờ lỗi ({st['error']})"
+    return t
+
+
+def _pauses_note(st: dict) -> str:
+    t = ""
+    if st.get("opened"):
+        t += f", mở chỗ ngừng giữa câu ở {st['opened']} câu"
+    if st.get("breaths"):
+        t += f", thêm dấu phẩy ở {st['breaths']} chỗ nhân vật ngừng (giọng lồng nghỉ đúng chỗ)"
+    return t
+
+
+def _voice_pauses(p: Project, segs: list, settings: dict, language: str, cancel=None) -> dict:
+    """Chỗ nhân vật NGỪNG giữa câu (câu có mốc từng chữ đo trên giọng): mở khe ở đoạn lặng bộ căn kéo chữ qua
+    (`snap.open_pauses`, cần giọng đã tách) + "，" ở chỗ ngừng ≥ dub_pause_min (`align.mark_breaths`) -> bản dịch giữ vế,
+    giọng lồng nghỉ đúng lúc nhân vật ngừng. Dùng cho phụ đề OCR (giờ kết hợp / OCR + nghe – 2.1.32)."""
+    out = {"opened": 0, "breaths": 0}
+    gap = float(settings.get("dub_pause_min", 0.3))
+    if settings.get("snap_edges", True):
+        try:
+            env, ehop, esrc = voice_env(p, None, cancel)
+            if env is not None and esrc == "vocals":
+                from .snap import open_pauses
+
+                out["opened"] = len(open_pauses(segs, env, ehop, gap))
+        except ff.Cancelled:
+            raise
+        except Exception:  # noqa: BLE001 – bước phụ
+            log_error("Mở chỗ ngừng giữa câu theo giọng (phụ đề OCR)")
+    if language in ("zh", "yue", "auto") and settings.get("breath_marks", True):
+        from .align import mark_breaths
+
+        out["breaths"] = mark_breaths(segs, gap)
+    return out
+
+
+OCR_TIMINGS = ("sub", "mix")
+MIX_LEAD = 0.4     # giờ kết hợp: phụ đề in sẵn hay hiện trước / tắt sau lúc nói -> căn chữ trong giờ hiện chữ nới vào
+                   # khoảng trống 2 bên tối đa 0,4 s ...
+MIX_BACK = 0.1     # ... và lấn sang giờ hiện của câu bên cạnh tối đa 0,1 s (phụ đề liền nhau, không khoảng trống)
+MIX_EDGE = 0.6     # mép câu theo chữ đầu / cuối không dời quá 0,6 s ra ngoài giờ hiện chữ
+MIX_SIL = 0.3      # ≥ 30 % số chữ bộ căn đặt vào chỗ lặng -> không tin, chia chữ theo cụm có tiếng
+
+
+def ocr_timing(settings: dict | None) -> str:
+    """Giờ câu khi lấy phụ đề bằng OCR (Cài đặt ocr_timing): "sub" = giờ hiện / tắt chữ trên hình | "mix" = kết hợp."""
+    v = str((settings or {}).get("ocr_timing", "sub") or "sub")
+    return v if v in OCR_TIMINGS else "sub"
+
+
+def _mix_windows(segs: list, back: float = MIX_BACK) -> list[tuple[float, float]]:
+    """Khoảng tìm giọng của từng câu OCR (segs theo thứ tự giờ): giờ hiện chữ + khoảng trống 2 bên (≤ MIX_LEAD) +
+    `back` giây lấn sang giờ câu bên cạnh."""
+    out = []
+    n = len(segs)
+    for i, s in enumerate(segs):
+        o0, o1 = (float(v) for v in s.extra.get("ocr_time") or (s.start, s.end))
+        gp = o0 - float((segs[i - 1].extra.get("ocr_time") or (0, segs[i - 1].end))[1]) if i else MIX_LEAD
+        gn = float((segs[i + 1].extra.get("ocr_time") or (segs[i + 1].start, 0))[0]) - o1 if i + 1 < n else MIX_LEAD
+        a = o0 - min(MIX_LEAD, max(0.0, gp) + back)
+        b = o1 + min(MIX_LEAD, max(0.0, gn) + back)
+        out.append((round(max(0.0, a), 3), round(b, 3)))
+    return out
+
+
+def _mix_alloc(s, env, hop: float, w0: float, w1: float, floor: float):
+    """Không đo được mốc từng chữ (chưa có bộ căn / bộ căn đặt sai): chia chữ của câu vào các cụm có tiếng của giọng
+    trong giờ hiện chữ (`align.alloc_chars`) – mép cụm là chỗ nhân vật thật sự ngừng. None nếu không thấy tiếng."""
+    from . import snap
+    from .align import GAP_SPLIT, _char_positions, alloc_chars
+
+    pos = _char_positions(s.text or "")
+    thr = snap._thr(env, hop, w0, w1, floor) if pos else None
+    if thr is None:
+        return None
+    groups: list[list[float]] = []
+    for a, b in snap._clusters(env, hop, w0, w1, thr, gap=0.1):
+        if groups and a - groups[-1][1] < GAP_SPLIT:
+            groups[-1][1] = b
+        else:
+            groups.append([a, b])
+    while len(groups) > len(pos):      # nhiều cụm hơn số chữ: gộp 2 cụm sát nhau nhất
+        j = min(range(len(groups) - 1), key=lambda k: groups[k + 1][0] - groups[k][1])
+        groups[j][1] = groups.pop(j + 1)[1]
+    ct = alloc_chars([tuple(g) for g in groups], s.text, pos) if groups else None
+    return [[a, b] for a, b in ct] if ct else None
+
+
+def ocr_voice_timing(p: Project, segs: list, settings: dict, language: str, engine: str, denoise: bool = False,
+                     progress: Prog | None = None, cancel=None) -> list:
+    """Giờ câu KẾT HỢP cho phụ đề OCR (2.1.32, Cài đặt ocr_timing "mix"): chữ + cách chia câu giữ đúng phụ đề in sẵn
+    (câu chuẩn), mốc TỪNG CHỮ đo trên giọng nói trong giờ hiện chữ (Qwen3-ForcedAligner / nhánh CTC FireRedASR2; không
+    có bộ căn hoặc bộ căn đặt chữ vào chỗ lặng -> chia chữ theo cụm có tiếng của giọng đã tách) -> đầu / cuối câu đúng
+    lúc nhân vật bắt đầu / thôi nói (không dời quá MIX_EDGE ra ngoài giờ hiện chữ), chỗ nhân vật ngừng giữa câu có khe
+    + dấu phẩy -> bản dịch giữ vế, giọng lồng nghỉ đúng chỗ ("说好要卖的，怎么又不卖了"). Câu không thấy tiếng nói giữ
+    giờ phụ đề. extra["ocr_time"] = giờ hiện chữ gốc. Thống kê -> p.data["ocr_mix"]."""
+    import numpy as np
+
+    from . import asr_firered, asr_qwen, snap
+    from .align import PAD, _char_positions, fix_overlaps
+
+    segs = sorted(segs, key=lambda x: x.start)
+    st = {"lines": len(segs), "aligned": 0, "voice": 0, "kept": 0}
+    # giờ kết hợp cần giọng đã tách (nhạc nền lẫn vào thì không thấy chỗ ngừng) -> luôn tách
+    audio_in, wav = _listen_audio(p, dict(settings, sep_before_asr=True), denoise, _sub(progress, 0.0, 0.55), cancel)
+    if audio_in == Path(p.source):
+        st["no_vocals"] = True
+    for s in segs:
+        s.extra["ocr_time"] = [s.start, s.end]
+        s.extra.pop("ct", None)
+        s.extra.pop("ct_voice", None)
+    wins = _mix_windows(segs)
+    al = "qwen3" if asr_qwen.available() and (engine == "qwen3" or use_qwen_align("qwen3", settings)) else \
+        "firered" if asr_firered.ready() else ""
+    try:
+        if al and language in ("zh", "yue", "auto") and segs:
+            if progress:
+                progress(0.55, "Đang đo mốc từng chữ phụ đề trên giọng nói…")
+            try:
+                asr_qwen.align_qwen(segs, wav, language, settings, _sub(progress, 0.55, 0.9), cancel, engine=al,
+                                    windows=wins)
+            except ff.Cancelled:
+                raise
+            except Exception as e:  # noqa: BLE001 – không căn được: chia chữ theo cụm có tiếng
+                log_error("Giờ kết hợp: căn chữ phụ đề OCR")
+                st["error"] = err_text(e)[:120]
+        elif not al:
+            st["no_aligner"] = True
+    finally:
+        asr_qwen.release()
+    env, hop, _esrc = voice_env(p, _sub(progress, 0.9, 0.95), cancel)
+    if env is not None:
+        env = np.asarray(env, np.float32)
+    floor = snap._floor(env) if env is not None and len(env) else 0.0
+    tight = _mix_windows(segs, back=0.0)
+    for s, (w0, w1), (t0, t1) in zip(segs, wins, tight):
+        o0, o1 = s.extra["ocr_time"]
+        pos = _char_positions(s.text or "")
+        ct = s.extra.get("ct")
+        ok = bool(pos) and bool(ct) and len(ct) == len(pos) and float(ct[0][0]) >= w0 - 0.05 and \
+            float(ct[-1][1]) <= w1 + 0.05
+        if ok and env is not None and len(env):
+            thr = snap._thr(env, hop, w0, w1, floor)
+            if thr is not None and snap._sil_frac([[float(a), float(b)] for a, b in ct], env, hop, thr) >= MIX_SIL:
+                ok = False
+        if ok:
+            st["aligned"] += 1
+        else:
+            ct = _mix_alloc(s, env, hop, t0, t1, floor) if env is not None and len(env) else None
+            if not ct:
+                s.extra.pop("ct", None)
+                st["kept"] += 1
+                continue
+            s.extra["ct"] = ct
+            s.extra["ct_voice"] = True
+            st["voice"] += 1
+        ns = min(max(float(s.extra["ct"][0][0]) - PAD, o0 - MIX_EDGE), o1 - 0.2)
+        ne = max(min(float(s.extra["ct"][-1][1]) + PAD, o1 + MIX_EDGE), ns + 0.2)
+        s.start, s.end = round(max(0.0, ns), 3), round(ne, 3)
+    segs = fix_overlaps(segs)
+    st.update(_voice_pauses(p, segs, settings, language, cancel))
+    p.data["ocr_mix"] = st
+    if progress:
+        progress(1.0, "Đã căn giờ phụ đề theo giọng nói")
+    return segs
+
+
+def ocr_timing_note(p: Project) -> str:
+    """Kết quả giờ câu của phụ đề OCR cho thông báo bước 1 / Tự động."""
+    if p.data.get("sub_source") != "ocr":
+        return ""
+    if p.data.get("ocr_timing", "sub") != "mix":
+        return "giờ câu: đúng giờ hiện / tắt chữ trên hình"
+    st = p.data.get("ocr_mix") or {}
+    n = int(st.get("lines", 0) or 0)
+    t = f"giờ câu kết hợp: {int(st.get('aligned', 0)) + int(st.get('voice', 0))}/{n} câu theo giọng nói"
+    if st.get("voice"):
+        t += f" ({st['voice']} câu chia chữ theo cụm tiếng)"
+    if st.get("kept"):
+        t += f", {st['kept']} câu không thấy tiếng nói giữ giờ phụ đề"
+    t += _pauses_note(st)
+    if st.get("no_vocals"):
+        t += " · ⚠ chưa tách được giọng khỏi nhạc nền – chỗ ngừng kém chính xác"
+    if st.get("no_aligner"):
+        t += " · chưa có bộ căn thời gian (tải Qwen3-ForcedAligner ở tab Tài liệu để mốc từng chữ chính xác hơn)"
+    if st.get("error"):
+        t += f" · ⚠ căn chữ lỗi ({st['error']})"
     return t
 
 
@@ -1442,8 +1632,9 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
     p.data.pop("breaths_marked", None)
     p.data.pop("pauses_opened", None)
     p.data.pop("ct_revoiced", None)
+    timing = ocr_timing(settings) if method == "ocr" else ""
     if method in ("ocr", "hybrid"):
-        opr = progress if method == "ocr" else _sub(progress, 0.0, 0.4)
+        opr = progress if method == "ocr" and timing != "mix" else _sub(progress, 0.0, 0.4)
         from .ocr import detect_subtitle_region, expand_region, extract_hardsubs
 
         box = ocr_box(p) or region
@@ -1481,6 +1672,12 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         if method == "hybrid":   # chữ lấy từ phụ đề in sẵn, giờ đo trên giọng nói, câu OCR sót lấy từ bộ nghe
             segs = hybrid_listen(p, segs, settings, language, engine, denoise, _sub(progress, 0.4, 0.92), cancel)
             asr_end = 0.92
+        elif timing == "mix" and segs:   # giờ kết hợp: câu theo phụ đề, mốc chữ + chỗ ngừng theo giọng (2.1.32)
+            segs = ocr_voice_timing(p, segs, settings, language, engine, denoise, _sub(progress, 0.4, 0.92), cancel)
+            asr_end = 0.92
+        p.data["ocr_timing"] = timing or "voice"
+        if timing != "mix":
+            p.data.pop("ocr_mix", None)
     else:
         from . import asr_funasr
 
@@ -1817,8 +2014,9 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
                 if progress:
                     progress(1.0, f"Bỏ qua phân biệt người nói ({str(e)[:80]})")
         _drop_char_times(p)
-    # 4) bám mép câu theo giọng đã tách: đầu / cuối câu đúng lúc nhân vật bắt đầu / thôi nói (2.0.96)
-    if p.segments and settings.get("snap_edges", True) and stems(p):
+    # 4) bám mép câu theo giọng đã tách: đầu / cuối câu đúng lúc nhân vật bắt đầu / thôi nói (2.0.96). Phụ đề OCR giờ
+    # "theo phụ đề" giữ đúng giờ hiện / tắt chữ (2.1.32)
+    if p.segments and settings.get("snap_edges", True) and stems(p) and timing != "sub":
         try:
             snap_edges(p, settings, relayout_dub=False, cancel=cancel)
         except ff.Cancelled:
@@ -4965,6 +5163,9 @@ def ocr_note(p: Project) -> str:
         msg += f" · {o['chunks']} khúc song song"
     if o.get("secs"):
         msg += f" · {o['secs']:g} s"
+    tn = ocr_timing_note(p)
+    if tn:
+        msg += " · " + tn
     if o.get("engine_warn"):
         msg += "  ⚠ " + str(o["engine_warn"])
     return msg

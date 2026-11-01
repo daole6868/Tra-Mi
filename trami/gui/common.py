@@ -87,6 +87,12 @@ OCR_BOX_HELP = ("Khung chữ nhật tool sẽ quét để đọc phụ đề. D�
 OCR_MODEL_HELP = ("PP-OCRv6 có sẵn (không phải tải) đủ tốt cho phần lớn video. PP-OCRv6 medium / PP-OCRv5 server đọc kỹ "
                   "hơn với chữ nhỏ / chữ kiểu nhưng chậm hơn – tải ở tab Tài liệu; nên có card (Cài đặt → OCR chạy trên). "
                   "PP-OCRv4 = bộ đọc cũ")
+OCR_TIMINGS = [("sub", "Theo giờ phụ đề trên hình"), ("mix", "Kết hợp: câu theo phụ đề + chỗ ngừng theo giọng nói")]
+OCR_TIMING_HELP = ("Giờ câu khi lấy phụ đề bằng OCR. Theo giờ phụ đề: đúng lúc chữ hiện / tắt trên hình (nhanh, không cần "
+                   "tách giọng). Kết hợp: chữ và cách chia câu giữ đúng phụ đề, nhưng tool tách giọng rồi đo từng chữ "
+                   "trên giọng nói – đầu / cuối câu đúng lúc nhân vật bắt đầu / thôi nói (lệch tối đa 0,6 s so với giờ "
+                   "hiện chữ), chỗ nhân vật ngừng giữa câu (\"说好要卖的……怎么又不卖了\") được thêm dấu phẩy để bản dịch "
+                   "giữ 2 vế và giọng lồng nghỉ đúng chỗ. Chậm hơn (tách giọng + đo mốc chữ bằng Qwen3)")
 HARDSUB = [("none", "Giữ nguyên"), ("inpaint", "Xoá sạch bằng AI (LaMa)"), ("blur", "Làm mờ vùng phụ đề"),
            ("box", "Che bằng dải màu"), ("delogo", "Delogo (nhanh)"),
            ("patch", "Vá nền (chép nền sát bên, nhanh)"), ("stretch", "Kéo dọc (kéo dòng sát mép phủ kín chữ)")]
