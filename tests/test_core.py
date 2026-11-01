@@ -11643,3 +11643,118 @@ def test_recognize_ocr_timing_modes_2132(tmp_path, monkeypatch):
     finally:
         p.delete()
 
+
+
+# ------------------------------------------------------------------ 2.1.33: lọc từ (logo / watermark dính vào câu)
+
+def test_word_filter_2133():
+    """Bỏ đúng cụm "@纵横" ở mọi câu (＠ toàn khổ, khoảng trắng giữa chữ, chữ hoa / thường đều nhận), câu chỉ có cụm đó
+    -> xoá cả câu; giờ mọi câu giữ nguyên, mốc từng chữ của chữ còn lại giữ nguyên; câu không có cụm đó không đổi."""
+    from trami import wordfilter as wf
+    from trami.subtitle import Segment
+
+    assert wf.parse("@纵横, bilibili，@纵横\nABC") == ["@纵横", "bilibili", "ABC"]
+    W = ["@纵横"]
+    assert wf.strip_words("@纵横排队一个个的进来", W)[:2] == ("排队一个个的进来", 1)
+    assert wf.strip_words("排队@ 纵横进来", W)[0] == "排队进来"
+    assert wf.strip_words("排队，@纵横，进来", W)[0] == "排队，进来"
+    assert wf.strip_words("你好，＠纵横", W)[0] == "你好"
+    assert wf.strip_words("排队@纵横。", W)[0] == "排队。"
+    assert wf.strip_words("纵横天下", W) == ("纵横天下", 0, set())       # thiếu "@" -> không phải cụm cần lọc
+    assert wf.strip_words("看 BILIBILI 视频", ["bilibili"])[0] == "看 视频"
+    assert wf.empty(wf.strip_words("＠纵横。", W)[0])
+    a = Segment(1.0, 2.5, "@纵横排队一个个的进来", trans="Xếp hàng vào từng người một")
+    a.extra["ct"] = [[1.0 + 0.1 * k, 1.1 + 0.1 * k] for k in range(10)]       # 纵横 + 8 chữ
+    b = Segment(2.5, 3.0, "@纵横")
+    c = Segment(3.2, 4.0, "大家好", trans="Chào mọi người")
+    d = Segment(4.0, 5.0, "我是@纵横的粉丝", trans="Tôi là fan của @纵横")
+    segs = [a, b, c, d]
+    pl = wf.plan(segs, W)
+    assert pl == {"changed": [0, 3], "dropped": [1], "hits": 4} and segs[0].text.startswith("@")   # xem trước: không sửa
+    res = wf.apply(segs, W)
+    assert [s.text for s in res["segs"]] == ["排队一个个的进来", "大家好", "我是的粉丝"] and res["dropped"] == [1]
+    assert [(s.start, s.end) for s in res["segs"]] == [(1.0, 2.5), (3.2, 4.0), (4.0, 5.0)]
+    assert a.extra["ct"] == [[1.0 + 0.1 * k, 1.1 + 0.1 * k] for k in range(2, 10)]     # bỏ đúng mốc 纵 横
+    assert a.trans == "Xếp hàng vào từng người một" and d.trans == "Tôi là fan của"
+    assert a.extra["word_filtered"] == "@纵横排队一个个的进来" and c.text == "大家好" and "word_filtered" not in c.extra
+    assert res["changed"] == [a, d] and res["hits"] == 4
+    assert "bỏ ở 2 câu, xoá 1 câu" in wf.note({"words": W, "hits": 4, "lines": 2, "dropped": 1})
+
+
+def test_recognize_word_filter_auto_2133(tmp_path, monkeypatch):
+    """Bật "tự lọc khi lấy phụ đề mới": lấy phụ đề xong tự bỏ cụm đã điền, thông báo có kết quả; tắt thì giữ nguyên."""
+    from trami import ocr, pipeline
+    from trami.config import load_settings
+    from trami.project import Project
+    from trami.subtitle import Segment
+
+    src = tmp_path / "phim.mp4"
+    src.write_bytes(b"x")
+    p = Project.create("wf2133")
+    p.data["source"] = str(src)
+    p.save()
+    monkeypatch.setattr(ocr, "extract_hardsubs", lambda *a, **k: [
+        Segment(1.0, 2.0, "@纵横排队一个个的进来"), Segment(2.0, 2.6, "@纵横"), Segment(3.0, 4.0, "再见")])
+    monkeypatch.setattr(pipeline, "ocr_box", lambda p: {"x": 0, "y": 0.8, "w": 1, "h": 0.2, "exact": True})
+    try:
+        st = {**load_settings(), "diarize": False, "ocr_timing": "sub", "sub_filter_words": "@纵横"}
+        pipeline.recognize(p, "ocr", "zh", None, 4.0, st)
+        p.reload()
+        assert [s.text for s in p.segments] == ["@纵横排队一个个的进来", "@纵横", "再见"] and "word_filtered" not in p.data
+        pipeline.recognize(p, "ocr", "zh", None, 4.0, {**st, "sub_filter_auto": True})
+        p.reload()
+        assert [(s.start, s.end, s.text) for s in p.segments] == [(1.0, 2.0, "排队一个个的进来"), (3.0, 4.0, "再见")]
+        assert "lọc từ @纵横: bỏ ở 1 câu, xoá 1 câu" in pipeline.listen_note(p)
+    finally:
+        p.delete()
+
+
+def test_word_filter_gui_2133(sample_video, monkeypatch):
+    """Tab Phụ đề → Công cụ → Sửa câu → Lọc từ: hỏi lại khi có câu bị xoá, bỏ cụm ở mọi câu, giờ không đổi, câu đã dịch
+    được tích sẵn, lưu ô vào Cài đặt, Ctrl+Z (nút ↶) trả lại như cũ."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from trami import pipeline
+    from trami.config import load_settings, save_settings
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+    from trami.subtitle import Segment
+
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    p = Project.create("wfgui")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [Segment(0.5, 1.5, "@纵横排队一个个的进来", trans="Xếp hàng vào"), Segment(1.5, 2.0, "@纵横"),
+                  Segment(2.2, 3.0, "大家好")]
+    p.save()
+    win = MainWindow()
+    win.show()
+    win.open_project(p.id)
+    pp = win.project_page
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: asked.append(a[2]) or QMessageBox.StandardButton.Yes)
+    try:
+        app.processEvents()
+        pp.s_wf.setText("@纵横")
+        pp._word_filter()
+        app.processEvents()
+        segs = pp.model.segs
+        assert asked and "xoá hẳn 1 câu" in asked[0]
+        assert [(s.start, s.end, s.text) for s in segs] == [(0.5, 1.5, "排队一个个的进来"), (2.2, 3.0, "大家好")]
+        assert sorted(pp.model.selected) == [0] and load_settings()["sub_filter_words"] == "@纵横"
+        p.reload()
+        assert [s.text for s in p.segments] == ["排队一个个的进来", "大家好"]
+        pp.undo()
+        app.processEvents()
+        assert [s.text for s in pp.model.segs] == ["@纵横排队一个个的进来", "@纵横", "大家好"]
+        pp.s_wf.setText("không có")
+        pp._word_filter()
+        assert len(pp.model.segs) == 3
+    finally:
+        save_settings({"sub_filter_words": ""})
+        win.timer.stop()
+        pp.p = None
+        win.close()
+        p.delete()

@@ -529,6 +529,15 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   giữ khi cùng hàng chữ Hán của câu hoặc đứng 1 mình đúng hàng + cỡ + tâm ngang phụ đề (`_han_band`, `_stray_ok`); h_sub chỉ
   tính chữ Hán; `_same_line` câu < 4 chữ phải giống hệt; `_other_shape` (khác chữ + khối chữ rộng hơn kém ≥ 0,6 cao dòng ->
   2 câu, không gộp – raw có bề rộng / cao dòng mỗi đoạn).
+- Lọc từ (2.1.33, `trami/wordfilter.py`): `parse` (ô cách nhau bằng , ， ; | xuống dòng), `find` (khớp theo NFKC + chữ
+  thường, bỏ khoảng trắng – "＠ 纵横" = "@纵横"; cụm dài trước), `strip_words` (bỏ cụm, `_tidy`: khoảng trắng đôi, 2 dấu ngắt
+  liền nhau, cụm ở đầu / cuối câu thì bỏ dấu ngắt còn sót), `empty` (không còn chữ / số), `plan` (xem trước, không sửa),
+  `apply` (chữ gốc + bản dịch nếu có cụm; câu gốc rỗng -> bỏ câu; giờ giữ nguyên; `ct` bỏ đúng mốc chữ đã xoá – `_ct_after`;
+  `extra["word_filtered"]` = chữ cũ), `note`. GUI tab Phụ đề → Công cụ → Sửa câu hàng "Lọc từ": ô `s_wf` (Cài đặt
+  `sub_filter_words`, Enter = lọc) + nút -> `project_page._word_filter` (có câu bị xoá -> hỏi lại; xoá qua `_sub_op("delete")`
+  – đã lồng thì xếp lại; câu đổi đã dịch tích sẵn; 1 bước Ctrl+Z) + công tắc `s_wf_auto` (Cài đặt `sub_filter_auto`, mặc
+  định tắt) -> `recognize` bước 2j (sau Xoá câu không chắc, mọi nguồn phụ đề) `p.data["word_filtered"]` -> `listen_note`.
+  `C.WORD_FILTER_HELP`.
 - Dấu câu bản dịch (2.1.11): `translate.punct_fix` = `fix_commas` (bỏ dấu phẩy ngay sau `COMMA_GLUE` lượng từ / "của" khi
   chữ sau viết thường, trừ dãy số; dấu phẩy giữa các tiếng của tên trong bảng thuật ngữ `Translator.names`) + `end_punct`
   (thiếu dấu câu cuối -> theo câu gốc: ？/吗/么 -> ?, ！ -> !, … , dấu phẩy -> ",", còn lại "."; Nhật 。？！、, Thái không
@@ -597,7 +606,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (269 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
+- `tests/test_core.py` – `python -m pytest -q tests` (272 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2369,7 +2378,14 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   to giọng giả (2 cụm tiếng cách 0,6 s): không bộ căn -> chia 5 | 6 chữ ở "的", thêm "，", đầu câu 10,15 s (chữ hiện 10,0 s);
   có bộ căn giả: mốc tốt giữ, mốc rơi vào lặng chia lại, câu không tiếng giữ giờ phụ đề. Chưa chạy với Qwen3 / giọng tách thật.
 
+- 2.1.33: "tab Phụ đề thêm phần lọc từ: '@纵横排队一个个的进来' dính '@纵横' là logo – ghi '@纵横' thì tool tìm đúng cụm đó ở
+  mọi câu rồi xoá, câu chỉ có '@纵横' thì xoá cả câu, các câu khác không lệch" -> xem Cấu trúc "Lọc từ". Thử: đủ kiểu dính
+  (đầu / giữa / cuối câu, ＠ toàn khổ, khoảng trắng giữa chữ, kèm dấu phẩy), "纵横天下" (thiếu @) không đụng, giờ + mốc từng
+  chữ còn lại giữ nguyên; tự lọc khi lấy phụ đề; giao diện offscreen (hỏi lại, xoá câu, tích câu đã dịch, Ctrl+Z).
+
 ## Vấn đề đang mở
+- 2.1.33: chờ người dùng thử tab Phụ đề → Công cụ → Sửa câu → ô "Lọc từ" điền @纵横 → bấm Lọc từ trên dự án OCR có logo
+  dính; muốn mọi video sau tự lọc thì bật "tự lọc khi lấy phụ đề mới". OCR đọc logo lệch chữ (VD "@纵模") -> điền thêm cụm đó.
 - 2.1.32: chờ người dùng chọn tab Tự động → Nguồn phụ đề "OCR" → Giờ câu "Kết hợp…" rồi chạy "1. Nghe & tách câu" trên
   video có phụ đề in sẵn: thông báo có "giờ câu kết hợp: N/M câu theo giọng nói, thêm dấu phẩy ở K chỗ"; xem timeline khối
   phụ đề có khớp sóng âm Tiếng gốc không, câu có chỗ nhân vật ngừng giọng lồng có nghỉ đúng không (cần Dịch sau bước này để

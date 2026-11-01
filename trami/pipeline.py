@@ -1969,6 +1969,19 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
     p.data.pop("unsure_removed", None)
     if segs and method != "ocr" and settings.get("asr_drop_unsure"):
         segs = drop_unsure(p, segs, settings)
+    # 2j) lọc từ (2.1.33, Cài đặt sub_filter_auto): bỏ cụm người dùng điền (logo / watermark OCR đọc dính "@纵横") ở
+    # mọi câu, câu chỉ có cụm đó thì bỏ cả câu; giờ các câu không đổi
+    p.data.pop("word_filtered", None)
+    if segs and settings.get("sub_filter_auto"):
+        from . import wordfilter
+
+        words = wordfilter.parse(settings.get("sub_filter_words", ""))
+        if words:
+            wf = wordfilter.apply(segs, words)
+            segs = wf["segs"]
+            if wf["hits"]:
+                p.data["word_filtered"] = {"words": words, "hits": wf["hits"], "lines": len(wf["changed"]),
+                                           "dropped": len(wf["dropped"])}
     segs = normalize(segs)
     one_spk = want_spk and int(settings.get("diarize_speakers", 0) or 0) == 1
     if one_spk:   # đặt "1 người nói": gán hết S1, không đo giọng / không tách câu theo chỗ đổi giọng
@@ -2716,7 +2729,10 @@ def listen_note(p: Project) -> str:
 
     from .vreview import note as gemini_note
 
+    from .wordfilter import note as filter_note
+
     out = [x for x in (hybrid_note(p.data.get("hybrid")) if p.data.get("sub_source") == "hybrid" else "",
+                       filter_note(p.data.get("word_filtered")),
                        recheck_note(p.data.get("asr_recheck")), name_note(p.data.get("name_pass")),
                        dual_note(p.data.get("asr_dual")), gemini_note(p.data.get("gemini_review"))) if x]
     if edge_note(p.data.get("edge_fix")):
