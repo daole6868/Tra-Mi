@@ -11842,3 +11842,215 @@ def test_word_find_gui_2134(sample_video, monkeypatch):
         pp.p = None
         win.close()
         p.delete()
+
+
+# ------------------------------------------------------------------ 2.1.35: tách phụ đề theo đoạn
+
+def test_spans_core_2135():
+    """Khoảng chưa có phụ đề theo độ dài (đầu / giữa / cuối video, 🎵 tuỳ chọn), gộp đoạn chồng, gộp câu mới: giữ câu cũ
+    (câu trùng lời bỏ, chạm nhẹ thì xén) / thay câu cũ trong đoạn; người nói theo câu gần nhất."""
+    from trami import spans as spm
+    from trami.subtitle import Segment
+
+    assert spm.clean([(5, 3), (2.9, 4), (10, 10.2), (-1, 0.5), (8, 30)], 20) == [(0.0, 0.5), (2.9, 5.0), (8.0, 20.0)]
+    assert spm.padded([(2, 3), (5, 6)], 6.5, 1.5) == [(0.5, 6.5)]
+    segs = [Segment(12, 14, "一"), Segment(30, 32, "二"), Segment(32.5, 40, "♪", extra={"song": True}),
+            Segment(41, 43, "三")]
+    assert spm.gaps(segs, 100, 10, 60) == [(0.0, 12.0), (14.0, 30.0), (43.0, 100.0)]
+    assert spm.gaps(segs, 100, 10, 40) == [(0.0, 12.0), (14.0, 30.0)]
+    assert spm.gaps(segs, 100, 5, 0, skip_songs=True) == [(0.0, 12.0), (14.0, 30.0), (32.0, 41.0), (43.0, 100.0)]
+    old = [Segment(1.0, 2.0, "旧一", speaker="S1", trans="Cũ một"), Segment(5.0, 6.0, "旧二", speaker="S2")]
+    new = [Segment(1.1, 1.9, "旧一"), Segment(2.0, 3.0, "新一"), Segment(3.2, 5.3, "新二"), Segment(6.5, 7.0, "外")]
+    r = spm.merge(old, new, [(0.5, 6.0)], "keep")
+    assert [(s.start, s.end, s.text) for s in r["segs"]] == [(1.0, 2.0, "旧一"), (2.0, 3.0, "新一"), (3.2, 4.98, "新二"),
+                                                             (5.0, 6.0, "旧二")]
+    assert r["segs"][0] is old[0] and r["segs"][0].trans == "Cũ một" and r["skipped"] == 1 and r["removed"] == 0
+    assert spm.nearest_speaker(r["added"], old) == 2 and [s.speaker for s in r["added"]] == ["S1", "S2"]
+    new = [Segment(1.1, 1.9, "新零"), Segment(6.5, 7.0, "外")]
+    r = spm.merge(old, new, [(0.5, 3.0)], "replace")
+    assert [s.text for s in r["segs"]] == ["新零", "旧二"] and r["removed"] == 1 and len(r["added"]) == 1
+    assert "thêm 1 câu, thay 1 câu cũ" in spm.note({"spans": 1, "secs": 2.5, **{k: r[k] for k in ("removed", "skipped")},
+                                                    "added": 1})
+
+
+def test_recognize_spans_ocr_2135(tmp_path, monkeypatch):
+    """OCR chỉ quét các đoạn (đã nới PAD), dùng lại vùng quét của lần trước; câu mới chèn đúng giờ, câu cũ (bản dịch,
+    giọng) giữ nguyên; thay câu cũ trong đoạn; khung chữ OCR gộp vào ocr_boxes.json; không đụng dữ liệu khác của dự án."""
+    import json
+
+    from trami import ocr, pipeline
+    from trami.config import load_settings
+    from trami.project import Project
+    from trami.subtitle import Segment
+
+    src = tmp_path / "phim.mp4"
+    src.write_bytes(b"x")
+    p = Project.create("sp2135")
+    p.data["source"] = str(src)
+    p.data["info"] = {"duration": 20.0}
+    p.data["sub_source"] = "ocr"
+    p.data["ocr_region"] = {"x": 0.0, "y": 0.75, "w": 1.0, "h": 0.2, "line_y": 0.85, "line_h": 0.05}
+    p.data["film_profile"] = "giữ nguyên"
+    p.segments = [Segment(1.0, 2.0, "旧一", speaker="S1", trans="Cũ một", extra={"tts_file": "a.wav"}),
+                  Segment(9.0, 10.0, "旧二", speaker="S2", trans="Cũ hai")]
+    p.save()
+    (p.work / "ocr_boxes.json").write_text(json.dumps({"fps": 25, "spans": [
+        {"a": 1.0, "b": 2.0, "boxes": [[1, 1, 2, 2]]}, {"a": 9.0, "b": 10.0, "boxes": [[3, 3, 4, 4]]}]}), "utf-8")
+    calls = []
+
+    def fake(src_, region=None, fps=4, boxes_out=None, windows=None, **k):
+        calls.append((dict(region), windows))
+        out = [Segment(1.1, 1.9, "旧一"), Segment(3.0, 4.0, "新一"), Segment(5.0, 6.5, "新二"), Segment(9.0, 10.0, "旧二"),
+               Segment(12.0, 12.8, "外")]
+        Path(boxes_out).write_text(json.dumps({"fps": 25, "spans": [
+            {"a": s.start, "b": s.end, "boxes": [[5, 5, 6, 6]]} for s in out]}), "utf-8")
+        return out
+    monkeypatch.setattr(ocr, "extract_hardsubs", fake)
+    monkeypatch.setattr(pipeline, "ocr_box", lambda q: None)
+    try:
+        st = {**load_settings(), "ocr_timing": "sub", "diarize": True}
+        r = pipeline.recognize_spans(p, [(2.5, 8.5)], "ocr", "zh", st)
+        assert calls[0][1] == [(1.0, 10.0)] and calls[0][0]["line_y"] == 0.85     # nới 1,5 s mỗi bên, đúng vùng cũ
+        assert r["added"] == 2 and r["removed"] == 0 and r["rows"] == [1, 2] and r["found"] == 2
+        q = Project(p.id)
+        assert [(s.start, s.end, s.text, s.speaker) for s in q.segments] == [
+            (1.0, 2.0, "旧一", "S1"), (3.0, 4.0, "新一", "S1"), (5.0, 6.5, "新二", "S2"), (9.0, 10.0, "旧二", "S2")]
+        assert q.segments[0].trans == "Cũ một" and q.segments[0].extra["tts_file"] == "a.wav"
+        assert q.segments[1].extra.get("from_span") and q.data["film_profile"] == "giữ nguyên"
+        boxes = json.loads((p.work / "ocr_boxes.json").read_text("utf-8"))["spans"]
+        assert [b["a"] for b in boxes] == [1.0, 3.0, 5.0, 9.0] and not (p.work / "ocr_boxes_span.json").exists()
+        # thay câu cũ trong đoạn
+        r = pipeline.recognize_spans(p, [(0.5, 2.5)], "ocr", "zh", st, mode="replace")
+        q = Project(p.id)
+        assert r["removed"] == 1 and r["added"] == 1 and q.segments[0].text == "旧一" and not q.segments[0].trans
+        with pytest.raises(ValueError):
+            pipeline.recognize_spans(p, [(3.0, 3.1)], "ocr", "zh", st)
+    finally:
+        p.delete()
+
+
+def test_recognize_spans_asr_mask_2135(sample_video, monkeypatch):
+    """Nghe giọng nói theo đoạn: bộ nghe nhận bản 16 kHz chỉ còn tiếng trong đoạn (đã nới), ngoài đoạn lặng – giờ giữ
+    nguyên; chỉ câu nằm trong đoạn được thêm; file tạm / tiến độ nghe của lần tách theo đoạn bị dọn."""
+    from trami import asr_qwen, pipeline
+    from trami.config import load_settings
+    from trami.project import Project
+    from trami.songs import read_wav16
+    from trami.subtitle import Segment
+
+    got = {}
+
+    def fake_listen(wav, settings, language, progress=None, cancel=None, **k):
+        a = np.abs(np.asarray(read_wav16(wav), np.float32))
+        loud = np.flatnonzero(a > 200)
+        got["span"] = (loud[0] / 16000, loud[-1] / 16000)
+        (Path(wav).parent / "asr_progress_test.json").write_text("{}", "utf-8")
+        t0, t1 = got["span"]
+        return [Segment(t, t + 0.8, "我们说话。") for t in np.arange(0.25, 6.0, 1.0) if t0 <= t and t + 0.8 <= t1]
+    monkeypatch.setattr(asr_qwen, "available", lambda: True)
+    monkeypatch.setattr(asr_qwen, "transcribe_qwen", fake_listen)
+    p = Project.create("sp2135asr")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [Segment(0.0, 0.4, "开头", speaker="S1"), Segment(5.4, 5.9, "结尾", speaker="S1")]
+    p.save()
+    try:
+        st = {**load_settings(), "asr_engine": "qwen3", "sep_before_asr": False, "align_words": False,
+              "ai_join_engine": "off", "asr_name_pass": False, "breath_marks": False, "asr_dual": False}
+        r = pipeline.recognize_spans(p, [(1.5, 3.0)], "asr", "zh", st)
+        assert got["span"][0] < 0.05 and abs(got["span"][1] - 4.5) < 0.05      # chỉ nghe [0; 4,5] (đoạn nới 1,5 s)
+        q = Project(p.id)
+        assert [s.text for s in q.segments] == ["开头", "我们说话。", "我们说话。", "结尾"] and r["added"] == 2
+        assert [s.start for s in q.segments[1:3]] == [1.25, 2.25] and q.segments[1].speaker == "S1"
+        assert not (p.work / pipeline.SPAN_WAV).exists() and not (p.work / "asr_progress_test.json").exists()
+        assert q.data.get("sub_source") == "asr"
+    finally:
+        p.delete()
+
+
+def test_ocr_windows_2135(tmp_path):
+    """OCR thật quét riêng 2 đoạn: câu trong đoạn đúng chữ + đúng giờ, câu ngoài đoạn không đọc."""
+    _need_ocr3()
+    from trami import ocr
+
+    v = tmp_path / "v.mp4"
+    subs = _ocr_video_2131(v, dur=14.0, bg="none")
+    out = ocr.extract_hardsubs(v, {"x": 0, "y": 0.7, "w": 1, "h": 0.3, "exact": True}, fps=4,
+                               windows=[(2.0, 4.6), (8.8, 11.0)])
+    full = [(a, b, t) for a, b, t in subs if a >= 2.0 and b <= 11.0 and not 4.6 < a < 8.8]
+    for a, b, t in full:
+        hit = [s for s in out if s.text == t]
+        assert hit and abs(hit[0].start - a) <= 0.08 and abs(hit[0].end - b) <= 0.08, (t, hit)
+    assert not any(s.text in ("我们一起去吃饭好不好",) for s in out)
+
+
+def test_span_gui_2135(sample_video, monkeypatch):
+    """Tab Phụ đề → Tách phụ đề theo đoạn: Tìm khoảng trống (vùng xanh trên timeline), đánh dấu đầu / cuối (chồng đoạn
+    -> gộp), Tách = việc nền -> câu mới chèn đúng giờ + tích sẵn, đoạn ✓; Ctrl+Z hoàn tác; lưu mức tìm vào Cài đặt."""
+    import time as _t
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from trami import ocr, pipeline
+    from trami.config import load_settings, save_settings
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.jobs import manager
+    from trami.project import Project
+    from trami.subtitle import Segment
+
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    monkeypatch.setattr(ocr, "extract_hardsubs", lambda *a, **k: [Segment(2.0, 2.8, "新一"), Segment(3.0, 3.6, "新二")])
+    monkeypatch.setattr(pipeline, "ocr_box", lambda q: {"x": 0, "y": 0.8, "w": 1, "h": 0.2, "exact": True})
+    p = Project.create("spgui")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [Segment(0.2, 1.0, "大家好", speaker="S1"), Segment(4.0, 5.0, "再见", speaker="S1")]
+    p.data["sub_source"] = "ocr"
+    p.save()
+    win = MainWindow()
+    win.show()
+    win.open_project(p.id)
+    pp = win.project_page
+
+    def pump(cond, t=20):
+        t0 = _t.time()
+        while not cond() and _t.time() - t0 < t:
+            app.processEvents()
+            _t.sleep(0.02)
+        return cond()
+    try:
+        app.processEvents()
+        assert pp.sp_method.currentData() == "ocr"
+        pp.sp_lo.setValue(2.0)
+        pp.sp_hi.setValue(0)
+        assert load_settings()["span_gap_min"] == 2.0
+        pp._span_find()
+        assert [(x["a"], x["b"]) for x in pp._spans] == [(1.0, 4.0)] and pp.tracks.spans == pp._spans
+        pp.sp_a.setText("00:05.200")
+        pp.sp_b.setText("5.9")
+        pp._span_add()
+        pp.sp_a.setText("00:05.600")
+        pp.sp_b.setText("00:06.000")
+        pp._span_add()                                   # chồng đoạn vừa thêm -> gộp
+        assert [(x["a"], x["b"]) for x in pp._spans] == [(1.0, 4.0), (5.2, 6.0)] and "Tách 2 đoạn" in pp.sp_run.text()
+        pp._span_run()
+        assert pump(lambda: all(x.get("state") in ("done", "none") for x in pp._spans))
+        assert [(s.start, s.end, s.text) for s in pp.model.segs] == [
+            (0.2, 1.0, "大家好"), (2.0, 2.8, "新一"), (3.0, 3.6, "新二"), (4.0, 5.0, "再见")]
+        assert sorted(pp.model.selected) == [1, 2] and pp._spans[0]["state"] == "done"
+        assert sum(1 for j in manager.list(p.id) if j["kind"] == "dual") == 1
+        pp.undo()
+        app.processEvents()
+        assert [s.text for s in pp.model.segs] == ["大家好", "再见"]
+        pp._span_clear(done_only=True)
+        assert pp.tracks.spans == pp._spans
+        pp.tracks.select_gap("subs", 2.0)                # bấm chỗ trống dòng Phụ đề -> "Tách đoạn này"
+        pp._timeline_action("sub_span")
+        assert [(x["a"], x["b"]) for x in pp._spans] == [(1.0, 4.0)] and pp.tabs.cur == 1
+    finally:
+        save_settings({"span_gap_min": 10.0, "span_gap_max": 60.0})
+        win.timer.stop()
+        pp.p = None
+        win.close()
+        p.delete()

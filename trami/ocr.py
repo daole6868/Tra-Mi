@@ -487,7 +487,8 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
                      progress: Callable[[float, str], None] | None = None,
                      cancel: Callable[[], bool] | None = None,
                      boxes_out: str | Path | None = None, stats: dict | None = None,
-                     low_score: float = 0.45, settings: dict | None = None) -> list[Segment]:
+                     low_score: float = 0.45, settings: dict | None = None,
+                     windows: list | None = None) -> list[Segment]:
     """Đọc phụ đề in sẵn trong vùng `region` (2.1.31):
       A giải mã bằng card (NVDEC / D3D11) chỉ lấy dải phụ đề ảnh xám; phim dài chia 2–3 khúc giải mã song song; giải mã
         và đọc chữ chạy ở luồng riêng;
@@ -497,7 +498,9 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
       E mô hình PP-OCRv6 / PP-OCRv5 (Cài đặt ocr_model);
       F ảnh chữ sạch dựng từ nhiều khung của câu (nền chuyển động bị loại).
     region có line_y / line_h (dòng phụ đề chính, từ detect_subtitle_region) thì chỉ giữ khối dòng chữ quanh dòng đó;
-    region "exact" (khung người dùng kéo) -> quét đúng khung đó, giữ mọi chữ trong khung."""
+    region "exact" (khung người dùng kéo) -> quét đúng khung đó, giữ mọi chữ trong khung.
+    windows [(giây đầu, giây cuối)] (2.1.35 – tách phụ đề theo đoạn): chỉ quét các đoạn này (mỗi đoạn 1 khúc giải mã,
+    tối đa 2–3 khúc chạy cùng lúc), giờ câu vẫn tính từ đầu video."""
     import bisect
     import queue
     import time as _time
@@ -524,9 +527,21 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
     n_total = int(total * F) + 1
     step = max(1, int(round(F / max(1.0, float(fps or 4)))))
     hw = ff.hwdec_args(src, info.vcodec) if st.get("ocr_hwdec", True) else []
-    nch = _chunks(total)
-    bounds = [(k * n_total // nch, (k + 1) * n_total // nch - k * n_total // nch if k < nch - 1 else None)
-              for k in range(nch)]
+    covered = total
+    if windows:
+        wins = sorted((max(0.0, float(a)), min(total, float(b))) for a, b in windows if float(b) - float(a) > 0.05)
+        if not wins:
+            raise ValueError("Không có đoạn nào để quét.")
+        bounds = [(int(a * F), max(1, int(round((b - a) * F)) + 1)) for a, b in wins]
+        n_total = sum(c for _, c in bounds)
+        covered = sum(b - a for a, b in wins)
+        nch = min(len(bounds), max(2, _chunks(total)))     # số luồng giải mã cùng lúc
+    else:
+        nch = _chunks(total)
+        bounds = [(k * n_total // nch, (k + 1) * n_total // nch - k * n_total // nch if k < nch - 1 else None)
+                  for k in range(nch)]
+    todo = list(bounds)
+    todo_lock = threading.Lock()
     # hàng đợi có giới hạn: đọc chữ chậm hơn giải mã (máy chỉ CPU) thì luồng giải mã chờ – mỗi câu giữ ≤ 16 khung mẫu,
     # không giới hạn thì phim dài có thể dồn hàng nghìn câu (vài GB RAM)
     q: queue.Queue = queue.Queue(maxsize=QUEUE_MAX)
@@ -550,17 +565,22 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
         with det_lock:
             return eng.detect(img, SCAN_SIDE)
 
-    def run(f0: int, count: int | None):
+    def run():
         try:
-            got, nd = _scan(src, rect, size, F, f0, count, step, hw, detect, put, stop, seen)
-            if got == 0 and hw and not stop.is_set():      # card không giải mã được file này -> giải mã CPU
-                used_hw[0] = False
-                got, nd = _scan(src, rect, size, F, f0, count, step, [], detect, put, stop, seen)
-            n_det[0] += nd
+            while not stop.is_set():
+                with todo_lock:
+                    if not todo:
+                        return
+                    f0, count = todo.pop(0)
+                got, nd = _scan(src, rect, size, F, f0, count, step, hw if used_hw[0] else [], detect, put, stop, seen)
+                if got == 0 and used_hw[0] and not stop.is_set():   # card không giải mã được file này -> giải mã CPU
+                    used_hw[0] = False
+                    got, nd = _scan(src, rect, size, F, f0, count, step, [], detect, put, stop, seen)
+                n_det[0] += nd
         except Exception as e:  # noqa: BLE001
             errs.append(e)
             stop.set()
-    threads = [threading.Thread(target=run, args=b, daemon=True, name=f"trami-ocr-scan{k}") for k, b in enumerate(bounds)]
+    threads = [threading.Thread(target=run, daemon=True, name=f"trami-ocr-scan{k}") for k in range(nch)]
     t_start = _time.time()
     for th in threads:
         th.start()
@@ -583,7 +603,7 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
             if progress and now - last > 0.5:
                 last = now
                 done = min(0.999, seen[0] / max(1, n_total))
-                progress(done, f"OCR phụ đề {int(done * total)}/{int(total)} giây · {reader.n['spans']} câu · "
+                progress(done, f"OCR phụ đề {int(done * covered)}/{int(covered)} giây · {reader.n['spans']} câu · "
                                f"{eng.label}" + (" · giải mã bằng card" if used_hw[0] else ""))
     finally:
         stop.set()                      # xong / Huỷ / lỗi: dừng mọi luồng giải mã còn chạy (đã xong thì vô hại)
@@ -617,7 +637,7 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
         anchor_y = (float(reg_d["line_y"]) * H - y) * scale
         line_h = float(reg_d["line_h"]) * H * scale
     # logo / watermark tên kênh (chữ đứng yên gần suốt video) + chữ nhỏ hơn hẳn chữ phụ đề (hoạ tiết áo đọc thành "米")
-    marks = _static_marks_spans(times, reads, total)
+    marks = _static_marks_spans(times, reads, covered)
     # chiều cao chữ phụ đề = trung vị theo THỜI GIAN hiện (1 đoạn dài nặng hơn 1 đoạn ngắn – như khi đếm từng khung)
     hw_ = [(_bbox(it[0])[3] - _bbox(it[0])[1], b - a) for (a, b), items in zip(times, reads) for it in items
            if not _is_mark(it, marks) and _CJK.search(it[1])]

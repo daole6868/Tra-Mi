@@ -119,6 +119,25 @@ def _vsep() -> QWidget:
     f.setStyleSheet(f"background: {theme.BORDER}; border: none;")
     return f
 
+class _HfwBox(QWidget):
+    """Khung chứa các thẻ có hàng nút tự xuống dòng: chiều cao tối thiểu = chiều cao cần ở bề rộng hiện tại (vách kéo
+    QSplitter không ép được nhỏ hơn -> không chồng chữ)."""
+
+    def refit(self):
+        lay = self.layout()
+        if lay is None:
+            return
+        h = lay.heightForWidth(max(200, self.width())) if lay.hasHeightForWidth() else -1
+        h = max(h, lay.minimumSize().height())
+        if h > 0 and h != self.minimumHeight():
+            self.setMinimumHeight(h)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if e.size().width() != e.oldSize().width():
+            self.refit()
+
+
 class ProjectPage(QWidget):
     def __init__(self, win):
         super().__init__()
@@ -322,10 +341,16 @@ class ProjectPage(QWidget):
         on = (not self.sk_more.isVisible()) if on is None else on
         self.sk_more.setVisible(on)
         self.sk_toggle.setText("Ẩn hồ sơ phim / tên riêng" if on else "Hồ sơ phim / tên riêng")
+        self._fit_bottom()
+
+    def _fit_bottom(self):
+        """Phần dưới bảng câu (Tách phụ đề theo đoạn + Kỹ năng dịch AI) đủ cao cho mọi hàng (không bị vách kéo ép
+        chồng chữ) – gọi khi mở / thu gọn 1 khung."""
+        w = self.subs_bottom
+        w.refit()
         sizes = self.subs_split.sizes()
         if len(sizes) == 2 and sum(sizes) > 0:
-            w = self.subs_split.widget(1)
-            card = max(w.sizeHint().height(), w.minimumSizeHint().height())
+            card = max(w.sizeHint().height(), w.minimumHeight())
             self.subs_split.setSizes([max(60, sum(sizes) - card), card])
 
     def _show_inspector(self, on: bool):
@@ -950,6 +975,7 @@ class ProjectPage(QWidget):
         self.glossary.setPlaceholderText("Mỗi dòng: 中文=Tiếng Việt   (VD: 李逍遥=Lý Tiêu Dao). AI tự điền khi dịch.")
         self.glossary.setMinimumHeight(126)
         self.glossary.textChanged.connect(lambda: self._save_edit_timer.start())
+        spc = self._span_card()
         # 1 thẻ chung: kỹ năng dịch AI + hồ sơ phim + bảng tên riêng (2 ô cạnh nhau) – kéo vách trên để đổi chiều cao
         sk = SectionCard("Kỹ năng dịch AI", "sparkle")
         self.sk_toggle = button("Ẩn hồ sơ phim / tên riêng", "chev_down", "Hiện / ẩn 2 ô Hồ sơ phim và Bảng tên riêng "
@@ -974,10 +1000,17 @@ class ProjectPage(QWidget):
         self.sk_more.setLayout(more)
         sk.add(self.sk_more)
         tv.setMinimumHeight(460)   # bảng câu luôn đủ cao (~10 câu); màn thấp: cả tab cuộn dọc
+        bottom = _HfwBox()    # dưới bảng câu: Tách phụ đề theo đoạn (2.1.35) + Kỹ năng dịch AI
+        self.subs_bottom = bottom
+        bl = QVBoxLayout(bottom)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(theme.GAP)
+        bl.addWidget(spc)
+        bl.addWidget(sk)
         split = QSplitter(Qt.Orientation.Vertical)
         split.setHandleWidth(theme.GAP)
         split.addWidget(tv)
-        split.addWidget(sk)
+        split.addWidget(bottom)
         split.setStretchFactor(0, 1)
         split.setStretchFactor(1, 0)
         split.setCollapsible(0, False)
@@ -1041,6 +1074,293 @@ class ProjectPage(QWidget):
         v.addWidget(split, 1)
         self.subs_scroll = scroll(w)
         return self.subs_scroll
+
+    # ================================================================== tách phụ đề theo đoạn (2.1.35)
+    def _span_card(self) -> QWidget:
+        """Khung "Tách phụ đề theo đoạn" (tab Phụ đề, trên thẻ Kỹ năng dịch AI): đánh dấu đầu / cuối đoạn hoặc tự tìm
+        các khoảng chưa có phụ đề dài từ … đến … giây -> danh sách đoạn (hiện cả trên timeline) -> tách lại đúng như
+        "1. Nghe & tách câu" (nghe / OCR / OCR + nghe) chỉ trong các đoạn đó, câu mới chèn đúng giờ."""
+        from .. import spans as spm
+
+        st = self.settings
+        card = SectionCard("Tách phụ đề theo đoạn", "search")
+        self.sp_toggle = button("Thu gọn", "chev_down", "Hiện / ẩn khung (ẩn để bảng câu cao hơn)", flat=True,
+                                on_click=lambda: self._span_open(None))
+        card.head.addWidget(self.sp_toggle)
+        self._spans: list[dict] = []
+        self.sp_a, self.sp_b = QLineEdit(), QLineEdit()
+        for e in (self.sp_a, self.sp_b):
+            e.setPlaceholderText("00:00.00")
+            e.setFixedWidth(96)
+            e.setToolTip("Giờ trong video: phút:giây (01:23.50) hoặc giờ:phút:giây, hoặc số giây")
+            e.returnPressed.connect(self._span_add)
+
+        def mark(which: str):
+            from .player import fmt
+
+            (self.sp_a if which == "a" else self.sp_b).setText(fmt(self.player.position()))
+        self.sp_lo, self.sp_hi = QDoubleSpinBox(), QDoubleSpinBox()
+        for w_, v_, lo_ in ((self.sp_lo, st.get("span_gap_min", 10.0), 0.5), (self.sp_hi, st.get("span_gap_max", 60.0), 0.0)):
+            w_.setRange(lo_, 36000)
+            w_.setDecimals(1)
+            w_.setSingleStep(1.0)
+            w_.setMaximumWidth(96)
+            w_.setValue(float(v_))
+            w_.valueChanged.connect(self._span_opts)
+        self.sp_hi.setSpecialValueText("không giới hạn")
+        self.sp_hi.setToolTip("0 = không giới hạn")
+        self.sp_songs = Switch(bool(st.get("span_songs", False)))
+        self.sp_songs.setToolTip("Bật: câu 🎵 (lời bài hát) coi như chưa có phụ đề – khoảng có bài hát cũng được tìm")
+        self.sp_songs.toggled.connect(self._span_opts)
+        self.sp_method = QComboBox()
+        for k, t in (("asr", "Nghe giọng nói"), ("ocr", "OCR chữ trên hình"), ("hybrid", "OCR + nghe")):
+            self.sp_method.addItem(t, k)
+        self.sp_method.setToolTip("Cách tách – y hệt '1. Nghe & tách câu' (bộ nghe, OCR, các bước nghe lại / căn mốc "
+                                  "chữ / tách câu theo Cài đặt và tab Tự động), chỉ khác là chỉ làm trong các đoạn")
+        self.sp_mode = QComboBox()
+        for k, t in spm.MODES:
+            self.sp_mode.addItem(t, k)
+        set_combo(self.sp_mode, st.get("span_mode", "keep"))
+        self.sp_mode.currentIndexChanged.connect(self._span_opts)
+        self.sp_dub = Switch(bool(st.get("span_dub", True)))
+        self.sp_dub.setToolTip("Dự án đã dịch: dịch luôn câu mới bằng công cụ đang chọn; đã lồng tiếng: đọc luôn giọng "
+                               "câu mới và xếp vào bản lồng")
+        self.sp_dub.toggled.connect(self._span_opts)
+        self.sp_table = QTableWidget(0, 6)
+        self.sp_table.setHorizontalHeaderLabels(["#", "Từ", "Đến", "Dài", "", ""])
+        self.sp_table.verticalHeader().hide()
+        self.sp_table.verticalHeader().setDefaultSectionSize(34)
+        hh = self.sp_table.horizontalHeader()
+        for c, w_ in ((0, 46), (1, 110), (2, 110), (3, 70), (5, 150)):
+            self.sp_table.setColumnWidth(c, w_)
+        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.sp_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.sp_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.sp_table.setFixedHeight(34 * 4 + 32)
+        self.sp_table.cellDoubleClicked.connect(lambda r, _c: self._span_play(r))
+        self.sp_info = label("Chưa có đoạn nào – đánh dấu đầu / cuối hoặc bấm Tìm", "muted", wrap=True)
+        self.sp_run = GradientButton("Tách các đoạn", "search")
+        self.sp_run.setToolTip("Tách phụ đề trong các đoạn chưa tách (✓ = đã tách) – Ctrl+Z hoàn tác")
+        self.sp_run.clicked.connect(self._span_run)
+        body = QWidget()
+        v = QVBoxLayout(body)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(8)
+        v.addWidget(label("Đoạn video chưa tách được phụ đề: đánh dấu đầu / cuối đoạn, hoặc để tool tìm các khoảng chưa "
+                          "có câu nào – rồi tách lại đúng như '1. Nghe & tách câu', câu mới chèn đúng giờ ở tab Phụ đề "
+                          "và Lồng tiếng. Đoạn hiện xanh trên dòng Phụ đề của timeline", "muted", wrap=True))
+        v.addWidget(flow(_rowlbl("Đánh dấu"), label("Đầu"), self.sp_a,
+                         button("", "clock", "Đầu đoạn = vị trí đang phát", flat=True, on_click=lambda: mark("a")),
+                         label("Cuối"), self.sp_b,
+                         button("", "clock", "Cuối đoạn = vị trí đang phát", flat=True, on_click=lambda: mark("b")),
+                         button("Thêm đoạn", "plus", "Thêm đoạn vừa đánh dấu. Để trống 2 ô mà đang chọn 1 khoảng trống "
+                                "trên dòng Phụ đề của timeline -> thêm đúng khoảng đó", on_click=self._span_add)))
+        v.addWidget(flow(_rowlbl("Tự tìm"), label("khoảng chưa có phụ đề dài từ", "muted"), self.sp_lo,
+                         label("đến", "muted"), self.sp_hi, label("giây", "muted"),
+                         button("Tìm", "search", "Tìm mọi khoảng không có câu phụ đề nào trong mức này (đầu / cuối video "
+                                "cũng tính) – thay các đoạn tìm lần trước, giữ đoạn bạn tự đánh dấu", on_click=self._span_find),
+                         hbox(self.sp_songs, label("tính cả đoạn 🎵", "muted"))))
+        v.addWidget(self.sp_table)
+        v.addWidget(flow(self.sp_info, button("Bỏ hết", "x", "Bỏ mọi đoạn trong danh sách", flat=True,
+                                              on_click=self._span_clear),
+                         button("Bỏ đoạn đã tách", "check", "Bỏ các đoạn ✓ khỏi danh sách", flat=True,
+                                on_click=lambda: self._span_clear(done_only=True))))
+        v.addWidget(flow(_rowlbl("Cách tách"), self.sp_method, label("Câu cũ trong đoạn", "muted"), self.sp_mode,
+                         hbox(self.sp_dub, label("dịch + lồng tiếng câu mới", "muted")), self.sp_run))
+        self.sp_body = body
+        card.add(body)
+        self._span_open(bool(st.get("span_open", True)), save=False)
+        return card
+
+    def _span_open(self, on: bool | None, save: bool = True):
+        on = (not self.sp_body.isVisible()) if on is None else on
+        self.sp_body.setVisible(on)
+        self.sp_toggle.setText("Thu gọn" if on else "Mở")
+        if save:
+            self._save_setting("span_open", on)
+            self._fit_bottom()
+
+    def _span_opts(self, *_):
+        if self.loading:
+            return
+        from ..config import save_settings
+
+        d = {"span_gap_min": round(self.sp_lo.value(), 1), "span_gap_max": round(self.sp_hi.value(), 1),
+             "span_songs": self.sp_songs.isChecked(), "span_mode": self.sp_mode.currentData(),
+             "span_dub": self.sp_dub.isChecked()}
+        save_settings(d)
+        self.settings.update(d)
+
+    def _span_sync(self):
+        """Mở dự án: bỏ danh sách đoạn của dự án trước, cách tách = cách đã lấy phụ đề của dự án (chưa có: tab Tự động)."""
+        self._spans = []
+        set_combo(self.sp_method, (self.p.data.get("sub_source") if self.p else None) or self.a_method.currentData()
+                  or "asr")
+        self._span_refresh()
+
+    def _span_refresh(self):
+        from .player import fmt
+
+        t = self.sp_table
+        t.setRowCount(0)          # bỏ hẳn các dòng cũ (cả nút Xem / ✕) rồi vẽ lại
+        t.setRowCount(len(self._spans))
+        for r, it in enumerate(self._spans):
+            a, b = float(it["a"]), float(it["b"])
+            state = {"done": "✓ đã tách", "none": "✓ không có câu mới", "run": "đang tách…"}.get(
+                it.get("state", ""), "tự tìm" if it.get("auto") else "tự đánh dấu")
+            for c, val in enumerate([str(r + 1), fmt(a), fmt(b), f"{b - a:.1f}s", state]):
+                t.setItem(r, c, QTableWidgetItem(val))
+            cw = QWidget()
+            cl = QHBoxLayout(cw)
+            cl.setContentsMargins(2, 0, 2, 0)
+            cl.setSpacing(4)
+            cl.addWidget(button("Xem", "play", "Phát đoạn này (dừng ở cuối đoạn)", flat=True,
+                                on_click=lambda _=False, k=r: self._span_play(k)))
+            cl.addWidget(button("", "x", "Bỏ đoạn này", flat=True, on_click=lambda _=False, k=r: self._span_drop(k)))
+            t.setCellWidget(r, 5, cw)
+        todo = [x for x in self._spans if x.get("state") not in ("done", "none")]
+        secs = sum(float(x["b"]) - float(x["a"]) for x in todo)
+        self.sp_info.setText(f"{len(self._spans)} đoạn · {len(todo)} chưa tách ({secs:.0f} s)" if self._spans else
+                             "Chưa có đoạn nào – đánh dấu đầu / cuối hoặc bấm Tìm")
+        self.sp_run.setText(f"Tách {len(todo)} đoạn" if todo else "Tách các đoạn")
+        self.tracks.set_spans(self._spans)
+
+    def _span_add(self):
+        from ..subtitle import parse_time
+
+        ta, tb = self.sp_a.text().strip(), self.sp_b.text().strip()
+        if not ta and not tb and self.tracks.sel_gap:      # khoảng trống đang chọn trên dòng Phụ đề của timeline
+            a, b = self.tracks.sel_gap
+        elif not ta or not tb:
+            return self.win.toast("Điền giờ đầu và cuối đoạn (hoặc bấm ⏱ khi video đang ở đúng chỗ)", "warn")
+        else:
+            a, b = parse_time(ta), parse_time(tb)
+        a, b = min(a, b), max(a, b)
+        dur = float((self.p.data.get("info") or {}).get("duration", 0) or 0) if self.p else 0.0
+        if dur:
+            a, b = max(0.0, a), min(dur, b)
+        if b - a < 0.4:
+            return self.win.toast("Đoạn phải dài ít nhất 0,4 giây (cuối đoạn sau đầu đoạn)", "warn")
+        over = [x for x in self._spans if min(b, x["b"]) - max(a, x["a"]) > 0]
+        if over:   # chồng đoạn đã có -> gộp thành 1 đoạn (chưa tách)
+            a, b = min([a] + [x["a"] for x in over]), max([b] + [x["b"] for x in over])
+            self._spans = [x for x in self._spans if x not in over]
+        self._spans.append({"a": round(a, 3), "b": round(b, 3), "state": ""})
+        self._spans.sort(key=lambda x: x["a"])
+        self.sp_a.clear()
+        self.sp_b.clear()
+        self._span_refresh()
+
+    def _span_find(self):
+        if not self.p:
+            return
+        self.flush()
+        lo, hi = self.sp_lo.value(), self.sp_hi.value()
+        if hi and hi < lo:
+            return self.win.toast("Mức 'đến' phải lớn hơn mức 'từ' (0 = không giới hạn)", "warn")
+        found = pipeline.span_gaps(self.p, lo, hi, self.sp_songs.isChecked()) if self.p.segments or \
+            (self.p.data.get("info") or {}).get("duration") else []
+        keep = [x for x in self._spans if not x.get("auto")]
+        self._spans = sorted(keep + [{"a": a, "b": b, "state": "", "auto": True} for a, b in found
+                                     if not any(min(b, k["b"]) - max(a, k["a"]) > 0 for k in keep)],
+                             key=lambda x: x["a"])
+        self._span_refresh()
+        rng = f"{lo:g}–{hi:g} giây" if hi else f"từ {lo:g} giây"
+        if not found:
+            return self.win.toast(f"Không có khoảng chưa có phụ đề nào dài {rng}", "ok")
+        self.win.toast(f"Tìm thấy {len(found)} khoảng chưa có phụ đề dài {rng} ({sum(b - a for a, b in found):.0f} s) "
+                       "– xem vùng xanh trên timeline, bấm 'Xem' để nghe thử, rồi 'Tách'", "ok")
+
+    def _span_drop(self, k: int):
+        if 0 <= k < len(self._spans):
+            del self._spans[k]
+            self._span_refresh()
+
+    def _span_clear(self, done_only: bool = False):
+        self._spans = [x for x in self._spans if done_only and x.get("state") not in ("done", "none")]
+        self._span_refresh()
+
+    def _span_play(self, k: int):
+        if 0 <= k < len(self._spans):
+            a, b = float(self._spans[k]["a"]), float(self._spans[k]["b"])
+            self.tracks.scroll_to(max(0.0, a - 1.0))
+            self.player.seek(a)
+            self._stop_at = b
+            if not self.player.playing():
+                self.player.toggle()
+
+    def _span_run(self):
+        """Tách phụ đề trong các đoạn chưa tách (1 việc nền): tách -> (dự án đã dịch) dịch câu mới -> (đã lồng) đọc giọng
+        câu mới / xếp lại bản lồng. Câu mới được tích sẵn."""
+        if not self.p or not self.p.data.get("source"):
+            return self.win.toast("Dự án chưa có video", "err")
+        if self._live_draft:
+            return self.win.toast("Đang dịch tự động – chờ việc chạy xong rồi tách theo đoạn", "warn")
+        todo = [x for x in self._spans if x.get("state") not in ("done", "none")]
+        if not todo:
+            return self.win.toast("Chưa có đoạn nào cần tách – đánh dấu đầu / cuối đoạn hoặc bấm Tìm", "warn")
+        self.flush()
+        o = self._auto_opts()
+        method = self.sp_method.currentData() or "asr"
+        mode = self.sp_mode.currentData() or "keep"
+        if mode == "replace" and QMessageBox.question(
+                self, "Thay câu cũ", f"Các câu đang có trong {len(todo)} đoạn sẽ bị thay bằng câu tách mới (giọng lồng "
+                "của chúng bỏ khỏi bản lồng). Ctrl+Z để hoàn tác. Tiếp tục?") != QMessageBox.StandardButton.Yes:
+            return
+        st = dict(load_settings())
+        st.update({"asr_engine": o["asr_engine"], "diarize": o["diarize"], "sep_before_asr": o["separate"],
+                   "asr_dual": self.a_dual.isChecked()})
+        spans = [(float(x["a"]), float(x["b"])) for x in todo]
+        follow = self.sp_dub.isChecked()
+        eng, sty = self.a_engine.currentData(), self.a_style.currentData()
+        tts_eng, rate = self.d_engine.currentData(), self.d_rate.currentData()
+        st["dub_skip_songs"] = self.d_skipsong.isChecked()
+        translated = any(x.trans.strip() for x in self.model.segs)
+        language = self.p.data.get("language") or o["language"]
+
+        def fn(j, p):
+            r = pipeline.recognize_spans(p, spans, method, language, st, lambda x, m="": j.update(0.75 * x, m),
+                                         j.cancelled, mode, o["asr_engine"], o["ocr_fps"], o["denoise"])
+            from .. import spans as spm
+
+            rows = r["rows"]
+            msg = "Tách theo đoạn: " + spm.note(r)
+            if r.get("listen"):
+                msg += " · " + r["listen"]
+            if follow and rows and translated:
+                if eng == pipeline.NO_TRANSLATE:
+                    msg += " · chọn công cụ dịch rồi bấm 'Dịch câu đã tích'"
+                else:
+                    pipeline.translate(p, eng, sty, False, None, lambda x, m="": j.update(0.75 + 0.1 * x, m),
+                                       j.cancelled, rows=rows, split=False)
+                    left = sum(1 for k in rows if not p.segments[k].trans.strip())
+                    msg += f" · đã dịch {len(rows) - left} câu mới" + (f" (⚠ {left} câu chưa dịch được)" if left else "")
+            voiced = [k for k in rows if p.segments[k].trans.strip()]
+            if pipeline.has_dub(p) and follow and voiced:
+                pipeline.redub(p, voiced, rate, st, lambda x, m="": j.update(0.85 + 0.15 * x, m), j.cancelled, tts_eng)
+                msg += f" · đã đọc giọng {len(voiced)} câu mới vào bản lồng"
+            elif pipeline.has_dub(p) and r.get("relayout"):   # câu cũ bị thay: bỏ giọng của chúng khỏi bản lồng
+                pipeline.relayout(p, st, lambda x, m="": j.update(0.85 + 0.15 * x, m), j.cancelled)
+                msg += " · đã xếp lại bản lồng"
+            elif rows and not translated:
+                msg += " · câu mới đã tích sẵn"
+            for w in r.get("warn") or []:
+                msg += "  ⚠ " + w
+            if not r["found"]:
+                msg = ("Tách theo đoạn: không tìm thấy câu nào trong " + f"{r['spans']} đoạn" +
+                       (" – thử cách tách khác (Nghe giọng nói / OCR)" if method != "hybrid" else "") +
+                       "".join("  ⚠ " + w for w in r.get("warn") or []))
+            return {"message": msg, "pick": rows, "span_found": r["found"]}
+        job = self.submit("dual", "Tách phụ đề theo đoạn", fn)
+        if job is not None:
+            for x in todo:
+                x["state"] = "run"
+
+            def done(res: dict):
+                for x in todo:
+                    x["state"] = "done" if res.get("pick") else "none"
+                self._span_refresh()
+            self._after_job[job.id] = done
 
     def _subs_tools(self, page: int | None = None, open_: bool | None = None, save: bool = True):
         """Khung Công cụ ở tab Phụ đề: mỗi lúc hiện 1 trang (Sửa câu / Nối – tách câu / Lời hát / Nhập – xuất SRT);
@@ -2272,6 +2592,7 @@ class ProjectPage(QWidget):
                 self._load_media()
                 self._sel_row = -1
                 self._word_unfind(quiet=True)       # dự án khác: bỏ lọc từ của dự án trước
+                self._span_sync()                   # … và danh sách đoạn chờ tách theo đoạn
                 self.tracks.set_thumbs(None, 0, 0)
                 self.tracks.set_wave(None, 0.05)
             self.model.set_segments(p.segments)
@@ -2983,6 +3304,13 @@ class ProjectPage(QWidget):
             cb = self._after_job.pop(j["id"], None)
             if cb and j.get("status") == "done":
                 cb(j.get("result") if isinstance(j.get("result"), dict) else {})
+            if any(x.get("state") == "run" for x in self._spans) and not any(
+                    x["project_id"] == self.p.id and x["kind"] == "dual" and x["status"] in ("queued", "running")
+                    for x in manager.list()):
+                for x in self._spans:      # việc tách theo đoạn lỗi / bị huỷ -> đoạn về "chưa tách"
+                    if x.get("state") == "run":
+                        x["state"] = ""
+                self._span_refresh()
 
     def _auto_opts(self) -> dict:
         which = self.a_which.currentData()
@@ -3989,6 +4317,15 @@ class ProjectPage(QWidget):
         # ---- phụ đề
         if name == "sub_add":
             return self._sub_add(tl.sel_gap if tl.sel_track == "subs" else None)
+        if name == "sub_span":   # khoảng trống đang chọn -> danh sách Tách phụ đề theo đoạn (2.1.35)
+            if not (tl.sel_track == "subs" and tl.sel_gap):
+                return self.win.toast("Bấm vào chỗ trống trên dòng Phụ đề (giữa 2 câu) trước", "warn")
+            self.sp_a.clear()
+            self.sp_b.clear()
+            self._span_add()
+            self._span_open(True)
+            self.tabs.set_current(1)
+            return self.win.toast("Đã thêm đoạn vào 'Tách phụ đề theo đoạn' (tab Phụ đề) – bấm 'Tách' khi đủ đoạn", "ok")
         if name in ("insert", "split", "merge", "delete", "sub_split", "sub_merge", "sub_delete"):
             return self._sub_op(name.replace("sub_", ""), rows)
         if name == "sub_translate":

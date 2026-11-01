@@ -744,6 +744,25 @@ class _Canvas(QWidget):
             self._paint_clip(p, rd, a, b, row, fit, ghost=True)
         # phụ đề: khối từng câu
         rs = self.track_rect("subs")
+        # đoạn chờ tách phụ đề (tab Phụ đề → Tách phụ đề theo đoạn, 2.1.35): vùng xanh nét đứt dưới các khối câu
+        for k, it in enumerate(tl.spans):
+            a, b = float(it["a"]), float(it["b"])
+            if b < t_lo or a > t_hi:
+                continue
+            rr = QRectF(self.x(a), rs.top() + 1, max(2.0, (b - a) * tl.pps), rs.height() - 2)
+            done = it.get("state") == "done"
+            col = QColor("#34D399") if done else QColor("#38BDF8")
+            fill = QColor(col)
+            fill.setAlpha(45 if done else 60)
+            p.fillRect(rr, fill)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(col, 1.4, Qt.PenStyle.DashLine))
+            p.drawRect(rr)
+            if rr.width() > 40:
+                p.setFont(theme.font(7.6, QFont.Weight.DemiBold))
+                p.setPen(QColor("#FFFFFF"))
+                p.drawText(rr.adjusted(4, 1, -2, 0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                           ("✓ " if done else "") + f"#{k + 1}")
         p.setFont(theme.font(8.4, QFont.Weight.Medium))
         sghost = self._sghost or {}
         for i, s in enumerate(tl.segs):
@@ -999,6 +1018,8 @@ class TrackTimeline(QWidget):
                ("v_split", "split", "Tách video", "Tách video + tiếng gốc tại đầu phát thành 2 đoạn"),
                ("v_insert", "film", "Chèn video…", "Chèn 1 video khác vào tại đầu phát (khi xuất)")],
         "subs": [("sub_add", "plus", "Thêm phụ đề", "Thêm câu vào khoảng trống đang chọn (hoặc tại đầu phát)"),
+                 ("sub_span", "search", "Tách đoạn này", "Thêm khoảng trống đang chọn vào danh sách 'Tách phụ đề theo "
+                  "đoạn' (tab Phụ đề) để tách lại phụ đề trong đó"),
                  ("sub_split", "split", "Tách", "Tách câu tại đầu phát"),
                  ("sub_merge", "merge", "Gộp", "Gộp các câu đang chọn (1 câu: gộp với câu sau)"),
                  ("sub_delete", "trash", "Xoá", "Xoá các câu đang chọn (phím Delete)"),
@@ -1066,6 +1087,7 @@ class TrackTimeline(QWidget):
         self.layers_collapsed = False
         self.sel_layer = ""
         self.pending: list[dict] = []         # đoạn chờ cắt (rút khoảng lặng / bài hát)
+        self.spans: list[dict] = []           # đoạn chờ tách phụ đề {a, b, state} (2.1.35)
         self.thumbs: QPixmap | None = None
         self.thumb_step = 0.0
         self.thumb_count = 0
@@ -1156,6 +1178,10 @@ class TrackTimeline(QWidget):
 
     def set_pending(self, items: list):
         self.pending = list(items or [])
+        self.canvas.update()
+
+    def set_spans(self, items: list):
+        self.spans = list(items or [])
         self.canvas.update()
 
     def set_thumbs(self, pm: QPixmap | None, step: float, count: int):

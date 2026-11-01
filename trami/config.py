@@ -94,6 +94,11 @@ DEFAULT_SETTINGS: dict = {
     "ocr_clean": True,                # đọc trên ảnh chữ sạch dựng từ nhiều khung (nền chuyển động bị loại)
     "sub_filter_words": "",           # 2.1.33: lọc từ (tab Phụ đề → Công cụ → Sửa câu): cụm cần xoá ở mọi câu ("@纵横")
     "sub_filter_auto": False,         # ... tự lọc mỗi lần lấy phụ đề mới (Nghe & tách câu / OCR / Tự động)
+    # tách phụ đề theo đoạn (2.1.35, tab Phụ đề): tìm khoảng chưa có phụ đề dài từ … đến … giây (0 = không giới hạn)
+    "span_gap_min": 10.0, "span_gap_max": 60.0, "span_songs": False,
+    "span_mode": "keep",              # keep: giữ câu cũ, chỉ thêm câu còn thiếu | replace: thay câu cũ trong đoạn
+    "span_dub": True,                 # dự án đã dịch / lồng tiếng: dịch + lồng luôn câu mới
+    "span_open": True,                # khung mở
     "ocr_timing": "sub",              # 2.1.32: giờ câu khi lấy phụ đề bằng OCR: sub = đúng giờ hiện / tắt chữ trên hình |
                                       # mix = kết hợp: câu theo phụ đề, mốc từng chữ + chỗ ngừng giữa câu theo giọng nói
     "split_style": "dub",            # kiểu tách câu: dub = câu trọn ý (hợp lồng tiếng) / short = câu ngắn

@@ -546,6 +546,35 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   xong thì bỏ lọc) + công tắc `s_wf_auto` "tự xoá khi lấy phụ đề mới" (Cài đặt `sub_filter_auto`, mặc định tắt) ->
   `recognize` bước 2j (sau Xoá câu không chắc, mọi nguồn phụ đề) `p.data["word_filtered"]` -> `listen_note`.
   `C.WORD_FILTER_HELP`.
+- Tách phụ đề theo đoạn (2.1.35, `trami/spans.py` + `pipeline.recognize_spans`): đoạn video chưa tách được phụ đề ->
+  tách lại Y HỆT "1. Nghe & tách câu" chỉ trong các đoạn. `spans.clean` (kẹp, bỏ < `MIN_SPAN` 0,4 s, gộp đoạn chồng),
+  `padded` (nới `PAD` 1,5 s mỗi bên để câu vắt qua mép đoạn nghe / đọc trọn), `gaps(segs, total, lo, hi, skip_songs)`
+  (khoảng không câu nào phủ – đầu / giữa / cuối video – dài lo..hi, hi 0 = không giới hạn; `pipeline.span_gaps`),
+  `inside` (điểm giữa câu trong đoạn), `merge(existing, new, spans, mode)` keep: câu mới trùng ≥ `SAME` 50 % thời lượng
+  câu cũ = đã có -> bỏ, chạm nhẹ -> xén mép (còn ≥ `MIN_LINE` 0,2 s, bỏ `ct` khi lệch) | replace: bỏ câu cũ trong đoạn;
+  câu cũ giữ nguyên đối tượng (bản dịch, giọng); `nearest_speaker`, `note`. `recognize_spans`: `_SpanProject` (bản sao
+  dữ liệu, cùng thư mục work, `save` không làm gì) -> `recognize(settings["_spans"] = đoạn đã nới, diarize tắt)`:
+  `_listen_audio` thấy `_spans` -> `_span_wav` (work/span16k.wav: ngoài đoạn = lặng, giờ giữ nguyên -> mọi bước nghe /
+  nghe lại đoạn sót / căn mốc / tách câu chỉ ra câu trong đoạn; cả hybrid / giờ kết hợp OCR); OCR: dùng lại đúng
+  `p.data["ocr_region"]` (khung kéo `ocr_box` vẫn ưu tiên), `extract_hardsubs(windows=)` (mỗi đoạn 1 khúc giải mã, luồng
+  lấy khúc từ hàng đợi `todo`, ≤ max(2, `_chunks`) luồng; watermark / tiến độ theo tổng thời lượng đoạn `covered`),
+  khung chữ ra `ocr_boxes_span.json` -> `_merge_ocr_boxes` gộp vào ocr_boxes.json; `clear_progress` không chạy (chỉ xoá
+  file tiến độ mới tạo). Rồi `p.reload()` (bản mới nhất trên đĩa) -> người nói `_span_speakers` (ECAPA so giọng mẫu ≤ 12
+  câu dài nhất / người nói đã có trên `asr16k_vocals.wav` đọc từng đoạn `_Wav16`; không được -> câu gần nhất) -> `merge`
+  -> `extra["from_span"]`, `p.data["span_listen"]`; bản tách giọng mới (dự án chưa tách) chép sang dự án. Trả rows (câu
+  mới), warn, listen (`listen_note` / `ocr_note` của bản sao), relayout (thay câu cũ khi đã lồng).
+  GUI tab Phụ đề: thẻ "Tách phụ đề theo đoạn" (`_span_card`, trên thẻ Kỹ năng dịch AI, cả 2 trong `_HfwBox` – chiều cao
+  tối thiểu theo bề rộng nên vách kéo không ép chồng chữ, `_fit_bottom`; "Thu gọn" Cài đặt `span_open`): hàng Đánh dấu
+  (`sp_a` / `sp_b` "phút:giây", ⏱ = giờ đang phát, "Thêm đoạn" – để trống 2 ô mà đang chọn khoảng trống trên dòng Phụ đề
+  timeline -> thêm khoảng đó; chồng đoạn có sẵn -> gộp), hàng Tự tìm (`sp_lo` / `sp_hi` Cài đặt `span_gap_min` 10 /
+  `span_gap_max` 60, `sp_songs` `span_songs`; tìm lại thay đoạn tự tìm, giữ đoạn tự đánh dấu), bảng `sp_table` (#, Từ,
+  Đến, Dài, trạng thái tự tìm / tự đánh dấu / đang tách… / ✓, Xem = phát tới cuối đoạn, ✕; bấm đúp = Xem), Bỏ hết / Bỏ
+  đoạn đã tách, hàng Cách tách (`sp_method` asr / ocr / hybrid – mở dự án theo `sub_source`, `_span_sync`; `sp_mode`
+  `span_mode`; `sp_dub` `span_dub` "dịch + lồng tiếng câu mới") + nút `sp_run` "Tách N đoạn" -> `_span_run` (việc "dual":
+  `recognize_spans` theo ô tab Tự động (bộ nghe, tách giọng, OCR mức quét, lọc nhiễu) -> dự án đã dịch: `translate(rows=,
+  split=False)` -> đã lồng: `redub` câu mới / `relayout` khi thay câu cũ; "pick" tích sẵn câu mới; `_after_job` đánh ✓,
+  lỗi / huỷ -> đoạn về chưa tách). Timeline: `TrackTimeline.set_spans` vẽ đoạn xanh nét đứt "#n" (✓ xanh lá) dưới khối
+  câu dòng Phụ đề; công cụ dòng Phụ đề "Tách đoạn này" (`sub_span`: khoảng trống đang chọn -> danh sách, mở tab Phụ đề).
 - Dấu câu bản dịch (2.1.11): `translate.punct_fix` = `fix_commas` (bỏ dấu phẩy ngay sau `COMMA_GLUE` lượng từ / "của" khi
   chữ sau viết thường, trừ dãy số; dấu phẩy giữa các tiếng của tên trong bảng thuật ngữ `Translator.names`) + `end_punct`
   (thiếu dấu câu cuối -> theo câu gốc: ？/吗/么 -> ?, ！ -> !, … , dấu phẩy -> ",", còn lại "."; Nhật 。？！、, Thái không
@@ -614,7 +643,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (274 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
+- `tests/test_core.py` – `python -m pytest -q tests` (279 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2397,7 +2426,18 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   chụp giao diện: "*" không giới hạn sẽ coi "@纵横排队一个个的进来" là câu chỉ có logo (xoá cả câu) -> "*" ≤ 8 chữ + phải chạm
   hết câu / dấu câu. Thử: lọc 3/5 câu, sửa ô lọc lại, Bỏ lọc, xoá @* bỏ đúng 3 câu (1 câu chỉ có logo xoá hẳn), mở lại bỏ lọc.
 
+- 2.1.35: "một số đoạn trong video không tách được phụ đề – thêm 'Tách phụ đề theo đoạn' (trên Kỹ năng dịch): đánh dấu đầu /
+  cuối, hoặc chọn độ dài 10–60 s để tool tự tìm khoảng chưa có phụ đề, hiện trên timeline, tách bằng nghe / OCR y hệt Nghe &
+  tách câu chỉ chia đoạn nhỏ, chèn câu đúng giờ ở Phụ đề + Lồng tiếng" -> xem Cấu trúc "Tách phụ đề theo đoạn". Thử: OCR
+  thật quét 2 đoạn của video vẽ chữ (giờ câu ±0,08 s, câu ngoài đoạn không đọc), bộ nghe giả nhận wav chỉ còn tiếng trong
+  đoạn đã nới, gộp giữ / thay câu cũ, khung chữ OCR gộp, người nói theo câu gần nhất, giao diện offscreen (tìm khoảng
+  trống, gộp đoạn chồng, việc nền chèn câu + tích sẵn + ✓, Ctrl+Z, "Tách đoạn này" trên timeline). Lỗi tìm ra khi chụp
+  giao diện: vách kéo ép khung mới chồng chữ (-> `_HfwBox`), nút Xem / ✕ cũ còn sót khi vẽ lại bảng.
+
 ## Vấn đề đang mở
+- 2.1.35: chờ người dùng thử tab Phụ đề → "Tách phụ đề theo đoạn": Tự tìm 10–60 s (hoặc đánh dấu đầu / cuối) → Xem từng
+  đoạn → Tách: câu mới có đúng giờ / đúng chữ không, người nói có đúng không (so giọng với người nói đã có), thời gian tách
+  bao lâu so với tách cả phim; đoạn ✓ "không có câu mới" nhiều -> thử đổi Cách tách (OCR ↔ Nghe giọng nói).
 - 2.1.34: chờ người dùng thử tab Phụ đề → Công cụ → Sửa câu → ô "Lọc từ" điền @ (hoặc @*) → Lọc: bảng chỉ còn câu dính
   logo, xem đủ các kiểu OCR đọc; "Xoá chữ này" -> xem ví dụ trong hộp hỏi rồi Có. Logo dính đầu câu -> @?? (số ? = số chữ
   logo) hoặc điền từng kiểu. Muốn mọi video sau tự xoá thì bật "tự xoá khi lấy phụ đề mới".

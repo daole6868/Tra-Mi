@@ -1580,7 +1580,42 @@ def _listen_audio(p: Project, settings: dict, denoise: bool = False, progress: P
             "highpass=f=80,lowpass=f=8000,afftdn=nf=-25,dynaudnorm=f=200" if denoise else "")
         args += ["-c:a", "pcm_s16le", str(wav)]
         ff.run(args, info_dur, _sub(progress, 0.3, 0.33), cancel, "Đang chuẩn bị âm thanh")
+    if settings.get("_spans"):   # tách phụ đề theo đoạn (2.1.35): ngoài các đoạn là lặng -> bộ nghe chỉ nghe các đoạn đó
+        wav = _span_wav(p, wav, settings["_spans"])
     return audio_in, wav
+
+
+SPAN_WAV = "span16k.wav"
+
+
+def _span_wav(p: Project, wav: Path, spans) -> Path:
+    """Bản 16 kHz chỉ giữ tiếng trong các đoạn (ngoài đoạn = lặng, giờ giữ nguyên) – mọi bước nghe / căn / nghe lại
+    đoạn sót của "1. Nghe & tách câu" chạy y hệt nhưng chỉ ra câu trong đoạn."""
+    import wave
+
+    out = p.work / SPAN_WAV
+    with wave.open(str(wav), "rb") as r:
+        sr, ch, sw, n = r.getframerate(), r.getnchannels(), r.getsampwidth(), r.getnframes()
+        keep = [(max(0, int(a * sr)), min(n, int(b * sr) + 1)) for a, b in spans]
+        with wave.open(str(out), "wb") as w:
+            w.setnchannels(ch)
+            w.setsampwidth(sw)
+            w.setframerate(sr)
+            pos, block = 0, sr * 30
+            while pos < n:
+                k = min(block, n - pos)
+                buf = bytearray(r.readframes(k))
+                got = len(buf) // (ch * sw)
+                if not got:
+                    break
+                mask = bytearray(len(buf))    # 0 = lặng
+                for a, b in keep:
+                    lo, hi = max(a, pos), min(b, pos + got)
+                    if hi > lo:
+                        mask[(lo - pos) * ch * sw:(hi - pos) * ch * sw] = buf[(lo - pos) * ch * sw:(hi - pos) * ch * sw]
+                w.writeframes(bytes(mask))
+                pos += got
+    return out
 
 
 def _orig_wav16(p: Project, cancel=None) -> Path:
@@ -1638,19 +1673,23 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         from .ocr import detect_subtitle_region, expand_region, extract_hardsubs
 
         box = ocr_box(p) or region
+        spans = settings.get("_spans")
+        prev = p.data.get("ocr_region") if spans and not region else None
         if box and box.get("exact"):   # 2.1.31: khung người dùng kéo trên video (tab Tự động) -> quét ĐÚNG khung đó
             scan = {k: float(box[k]) for k in ("x", "y", "w", "h")}
             scan.update({"found": True, "exact": True})
+        elif prev and all(k in prev for k in ("x", "y", "w", "h")):
+            scan = dict(prev)   # tách theo đoạn (2.1.35): quét đúng vùng của lần lấy phụ đề trước
         elif box:   # vùng khoanh ở tab Xoá phụ đề (vừa khít 1 dòng) -> mở rộng: hết ngang, thêm dòng trên / dưới
             scan = expand_region(box)
         else:
             if progress:
                 progress(0.0, "Đang dò vùng phụ đề (kỹ ở 5 giây đầu và 5 giây cuối)…")
             scan = detect_subtitle_region(src, _sub(opr, 0.0, 0.05), settings=settings)
-        boxes = p.work / "ocr_boxes.json"
+        boxes = p.work / ("ocr_boxes_span.json" if spans else "ocr_boxes.json")
         stats: dict = {}
         segs = extract_hardsubs(src, scan, fps=float(ocr_fps or 4), progress=_sub(opr, 0.05, 0.85),
-                                cancel=cancel, boxes_out=boxes, stats=stats, settings=settings)
+                                cancel=cancel, boxes_out=boxes, stats=stats, settings=settings, windows=spans)
         if on_draft and segs:
             on_draft([Segment(x.start, x.end, x.text) for x in segs])
         p.data["ocr_region"] = scan
@@ -2038,9 +2077,202 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
             log_error("Bám mép câu theo giọng")
     from .asr_qwen import clear_progress
 
-    clear_progress(p.work)   # nghe xong trọn vẹn -> bỏ tiến độ nghe dở (lần sau nghe lại từ đầu)
+    if not settings.get("_spans"):   # tách theo đoạn: không đụng tiến độ nghe dở của lần nghe cả phim
+        clear_progress(p.work)   # nghe xong trọn vẹn -> bỏ tiến độ nghe dở (lần sau nghe lại từ đầu)
     _drop_orig_wav16(p)
     return len(p.segments)
+
+
+class _SpanProject(Project):
+    """Bản sao dự án chỉ để chạy "1. Nghe & tách câu" trên vài đoạn (2.1.35): cùng thư mục làm việc (dùng lại bản tách
+    giọng, wav 16 kHz, mô hình…) nhưng KHÔNG ghi project.json – phụ đề thật chỉ đổi ở bước gộp (`recognize_spans`)."""
+
+    def __init__(self, p: Project):  # noqa: D107 – không gọi Project.__init__ (không đọc lại file)
+        import json
+
+        self.id, self.dir, self.file = p.id, p.dir, p.file
+        data = {k: v for k, v in p.data.items() if k not in ("segments", "cache")}
+        self.data = json.loads(json.dumps(data))
+        self.data["segments"] = []
+
+    def save(self):
+        pass
+
+    def reload(self):
+        return self
+
+
+class _Wav16:
+    """Đọc từng đoạn giọng 16 kHz (int16 trên đĩa) thành float như mảng – không nạp cả phim vào RAM."""
+
+    def __init__(self, mm):
+        self.mm = mm
+
+    def __len__(self):
+        return len(self.mm)
+
+    def __getitem__(self, k):
+        import numpy as np
+
+        return np.asarray(self.mm[k], np.float32) / 32768.0
+
+
+def _span_speakers(p: Project, new: list, old: list, settings: dict, cancel=None) -> str:
+    """Người nói cho câu tách theo đoạn: so giọng (ECAPA) với giọng mẫu từng người nói đã có của dự án (≤ 12 câu dài
+    nhất / người) -> người giống nhất; câu ngắn / không đo được -> người nói của câu gần nhất. Trả "voice" | "near" | ""."""
+    from . import spans as spm
+
+    known = [s for s in old if s.speaker]
+    if not new or not known:
+        return ""
+    if int(settings.get("diarize_speakers", 0) or 0) == 1 or len({s.speaker for s in known}) == 1:
+        for s in new:
+            s.speaker = known[0].speaker
+        return "near"
+    from . import diarize as dz
+
+    wav = p.work / "asr16k_vocals.wav"
+    if dz.available() and wav.exists():
+        try:
+            import numpy as np
+
+            from .songs import read_wav16
+
+            audio = _Wav16(read_wav16(wav))
+            by: dict[str, list] = {}
+            for s in sorted(known, key=lambda x: -(x.end - x.start)):
+                if len(by.setdefault(s.speaker, [])) < 12:
+                    by[s.speaker].append(s)
+            ref = [s for v in by.values() for s in v]
+            idx, embs = dz.embed_segments(audio, ref, None, cancel)
+            cents: dict[str, list] = {}
+            for i, e in zip(idx, embs):
+                cents.setdefault(ref[i].speaker, []).append(e)
+            if cents:
+                names = list(cents)
+                c = np.vstack([np.mean(cents[k], axis=0) for k in names])
+                c /= np.maximum(np.linalg.norm(c, axis=1, keepdims=True), 1e-9)
+                nidx, nembs = dz.embed_segments(audio, new, None, cancel)
+                for i, e in zip(nidx, nembs):
+                    new[i].speaker = names[int(np.argmax(c @ e))]
+                spm.nearest_speaker(new, known + [s for s in new if s.speaker])
+                return "voice"
+        except ff.Cancelled:
+            raise
+        except Exception:  # noqa: BLE001 – không có ECAPA / lỗi card: theo câu gần nhất
+            log_error("Người nói của câu tách theo đoạn")
+    spm.nearest_speaker(new, known)
+    return "near"
+
+
+def _merge_ocr_boxes(p: Project, spans, mode: str) -> None:
+    """Khung chữ OCR của các đoạn vừa quét -> gộp vào ocr_boxes.json (xoá phụ đề cũ "Dùng khung chữ OCR")."""
+    import json
+
+    part, main = p.work / "ocr_boxes_span.json", p.work / "ocr_boxes.json"
+    try:
+        if not part.exists():
+            return
+        new = json.loads(part.read_text("utf-8"))
+        old = json.loads(main.read_text("utf-8")) if main.exists() else None
+        if not old or "spans" not in old:
+            if old is None:
+                part.replace(main)
+            return
+        inside = lambda e: any(a <= (e["a"] + e["b"]) / 2 <= b for a, b in spans)  # noqa: E731
+        keep = [e for e in old["spans"] if not (mode == "replace" and inside(e))]
+        add = [e for e in new.get("spans", []) if inside(e) and not any(
+            min(e["b"], o["b"]) - max(e["a"], o["a"]) > 0.5 * (e["b"] - e["a"]) for o in keep)]
+        old["spans"] = sorted(keep + add, key=lambda e: e["a"])
+        main.write_text(json.dumps(old), "utf-8")
+    except (OSError, ValueError, KeyError):
+        log_error("Gộp khung chữ OCR tách theo đoạn")
+    finally:
+        try:
+            part.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def span_gaps(p: Project, lo: float = 10.0, hi: float = 60.0, skip_songs: bool = False) -> list[tuple[float, float]]:
+    """Các khoảng chưa có phụ đề dài từ `lo` tới `hi` giây (tab Phụ đề → Tách phụ đề theo đoạn)."""
+    from . import spans as spm
+
+    total = float(p.data.get("info", {}).get("duration", 0) or 0)
+    return spm.gaps(p.segments, total, lo, hi, skip_songs)
+
+
+def recognize_spans(p: Project, spans, method: str | None = None, language: str | None = None,
+                    settings: dict | None = None, progress: Prog | None = None, cancel=None, mode: str = "keep",
+                    engine: str | None = None, ocr_fps: float | None = None, denoise: bool = False) -> dict:
+    """Tách phụ đề lại CHỈ trong các đoạn (2.1.35): chạy đúng "1. Nghe & tách câu" (nghe giọng / OCR / OCR + nghe với mọi
+    bước nghe lại, căn mốc chữ, tách câu, bám mép…) trên bản sao dự án – bộ nghe chỉ nghe tiếng trong đoạn (ngoài đoạn =
+    lặng), OCR chỉ quét các đoạn – rồi gộp câu mới vào phụ đề đang có đúng giờ (`spans.merge`, mode keep | replace).
+    Câu mới: `extra["from_span"]`, người nói theo giọng (`_span_speakers`). Trả thống kê + "rows" (chỉ số câu mới)."""
+    from . import spans as spm
+
+    settings = dict(settings or load_settings())
+    total = float(p.data.get("info", {}).get("duration", 0) or 0)
+    sp = spm.clean(spans, total)
+    if not sp:
+        raise ValueError("Chưa có đoạn nào để tách (mỗi đoạn phải dài ít nhất 0,4 giây).")
+    if not p.data.get("source") or source_missing(p):
+        raise ValueError("Không tìm thấy video gốc – bấm 'Tìm lại video gốc…' trên thanh trên cùng.")
+    method = method or p.data.get("sub_source") or "asr"
+    if method not in ("asr", "ocr", "hybrid"):
+        method = "asr"
+    language = language or p.data.get("language") or settings.get("language", "zh")
+    want_spk = bool(settings.get("diarize", True))
+    st = dict(settings)
+    st["_spans"] = spm.padded(sp, total)
+    st["diarize"] = False             # người nói lấy theo giọng mẫu người nói đã có của dự án (không đánh số lại S1…)
+    sh = _SpanProject(p)
+    before = set(p.work.glob("asr_progress*"))
+    t0 = time.time()
+    try:
+        recognize(sh, method, language, None, float(ocr_fps or settings.get("ocr_fps", 4) or 4), st,
+                  _sub(progress, 0.0, 0.92), cancel, denoise, engine)
+    finally:
+        for f in set(p.work.glob("asr_progress*")) - before:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+        try:
+            (p.work / SPAN_WAV).unlink(missing_ok=True)
+        except OSError:
+            pass
+    new = [s for s in sh.segments if spm.inside(s, sp)]
+    if progress:
+        progress(0.94, f"Đang gộp {len(new)} câu vào phụ đề…")
+    p.reload()      # bản mới nhất trên đĩa (người dùng có thể đã sửa câu khác trong lúc tách)
+    if stems(sh) and not stems(p):   # dự án chưa tách giọng lần nào: lần tách này tách cả phim -> dùng luôn
+        p.data["stems"] = sh.data["stems"]
+    old = p.segments
+    spk = _span_speakers(p, new, old, settings, cancel) if want_spk else ""
+    for s in new:
+        s.extra.pop("chunked", None)
+        s.extra["from_span"] = True
+    res = spm.merge(old, new, sp, mode)
+    if method in ("ocr", "hybrid"):
+        _merge_ocr_boxes(p, sp, mode)
+    else:
+        (p.work / "ocr_boxes_span.json").unlink(missing_ok=True)
+    p.segments = res["segs"]
+    rows = [i for i, s in enumerate(res["segs"]) if any(s is a for a in res["added"])]
+    stats = {"spans": len(sp), "secs": round(sum(b - a for a, b in sp), 1), "found": len(new),
+             "added": len(res["added"]), "removed": res["removed"], "skipped": res["skipped"], "method": method,
+             "mode": mode, "speaker": spk, "time": round(time.time() - t0, 1)}
+    p.data["span_listen"] = stats
+    if not p.data.get("sub_source"):
+        p.data["sub_source"] = method
+        p.data["language"] = language
+    p.save()
+    warn = [w for w in (sh.data.get("asr_warning"), sh.data.get("sep_warning")) if w and method != "ocr"]
+    if method in ("ocr", "hybrid") and not new and sh.data.get("ocr_warning"):
+        warn.append(sh.data["ocr_warning"])
+    return {**stats, "rows": rows, "warn": warn, "listen": listen_note(sh) if method != "ocr" else ocr_note(sh),
+            "relayout": bool(res["removed"]) and has_dub(p)}
 
 
 def _drop_char_times(p: Project) -> None:
