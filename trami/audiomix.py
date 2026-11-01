@@ -82,8 +82,17 @@ def pitch_filter(pitch: float, rate: int = SR) -> str:
 
 # ------------------------------------------------------------------ bộ trộn trực tiếp (trình phát trong tool)
 
-def _track_key(src: Path, size: int, mtime: float, pre: str) -> str:
-    return hashlib.md5(f"{src.resolve()}|{size}|{int(mtime)}|{pre}".encode()).hexdigest()[:12]
+MONO = ("dub",)   # bản lồng vốn 1 kênh -> đệm nghe 1 kênh (phim 2 giờ: 1,27 -> 0,64 GB, 2.1.29)
+
+
+def channels(name: str | Path) -> int:
+    """Số kênh của bản giải mã lớp `name` ("dub" hoặc file "dub_<mã>.raw" -> 1, lớp khác 2)."""
+    return 1 if Path(str(name)).name.split("_")[0] in MONO else 2
+
+
+def _track_key(src: Path, size: int, mtime: float, pre: str, name: str = "") -> str:
+    tag = "|ac1" if name and channels(name) == 1 else ""     # đệm 2 kênh cũ của lớp 1 kênh không bị đọc nhầm
+    return hashlib.md5(f"{src.resolve()}|{size}|{int(mtime)}|{pre}{tag}".encode()).hexdigest()[:12]
 
 
 def _cached_track(d: Path, name: str, key: str) -> Path | None:
@@ -102,10 +111,10 @@ def _cached_track(d: Path, name: str, key: str) -> Path | None:
     return None
 
 
-def _decode_cmd(src: str | Path, pre: str, dst: str) -> list[str]:
+def _decode_cmd(src: str | Path, pre: str, dst: str, ch: int = 2) -> list[str]:
     from . import ffmpeg as ff
 
-    return [ff.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-vn", "-ac", "2",
+    return [ff.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-vn", "-ac", str(ch),
             "-ar", str(SR)] + (["-af", pre] if pre else []) + ["-f", "s16le", dst]
 
 
@@ -120,7 +129,8 @@ def _decode_lock(path: Path) -> threading.Lock:
 
 
 def decode_track(src: str | Path, cache_dir: str | Path, name: str, pre: str = "") -> Path | None:
-    """Giải mã 1 file âm thanh / video thành PCM 16-bit stereo 44,1 kHz (đọc lại bằng memmap, không chiếm RAM).
+    """Giải mã 1 file âm thanh / video thành PCM 16-bit 44,1 kHz – stereo, riêng bản lồng 1 kênh (đọc lại bằng memmap,
+    không chiếm RAM).
     Có sẵn bản giải mã đúng file + đúng bộ lọc thì dùng lại. 2 lần nạp cùng lúc (mở dự án + vừa xong 1 việc) cùng 1
     bản -> lần sau chờ lần trước giải mã xong rồi dùng luôn (trước 2.0.93 cả 2 cùng ghi 1 file .tmp -> WinError 32)."""
     from . import ffmpeg as ff
@@ -130,7 +140,7 @@ def decode_track(src: str | Path, cache_dir: str | Path, name: str, pre: str = "
         return None
     pre = ",".join(x for x in (ff.audio_sync(src, SR), pre) if x)   # video gốc: theo giờ của hình (2.0.92)
     st = src.stat()
-    key = _track_key(src, st.st_size, st.st_mtime, pre)
+    key = _track_key(src, st.st_size, st.st_mtime, pre, name)
     d = Path(cache_dir)
     d.mkdir(parents=True, exist_ok=True)
     out = d / f"{name}_{key}.raw"
@@ -139,7 +149,8 @@ def decode_track(src: str | Path, cache_dir: str | Path, name: str, pre: str = "
         if hit:
             return hit
         tmp = d / f"{name}_{key}.{os.getpid()}_{threading.get_ident()}.tmp"
-        r = subprocess.run(_decode_cmd(src, pre, str(tmp)), capture_output=True, creationflags=ff._NO_WINDOW)
+        r = subprocess.run(_decode_cmd(src, pre, str(tmp), channels(name)), capture_output=True,
+                           creationflags=ff._NO_WINDOW)
         if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
             tmp.unlink(missing_ok=True)
             return None
@@ -171,16 +182,17 @@ def patch_track(src: str | Path, cache_dir: str | Path, name: str, pre: str, old
     from .tts import wav_info
 
     src, d = Path(src), Path(cache_dir)
-    raw = _cached_track(d, name, _track_key(src, old_stat.st_size, old_stat.st_mtime, pre))
+    raw = _cached_track(d, name, _track_key(src, old_stat.st_size, old_stat.st_mtime, pre, name))
     if raw is None:
         return False
+    co = channels(name)
     off, frames, sr, ch, sw = wav_info(src)
     if sw != 2:
         return False
     k = gcd(sr, SR)
     u, v = sr // k, SR // k          # u mẫu nguồn <-> v khung 44,1 kHz (24 kHz: 80 <-> 147)
     m = u * max(1, int(0.1 * sr) // u)
-    nraw = raw.stat().st_size // 4
+    nraw = raw.stat().st_size // (2 * co)
     tmp = d / f"{name}_patch.wav"
     with open(src, "rb") as fs, open(raw, "r+b") as fr:
         for r0, r1 in regions:
@@ -195,25 +207,26 @@ def patch_track(src: str | Path, cache_dir: str | Path, name: str, pre: str, old
                 w.setsampwidth(2)
                 w.setframerate(sr)
                 w.writeframes(fs.read((i1 - i0) * ch * 2))
-            r = subprocess.run(_decode_cmd(tmp, pre, "pipe:1"), capture_output=True, creationflags=ff._NO_WINDOW)
+            r = subprocess.run(_decode_cmd(tmp, pre, "pipe:1", co), capture_output=True, creationflags=ff._NO_WINDOW)
             if r.returncode != 0:
                 raise RuntimeError(r.stderr.decode("utf-8", "replace")[-300:])
-            pcm = np.frombuffer(r.stdout, dtype=np.int16).reshape(-1, 2)
+            pcm = np.frombuffer(r.stdout, dtype=np.int16).reshape(-1, co)
             o0, dst = (a0 - i0) * v // u, a0 * v // u
             n = min((a1 - a0) * v // u, len(pcm) - o0, nraw - dst)
             if n > 0:
-                fr.seek(dst * 4)
+                fr.seek(dst * 2 * co)
                 fr.write(pcm[o0:o0 + n].tobytes())
     tmp.unlink(missing_ok=True)
     st = src.stat()
-    key = _track_key(src, st.st_size, st.st_mtime, pre)
+    key = _track_key(src, st.st_size, st.st_mtime, pre, name)
     if not raw.name.endswith(f"_{key}.raw"):
         (d / f"{name}_{key}.ref").write_text(raw.name, encoding="utf-8")
     return True
 
 
 def load_raw(path: str | Path) -> np.ndarray:
-    return np.memmap(str(path), dtype=np.int16, mode="r").reshape(-1, 2)
+    """Bản giải mã -> mảng int16 [khung, kênh] (bản lồng 1 kênh: [khung, 1] – cộng vào khối 2 kênh tự nhân đôi)."""
+    return np.memmap(str(path), dtype=np.int16, mode="r").reshape(-1, channels(path))
 
 
 ENV_BLOCK = 60.0   # giây mỗi khối khi đo độ to bản lồng (không nạp cả bản vào RAM)

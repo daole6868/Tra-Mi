@@ -81,7 +81,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `vieneu:trend:<mã>` = giọng dựng sẵn + kiểu đọc + hiệu ứng) + `voicefx.py` (hiệu ứng giọng chỉ bằng numpy).
 - `trami/audiomix.py` – quy tắc trộn âm thanh dùng chung cho xuất video (`video.build_and_render`) và bộ trộn trực tiếp
   `LiveMix` của trình phát (`player.LiveAudio` + `_Feeder` ở QThread riêng, QAudioSink); cài đặt ở `edit["audio"]`, tab `gui/audio_tab.py`.
-  `decode_track` giải mã mỗi lớp 1 lần (`work/live/<lớp>_<mã>.raw`); `patch_track` vá từng đoạn + `<lớp>_<mã mới>.ref`.
+  `decode_track` giải mã mỗi lớp 1 lần (`work/live/<lớp>_<mã>.raw`, 44,1 kHz 2 kênh – riêng "dub" 1 kênh từ 2.1.29); `patch_track` vá từng đoạn + `<lớp>_<mã mới>.ref`.
   `LiveMix.set_tracks` chỉ đo độ to bản lồng (`dub_envelope`, từng khối `ENV_BLOCK` 60 s) khi có lớp nhạc thêm;
   `_duck_cs` tổng tích luỹ giảm nhạc tính 1 lần / âm lượng. `project_page._update_player_audio`: `_audio_pending` – đang
   chuẩn bị đúng bộ lớp đó thì không chạy chồng (2.1.10).
@@ -393,6 +393,28 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   hiện theo cách – `_ds_rows`, `ds_row2` mảnh ngắn nhất / hiện ít nhất / Mặc định, `s_ds_note` "N/M câu sẽ hiện thành K
   mảnh" – `_ds_note` hẹn 0,6 s; `_ds_changed` lưu Cài đặt, `_sync_dsplit` khi mở dự án). `textfit._VI_PAIRS` thêm từ
   tiên hiệp (bế quan, đột phá, cảnh giới…).
+- Dung lượng (2.1.29, `trami/storage.py` + `gui/storage_page.StoragePage` – mục "Dung lượng" thanh bên, icon `disk`):
+  `scan_project` phân loại MỌI file trong thư mục dự án theo `classify` (đường dẫn tương đối + `_Ctx` đọc project.json:
+  giọng câu đang dùng = `extra["tts_file"]` + tên file trong `placed` của mọi bản lồng còn giữ; bản lồng giữ = bản đang
+  dùng + bản `pinned`; bản xoá phụ đề đang dùng = `video.inpainted_file` theo `pipeline.hardsub_spec`) vào `GROUPS`:
+  ĐỆM (CACHE – tool tự tạo lại: live, wav16, preview, chunks, tts_cache `.npy` / `.x<tốc độ>.npy` / ref_*, misc sóng âm /
+  ảnh timeline / gemvideo / render warp|fonts|layers / burn.ass), RÁC (JUNK: tmp `TMP_RE` + ảnh chụp khung / mix44k /
+  _sep / live_draft, tts_old = giọng .wav không câu / bản lồng nào dùng – vế .mp3 của Edge luôn giữ vì không biết thuộc câu
+  ghép nào, dub_old = bản lồng không dùng + chưa ghim + file mồ côi, inpaint_old), GIỮ (stems, tts, dub, inpaint, output,
+  source, other – mọi file lạ / ocr_boxes / asr_progress / logo_*.npz). `BARS` gộp nhóm cho thanh màu. `plan` (xem trước
+  số byte – hỏi lại) / `clean` (bỏ qua file đang mở, tmp < `TMP_MIN_AGE` 10 phút, `_drop_empty`, `_prune_clipmeta`);
+  dự án đang mở `PROTECT_OPEN` (live + preview), dự án đang có việc chạy / chờ bỏ qua. `scan_global`: mô hình
+  (`model_dirs`: data/models + kho HF / ModelScope ngoài data, `dir_size` không theo liên kết) + phần còn lại của data.
+  Tự dọn (Cài đặt `auto_clean`, `live_keep_projects` 2, `dub_keep_versions` 3 – ô ở trang Dung lượng): `note_opened` /
+  `recent` (`data/recent_projects.json`) + `trim_live` khi mở dự án (`auto_clean_on_open` ở luồng nền trong
+  `MainWindow.open_project`: xoá work/live của dự án ngoài N dự án mở gần nhất / đang mở / đang chạy việc), `sweep` file
+  tạm > 1 ngày khi mở tool (`main._startup_clean` cùng `purge_deleted`), `pipeline.prune_dub_versions` sau mỗi bản lồng
+  MỚI (`dub`, giữ bản đang dùng + bản ghim), `pin_dub_version` (nút Ghim / Bỏ ghim tab Lồng tiếng mục 4 `_pin_dub`).
+  Giảm tận gốc: đệm nghe bản lồng 1 kênh (`audiomix.MONO` / `channels`: `_decode_cmd(ch)`, mã đệm thêm "|ac1", `load_raw`
+  [khung, 1] cộng vào khối 2 kênh, `patch_track` theo số kênh); giọng .wav đọc thẳng `tts._read_wav24` (24 kHz 1 kênh),
+  dạng khác (VieNeu 48 kHz) `_compact_wav` ghi lại 1 lần đúng từng mẫu bản giải mã, GIỮ giờ sửa (đệm tua nhanh vẫn dùng),
+  sửa `sig` của `.words.json`, bỏ `.npy`; chỉ .mp3 (Edge) còn đệm `.npy`; `pipeline._drop_orig_wav16` bỏ work/audio16k.wav
+  (tiếng gốc 16 kHz) sau `recognize` / `relisten_lines` khi đã tách giọng (cần thì `_orig_wav16` tạo lại).
 - Karaoke theo mốc thật từng từ (2.1.24, `trami/dubwords.py`): `<file giọng>.words.json` {rel raw | trim, src edge |
   whisper, sig, w [[giây, giây, chữ]]}. Edge: `_edge_comm(words=True)` (boundary "WordBoundary" – edge-tts 7 mặc định
   theo câu) + `save(audio, metadata)` -> `edge_jsonl`; đọc từng vế -> `dubwords.join` (dời theo chỗ nối). Giọng khác:
@@ -503,7 +525,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (254 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
+- `tests/test_core.py` – `python -m pytest -q tests` (258 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2233,8 +2255,21 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   "lẩu anh nấu ăn…"; 15 từ -> 3 mảnh ≤ 7 từ không xé "Hoàn Kiếm"), chữ Hán, ngắt hơi (mảnh sau hiện 1,6 s đúng lúc giọng có
   tiếng lại), karaoke mốc thật chia theo mảnh, câu ngắn / mảnh 1 từ không tách; SRT đã dịch + video xuất (ASS) có mảnh,
   SRT gốc giữ câu; giao diện offscreen (đổi cách -> lưu Cài đặt, khung xem trước hiện "Hôm nay trời đẹp quá" lúc 6 s).
+- 2.1.29: "tối ưu data, xoá bớt file không cần thiết" -> rà thư mục dự án: phim 2 giờ ~15–20 GB (đệm nghe trực tiếp
+  3,8–5 GB – bản lồng mono 24 kHz lưu thành stereo 44,1 kHz nặng gấp ~7 lần; bản tách 2,5 GB; bản xoá phụ đề / đệm xuất ≈
+  cỡ video; giọng câu cũ không bao giờ bị xoá khi đọc lại / đổi giọng; mỗi bản lồng ~0,35 GB; đệm nghe của mọi dự án còn
+  nguyên dù lâu không mở). Người dùng chọn làm mục 1 (trang Dung lượng + tự dọn) và 2 (giảm tận gốc) – xem Cấu trúc
+  "Dung lượng". Chưa làm (chờ người dùng): "Thu gọn dự án đã xong" (nén bản tách FLAC, xoá bản đã xoá phụ đề), xoá mô hình
+  ở tab Tài liệu + dọn bản HF cũ / tải dở. Thử: dự án giả đủ loại file (dọn đệm / rác đúng nhóm, file giữ còn nguyên, dự
+  án đang mở giữ đệm nghe), tự dọn (đệm nghe 2 dự án gần nhất + dự án đang chạy việc, file tạm cũ, giữ 2 bản lồng bỏ bản
+  cũ chưa ghim), đệm nghe 1 kênh (trộn ra 2 kênh bằng nhau, vá khớp giải mã cả file), wav 48 kHz -> 24 kHz đúng từng mẫu,
+  giao diện offscreen (trang Dung lượng, hỏi lại rồi dọn, nút Ghim).
 
 ## Vấn đề đang mở
+- 2.1.29: chờ người dùng mở trang Dung lượng (thanh bên) xem số GB thật từng dự án / mô hình, bấm Dọn đệm / Dọn rác thử
+  1 dự án; mở lại dự án đó xem nghe thử / xuất vẫn bình thường (lần đầu giải mã lại đệm nghe ~1–2 phút). Lần đầu mở 1 dự
+  án sau cập nhật, tự dọn xoá đệm nghe của mọi dự án khác (chỉ giữ dự án mở gần nhất). Giọng VieNeu cũ (48 kHz + .npy) tự
+  ghi lại 24 kHz ở lần xếp lại / lồng tiếp theo (lần đó chậm hơn 1 chút).
 - 2.1.28: chờ người dùng thử tab Phụ đề → Công cụ → Nối / tách câu → "Tách phụ đề" (Dấu câu + số từ / Theo số từ 7 từ
   khi dài hơn 12…) trên phim đã lồng: chữ đổi mảnh có đúng lúc giọng đọc tới không, có mảnh nào hiện quá nhanh không (tăng
   "mỗi mảnh hiện ít nhất"), chỗ ngắt có xé cụm từ không (gửi câu bị ngắt sai để thêm vào danh sách từ ghép); xem lại 2 ô

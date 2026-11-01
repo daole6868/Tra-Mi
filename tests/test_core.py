@@ -10777,3 +10777,263 @@ def test_subsplit_gui_and_textbox_height_2128(sample_video):
         win.close()
         p.delete()
         save_settings(old)
+
+
+def _fake_project_2129(name: str):
+    """Dự án giả có đủ loại file trong work/ để thử quét / dọn dung lượng."""
+    from trami.project import Project
+
+    p = Project.create(name)
+    w = p.dir / "work"
+    old = 1_000_000_000          # file tạm cũ (2001)
+
+    def put(rel, size=1000, mtime=None):
+        f = p.dir / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"x" * size)
+        if mtime:
+            os.utime(f, (mtime, mtime))
+        return f
+    for rel, size in (("work/live/dub_aaa.raw", 50_000), ("work/live/bg_bbb.raw", 60_000),
+                      ("work/audio16k.wav", 7000), ("work/asr16k_vocals.wav", 7000), ("work/preview.mp4", 9000),
+                      ("work/render/chunks/c_1.mp4", 8000), ("work/render/warp/bg_x.flac", 500),
+                      ("work/gemvideo/g_1.mp4", 400), ("work/tl_wave_10ms.npy", 300),
+                      ("work/tts/tts_a1.wav", 2000), ("work/tts/tts_a1.wav.x1.100.npy", 900),
+                      ("work/tts/tts_b2.wav", 2100), ("work/tts/tts_dead01.wav", 2200),
+                      ("work/tts/tts_dead01.wav.npy", 1100), ("work/tts/tts_cafe.mp3", 300),
+                      ("work/tts/tts_cafe.mp3.npy", 1200), ("work/tts/_clipmeta.json", 50),
+                      ("work/dubs/dub_cur.wav", 30_000), ("work/dubs/dub_cur.env10.npy", 100),
+                      ("work/dubs/dub_old.wav", 31_000), ("work/dubs/dub_old.env10.npy", 100),
+                      ("work/dubs/dub_pin.wav", 32_000), ("work/stems/vocals.wav", 40_000),
+                      ("work/stems/instrumental.wav", 40_000), ("work/ocr_boxes.json", 80),
+                      ("work/unknown.bin", 70), ("output/phim.mp4", 99_000), ("source/goc.mp4", 77_000),
+                      ("work/render/logo_abc.npz", 600)):
+        put(rel, size)
+    put("work/frame_1234.jpg", 500, old)
+    put("work/stems/mix44k.wav", 700, old)
+    put("work/live/dub_aaa.123_45.tmp", 800, old)
+    (w / "tts" / "_clipmeta.json").write_text(json.dumps({"tts_a1.wav": [1, 1, 1], "tts_dead01.wav": [1, 1, 1]}))
+    p.segments = [Segment(0, 1, "a", "A", extra={"tts_file": str(w / "tts" / "tts_a1.wav")})]
+    p.data["dub_versions"] = [{"wav": str(w / "dubs" / "dub_cur.wav"), "placed": [["tts_a1.wav", 0, 1.0, 1.0, 0, 10]]},
+                              {"wav": str(w / "dubs" / "dub_old.wav"), "placed": [["tts_b2.wav", 0, 1.0, 1.0, 0, 10]]},
+                              {"wav": str(w / "dubs" / "dub_pin.wav"), "pinned": True}]
+    ed = p.edit
+    ed["dub"]["wav"] = str(w / "dubs" / "dub_cur.wav")
+    p.data["edit"] = ed
+    p.save()
+    return p
+
+
+def test_storage_scan_and_clean_2129():
+    """Quét dự án theo nhóm file; Dọn đệm chỉ xoá file tạo lại được, Dọn rác chỉ xoá file không còn dùng; video xuất /
+    video gốc / bản tách / giọng + bản lồng đang dùng / file lạ luôn còn; dự án đang mở giữ đệm nghe + bản xem trước."""
+    from trami import storage as S
+
+    p = _fake_project_2129("store1")
+    try:
+        sc = S.scan_project(p.dir)
+        g = sc["groups"]
+        assert g["live"] == 110_000 and g["wav16"] == 14_000 and g["preview"] == 9000 and g["chunks"] == 8000
+        assert g["tts_cache"] == 900 + 1200 and g["tts"] == 2000 + 2100 + 300
+        assert g["tts_old"] == 2200 + 1100                  # giọng không câu / bản lồng nào dùng
+        assert g["dub"] == 30_000 + 100 + 32_000 and g["dub_old"] == 31_000 + 100
+        assert g["tmp"] == 500 + 700 + 800 and g["stems"] == 80_000
+        assert g["output"] == 99_000 and g["source"] == 77_000
+        assert sc["total"] == sum(g.values()) and sc["bars"]["voice"] == g["tts"] + g["dub"]
+        # dự án đang mở: không đụng đệm nghe / bản xem trước (trình phát đang đọc)
+        pl = S.plan(sc, (S.CACHE,), S.PROTECT_OPEN)
+        assert "live" not in pl["groups"] and "preview" not in pl["groups"] and pl["groups"]["wav16"] == 14_000
+        r = S.clean(sc, (S.CACHE,), S.PROTECT_OPEN)
+        w = p.dir / "work"
+        assert r["bytes"] == pl["bytes"] and r["failed"] == 0
+        assert (w / "live" / "dub_aaa.raw").exists() and (w / "preview.mp4").exists()
+        assert not (w / "audio16k.wav").exists() and not (w / "render" / "chunks").exists()
+        assert not (w / "tts" / "tts_a1.wav.x1.100.npy").exists() and (w / "tts" / "tts_a1.wav").exists()
+        r = S.clean(S.scan_project(p.dir), (S.JUNK,))
+        assert r["bytes"] == 2200 + 1100 + 31_100 + 2000
+        for rel in ("work/tts/tts_a1.wav", "work/tts/tts_b2.wav", "work/tts/tts_cafe.mp3", "work/dubs/dub_cur.wav",
+                    "work/dubs/dub_pin.wav", "work/stems/vocals.wav", "output/phim.mp4", "source/goc.mp4",
+                    "work/ocr_boxes.json", "work/unknown.bin", "work/render/logo_abc.npz", "project.json"):
+            assert (p.dir / rel).exists(), rel
+        for rel in ("work/tts/tts_dead01.wav", "work/dubs/dub_old.wav", "work/frame_1234.jpg", "work/stems/mix44k.wav"):
+            assert not (p.dir / rel).exists(), rel
+        assert set(json.loads((w / "tts" / "_clipmeta.json").read_text())) == {"tts_a1.wav"}
+        from trami import pipeline
+
+        assert [Path(v["wav"]).name for v in pipeline.dub_versions(p.reload())] == ["dub_cur.wav", "dub_pin.wav"]
+        # dọn lần 2: còn đệm nghe (không bảo vệ) – rác hết
+        sc = S.scan_project(p.dir)
+        assert S.plan(sc, (S.JUNK,))["bytes"] == 0 and S.plan(sc, (S.CACHE,))["groups"].get("live") == 110_000
+        assert S.fmt_size(3.4e9) == "3,4 GB" and S.fmt_size(25e6) == "25 MB"
+        # dự án rất cũ không ghi tên file giọng từng câu -> không coi giọng nào là rác
+        (w / "tts" / "tts_dead02.wav").write_bytes(b"x" * 10)
+        q = p.reload()
+        q.segments = [Segment(0, 1, "a", "A")]
+        q.data["dub_versions"] = []
+        q.save()
+        assert S.scan_project(p.dir)["groups"]["tts_old"] == 0
+    finally:
+        p.delete()
+
+
+def test_storage_auto_clean_2129():
+    """Tự dọn: đệm nghe chỉ giữ cho N dự án mở gần nhất (+ dự án đang chạy việc), file tạm cũ khi mở tool, giữ tối đa
+    N bản lồng (bản đang dùng + bản đã ghim luôn giữ); tiếng gốc 16 kHz bỏ sau khi nghe xong khi đã tách giọng."""
+    from trami import pipeline
+    from trami import storage as S
+
+    ps = [_fake_project_2129(f"auto{i}") for i in range(4)]
+    try:
+        for p in ps[:3]:
+            S.note_opened(p.id)
+        assert S.recent()[:3] == [ps[2].id, ps[1].id, ps[0].id]
+        freed = S.auto_clean_on_open(ps[1].id, {"auto_clean": True, "live_keep_projects": 2}, busy={ps[3].id})
+        live = [(p.dir / "work" / "live" / "bg_bbb.raw").exists() for p in ps]
+        assert live == [False, True, True, True] and freed >= 110_000      # ps[3] đang chạy việc -> giữ
+        assert S.recent()[0] == ps[1].id
+        assert S.auto_clean_on_open(ps[0].id, {"auto_clean": False}) == 0
+        freed = S.sweep()
+        assert freed >= 2000 and not (ps[2].dir / "work" / "frame_1234.jpg").exists()
+        assert (ps[2].dir / "work" / "stems" / "vocals.wav").exists()
+        # bản lồng: giữ tối đa 2 -> bỏ bản cũ không ghim; bản đang dùng + bản ghim còn
+        p = ps[0].reload()
+        w = p.dir / "work" / "dubs"
+        extra = w / "dub_new.wav"
+        extra.write_bytes(b"y" * 10)
+        p.data["dub_versions"].insert(0, {"wav": str(extra)})
+        assert pipeline.prune_dub_versions(p, 2) == 2
+        names = [Path(v["wav"]).name for v in pipeline.dub_versions(p)]
+        assert names == ["dub_cur.wav", "dub_pin.wav"] and not (w / "dub_old.wav").exists() and not extra.exists()
+        pipeline.pin_dub_version(p, str(w / "dub_pin.wav"), False)
+        assert not any(v.get("pinned") for v in pipeline.dub_versions(p))
+        assert pipeline.prune_dub_versions(p, 1) == 1 and pipeline.prune_dub_versions(p, 0) == 0
+        assert [Path(v["wav"]).name for v in pipeline.dub_versions(p)] == ["dub_cur.wav"]
+        # tiếng gốc 16 kHz: chỉ bỏ khi đã tách giọng
+        q = ps[2].reload()
+        (q.work / "audio16k.wav").write_bytes(b"z" * 100)
+        pipeline._drop_orig_wav16(q)
+        assert (q.work / "audio16k.wav").exists()        # chưa đăng ký bản tách -> đây là file nghe chính
+        q.data["stems"] = {"vocals": str(q.work / "stems" / "vocals.wav"),
+                           "instrumental": str(q.work / "stems" / "instrumental.wav")}
+        pipeline._drop_orig_wav16(q)
+        assert not (q.work / "audio16k.wav").exists() and (q.work / "asr16k_vocals.wav").exists()
+    finally:
+        for p in ps:
+            p.delete()
+
+
+def test_storage_mono_dub_and_wav_compact_2129(tmp_path):
+    """Đệm nghe bản lồng 1 kênh (trộn ra 2 kênh như cũ, vá đoạn khớp giải mã cả file); giọng wav 48 kHz ghi lại thành
+    24 kHz 1 kênh đúng từng mẫu bản giải mã, không còn đệm .npy, mốc từ / đệm tua nhanh vẫn dùng được."""
+    import wave
+
+    from trami import audiomix, dubwords, tts
+
+    x = np.sin(np.arange(24000) / 24000 * 2 * np.pi * 300) * 0.3
+    d = tmp_path / "dub.wav"
+    tts.write_wav(d, x)
+    raw = audiomix.decode_track(d, tmp_path / "live", "dub", "")
+    arr = audiomix.load_raw(raw)
+    assert arr.shape[1] == 1 and raw.stat().st_size == len(arr) * 2
+    stereo = audiomix.decode_track(d, tmp_path / "live", "orig", "")
+    assert audiomix.load_raw(stereo).shape[1] == 2
+    mix = audiomix.LiveMix()
+    mix.set_tracks({"dub": arr})
+    mix.g = {"dub": 1.0}
+    out, _ = mix.render(1000, 2000)
+    assert out.shape == (2000, 2) and np.array_equal(out[:, 0], out[:, 1]) and float(np.abs(out).max()) > 0.2
+    st0 = d.stat()
+    y = x.copy()
+    y[5000:7000] = 0
+    tts.write_wav(d, y)
+    assert audiomix.patch_track(d, tmp_path / "live", "dub", "", st0, [(5000, 7000)])
+    full = tmp_path / "full.raw"
+    subprocess.run(audiomix._decode_cmd(d, "", str(full), 1), check=True)
+    got = audiomix.load_raw(audiomix.decode_track(d, tmp_path / "live", "dub", ""))[:, 0]
+    ref = np.fromfile(full, np.int16)
+    assert np.array_equal(got, ref[:len(got)])
+    # giọng wav 48 kHz -> 24 kHz 1 kênh, đúng từng mẫu
+    v = tmp_path / "tts_ab12.wav"
+    z = np.sin(np.arange(48000) / 48000 * 2 * np.pi * 440) * 0.4
+    with wave.open(str(v), "wb") as wv:
+        wv.setnchannels(1)
+        wv.setsampwidth(2)
+        wv.setframerate(48000)
+        wv.writeframes((z * 32767).astype(np.int16).tobytes())
+    os.utime(v, (1_500_000_000, 1_500_000_000))
+    dubwords.save(v, [[0.0, 0.4, "xin"]], "trim", "whisper")
+    xn = v.with_name(v.name + ".x1.200.npy")
+    np.save(xn, np.zeros(10, np.int16))
+    os.utime(xn, (1_600_000_000, 1_600_000_000))
+    ref = tts._decode(v)
+    a = tts._decode_cached(v)
+    assert np.array_equal(a, ref) and np.array_equal(tts._decode_cached(v), ref)
+    with wave.open(str(v)) as wv:
+        assert (wv.getframerate(), wv.getnchannels()) == (tts.SR, 1)
+    assert int(v.stat().st_mtime) == 1_500_000_000 and not v.with_name(v.name + ".npy").exists()
+    assert dubwords.load(v) is not None and len(tts._clip_at(v, 1.2)) == 10    # mốc từ + đệm tua nhanh còn dùng
+    mp3 = tmp_path / "tts_cd34.mp3"
+    subprocess.run([ff.ffmpeg_bin(), "-loglevel", "error", "-y", "-i", str(v), str(mp3)], check=True)
+    tts._decode_cached(mp3)
+    assert mp3.with_name(mp3.name + ".npy").exists()             # Edge (.mp3) vẫn có đệm .npy
+
+
+def test_storage_page_gui_2129(monkeypatch):
+    """Trang Dung lượng: tổng quan, danh sách dự án nặng nhất trước, Dọn rác hỏi lại rồi xoá; dự án đang mở giữ đệm
+    nghe; nút Ghim bản lồng ở tab Lồng tiếng mục 4; cài đặt tự dọn lưu vào Cài đặt."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from trami.config import load_settings, save_settings
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami import storage as S
+
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    old = load_settings()
+    big = _fake_project_2129("big")
+    small = _fake_project_2129("small")
+    (small.dir / "output" / "phim.mp4").unlink()
+    win = MainWindow()
+    try:
+        assert "storage" in win.sidebar.nav
+        pg = win.storage_page
+        scans = [S.scan_project(big.dir), S.scan_project(small.dir)]
+        pg.scans, pg.glob = scans, {"models": [("Thư mục mô hình của tool", Path("."), 5e9)], "models_total": 5e9,
+                                    "other": 1e6}
+        pg._show()
+        assert "Mô hình: 5,0 GB" in pg.sum_lb.text() and "Dọn được ngay" in pg.sum_lb.text()
+        first = pg.rows.itemAt(0).widget()
+        assert first is not None and "big" in first.findChildren(type(pg.sum_lb))[0].text()
+        monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+        done = []
+        monkeypatch.setattr(pg, "refresh", lambda: done.append(1))
+        pg.clean([scans[0]], S.JUNK)
+        for _ in range(200):
+            app.processEvents()
+            if done:
+                break
+            import time as _t
+            _t.sleep(0.02)
+        assert done and not (big.dir / "work" / "dubs" / "dub_old.wav").exists()
+        assert (big.dir / "work" / "dubs" / "dub_cur.wav").exists()
+        pg.sp_dub.setValue(5)
+        pg.sw_auto.setChecked(False)
+        assert load_settings()["dub_keep_versions"] == 5 and load_settings()["auto_clean"] is False
+        # dự án đang mở: Dọn đệm giữ đệm nghe; mục 4 có nút Ghim
+        win.open_project(small.id)
+        assert pg.protect(small.id) == S.PROTECT_OPEN and pg.protect(big.id) == ()
+        pp = win.project_page
+        pp._fill_dub_versions()
+        texts = [w.text() for w in pp.findChildren(type(first.findChildren(type(pg.b_all_cache))[0]))]
+        assert "Ghim" in texts
+        pp._pin_dub(str(small.dir / "work" / "dubs" / "dub_old.wav"), True)
+        from trami import pipeline
+
+        assert any(v.get("pinned") and v["wav"].endswith("dub_old.wav") for v in pipeline.dub_versions(pp.p))
+    finally:
+        win.close()
+        big.delete()
+        small.delete()
+        save_settings(old)

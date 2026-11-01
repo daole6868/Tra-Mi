@@ -192,6 +192,9 @@ DEFAULT_SETTINGS: dict = {
     "proxy_mode": "auto",             # bản xem trước nhẹ ≤ 720p cho trình phát: auto (video nặng) / always / off
     "vram_check": True,               # trước việc GPU: card bị chương trình khác chiếm -> báo + chờ (tối đa 3 phút)
     "jobs_parallel": False,           # chạy nhiều việc cùng lúc (tắt = lần lượt từng việc, như trước 2.0.64: ít RAM / GPU)
+    "auto_clean": True,               # tự dọn (2.1.29): đệm nghe chỉ giữ cho dự án mở gần đây, bản lồng cũ, file tạm cũ
+    "live_keep_projects": 2,          #   giữ đệm nghe trực tiếp (work/live) cho N dự án mở gần nhất
+    "dub_keep_versions": 3,           #   mỗi dự án giữ tối đa N bản lồng (đang dùng + đã ghim luôn giữ; 0 = không giới hạn)
     "song_detect": True,              # khi nghe: đoán cụm câu đang hát (nốt ngân trên giọng đã tách) -> 🎵
     "pitch_check": True,              # khi nghe: đánh dấu câu nghi là nhạc / tiếng động bị chép thành lời (cao độ giọng)
     "pitch_tol": 4.0,                 #   lệch cao độ cho phép ngoài khoảng giọng thường của người nói (nửa cung)

@@ -518,6 +518,13 @@ def _silence(p: QPainter):
     p.drawPath(path)
 
 
+def _disk(p: QPainter):
+    p.drawRoundedRect(QRectF(3.5, 6, 17, 12), 2.5, 2.5)
+    p.drawLine(QPointF(3.5, 13.5), QPointF(20.5, 13.5))
+    p.drawEllipse(QPointF(16.5, 15.8), 0.9, 0.9)
+    p.drawLine(QPointF(6.5, 15.8), QPointF(11, 15.8))
+
+
 ICONS = {
     "home": _home, "folder": _folder, "link": _link, "upload": _upload, "download": _download, "film": _film,
     "subtitles": _subtitles, "eraser": _eraser, "scissors": _scissors, "palette": _palette, "mic": _mic,
@@ -528,7 +535,7 @@ ICONS = {
     "split": _split, "merge": _merge, "sparkle": _sparkle, "stack": _stack, "chev_left": _chev_left,
     "chev_right": _chev_right, "chev_down": _chev_down, "info": _info, "cpu": _cpu, "minus": _minus, "fit": _fit,
     "panel_right": _panel_right, "mute": _mute, "undo": _undo, "redo": _redo, "share": _share,
-    "eye_off": _eye_off, "aspect": _aspect, "silence": _silence,
+    "eye_off": _eye_off, "aspect": _aspect, "silence": _silence, "disk": _disk,
 }
 
 

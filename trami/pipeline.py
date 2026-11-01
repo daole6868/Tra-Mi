@@ -1289,6 +1289,16 @@ def _orig_wav16(p: Project, cancel=None) -> Path:
     return wav
 
 
+def _drop_orig_wav16(p: Project) -> None:
+    """Đã tách giọng: tiếng gốc 16 kHz (~230 MB / phim 2 giờ) chỉ dùng lúc nghe lại câu trên tiếng gốc -> xoá sau khi
+    nghe xong, lần sau cần thì tạo lại (~1 phút). Chưa tách giọng thì đây là file bộ nghe dùng chính -> giữ (2.1.29)."""
+    if (p.work / "asr16k_vocals.wav").exists() and stems(p):
+        try:
+            (p.work / "audio16k.wav").unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def recognize(p: Project, method: str = "asr", language: str = "zh", region: dict | None = None,
               ocr_fps: float = 4.0, settings: dict | None = None, progress: Prog | None = None, cancel=None,
               denoise: bool = False, engine: str | None = None,
@@ -1697,6 +1707,7 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
     from .asr_qwen import clear_progress
 
     clear_progress(p.work)   # nghe xong trọn vẹn -> bỏ tiến độ nghe dở (lần sau nghe lại từ đầu)
+    _drop_orig_wav16(p)
     return len(p.segments)
 
 
@@ -2355,6 +2366,8 @@ def relisten_lines(p: Project, settings: dict | None = None, rows: list[int] | N
                                    _sub(progress, 0.05, 1.0), cancel, rows=rows)
     finally:
         release()     # trả card cho việc khác
+        if orig is not None:
+            _drop_orig_wav16(p)
     st["engine"] = engine
     st["changed"] = [i for i, (a, x) in enumerate(zip(before, segs)) if a != x.text]
     p.segments = segs
@@ -3542,6 +3555,8 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
         ed["dub"]["song_spans"] = [[s.start, s.end] for s in segs if s.extra.get("song")] \
             if settings.get("dub_skip_songs", True) else []
     p.data["edit"] = ed
+    if old_i is None and settings.get("auto_clean", True):   # bản mới: giữ tối đa N bản (bản cũ nhất bỏ trước)
+        prune_dub_versions(p, int(settings.get("dub_keep_versions", 3) or 0))
     if inplace:
         _keep_user_edits(p, sig0)
     p.save()
@@ -4459,6 +4474,35 @@ def delete_dub_version(p: Project, wav: str) -> None:
             ed["dub"]["enabled"] = False
             p.data["dub_stats"] = {}
     p.data["edit"] = ed
+
+
+def pin_dub_version(p: Project, wav: str, on: bool = True) -> None:
+    """Ghim bản lồng: không bị tự xoá khi quá số bản giữ lại, không bị coi là rác ở trang Dung lượng (2.1.29)."""
+    vers = dub_versions(p)
+    for v in vers:
+        if v["wav"] == wav:
+            if on:
+                v["pinned"] = True
+            else:
+                v.pop("pinned", None)
+    p.data["dub_versions"] = vers
+
+
+def prune_dub_versions(p: Project, keep: int) -> int:
+    """Giữ tối đa `keep` bản lồng (bản đang dùng + bản đã ghim luôn giữ; bỏ bản cũ nhất trước). Trả số bản đã xoá."""
+    if keep <= 0:
+        return 0
+    cur = (p.edit.get("dub") or {}).get("wav")
+    vers = dub_versions(p)          # mới nhất trước
+    n = 0
+    for v in reversed(vers):
+        if len(vers) - n <= keep:
+            break
+        if v["wav"] == cur or v.get("pinned"):
+            continue
+        delete_dub_version(p, v["wav"])
+        n += 1
+    return n
 
 
 def song_spans(p: Project, settings: dict | None = None) -> list:

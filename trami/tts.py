@@ -254,9 +254,65 @@ def _decode(path: str | Path, speed: float = 1.0, sr: int = SR, sync: bool = Fal
     return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
 
+def _read_wav24(p: Path) -> np.ndarray | None:
+    """Đọc thẳng file wav đã đúng dạng tool dùng (24 kHz, 1 kênh, 16 bit) – giống hệt giải mã bằng FFmpeg, không cần
+    đệm .npy. Dạng khác -> None."""
+    try:
+        with wave.open(str(p), "rb") as w:
+            if w.getnchannels() != 1 or w.getsampwidth() != 2 or w.getframerate() != SR:
+                return None
+            raw = w.readframes(w.getnframes())
+    except (OSError, EOFError, wave.Error):
+        return None
+    return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+
+
+def _compact_wav(p: Path, a: np.ndarray) -> bool:
+    """Ghi lại file giọng wav 48 kHz (VieNeu) / 2 kênh thành 24 kHz 1 kênh = đúng bản tool vẫn dùng (đã giải mã bằng
+    FFmpeg) -> file nhẹ còn 1/2, bỏ được đệm .npy cạnh nó (2.1.29). Giữ nguyên giờ sửa của file: các đệm tua nhanh
+    (.x<tốc độ>.npy) vẫn dùng được; mốc từng từ (.words.json) cập nhật cỡ file mới."""
+    from . import dubwords
+
+    tmp = p.with_name(p.name + ".c.tmp")
+    try:
+        st = p.stat()
+        old_sig = [int(st.st_mtime), int(st.st_size)]
+        with wave.open(str(tmp), "wb") as w:     # đúng từng mẫu như bản giải mã (a = int16 / 32768)
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(SR)
+            w.writeframes(np.clip(np.round(a * 32768.0), -32768, 32767).astype(np.int16).tobytes())
+        os.utime(tmp, (st.st_atime, st.st_mtime))
+        tmp.replace(p)      # Windows: file đang được mở -> lỗi -> giữ file cũ + đệm .npy như trước
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+    wj = dubwords.path(p)
+    try:
+        d = json.loads(wj.read_text(encoding="utf-8"))
+        if list(d.get("sig") or []) == old_sig:
+            d["sig"] = [int(st.st_mtime), int(p.stat().st_size)]
+            wj.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    p.with_name(p.name + ".npy").unlink(missing_ok=True)
+    return True
+
+
 def _decode_cached(path: str | Path) -> np.ndarray:
-    """Giải mã câu đã đọc (24 kHz) có lưu đệm .npy bên cạnh -> lồng lại vài câu không phải giải mã lại cả video."""
+    """Giải mã câu đã đọc (24 kHz). Giọng .wav: đọc thẳng (file khác dạng -> ghi lại về 24 kHz 1 kênh 1 lần); giọng .mp3
+    của Edge: đệm .npy bên cạnh -> lồng lại vài câu không phải giải mã lại cả video."""
     p = Path(path)
+    if p.suffix.lower() == ".wav":
+        a = _read_wav24(p)
+        if a is not None:
+            return a
+        a = _decode(p)
+        if len(a) and _compact_wav(p, a):
+            return a
     c = p.with_name(p.name + ".npy")
     try:
         if c.exists() and c.stat().st_mtime >= p.stat().st_mtime:

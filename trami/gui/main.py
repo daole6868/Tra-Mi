@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QFileDialog, QFrame, 
                                QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
                                QStackedWidget, QVBoxLayout, QWidget)
 
-from .. import APP_NAME, APP_TAGLINE, __version__, pipeline, sitelogin
+from .. import APP_NAME, APP_TAGLINE, __version__, pipeline, sitelogin, storage
 from ..config import load_settings, public_settings, save_settings
 from ..jobs import manager
 from ..project import Project
@@ -21,8 +21,18 @@ from . import common as C
 from . import icons, theme
 from .common import run_async
 from .project_page import ProjectPage, scroll
+from .storage_page import StoragePage
 from .widgets import (DropZone, Form, GradientButton, IconBadge, IconButton, NavButton, ProgressBar, SectionCard,
                       Switch, Toast, button, combo, flow, hbox, label, set_combo, shadow)
+
+def _startup_clean():
+    Project.purge_deleted()
+    try:
+        if load_settings().get("auto_clean", True):
+            storage.sweep()
+    except Exception:  # noqa: BLE001 – dọn ngầm không được làm hỏng lúc mở tool
+        pass
+
 
 VIDEO_FILTER = "Video (*.mp4 *.mkv *.mov *.avi *.flv *.webm *.ts *.m4v *.wmv *.mpg *.3gp);;Tất cả (*.*)"
 
@@ -80,7 +90,7 @@ class Sidebar(QFrame):
         for key, text, ic in (("home", "Trang chủ", "home"), ("project", "Dự án đang mở", "film"),
                               ("jobs", "Việc đang làm", "cpu"),
                               ("batch", "Xử lý hàng loạt", "stack"), ("concat", "Ghép nhiều video", "merge"),
-                              ("settings", "Cài đặt", "settings")):
+                              ("storage", "Dung lượng", "disk"), ("settings", "Cài đặt", "settings")):
             b = NavButton(text, ic)
             b.clicked.connect(lambda _=False, k=key: win.show_page(k))
             self.group.addButton(b)
@@ -1594,9 +1604,10 @@ class MainWindow(QMainWindow):
         self.concat_page = ConcatPage(self)
         self.settings_page = SettingsPage(self)
         self.jobs_page = JobsPage(self)
+        self.storage_page = StoragePage(self)
         self.page_keys = {"home": self.home, "project": self.project_page, "jobs": self.jobs_page,
-                          "batch": self.batch_page,
-                          "concat": self.concat_page, "settings": self.settings_page}
+                          "batch": self.batch_page, "concat": self.concat_page, "storage": self.storage_page,
+                          "settings": self.settings_page}
         for w in self.page_keys.values():
             self.pages.addWidget(w)
         self.jobsbar = JobsBar(self)
@@ -1618,8 +1629,8 @@ class MainWindow(QMainWindow):
         self.refresh_projects()
         self.show_page("home")
         self._sysinfo()
-        # dự án đã xoá lần trước mà còn file bị giữ (Windows) -> dọn nốt ở nền
-        threading.Thread(target=Project.purge_deleted, daemon=True, name="trami-purge").start()
+        # dự án đã xoá lần trước mà còn file bị giữ (Windows) -> dọn nốt + file tạm cũ (tự dọn, 2.1.29) ở nền
+        threading.Thread(target=_startup_clean, daemon=True, name="trami-purge").start()
 
     # ------------------------------------------------------------ điều hướng
     def show_page(self, key: str):
@@ -1635,6 +1646,8 @@ class MainWindow(QMainWindow):
             self.refresh_projects()
         if key == "jobs":
             self.jobs_page.update_jobs(manager.list())
+        if key == "storage":
+            self.storage_page.refresh()
         self.pages.setCurrentWidget(self.page_keys[key])
         self.sidebar.nav[key].setChecked(True)
         self.sidebar.set_compact(key == "project")   # trang dự án: thanh bên chỉ còn icon, rộng chỗ cho timeline
@@ -1646,6 +1659,9 @@ class MainWindow(QMainWindow):
         self.project_page.flush()
         self.project_page.open(pid)
         self.show_page("project")
+        busy = {j["project_id"] for j in manager.list() if j["status"] in ("running", "queued")}
+        threading.Thread(target=storage.auto_clean_on_open, args=(pid, load_settings(), busy), daemon=True,
+                         name="trami-clean").start()   # đệm nghe chỉ giữ cho các dự án mở gần đây
         self.sidebar.update()
         for i in range(self.sidebar.recent.count()):
             w = self.sidebar.recent.itemAt(i).widget()

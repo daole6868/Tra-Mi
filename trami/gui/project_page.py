@@ -5960,7 +5960,8 @@ class ProjectPage(QWidget):
             when = f"tạo {v.get('created') or v.get('time', '')}"
             if v.get("edits"):
                 when += f" · đã sửa {v['edits']} lần, lần cuối {v.get('time', '')}"
-            text = f"{mark}Bản {n - k} · {when}{cnt}" + (f" · {v['voices']}" if v.get("voices") else "")
+            text = f"{mark}Bản {n - k} · {when}{cnt}" + (f" · {v['voices']}" if v.get("voices") else "") + \
+                (" · 📌 đã ghim" if v.get("pinned") else "")
             lb = label(text, "" if active else "muted", wrap=True)   # dòng dài tự xuống dòng, không đẩy khung rộng ra
             miss = st.get("total", 0) - st.get("placed", 0)
             lb.setToolTip(v["wav"] + (f"\n{miss} câu chưa có giọng (chưa dịch / bỏ lồng / bài hát / đọc lỗi)" if miss > 0 else ""))
@@ -5971,6 +5972,10 @@ class ProjectPage(QWidget):
                                    QUrl.fromLocalFile(w))),
                                button("Dùng bản này" if not (active and on) else "Đang dùng", "check", flat=True,
                                       on_click=lambda _=False, w=wav: self._use_dub(w)),
+                               button("Bỏ ghim" if v.get("pinned") else "Ghim", "check" if v.get("pinned") else "save",
+                                      "Bản đã ghim không bị tự xoá khi quá số bản giữ lại (trang Dung lượng)",
+                                      flat=True, on_click=lambda _=False, w=wav, pn=bool(v.get("pinned")):
+                                      self._pin_dub(w, not pn)),
                                button("", "trash", "Xoá bản này", danger=True, flat=True,
                                       on_click=lambda _=False, w=wav: self._delete_dub(w))))
             row.layout().setStretch(0, 1)
@@ -5984,6 +5989,13 @@ class ProjectPage(QWidget):
         self.populate(reload_media=False)
         self._update_player_audio()
         self.win.toast("Đã chọn bản lồng tiếng này cho video", "ok")
+
+    def _pin_dub(self, wav: str, on: bool):
+        self.flush()
+        self.p.reload()
+        pipeline.pin_dub_version(self.p, wav, on)
+        self.p.save()
+        self._fill_dub_versions()
 
     def _delete_dub(self, wav: str):
         if QMessageBox.question(self, "Xoá bản lồng tiếng?", "Xoá hẳn bản lồng tiếng này khỏi máy?") != \
