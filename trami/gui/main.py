@@ -1092,10 +1092,13 @@ class SettingsPage(QWidget):
         self._ocr_gpu_status()
 
     def _ocr_gpu_status(self):
-        from ..ocr_engine import has_v3, ort_dists
+        from ..ocr_engine import gpu_mismatch, has_v3, ort_dists
 
         d = ort_dists()
-        if not has_v3():
+        bad = gpu_mismatch() if "onnxruntime-gpu" in d else ""
+        if bad:
+            t = "⚠ " + bad
+        elif not has_v3():
             t = "Chưa cài RapidOCR 3 – đang dùng bộ đọc cũ PP-OCRv4. Cài: .venv\\Scripts\\python -m pip install -U rapidocr"
         elif len(d) > 1:
             t = f"⚠ Đang cài cùng lúc {', '.join(d)} (đè file của nhau) – bấm \"Cài bản chạy card\" để sửa"
@@ -1108,16 +1111,17 @@ class SettingsPage(QWidget):
         self.ocr_gpu_lb.setText(t)
 
     def _install_ocr_gpu(self):
-        from ..ocr_engine import gpu_install_cmd, install_gpu
+        from ..ocr_engine import gpu_install_cmd, gpu_pkg_spec, install_gpu
 
-        if QMessageBox.question(self, "Cài OCR chạy trên card", "Gỡ onnxruntime bản CPU rồi cài onnxruntime-gpu (~200 MB) "
-                                "vào môi trường Python của tool?\n\nNên tắt mọi việc đang chạy. Xong thì mở lại tool.\n\n"
-                                "Lệnh tương đương (chạy khi đã tắt tool):\n" + gpu_install_cmd()) != \
-                QMessageBox.StandardButton.Yes:
+        spec = gpu_pkg_spec()
+        if QMessageBox.question(self, "Cài OCR chạy trên card", f"Gỡ onnxruntime đang cài rồi cài {spec} (~200 MB, đúng "
+                                "đời CUDA với PyTorch của tool) vào môi trường Python của tool?\n\nNên tắt mọi việc đang "
+                                "chạy. Xong thì mở lại tool.\n\nLệnh tương đương (chạy khi đã tắt tool):\n" +
+                                gpu_install_cmd()) != QMessageBox.StandardButton.Yes:
             return
 
         def fn(j):
-            return {"message": install_gpu("onnxruntime-gpu", j.update, j.cancelled)}
+            return {"message": install_gpu(spec, j.update, j.cancelled)}
         manager.submit("update", "Cài OCR chạy trên card (onnxruntime-gpu)", fn)
         self.win.jobs_changed()
         self.win.toast("Đang cài onnxruntime-gpu – xem tiến độ ở Việc đang làm", "ok")
@@ -1924,9 +1928,10 @@ def _crash_log():
 
 
 def run():
-    from ..config import fix_std_streams
+    from ..config import fix_std_streams, quiet_dll_errors
 
     fix_std_streams()   # python -m trami / exe không cửa sổ đen
+    quiet_dll_errors()  # 2.1.40: DLL lỗi (cuDNN lệch bản…) không bật hộp thoại chặn tool
     _keep_crash_file = _crash_log()  # noqa: F841
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     if sys.platform == "win32":

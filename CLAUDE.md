@@ -10,7 +10,8 @@ Công cụ desktop (PySide6) dịch video tiếng Trung → tiếng Việt (từ
 Phiên bản hiện tại: xem `trami/__init__.py`.
 
 ## Người dùng & cách làm việc
-- Người dùng nói tiếng Việt, chạy trên **Windows** (thư mục `C:\Users\daole\Downloads\TraMi`, venv `.venv`, Python 3.11),
+- Người dùng nói tiếng Việt, chạy trên **Windows** (thư mục `C:\Users\daole\Downloads\TraMi`; từ 2.1.40 thấy chạy ở
+  `C:\Subvideo`, venv `.venv`, Python 3.11),
   có card **NVIDIA**, PyTorch `2.11.0+cu128` (đã chạy GPU: True). Mục đích: dịch video đăng Facebook / YouTube.
 - Chạy dạng tool: `.venv\Scripts\python TraMi.py`. Từ 2.0.71 người dùng muốn bản **Subvideo.exe** đầy đủ thư viện, KHÔNG
   kèm mô hình: `DongGoi_EXE.bat` -> `Subvideo.spec` (PyInstaller) -> `dist\Subvideo\` – phải đóng gói trên Windows của
@@ -513,6 +514,14 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (+ `ocr_gpu_lb` trạng thái onnxruntime, nút Cài bản chạy card -> việc "update"), Giải mã video bằng card, Lọc nền khi
   đọc chữ. requirements: `rapidocr>=3.10` + `onnxruntime>=1.18` (+ rapidocr-onnxruntime dự phòng); Subvideo.spec gom
   rapidocr / omegaconf / pyclipper / shapely. `C.OCR_FPS_HELP` / `OCR_BOX_HELP` / `OCR_MODEL_HELP`.
+  OCR trên card (2.1.40): onnxruntime-gpu trên PyPI 1.19–1.26 = CUDA 12, từ 1.27 (`ORT_CUDA13`) = CUDA 13 -> `gpu_pkg_spec`
+  (PyTorch cu12x -> "onnxruntime-gpu>=1.20,<1.27", cu13x -> ">=1.27", không PyTorch card -> "[cuda,cudnn]"), `ort_gpu_cuda`
+  (đọc số phiên bản, không import), `gpu_mismatch` (khác đời CUDA -> `_init_v3` chạy CPU luôn + cảnh báo, Cài đặt
+  `ocr_gpu_lb` ⚠); `_prepare_cuda`: 1 nguồn cuDNN – PyTorch cùng đời CUDA với onnxruntime (`build_and_package_info.
+  cuda_version`) và chưa có cuDNN nào trong tiến trình (`_loaded` GetModuleHandleW) -> nạp torch\\lib theo `CUDA_DLLS` +
+  `CUDNN_ORDER` (cudnn_graph64_9 TRƯỚC), không gọi preload_dlls; không thì `ort.preload_dlls()`; lỗi nạp -> `_CUDA_NOTE`
+  (log + cảnh báo). `config.quiet_dll_errors` (SetErrorMode SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, gọi ở
+  `gui.main.run` + `__main__.main`, tiến trình phụ thừa hưởng): DLL lỗi không bật hộp thoại chặn tool.
 - Giờ câu phụ đề OCR (2.1.32): Cài đặt `ocr_timing` (`pipeline.OCR_TIMINGS`, ô "Giờ câu" tab Tự động nhóm 1 `a_ocrtime` –
   chỉ hiện khi nguồn "OCR", `_ocr_timing_changed`; Cài đặt → Nhận dạng giọng nói "Giờ câu khi OCR"; hộp Thiết lập tự động;
   `C.OCR_TIMINGS` / `OCR_TIMING_HELP`; `autoflow.summary` ghi "(giờ kết hợp giọng nói)"): "sub" (mặc định) = đúng giờ chữ
@@ -726,7 +735,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (296 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
+- `tests/test_core.py` – `python -m pytest -q tests` (297 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2559,7 +2568,20 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Đo video thử (nền nhiễu, chữ trắng viền đen, cả dải đen dưới khung có / không viền): làm rõ chữ – cả phim 6/6 câu giờ
   ±0,0 s (trước 5/6, 38 mảnh, trễ 0,2 s), theo đoạn 5/5 (trước 0); không làm rõ chữ – y như cũ.
 
+- 2.1.40: 4 hộp "pythonw.exe – Entry Point Not Found … C:\Subvideo\.venv\Lib\site-packages\torch\lib\cudnn_heuristic64_9
+  / cudnn_engines_runtime_compiled64_9 (?getSortedNodes@Graph@fusion@cudnn) / cudnn_engines_precompiled64_9 / cudnn_cnn64_9
+  .dll" mỗi lần dùng OCR. Nguyên nhân: nút "Cài bản chạy card" (2.1.31) cài `onnxruntime-gpu` mới nhất = 1.31 dựng cho
+  CUDA 13 (đã đọc requires_dist trên PyPI: 1.19–1.26 cu12, từ 1.27 cu13) trong khi PyTorch người dùng là cu128 (CUDA 12)
+  -> `ort.preload_dlls()` không dùng torch\lib (khác đời CUDA) mà nạp cuDNN nơi khác, rồi `_prepare_cuda` nạp cả bộ cuDNN
+  của PyTorch theo ABC -> thư viện con của PyTorch dính cudnn_graph64_9 bản khác -> Windows bật hộp thoại; OCR vốn cũng
+  không chạy được trên card (CUDA 13 thiếu). Sửa: chọn bản đúng đời CUDA, 1 nguồn cuDNN, graph trước, không bật hộp thoại
+  (xem Cấu trúc "OCR trên card (2.1.40)"). Thử: giả lập Windows (thứ tự nạp, có cuDNN khác -> không trộn, DLL lỗi 127 ->
+  ghi lý do), chọn gói theo bản PyTorch. Chưa chạy trên Windows thật.
+
 ## Vấn đề đang mở
+- 2.1.40: chờ người dùng bấm Cài đặt → Nhận dạng giọng nói → "Cài bản chạy card" (tắt mở lại tool trước – cài
+  "onnxruntime-gpu>=1.20,<1.27" thay bản CUDA 13) rồi mở lại tool, quét OCR: hết hộp lỗi cudnn …64_9.dll, thông báo có
+  "card (CUDA)"; còn hộp lỗi / vẫn CPU -> gửi dòng ⚠ trong thông báo + data\logs\loi.txt.
 - 2.1.39: chờ người dùng mở lại tab Tự động (nguồn OCR) xem hàng Sáng / Tương phản / Gamma còn bị cắt không; bật Làm rõ chữ
   rồi quét lại cả phim + Tách phụ đề theo đoạn: số câu / giờ câu có khớp lúc không làm rõ chữ không.
 - 2.1.38: chờ người dùng thử tab Lồng tiếng mục 2 → Tốc độ giọng: chọn "⚡ Dài" → Tích loại câu này → Đúng tốc độ ×1,00 (hoặc

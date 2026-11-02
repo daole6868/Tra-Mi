@@ -20,7 +20,7 @@ from typing import Callable
 
 import numpy as np
 
-from .config import MODELS_DIR
+from .config import MODELS_DIR, log_error, quiet_dll_errors
 
 OCR_DIR = MODELS_DIR / "ocr"
 MODELS = [
@@ -199,31 +199,83 @@ def ort_kind() -> str:
 _CUDA_READY = False
 
 
+# cuDNN 9 trên Windows: các thư viện con gọi hàm của cudnn_graph64_9 -> phải nạp graph TRƯỚC, rồi tới các thư viện con
+CUDA_DLLS = ("cudart64_*.dll", "cublasLt64_*.dll", "cublas64_*.dll", "cufft64_*.dll", "curand64_*.dll", "nvrtc64_*.dll")
+CUDNN_ORDER = ("cudnn_graph64_9.dll", "cudnn64_9.dll", "cudnn_ops64_9.dll", "cudnn_cnn64_9.dll", "cudnn_adv64_9.dll",
+               "cudnn_heuristic64_9.dll", "cudnn_engines_precompiled64_9.dll", "cudnn_engines_runtime_compiled64_9.dll",
+               "cudnn_engines_tensor_ir64_9.dll")
+_CUDA_NOTE = ""     # lý do không dùng được thư viện CUDA của PyTorch (hiện trong cảnh báo OCR)
+
+
+def _cuda_major(ver: str) -> int | None:
+    """'12.8' -> 12, '2.11.0+cu128' -> 12, '' -> None."""
+    try:
+        if "+cu" in ver:
+            return int(ver.split("+cu")[1][:2])
+        return int(str(ver).split(".")[0]) if ver else None
+    except (ValueError, IndexError):
+        return None
+
+
+def _loaded(name: str) -> bool:
+    """Windows: thư viện cùng tên đã nạp trong tiến trình (bản nào cũng được)."""
+    try:
+        import ctypes
+
+        return bool(ctypes.WinDLL("kernel32").GetModuleHandleW(name))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _prepare_cuda() -> None:
-    """onnxruntime-gpu cần thư viện CUDA 12 + cuDNN 9: dùng bản đi kèm PyTorch (torch\\lib) nếu có – nạp sẵn để
-    onnxruntime tìm thấy (không import torch: tiến trình giao diện không phải giữ ~0,5–1 GB của torch)."""
-    global _CUDA_READY
+    """onnxruntime-gpu cần thư viện CUDA + cuDNN 9: dùng bản đi kèm PyTorch (torch\\lib) nếu PyTorch cùng đời CUDA với
+    onnxruntime – nạp sẵn để onnxruntime tìm thấy (không import torch: tiến trình giao diện không phải giữ ~0,5–1 GB).
+    2.1.40: trước đây gọi onnxruntime.preload_dlls() (có thể nạp cuDNN của gói nvidia-* / PATH) RỒI nạp cả bộ cuDNN của
+    PyTorch theo ABC -> thư viện con của PyTorch dính cudnn_graph64_9 bản khác -> Windows bật 4 hộp "Entry Point Not
+    Found". Giờ: chỉ 1 nguồn cuDNN; đã có cuDNN nào trong tiến trình thì không nạp thêm; graph nạp trước; lỗi không bật
+    hộp thoại (quiet_dll_errors) mà ghi lại -> OCR tự chạy CPU + cảnh báo."""
+    global _CUDA_READY, _CUDA_NOTE
     if _CUDA_READY:
         return
     _CUDA_READY = True
+    quiet_dll_errors()
     try:
         import onnxruntime as ort
-
-        if hasattr(ort, "preload_dlls"):
-            try:
-                ort.preload_dlls()          # gói nvidia-* cài bằng pip (nếu có)
-            except Exception:  # noqa: BLE001
-                pass
     except Exception:  # noqa: BLE001
-        return
-    if sys.platform != "win32":
         return
     try:
-        spec = importlib.util.find_spec("torch")
-        lib = Path(spec.origin).parent / "lib" if spec and spec.origin else None
+        from onnxruntime.capi import build_and_package_info as bi
+
+        ort_major = _cuda_major(str(getattr(bi, "cuda_version", "") or ""))
     except Exception:  # noqa: BLE001
-        lib = None
-    if not lib or not lib.is_dir():
+        ort_major = None
+    lib = None
+    if sys.platform == "win32":
+        try:
+            spec = importlib.util.find_spec("torch")
+            lib = Path(spec.origin).parent / "lib" if spec and spec.origin else None
+        except Exception:  # noqa: BLE001
+            lib = None
+        if lib is not None and not lib.is_dir():
+            lib = None
+    from .gpu import torch_build
+
+    torch_major = _cuda_major(torch_build())
+    use_torch = bool(lib) and torch_major is not None and (ort_major is None or torch_major == ort_major) and \
+        (lib / "cudnn_graph64_9.dll").exists()
+    if use_torch and any(_loaded(n) for n in ("cudnn_graph64_9.dll", "cudnn64_9.dll")) and "torch" not in sys.modules:
+        use_torch = False          # đã có cuDNN khác trong tiến trình -> không trộn 2 bản
+    if not use_torch:
+        if hasattr(ort, "preload_dlls"):
+            try:
+                ort.preload_dlls()          # PyTorch cùng đời CUDA / gói nvidia-* cài bằng pip / PATH
+            except Exception:  # noqa: BLE001
+                pass
+        if lib and torch_major is not None and ort_major is not None and torch_major != ort_major:
+            _CUDA_NOTE = (f"onnxruntime-gpu dùng CUDA {ort_major} nhưng PyTorch dùng CUDA {torch_major} – không dùng chung "
+                          "được thư viện của PyTorch")
+        return
+    if "torch" in sys.modules:   # PyTorch đã nạp đủ bộ CUDA / cuDNN của nó (tách giọng chạy trong tiến trình này)
         return
     import ctypes
 
@@ -231,28 +283,78 @@ def _prepare_cuda() -> None:
         os.add_dll_directory(str(lib))
     except Exception:  # noqa: BLE001
         pass
-    for pat in ("cudart64_*.dll", "cublasLt64_*.dll", "cublas64_*.dll", "cufft64_*.dll", "curand64_*.dll",
-                "cudnn64_*.dll", "cudnn_*64_*.dll", "nvrtc64_*.dll"):
-        for f in sorted(lib.glob(pat)):
-            try:
-                ctypes.WinDLL(str(f))
-            except OSError:
-                pass
+    bad = []
+    files = [f for pat in CUDA_DLLS for f in sorted(lib.glob(pat))] + [lib / n for n in CUDNN_ORDER if (lib / n).exists()]
+    for f in files:
+        try:
+            ctypes.WinDLL(str(f))
+        except OSError as e:
+            bad.append(f"{f.name} ({getattr(e, 'winerror', '') or e})")
+    if bad:
+        _CUDA_NOTE = "không nạp được thư viện card của PyTorch: " + ", ".join(bad[:3])
+        try:
+            raise RuntimeError(_CUDA_NOTE)
+        except RuntimeError:
+            log_error("Nạp thư viện CUDA / cuDNN cho OCR")
+
+
+ORT_CUDA13 = (1, 27)     # onnxruntime-gpu trên PyPI: 1.19–1.26 dựng cho CUDA 12, từ 1.27 cho CUDA 13 (đã kiểm requires_dist)
+
+
+def ort_gpu_cuda() -> int | None:
+    """Đời CUDA của onnxruntime-gpu đang cài (đọc số phiên bản – không import): 11 / 12 / 13; None = chưa cài."""
+    try:
+        from importlib.metadata import version
+
+        v = version("onnxruntime-gpu").split(".")
+        mm = (int(v[0]), int(v[1]))
+    except Exception:  # noqa: BLE001
+        return None
+    return 13 if mm >= ORT_CUDA13 else 12 if mm >= (1, 19) else 11
+
+
+def gpu_pkg_spec() -> str:
+    """Bản onnxruntime-gpu hợp với PyTorch đang cài (2.1.40): PyTorch CUDA 12 (cu12x) -> onnxruntime-gpu < 1.27 (CUDA
+    12, dùng chung thư viện CUDA / cuDNN của PyTorch); PyTorch CUDA 13 -> bản mới nhất; không có PyTorch bản card ->
+    bản mới nhất kèm thư viện CUDA / cuDNN của NVIDIA cài bằng pip. Trước đây luôn cài bản mới nhất (CUDA 13) -> máy có
+    PyTorch cu128 không chạy được trên card + Windows bật hộp "Entry Point Not Found" (cuDNN lệch bản)."""
+    from .gpu import torch_build
+
+    tm = _cuda_major(torch_build())
+    if tm == 12:
+        return f"onnxruntime-gpu>=1.20,<{ORT_CUDA13[0]}.{ORT_CUDA13[1]}"
+    if tm and tm >= 13:
+        return f"onnxruntime-gpu>={ORT_CUDA13[0]}.{ORT_CUDA13[1]}"
+    return GPU_PKG["cuda"] + "[cuda,cudnn]"
+
+
+def gpu_mismatch() -> str:
+    """'' khi ổn; không thì câu giải thích onnxruntime-gpu đang cài khác đời CUDA với PyTorch."""
+    from .gpu import torch_build
+
+    oc, tb = ort_gpu_cuda(), torch_build()
+    tm = _cuda_major(tb)
+    if oc and tm and oc != tm:
+        return (f"onnxruntime-gpu đang cài dùng CUDA {oc}, PyTorch {tb} dùng CUDA {tm} – OCR không chạy được trên card "
+                f"(và Windows có thể báo lỗi cudnn …64_9.dll). Bấm \"Cài bản chạy card\" để cài bản CUDA {tm}")
+    return ""
 
 
 def gpu_install_cmd() -> str:
     """Lệnh cài onnxruntime chạy trên card (gỡ bản CPU trước – 2 bản cùng cài sẽ đè file của nhau)."""
     py = sys.executable
-    pkg = GPU_PKG["cuda"]
     return (f'"{py}" -m pip uninstall -y onnxruntime onnxruntime-gpu onnxruntime-directml && '
-            f'"{py}" -m pip install {pkg}')
+            f'"{py}" -m pip install "{gpu_pkg_spec()}"')
 
 
-def install_gpu(pkg: str = "onnxruntime-gpu", progress=None, cancel=None) -> str:
-    """Nút "OCR chạy trên card" (tab Tài liệu): gỡ onnxruntime bản CPU, cài bản card. Trả lời nhắn."""
+def install_gpu(pkg: str | None = None, progress=None, cancel=None) -> str:
+    """Nút "OCR chạy trên card" (Cài đặt): gỡ onnxruntime bản CPU / bản card khác đời CUDA, cài bản card hợp với PyTorch
+    (`gpu_pkg_spec`). Trả lời nhắn."""
     import subprocess
 
     from .ffmpeg import _NO_WINDOW, Cancelled
+
+    pkg = pkg or gpu_pkg_spec()
 
     if getattr(sys, "frozen", False):
         raise RuntimeError("Bản Subvideo.exe không cài thêm gói được – cài bằng bản Python (.venv) rồi đóng gói lại.")
@@ -381,6 +483,10 @@ class Engine:
         ver, size, _, _ = SPEC[key]
         (_, _, det), (_, _, rec) = _files(key)
         kind = ort_kind() if device != "cpu" else "cpu"
+        bad = gpu_mismatch() if kind == "cuda" else ""
+        if bad:      # onnxruntime-gpu khác đời CUDA với PyTorch: chạy CPU luôn (khỏi thử card -> lỗi cuDNN)
+            kind = "cpu"
+            self.warn = (self.warn + " " if self.warn else "") + bad + " – OCR đang chạy CPU."
         if kind == "cuda":
             _prepare_cuda()
         p = {"Global.log_level": "error", "Global.use_cls": False,
@@ -405,7 +511,8 @@ class Engine:
         self.device = {"CUDAExecutionProvider": "card (CUDA)", "DmlExecutionProvider": "card (DirectML)"}.get(prov, "CPU")
         if kind in ("cuda", "dml") and self.device == "CPU":
             self.warn = (self.warn + " " if self.warn else "") + \
-                "onnxruntime có bản card nhưng không khởi động được trên card (thiếu CUDA 12 / cuDNN 9?) – OCR chạy CPU."
+                "onnxruntime có bản card nhưng không khởi động được trên card (thiếu CUDA 12 / cuDNN 9?) – OCR chạy CPU." + \
+                (f" ({_CUDA_NOTE})" if kind == "cuda" and _CUDA_NOTE else "")
         self.kind, self.key = "v3", key
 
     @property

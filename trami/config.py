@@ -271,6 +271,21 @@ def _deep_merge(base: dict, extra: dict) -> dict:
     return out
 
 
+def quiet_dll_errors() -> None:
+    """Windows: nạp DLL lỗi (thiếu hàm – "Entry Point Not Found", thiếu file) trả lỗi cho Python thay vì bật hộp thoại
+    chặn cả tool (2.1.40 – PyTorch cũng làm vậy khi nạp thư viện của nó). Gọi 1 lần khi mở tool, tiến trình phụ thừa hưởng."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        SEM_FAILCRITICALERRORS, SEM_NOOPENFILEERRORBOX = 0x0001, 0x8000
+        k.SetErrorMode(k.SetErrorMode(0) | SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def log_error(where: str = "") -> Path:
     """Ghi traceback của lỗi đang xử lý vào data/logs/loi.txt để gửi đi khi cần hỗ trợ."""
     import time

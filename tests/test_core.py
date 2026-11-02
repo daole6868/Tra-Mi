@@ -12777,3 +12777,90 @@ def test_flow_box_min_height_2139():
     app.processEvents()
     assert row.minimumHeight() == one
     host.close()
+
+
+def test_ocr_cuda_dlls_2140(tmp_path, monkeypatch):
+    """OCR trên card (Windows): chọn onnxruntime-gpu đúng đời CUDA với PyTorch, nạp cuDNN của PyTorch theo thứ tự (graph
+    trước), không trộn với cuDNN khác đã nạp, lỗi nạp DLL không bật hộp thoại mà chuyển OCR sang CPU kèm lý do."""
+    import ctypes
+    import importlib.metadata as md
+    import importlib.util as iu
+    import types
+
+    from trami import gpu, ocr_engine as oe
+
+    assert oe._cuda_major("2.11.0+cu128") == 12 and oe._cuda_major("13.0") == 13 and oe._cuda_major("") is None
+    monkeypatch.setattr(gpu, "torch_build", lambda: "2.11.0+cu128")
+    assert oe.gpu_pkg_spec() == "onnxruntime-gpu>=1.20,<1.27"
+    real_version = md.version
+    monkeypatch.setattr(md, "version", lambda d: "1.31.1" if d == "onnxruntime-gpu" else real_version(d))
+    assert oe.ort_gpu_cuda() == 13
+    assert "CUDA 13" in oe.gpu_mismatch() and "CUDA 12" in oe.gpu_mismatch()
+    assert '"onnxruntime-gpu>=1.20,<1.27"' in oe.gpu_install_cmd()
+    monkeypatch.setattr(md, "version", lambda d: "1.26.0" if d == "onnxruntime-gpu" else real_version(d))
+    assert oe.ort_gpu_cuda() == 12 and oe.gpu_mismatch() == ""
+    monkeypatch.setattr(gpu, "torch_build", lambda: "2.12.0+cu130")
+    assert oe.gpu_pkg_spec() == "onnxruntime-gpu>=1.27"
+    monkeypatch.setattr(gpu, "torch_build", lambda: "")
+    assert oe.gpu_pkg_spec() == "onnxruntime-gpu[cuda,cudnn]"
+
+    # ---- nạp DLL kiểu Windows (giả lập)
+    pytest.importorskip("onnxruntime")
+    import onnxruntime as ort
+
+    lib = tmp_path / "torch" / "lib"
+    lib.mkdir(parents=True)
+    (tmp_path / "torch" / "__init__.py").write_text("")
+    names = ["cudart64_12.dll", "cublas64_12.dll", "cublasLt64_12.dll", "cudnn64_9.dll", "cudnn_adv64_9.dll",
+             "cudnn_cnn64_9.dll", "cudnn_engines_precompiled64_9.dll", "cudnn_engines_runtime_compiled64_9.dll",
+             "cudnn_graph64_9.dll", "cudnn_heuristic64_9.dll", "cudnn_ops64_9.dll"]
+    for n in names:
+        (lib / n).write_bytes(b"")
+    loads, preloaded, foreign, broken = [], [], set(), set()
+
+    class K:
+        def SetErrorMode(self, m):
+            return 0
+
+        def GetModuleHandleW(self, n):
+            return 1 if n in foreign else 0
+
+    def win_dll(path, *a, **k):
+        if path == "kernel32":
+            return K()
+        name = Path(path).name
+        if name in broken:
+            e = OSError("The specified procedure could not be found")
+            e.winerror = 127
+            raise e
+        loads.append(name)
+        return object()
+
+    real_find = iu.find_spec
+    monkeypatch.setattr(ctypes, "WinDLL", win_dll, raising=False)
+    monkeypatch.setattr(oe.sys, "platform", "win32")
+    monkeypatch.setattr(oe.os, "add_dll_directory", lambda d: None, raising=False)
+    monkeypatch.setattr(iu, "find_spec", lambda n, *a: types.SimpleNamespace(origin=str(tmp_path / "torch" / "__init__.py"))
+                        if n == "torch" else real_find(n, *a))
+    monkeypatch.setattr(ort, "preload_dlls", lambda *a, **k: preloaded.append(1), raising=False)
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
+    monkeypatch.setattr(gpu, "torch_build", lambda: "2.11.0+cu128")
+
+    def run():
+        loads.clear()
+        preloaded.clear()
+        monkeypatch.setattr(oe, "_CUDA_READY", False)
+        monkeypatch.setattr(oe, "_CUDA_NOTE", "")
+        oe._prepare_cuda()
+
+    run()                                   # PyTorch cùng đời CUDA: chỉ nạp thư viện của PyTorch, graph trước
+    cd = [n for n in loads if n.startswith("cudnn")]
+    assert cd[0] == "cudnn_graph64_9.dll" and cd.index("cudnn_ops64_9.dll") < cd.index("cudnn_cnn64_9.dll")
+    assert set(cd) == {n for n in names if n.startswith("cudnn")} and not preloaded and oe._CUDA_NOTE == ""
+    foreign.add("cudnn_graph64_9.dll")      # đã có cuDNN khác trong tiến trình -> không trộn
+    run()
+    assert not any(n.startswith("cudnn") for n in loads) and preloaded
+    foreign.clear()
+    broken.add("cudnn_cnn64_9.dll")         # thư viện lệch bản -> không hộp thoại, ghi lý do
+    run()
+    assert "cudnn_cnn64_9.dll" in oe._CUDA_NOTE and "cudnn_ops64_9.dll" in loads
