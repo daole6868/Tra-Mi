@@ -237,9 +237,13 @@ def _glyph_pixels(img: np.ndarray, boxes: list, skip: list | None = None) -> np.
         roi = img[y0:y1, x0:x1]
         if roi.size < 16:
             continue
-        lo, hi = np.percentile(roi, 12), np.percentile(roi, 80)
-        if hi - lo < 30:
+        p2, lo, hi, p98 = np.percentile(roi, (2, 12, 80, 98))
+        if hi - lo < 30 and p98 - p2 < 30:
             continue
+        # 2.1.39: chữ chiếm ít hơn 20 % khung (nền đã làm rõ chữ thành đen) -> mức 80 % rơi vào hạt nhiễu nền -> lấy cả
+        # mức giữa thân chữ / viền làm ngưỡng (chỉ thân chữ thật là "sáng", chỉ viền / nền tối thật là "tối")
+        mid = (p2 + p98) / 2
+        hi, lo = max(hi, mid), min(lo, mid)
         # nét chữ = điểm sáng nằm sát điểm tối (thân chữ cạnh viền) và ngược lại; mảng nền sáng / tối liền một khối
         # (trời, tường, dải màu đứng yên) không tính – nếu không, đổi câu mà nền đứng yên vẫn bị coi là còn câu cũ
         br, dk = (roi >= hi).astype(np.uint8), (roi <= lo).astype(np.uint8)
@@ -255,10 +259,21 @@ def _glyph_pixels(img: np.ndarray, boxes: list, skip: list | None = None) -> np.
     return idx
 
 
+PERSIST_GROUP = 12    # mỗi nhóm nét (sáng / tối) cần ít nhất chừng này điểm mới xét riêng
+
+
 def _persist(img: np.ndarray, idx: np.ndarray, ref: np.ndarray) -> float:
+    """Phần nét chữ còn nguyên. 2.1.39: nét SÁNG (thân chữ) và nét TỐI (viền) xét riêng, lấy phần kém hơn – nền cùng màu
+    viền (làm rõ chữ làm nền đen như viền, phụ đề trên dải đen) thì viền cũ "còn nguyên" dù chữ đã đổi -> trước đây câu
+    mới bị coi là câu cũ (tách theo đoạn có làm rõ chữ ra 0 câu, quét cả phim lệch giờ / sót câu)."""
     if not len(idx):
         return 0.0
-    return float((np.abs(img.ravel()[idx].astype(np.int16) - ref) <= TOL).mean())
+    ok = np.abs(img.ravel()[idx].astype(np.int16) - ref) <= TOL
+    hi = ref >= (int(ref.min()) + int(ref.max())) / 2
+    nh = int(hi.sum())
+    if nh >= PERSIST_GROUP and len(ref) - nh >= PERSIST_GROUP:
+        return float(min(ok[hi].mean(), ok[~hi].mean()))
+    return float(ok.mean())
 
 
 @dataclass

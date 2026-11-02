@@ -726,7 +726,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (293 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
+- `tests/test_core.py` – `python -m pytest -q tests` (296 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2546,7 +2546,22 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   xếp lại không đọc lại, câu sau lùi, về gốc như cũ), giao diện offscreen (tích loại, ×/%, 🔒, Ctrl+Z, về gốc tất cả).
   Logo chữ chạy liên tục (kế hoạch 2.1.38 cũ: chữ chuyển động không phải phụ đề + dải chữ chạy tự bỏ qua) – người dùng để sau.
 
+- 2.1.39: (1) ảnh tab Tự động: hàng Sáng / Tương phản / Gamma ("Làm rõ chữ khi quét") bị cắt nửa dưới, chữ hướng dẫn đè lên
+  (máy thử offscreen không tái hiện được – khung cha QFormLayout trong ô cuộn cấp thiếu chiều cao cho hàng tự xuống dòng).
+  Sửa chung: `widgets.HfwBox` (chiều cao tối thiểu = heightForWidth ở bề rộng hiện tại, tính lại khi đổi bề rộng / nhận
+  LayoutRequest) – mọi `flow()` trả HfwBox, `a_ocreq_box` là HfwBox, `project_page._HfwBox` = HfwBox; `FlowLayout._place`
+  dùng sizeHint mở rộng theo minimumSize. (2) "Tách phụ đề theo đoạn quét không ra chữ" khi bật Làm rõ chữ: có áp lọc
+  (Cài đặt `ocr_eq` qua `load_settings` -> `extract_hardsubs` -> `eq_filter`) nhưng chính lọc làm hỏng bộ theo dõi nét
+  chữ: nền thành đen như viền -> `_glyph_pixels` lấy "nét tối" là viền + nền đen, mức 80 % rơi vào hạt nhiễu nền -> khi
+  câu đổi, phần tối vẫn "còn nguyên" ≥ KEEP -> câu mới bị coi là câu cũ (quét theo đoạn 0 câu), hạt nhiễu làm câu vụn
+  (38 mảnh / 6 câu), giờ hiện chữ trễ 0,2 s, sót câu cuối. Sửa `ocr._persist`: nét sáng / nét tối xét riêng (mỗi nhóm ≥
+  `PERSIST_GROUP` 12 điểm), lấy phần kém hơn; `_glyph_pixels` ngưỡng sáng ≥ max(p80, giữa p2–p98), tối ≤ min(p12, giữa).
+  Đo video thử (nền nhiễu, chữ trắng viền đen, cả dải đen dưới khung có / không viền): làm rõ chữ – cả phim 6/6 câu giờ
+  ±0,0 s (trước 5/6, 38 mảnh, trễ 0,2 s), theo đoạn 5/5 (trước 0); không làm rõ chữ – y như cũ.
+
 ## Vấn đề đang mở
+- 2.1.39: chờ người dùng mở lại tab Tự động (nguồn OCR) xem hàng Sáng / Tương phản / Gamma còn bị cắt không; bật Làm rõ chữ
+  rồi quét lại cả phim + Tách phụ đề theo đoạn: số câu / giờ câu có khớp lúc không làm rõ chữ không.
 - 2.1.38: chờ người dùng thử tab Lồng tiếng mục 2 → Tốc độ giọng: chọn "⚡ Dài" → Tích loại câu này → Đúng tốc độ ×1,00 (hoặc
   Nhanh / chậm hơn hiện tại −10 %) → xem dòng báo trước → Đổi tốc độ giọng: nghe câu chậm lại có tự nhiên không, câu sau
   bị lùi / đè có chấp nhận được không (không thì bật tab Chỉnh sửa → Làm chậm "theo câu dài"), Ctrl+Z / Về gốc tất cả.

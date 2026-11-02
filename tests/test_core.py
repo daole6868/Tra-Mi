@@ -12712,3 +12712,68 @@ def test_dub_speed_gui_2138(monkeypatch):
         save_settings({"dub_speed_mode": "exact", "dub_speed_pct": -10})
         win.timer.stop()
         p.delete()
+
+
+def test_ocr_persist_groups_2139():
+    """Nét sáng (thân chữ) và nét tối (viền) xét riêng: nền cùng màu viền (đã làm rõ chữ -> nền đen) mà chữ đã đổi thì
+    phần viền "còn nguyên" không được giữ câu cũ."""
+    from trami import ocr
+
+    ref = np.array([230] * 40 + [5] * 60, np.int16)
+    idx = np.arange(100)
+    same = ref.astype(np.uint8)
+    changed = np.where(np.arange(100) < 40, 10, 5).astype(np.uint8)    # thân chữ thành đen, viền vẫn đen
+    assert ocr._persist(same, idx, ref) == 1.0
+    assert ocr._persist(changed, idx, ref) == 0.0            # trước đây 0,6 (= KEEP) -> coi là câu cũ
+    few = np.array([230] * 5 + [5] * 95, np.int16)           # nhóm quá ít điểm -> tính chung như cũ
+    assert abs(ocr._persist(np.full(100, 5, np.uint8), idx, few) - 0.95) < 1e-9
+
+
+def test_ocr_eq_windows_2139(tmp_path):
+    """Làm rõ chữ (nền thành đen như viền chữ): quét cả phim và quét theo đoạn (tách phụ đề theo đoạn) đều ra đủ câu,
+    đúng giờ như khi không làm rõ – 2.1.38 quét theo đoạn ra 0 câu, quét cả phim lệch 0,2 s + sót câu cuối."""
+    _need_ocr3()
+    from trami import ocr
+
+    vid = tmp_path / "v.mp4"
+    subs = _ocr_video_2131(vid, dur=14.0, bg="noise")
+    region = {"x": 0.0, "y": 0.75, "w": 1.0, "h": 0.22, "line_y": 0.86, "line_h": 0.07, "found": True}
+    st = {"ocr_eq": True, "ocr_eq_brightness": -0.3, "ocr_eq_contrast": 1.8, "ocr_eq_gamma": 0.5}
+    stats: dict = {}
+    segs = ocr.extract_hardsubs(str(vid), dict(region), fps=4, stats=stats, settings=st)
+    assert [s.text for s in segs] == [t for _a, _b, t in subs]
+    assert all(abs(s.start - a) <= 0.08 for s, (a, _b, _t) in zip(segs, subs)) and stats["spans"] <= 8
+    win = ocr.extract_hardsubs(str(vid), dict(region), fps=4, settings=st, windows=[(3.5, 8.5)])
+    assert [s.text for s in win] == [t for _a, _b, t in subs[1:4]]
+    assert all(abs(s.start - a) <= 0.08 for s, (a, _b, _t) in zip(win[1:], subs[2:4]))
+
+
+def test_flow_box_min_height_2139():
+    """Hàng tự xuống dòng giữ đủ chiều cao tối thiểu ở bề rộng hiện tại (ô Sáng / Tương phản / Gamma không bị cắt)."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QDoubleSpinBox, QFormLayout, QWidget
+
+    from trami.gui.widgets import HfwBox, button, flow, hbox, label
+
+    app = QApplication.instance() or QApplication([])
+    host = QWidget()
+    form = QFormLayout(host)
+    spins = []
+    for t in ("Sáng", "Tương phản", "Gamma"):
+        sp = QDoubleSpinBox()
+        sp.setMaximumWidth(84)
+        spins.append(hbox(label(t), sp))
+    row = flow(*spins, button("Làm nét"))
+    assert isinstance(row, HfwBox)
+    form.addRow("Làm rõ chữ", row)
+    host.resize(900, 300)
+    host.show()
+    app.processEvents()
+    one = row.minimumHeight()
+    host.resize(260, 300)
+    app.processEvents()
+    assert row.minimumHeight() > one and row.height() >= row.layout().heightForWidth(row.width())
+    host.resize(900, 300)
+    app.processEvents()
+    assert row.minimumHeight() == one
+    host.close()

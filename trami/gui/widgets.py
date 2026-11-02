@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from PySide6.QtCore import (QEasingCurve, QPoint, QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, Signal,
+from PySide6.QtCore import (QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, Signal,
                             Property)
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QAbstractButton, QComboBox, QDoubleSpinBox, QFormLayout, QFrame, QGraphicsDropShadowEffect,
@@ -828,7 +828,7 @@ class FlowLayout(QLayout):
         for it in self._items:
             if it.isEmpty():
                 continue
-            hint = it.sizeHint()
+            hint = it.sizeHint().expandedTo(it.minimumSize())   # ô không bao giờ thấp hơn mức tối thiểu của nó
             if x > rect.x() and x + hint.width() > rect.right() + 1:
                 flush()
                 x, y, line = rect.x(), y + line + sp, 0
@@ -839,9 +839,35 @@ class FlowLayout(QLayout):
         return y + line - rect.y()
 
 
+class HfwBox(QWidget):
+    """Khung có hàng tự xuống dòng / chữ tự xuống dòng: chiều cao tối thiểu = chiều cao cần ở bề rộng HIỆN TẠI (2.1.35 /
+    2.1.39). Khung cha (QFormLayout trong ô cuộn, vách kéo QSplitter) chỉ tính theo chiều cao tối thiểu 1 hàng nên có lúc
+    cấp thiếu -> hàng dưới bị cắt nửa / chữ hướng dẫn đè lên ô. Tính lại khi đổi bề rộng hoặc nội dung đổi."""
+
+    def refit(self):
+        lay = self.layout()
+        if lay is None or self.width() <= 0:
+            return
+        h = lay.heightForWidth(max(120, self.width())) if lay.hasHeightForWidth() else -1
+        h = max(h, lay.minimumSize().height())
+        if h > 0 and h != self.minimumHeight():
+            self.setMinimumHeight(h)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if e.size().width() != e.oldSize().width():
+            self.refit()
+
+    def event(self, e):
+        r = super().event(e)
+        if e.type() == QEvent.Type.LayoutRequest:   # ô con hiện / ẩn / đổi chữ
+            self.refit()
+        return r
+
+
 def flow(*ws, spacing: int = 8) -> QWidget:
     """Như hbox nhưng tự xuống dòng khi hẹp (None bị bỏ qua; layout con được gói thành 1 khối không tách)."""
-    box = QWidget()
+    box = HfwBox()
     lay = FlowLayout(box, spacing)
     for w in ws:
         if w is not None:

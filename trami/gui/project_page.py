@@ -26,7 +26,7 @@ from .player import Player, fmt
 from .subs_model import (C_END, C_FIT, C_NODUB, C_SEL, C_SONG, C_SPK, C_START, C_VI, C_VOICE, C_ZH, SpeakerDelegate,
                          WrapDelegate,
                          SubsFilter, SubsModel, VoiceDelegate)
-from .widgets import (Card, ColorButton, Form, GradientButton, IconButton, IconTabs, PillTabs, ProgressBar,
+from .widgets import (Card, ColorButton, Form, GradientButton, HfwBox, IconButton, IconTabs, PillTabs, ProgressBar,
                       SectionCard, SliderRow, Switch, button, combo, flow, hbox, label, set_combo, wrap)
 
 UNDO_TIP = ("Hoàn tác (Ctrl+Z): xoá / gộp / tách / kéo câu, sửa chữ, dịch, tạo giọng, tách / nối câu, căn mép, lọc cảm "
@@ -119,23 +119,7 @@ def _vsep() -> QWidget:
     f.setStyleSheet(f"background: {theme.BORDER}; border: none;")
     return f
 
-class _HfwBox(QWidget):
-    """Khung chứa các thẻ có hàng nút tự xuống dòng: chiều cao tối thiểu = chiều cao cần ở bề rộng hiện tại (vách kéo
-    QSplitter không ép được nhỏ hơn -> không chồng chữ)."""
-
-    def refit(self):
-        lay = self.layout()
-        if lay is None:
-            return
-        h = lay.heightForWidth(max(200, self.width())) if lay.hasHeightForWidth() else -1
-        h = max(h, lay.minimumSize().height())
-        if h > 0 and h != self.minimumHeight():
-            self.setMinimumHeight(h)
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        if e.size().width() != e.oldSize().width():
-            self.refit()
+_HfwBox = HfwBox    # 2.1.35: khung chứa thẻ có hàng nút tự xuống dòng (dùng chung widgets.HfwBox từ 2.1.39)
 
 
 class ProjectPage(QWidget):
@@ -423,7 +407,7 @@ class ProjectPage(QWidget):
         eq_row.append(hbox(self.a_eq_sharp, label("Làm nét", "muted")))
         set_combo(self.a_ocreq_preset, eq_preset_of(eqv, bool(s.get("ocr_eq", False))))
         self.a_ocreq_hint = label("", "muted", wrap=True)
-        self.a_ocreq_box = QWidget()
+        self.a_ocreq_box = HfwBox()    # 2.1.39: không để hàng Sáng / Tương phản / Gamma bị cắt nửa dưới
         eb = QVBoxLayout(self.a_ocreq_box)
         eb.setContentsMargins(0, 0, 0, 0)
         eb.setSpacing(6)
