@@ -562,7 +562,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - OCR logo chữ + đọc chữ kỹ (2.1.37): `trami/ocrlogo.py` (hàm thuần) – `Logo` (text = bản đọc nhiều nhất, variants bản
   đọc lệch, w / h cỡ khung chữ, static khung khi đứng yên 1 chỗ, hits / share / places / transparent, user, on (tắt = trả
   chữ lại), cut / dropped / hidden; `to_dict(k)` / `from_dict(d, k)` – dự án lưu cỡ theo tỉ lệ CHIỀU CAO khung hình, static
-  theo tỉ lệ khung), `norm` (NFKC, chữ thường, bỏ khoảng trắng), `find(obs, covered, known)` (gom theo NỘI DUNG gần giống:
+  theo tỉ lệ khung; 2.1.41: chữ hiện 1 mình chỉ là logo khi có @ # / tên Latin + ≤ 4 chữ Hán, chỗ logo đứng yên chỉ
+  bỏ chữ giống logo – `at_static` / `looks_like`), `norm` (NFKC, chữ thường, bỏ khoảng trắng), `find(obs, covered, known)` (gom theo NỘI DUNG gần giống:
   hạt = bản đọc y hệt ở ≥ 3 lần đọc, gộp bản lệch giống ≥ `VAR_SIM` 0,6 hoặc ≥ `SIZE_SIM` 0,34 + cùng cỡ; mảnh dính câu
   ("@纵横没想到…") tính là 1 lần thấy; logo khi ≥ `MIN_HITS` 4 lần, ≥ max(`SHARE` 4 %, min(12 s, 30 %)) thời lượng, trải
   ≥ min(20 %, 120 s) VÀ (hiện cùng lúc với chữ khác ≥ `COOC` 30 % hoặc có @ # Latin / số hoặc ≥ 3 chỗ hoặc trong suốt
@@ -735,7 +736,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (297 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
+- `tests/test_core.py` – `python -m pytest -q tests` (300 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2578,7 +2579,24 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (xem Cấu trúc "OCR trên card (2.1.40)"). Thử: giả lập Windows (thứ tự nạp, có cuDNN khác -> không trộn, DLL lỗi 127 ->
   ghi lý do), chọn gói theo bản PyTorch. Chưa chạy trên Windows thật.
 
+- 2.1.41: "video 2 tiếng mà chỉ còn 46 câu" (thông báo: 2948 lần chữ đổi, đọc 3152 lần · "logo 东部666分区生存人数为 (đứng
+  yên)") + "không phải logo – đó là câu thoại bình thường, tool tự nhận thành logo làm lỗi hết". 2 lỗi chồng nhau: (1)
+  `ocrlogo.find` coi CHỮ SỐ là dấu hiệu logo (`_MARK`) -> câu thoại có "666" lặp lại nhiều lần (dò trước khi quét mỗi khung
+  mẫu tính ~90 s nên vài lần thấy đã đủ thời lượng) thành logo dù luôn hiện 1 mình; (2) logo "đứng yên" thì MỌI chữ có tâm
+  trong khung đó bị coi là logo bất kể nội dung (`match` + `_LogoGuard.classify` bỏ khung không đọc) -> logo nằm đúng chỗ
+  phụ đề = mất gần hết câu (video thử: 11 câu -> 0). Thêm: công tắc "Tự lọc logo chữ" tắt vẫn áp logo tự tìm của lần quét
+  trước (`ocr_known_logos` đưa lại nguyên xi). Sửa: `_STRONG` (@ # / tên Latin ≥ 2 chữ cái) + ≤ `LONE_HAN_MAX` 4 chữ Hán
+  mới là dấu hiệu logo khi chữ hiện 1 mình (không cùng lúc chữ khác, đứng yên, không trong suốt); `at_static` (tâm trong
+  khung ± nửa cao dòng, gọn trong khung, cao ≤ 1,6 lần) + `looks_like` (giống ≥ 34 % / cùng @ # / ≥ nửa số chữ là chữ của
+  logo / 1 ký hiệu Latin; 1 chữ Hán chỉ khi là chữ của logo) mới là bản đọc của logo đứng yên; `_LogoGuard` luôn ĐỌC THỬ
+  khung ở chỗ logo đứng yên (đọc ra trống + trùng khung logo ≥ 50 % `_iou` mới bỏ); watermark (`_static_marks_spans`) phải
+  hiện cùng lúc chữ Hán KHÁC (không phải watermark) ≥ `MARK_COOC` 20 % thời lượng + `_mark_like` (chữ ở chỗ watermark phải
+  giống watermark, 1 chữ vẫn tính); `ocr_known_logos` chỉ đưa lại logo người dùng thêm + logo đã tắt (logo tự tìm sẽ tìm
+  lại); công tắc tắt -> `applied` chỉ logo người dùng thêm, stats["logo_off"] -> `ocr_note` không ghi logo tự tìm. Video thử
+  (câu "东部666分区生存人数为" lặp ở mọi khoảng nghỉ đúng chỗ phụ đề): 21/21 câu; đưa logo sai vào vẫn chỉ bỏ đúng câu đó.
 ## Vấn đề đang mở
+- 2.1.41: chờ người dùng quét lại phim 2 tiếng (tab Tự động → "1. Nghe & tách câu", nguồn OCR): số câu phải về ~2.900,
+  câu "东部666分区生存人数为" giữ là câu thoại, thông báo không còn "logo 东部666…"; còn thiếu câu -> gửi lại dòng thông báo.
 - 2.1.40: chờ người dùng bấm Cài đặt → Nhận dạng giọng nói → "Cài bản chạy card" (tắt mở lại tool trước – cài
   "onnxruntime-gpu>=1.20,<1.27" thay bản CUDA 13) rồi mở lại tool, quét OCR: hết hộp lỗi cudnn …64_9.dll, thông báo có
   "card (CUDA)"; còn hộp lỗi / vẫn CPU -> gửi dòng ⚠ trong thông báo + data\logs\loi.txt.

@@ -164,11 +164,24 @@ def static_marks(frames: list[tuple[float, list]], fps: float, min_share: float 
     return out
 
 
+def _mark_like(text: str, mark: str) -> bool:
+    """Chữ đọc ở chỗ watermark có phải (bản đọc lệch của) watermark không: 1 chữ ("冬", "水"), ≥ nửa số chữ là chữ của
+    watermark, hoặc giống ≥ 34 %. Câu phụ đề khác hẳn hiện đúng chỗ đó thì không (2.1.41)."""
+    import difflib
+
+    t = "".join(str(text or "").split())
+    if len(t) <= 1:
+        return True
+    if sum(1 for c in t if c in mark) * 2 >= len(t):
+        return True
+    return difflib.SequenceMatcher(None, t, mark, autojunk=False).ratio() >= 0.34
+
+
 def _is_mark(item, marks, pad: float = 15) -> bool:
     """Khung chữ nằm trong vùng watermark (kể cả khi OCR đọc lệch thành chữ khác: "冬", "水"…)."""
     x0, y0, x1, y1 = _bbox(item[0])
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-    return any((mx0 - pad <= cx <= mx1 + pad and my0 - pad <= cy <= my1 + pad)
+    return any((mx0 - pad <= cx <= mx1 + pad and my0 - pad <= cy <= my1 + pad and _mark_like(item[1], m))
                # đọc dính cả logo bên cạnh ("冬冰bilibili" -> "冬冰b#"): cùng chỗ bắt đầu, có chữ watermark
                or (abs(x0 - mx0) < 2 * pad and abs(y0 - my0) < 2 * pad and m in item[1])
                for m, mx0, my0, mx1, my1 in marks)
@@ -610,6 +623,12 @@ def _static_cut(bb, det, logos) -> tuple[int, int] | None:
     return None
 
 
+def _iou(a, b) -> float:
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    un = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - ix
+    return ix / un if un > 0 else 0.0
+
+
 class _LogoGuard:
     """2.1.37: bỏ logo chữ đã biết / vùng bỏ qua ra khỏi việc theo dõi nét chữ khi quét -> logo nhảy tới / đi khỏi không
     làm tách câu, câu ngắn có logo đứng cạnh không bị kéo dài giờ tắt; logo dính liền dòng phụ đề (bộ tìm chữ gộp chung 1
@@ -641,16 +660,18 @@ class _LogoGuard:
         if not self.logos:
             return ("text", None)
         w, h = bb[2] - bb[0], bb[3] - bb[1]
-        touch = False                  # khung chồng lên chỗ logo đứng yên (có thể dính câu) -> phải đọc thử
+        cx, cy = (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
+        # khung ở / chồng lên chỗ logo đứng yên -> LUÔN đọc thử (2.1.41: trước đây khung cùng chỗ bị bỏ ngay không đọc ->
+        # logo / chữ game hiện đúng chỗ phụ đề làm mất gần hết câu phụ đề)
+        touch = False
+        spot = None
         for L in self.logos:
             if L.static and L.h:
                 x0, y0, x1, y1 = L.static
-                pad = 0.5 * L.h
-                cx, cy = (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
-                if x0 - pad <= cx <= x1 + pad and y0 - pad <= cy <= y1 + pad and w <= 1.5 * (x1 - x0) + pad:
-                    return ("logo", L.text)
+                if ocrlogo.at_static(L, (cx, cy), (w, h)):
+                    spot = spot or L
                 ix = max(0.0, min(bb[2], x1) - max(bb[0], x0)) * max(0.0, min(bb[3], y1) - max(bb[1], y0))
-                touch = touch or ix >= 0.5 * (x1 - x0) * (y1 - y0)
+                touch = touch or spot is not None or ix >= 0.5 * (x1 - x0) * (y1 - y0)
         if not touch and self.hmax and (h < 0.6 * self.hmin or h > 2.5 * self.hmax or w < 0.6 * self.wmin):
             return ("text", None)
         import time as _time
@@ -659,9 +680,11 @@ class _LogoGuard:
         (text, _sc, det), = self.eng.recognize_ex([_crop(img, box)])
         self.n_rec += 1
         self.t += _time.perf_counter() - t0
-        if not text.strip():
+        if not text.strip():           # logo mờ đọc không ra chữ: khung trùng khung logo đứng yên -> logo
+            if spot is not None and _iou(bb, spot.static) >= 0.5:
+                return ("logo", spot.text)
             return ("text", None)
-        L = ocrlogo.match(text, self.logos, (w, h))
+        L = ocrlogo.match(text, self.logos, (w, h), (cx, cy))
         if L is not None:
             return ("logo", L.text)
         rest, (a, b), cuts = ocrlogo.strip(text, self.logos)
@@ -995,6 +1018,9 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
         return L
     known = [logo_in(d) for d in (logos or []) if d.get("text")]
     use_logo = bool(st.get("ocr_logo", True))
+
+    def applied(L) -> bool:    # công tắc "Tự lọc logo chữ" tắt: chỉ bỏ logo người dùng tự thêm (2.1.41)
+        return L.on and (use_logo or L.user)
     wins_all = [(a / F, (a + c) / F if c else total) for a, c in bounds] if windows else [(0.0, total)]
     if use_logo:
         t0 = _time.time()
@@ -1004,7 +1030,7 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
                                   (lambda f, m: progress(0.04 * f, m)) if progress else None)
         known = ocrlogo.find(obs0, covered, known)
         tm["logo"] = _time.time() - t0
-    active = [L for L in known if L.on]
+    active = [L for L in known if applied(L)]
     guard = _LogoGuard(eng, active, ign) if (active or ign) else None
     # hàng đợi có giới hạn: đọc chữ chậm hơn giải mã (máy chỉ CPU) thì luồng giải mã chờ – mỗi câu giữ ≤ 16 khung mẫu,
     # không giới hạn thì phim dài có thể dồn hàng nghìn câu (vài GB RAM)
@@ -1126,7 +1152,7 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
     # C3: logo – tìm lại trên MỌI lần đọc (logo dò trước bị sót / dính câu), rồi bỏ mảnh chữ là logo, cắt logo dính câu
     t0 = _time.time()
     logo_list = list(known)
-    if use_logo or known or ign:
+    if use_logo or active or ign:
         if use_logo:
             obs = []
             for k, ((a, b), items) in enumerate(zip(times, reads)):
@@ -1135,7 +1161,7 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
                     obs.append(ocrlogo.Obs(k, a, b, _bbox(it[0]), nt[i], tuple(o for j, o in enumerate(nt) if j != i),
                                            it.alpha))
             logo_list = ocrlogo.find(obs, covered, logo_list)
-        act = [L for L in logo_list if L.on]
+        act = [L for L in logo_list if applied(L)]
         new_reads = []
         for items in reads:
             out = []
@@ -1333,7 +1359,8 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
     except Exception:
         pass
     for L in logo_list:           # số câu đã cắt logo ra / số đoạn chỉ có logo đã bỏ / số lần bỏ ngay lúc quét
-        if not L.on:
+        if not applied(L):
+            L.cut = L.dropped = L.hidden = 0
             continue
         if guard is not None:
             L.hidden = guard.hid.get(L.text, 0)
@@ -1357,7 +1384,7 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
                       "spans": reader.n["spans"], "det": n_det[0], "cleaned": reader.n["cleaned"], "engine": eng.label,
                       "engine_warn": eng.warn, "hw": used_hw[0], "chunks": nch, "secs": round(_time.time() - t_start, 1),
                       "eq": bool(pre), "t": {k: round(v, 1) for k, v in tm.items()},
-                      "logos": [logo_out(L) for L in logo_list], "logo_only": lo_m,
+                      "logos": [logo_out(L) for L in logo_list], "logo_only": lo_m, "logo_off": not use_logo,
                       "logo_rec": guard.n_rec if guard else 0, "logo_hidden": guard.n_logo if guard else 0,
                       "big": big_st, "text_box": _text_box(boxes, W, H)})
     if progress:
@@ -1410,6 +1437,9 @@ def _stray_ok(it, han: list, h_sub: float, band) -> bool:
     return cx is None or abs((bb[0] + bb[2]) / 2 - cx) <= tol
 
 
+MARK_COOC = 0.2     # watermark: ≥ 20 % thời gian hiện cùng lúc với chữ Hán khác
+
+
 def _static_marks_spans(times: list, reads: list, total: float, min_share: float = 0.3,
                         min_sec: float = 10.0) -> list[tuple[str, float, float, float, float]]:
     """Như static_marks nhưng theo thời lượng từng đoạn: chữ ở cùng 1 chỗ tổng cộng ≥ 30 % video và ≥ 10 s (video ngắn:
@@ -1421,14 +1451,23 @@ def _static_marks_spans(times: list, reads: list, total: float, min_share: float
             pos.setdefault(txt, []).append(_bbox(pts))
             dur[txt] = dur.get(txt, 0.0) + (b - a)
     need = max(min_share * total, min(min_sec, 0.8 * total))
-    out = []
+    cand = {}
     for txt, bs in pos.items():
         if dur[txt] < need or len(bs) < 3:
             continue
         arr = np.array(bs)
         if arr[:, :2].std(axis=0).max() < 12:
-            out.append((txt, *(float(v) for v in np.median(arr, axis=0))))
-    return out
+            cand[txt] = tuple(float(v) for v in np.median(arr, axis=0))
+    # 2.1.41: watermark đè lên cảnh nên hay hiện CÙNG LÚC với câu phụ đề (chữ không phải watermark khác); chữ luôn hiện 1
+    # mình đúng chỗ phụ đề là câu thoại lặp lại nhiều lần – không phải watermark
+    co: dict[str, float] = {}
+    for (a, b), items in zip(times, reads):
+        if not any(o[1] not in cand and _CJK.search(o[1]) for o in items):
+            continue
+        for _pts, txt, _ in items:
+            if txt in cand:
+                co[txt] = co.get(txt, 0.0) + (b - a)
+    return [(txt, *bx) for txt, bx in cand.items() if co.get(txt, 0.0) >= MARK_COOC * dur[txt]]
 
 
 def _text_box(boxes: list[dict], W: int, H: int) -> dict | None:

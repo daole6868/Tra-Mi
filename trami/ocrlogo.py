@@ -31,6 +31,9 @@ SIZE_SIM = 0.34       # … hoặc giống ≥ 34 % và cùng cỡ khung chữ
 SIZE_H, SIZE_W = 0.3, 0.4   # cùng cỡ: cao lệch ≤ 30 %, rộng lệch ≤ 40 %
 ALPHA_MIN = 0.4       # nét chữ dao động theo nền ≥ 40 % = chữ in mờ (trong suốt)
 _MARK = re.compile(r"[@#＠＃]|[A-Za-z0-9]")
+_STRONG = re.compile(r"[@#＠＃]|[A-Za-z][^A-Za-z]{0,2}[A-Za-z]")   # dấu hiệu logo thật: @ # hoặc tên Latin (≥ 2 chữ cái)
+_HAN = re.compile(r"[\u3400-\u9fff]")
+LONE_HAN_MAX = 4      # logo không hiện cùng chữ nào khác (đứng 1 mình đúng chỗ phụ đề) chỉ nhận khi ≤ 4 chữ Hán
 _LIT = re.compile(r"[㐀-鿿A-Za-z0-9@#぀-ヿ가-힯]")
 
 
@@ -107,6 +110,39 @@ class Logo:
                    int(d.get("dropped", 0) or 0), int(d.get("hidden", 0) or 0))
 
 
+def at_static(L: Logo, center, wh=None) -> bool:
+    """Mảnh chữ nằm đúng chỗ logo đứng yên (tâm trong khung logo ± nửa cao dòng; biết cỡ thì phải nằm gọn trong khung
+    logo theo chiều ngang, cao gần bằng)."""
+    x0, y0, x1, y1 = L.static
+    pad = 0.5 * L.h
+    if not (x0 - pad <= center[0] <= x1 + pad and y0 - pad <= center[1] <= y1 + pad):
+        return False
+    if wh is None:
+        return True
+    w, h = float(wh[0]), float(wh[1])
+    return w <= (x1 - x0) + 2 * pad and h <= 1.6 * L.h
+
+
+def looks_like(n: str, L: Logo) -> bool:
+    """Chữ đọc ở chỗ logo đứng yên có phải (bản đọc lệch của) chính logo không (2.1.41): giống ≥ 34 %, cùng có @ #, hoặc
+    ≥ nửa số chữ là chữ của logo; mẩu 1 ký hiệu / chữ Latin (logo mờ đọc ra chữ lạ) cũng tính. Câu phụ đề hiện đúng chỗ đó (logo / chữ
+    trong game hiện ở chỗ phụ đề những lúc không ai nói) thì KHÔNG – trước 2.1.41 mọi câu ở chỗ đó bị bỏ như logo."""
+    if not n:
+        return False
+    lit = [c for c in n if _LIT.match(c)]
+    if not lit:
+        return True
+    if len(lit) == 1 and not ("\u3400" <= lit[0] <= "\u9fff"):
+        return True            # 1 ký hiệu / chữ Latin lạ; 1 chữ Hán ("好", "嗯") chỉ khi là chữ của logo
+    vs = L.texts()[:8]
+    if any(c in "@#" for c in n) and any(c in "@#" for c in L.text):
+        return True
+    chars = set("".join(vs))
+    if sum(1 for c in lit if c in chars) * 2 >= len(lit):
+        return True
+    return max(sim(n, v) for v in vs) >= SIZE_SIM
+
+
 def match(text: str, logos: list, wh=None, center=None, any_state: bool = False) -> Logo | None:
     """Cả mảnh chữ này là logo? (bản đọc đã gặp, hoặc gần giống + cùng cỡ khung chữ, hoặc nằm đúng chỗ logo đứng yên).
     Logo đã tắt không tính (any_state: tính cả logo đã tắt – để gộp bản đọc vào đúng logo khi tìm)."""
@@ -117,11 +153,8 @@ def match(text: str, logos: list, wh=None, center=None, any_state: bool = False)
     for L in logos:
         if not (L.on or any_state) or not L.text:
             continue
-        if L.static and center is not None and L.h:
-            x0, y0, x1, y1 = L.static
-            pad = 0.5 * L.h
-            if x0 - pad <= center[0] <= x1 + pad and y0 - pad <= center[1] <= y1 + pad:
-                return L
+        if L.static and center is not None and L.h and at_static(L, center, wh) and looks_like(n, L):
+            return L
         if n in L.variants or n == L.text:
             return L
         if any(len(v) >= 2 and literal(v) >= 2 and (n.startswith(v) or n.endswith(v)) for v in L.texts()[:8]):
@@ -339,7 +372,10 @@ def find(obs: list, covered: float, known: list | None = None) -> list[Logo]:
         cooc = co / max(1, hits)
         al = [o.alpha for o in g if o.alpha is not None]
         transparent = len(al) >= 3 and _med(al) >= ALPHA_MIN
-        mark = bool(_MARK.search(mem[0]))
+        # 2.1.41: chữ hiện 1 mình (không cùng lúc chữ nào khác), đứng yên 1 chỗ, không trong suốt = cách hiện của CÂU
+        # THOẠI (phụ đề lặp lại nhiều lần) – chỉ nhận là logo khi có @ # / tên Latin VÀ ngắn. Trước 2.1.41 chữ số cũng
+        # tính là dấu hiệu logo -> câu thoại "东部666分区生存人数为…" lặp lại thành logo, kéo theo mất gần hết phụ đề.
+        mark = bool(_STRONG.search(mem[0])) and len(_HAN.findall(mem[0])) <= LONE_HAN_MAX
         if not (cooc >= COOC or mark or places >= 3 or transparent):
             continue
         static = None

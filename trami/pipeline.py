@@ -1716,7 +1716,7 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         p.data["ocr_stats"] = {"fps": float(ocr_fps or 4), "first_t": scan.get("first_t"), "dict_fix": dict_fix,
                                **{k: stats.get(k) for k in ("frames", "ocr_runs", "spans", "det", "cleaned", "engine",
                                                              "engine_warn", "hw", "chunks", "secs", "eq", "t", "big",
-                                                             "logo_rec", "logo_hidden")}}
+                                                             "logo_rec", "logo_hidden", "logo_off")}}
         p.data["ocr_warning"] = "" if segs else (
             "Không đọc được câu phụ đề nào – video có thể không có chữ Trung in sẵn, hoặc chữ nằm ngoài vùng quét: "
             "tab Tự động → Vùng phụ đề: kéo khung đúng chỗ chữ (hoặc bấm Tự dò), hoặc dùng Nhận dạng giọng nói.")
@@ -5596,11 +5596,13 @@ def ocr_box(p: Project) -> dict | None:
 
 
 def ocr_known_logos(p: Project, settings: dict | None) -> list[dict]:
-    """Logo chữ đã biết khi quét (2.1.37): logo của lần quét trước (kể cả logo đã tắt – không bị tìm lại) + logo người
-    dùng nhớ cho mọi video (Cài đặt ocr_logo_known)."""
+    """Logo chữ đã biết khi quét (2.1.37): logo người dùng thêm / logo đã tắt (không bị tìm lại) của lần quét trước + logo
+    người dùng nhớ cho mọi video (Cài đặt ocr_logo_known). 2.1.41: logo tool TỰ tìm ở lần quét trước KHÔNG được dùng lại
+    nguyên xi (lần trước có thể nhận nhầm câu thoại) – logo thật sẽ được tìm lại."""
     from . import ocrlogo
 
-    out = [dict(d) for d in (p.data.get("ocr_logos") or []) if d.get("text")]
+    out = [dict(d) for d in (p.data.get("ocr_logos") or []) if d.get("text")
+           and (d.get("user") or d.get("on", True) is False)]
     have = {ocrlogo.norm(d["text"]) for d in out}
     for t in (settings or {}).get("ocr_logo_known") or []:
         n = ocrlogo.norm(t)
@@ -5716,7 +5718,8 @@ def ocr_note(p: Project) -> str:
         msg += f" · sửa chữ dễ nhầm theo từ điển ở {o['dict_fix']} câu"
     from . import ocrlogo
 
-    ln = ocrlogo.note(ocr_logos(p))
+    lg = [L for L in ocr_logos(p) if L.user or not o.get("logo_off")]
+    ln = ocrlogo.note(lg)
     if ln:
         msg += " · " + ln
     tn = ocr_timing_note(p)

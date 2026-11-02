@@ -12864,3 +12864,121 @@ def test_ocr_cuda_dlls_2140(tmp_path, monkeypatch):
     broken.add("cudnn_cnn64_9.dll")         # thư viện lệch bản -> không hộp thoại, ghi lý do
     run()
     assert "cudnn_cnn64_9.dll" in oe._CUDA_NOTE and "cudnn_ops64_9.dll" in loads
+
+
+def _hud_video_2141(path, dur=30.0):
+    """Video thử: câu thoại "东部666分区生存人数为" lặp lại ĐÚNG chỗ phụ đề ở mọi khoảng giữa 2 câu (người dùng 2.1.41: tool
+    nhận câu này là logo đứng yên rồi bỏ mọi câu ở chỗ đó – phim 2 giờ còn 46 câu)."""
+    font = _cjk_font()
+    lines = ["没想到你也有这一天", "今天的天气真不错啊", "我们一起去吃饭好不好", "这件事情你别管了", "他已经走了很久了",
+             "快跑啊", "那边还有人吗", "你们东部还剩多少人", "好"]
+    subs, t, k = [], 0.5, 0
+    while t + 2.0 < dur and k < len(lines):
+        d = 1.6 + 0.3 * (k % 4)
+        subs.append((round(t, 2), round(t + d, 2), lines[k]))
+        t += d + 1.6
+        k += 1
+    hud = [(subs[i][1], round(subs[i + 1][0] - 0.04, 2)) for i in range(len(subs) - 1)]
+    f = [f"drawtext=fontfile='{font}':text='{x}':fontsize=40:fontcolor=white:borderw=3:bordercolor=black:"
+         f"x=(w-tw)/2:y=h-80:enable='gte(t,{a})*lt(t,{b})'" for a, b, x in subs]
+    en = "+".join(f"between(t,{a},{b})" for a, b in hud)
+    f.append(f"drawtext=fontfile='{font}':text='东部666分区生存人数为':fontsize=40:fontcolor=white:borderw=3:"
+             f"bordercolor=black:x=(w-tw)/2:y=h-80:enable='{en}'")
+    subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i",
+                    f"color=c=0x406080:s=960x540:r=25:d={dur}", "-vf", ",".join(f), "-c:v", "libx264",
+                    "-preset", "veryfast", "-pix_fmt", "yuv420p", str(path)], check=True)
+    out = []
+    for i, s in enumerate(subs):
+        out.append(s[2])
+        if i < len(hud):
+            out.append("东部666分区生存人数为")
+    return out
+
+
+def test_ocrlogo_lone_line_not_logo_2141():
+    """Câu thoại lặp lại 1 mình đúng chỗ phụ đề (có chữ số) không phải logo; logo hiện cùng lúc câu khác / có @ ngắn vẫn
+    là logo. Logo đứng yên: câu KHÁC ở đúng chỗ đó không bị coi là logo (chỉ bản đọc giống logo)."""
+    from trami import ocrlogo as ol
+
+    line, wm = "东部666分区生存人数为", "@纵横"
+    obs = []
+    for k in range(40):
+        t = k * 10.0
+        if k % 2:
+            obs.append(ol.Obs(k, t, t + 10, (260, 10, 740, 50), line, ()))           # câu thoại 1 mình
+        else:
+            obs.append(ol.Obs(k, t, t + 10, (300, 10, 700, 50), f"别的话{k}", ()))
+    assert ol.find(obs, 400.0) == []
+    lone = [ol.Obs(k, k * 10.0, k * 10.0 + 10, (800, 0, 890, 34), wm, ()) for k in range(40)]
+    assert [L.text for L in ol.find(lone, 400.0)] == [wm]                       # @ + ngắn: logo dù đứng 1 mình
+    co = [ol.Obs(k, k * 10.0, k * 10.0 + 10, (800, 0, 990, 34), "频道号东部666", (f"别的话{k}",)) for k in range(40)]
+    assert [L.text for L in ol.find(co, 400.0)] == ["频道号东部666"]            # hiện cùng câu khác: logo
+    L = ol.Logo(line, {line: 5}, 480, 40, (260, 10, 740, 50))
+    for t in ("没想到你也有这一天", "你们东部还剩多少人", "好", "嗯"):
+        assert ol.match(t, [L], (380, 40), (500, 30)) is None, t
+    for t in (line, "东部666分区生存人数", "部", "a"):
+        assert ol.match(t, [L], (420, 40), (500, 30)) is L, t
+    L2 = ol.Logo(wm, {wm: 5}, 90, 34, (700, 5, 790, 40))
+    assert ol.match("@黄AGC", [L2], (95, 34), (745, 22)) is L2                   # logo mờ đọc lệch vẫn nhận
+
+
+def test_ocr_static_marks_need_cooc_2141():
+    """Watermark phải hiện cùng lúc câu khác; chữ luôn hiện 1 mình (câu thoại lặp) không phải watermark; chữ khác hẳn ở
+    đúng chỗ watermark không bị bỏ."""
+    from trami.ocr import _is_mark, _static_marks_spans
+
+    def box(x, y, w=60, h=30):
+        return np.array([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], np.float32)
+    times, reads = [], []
+    for k in range(60):
+        times.append((k * 2.0, k * 2.0 + 2.0))
+        it = [(box(300, 10, 400, 40), "东部666分区生存人数为", 0.99)] if k % 2 else \
+             [(box(300, 10, 360, 40), f"别的话说{k}", 0.99)]
+        reads.append(it + [(box(900, 5, 60, 30), "冬冰", 0.99)])
+    marks = _static_marks_spans(times, reads, 120.0)
+    assert [m[0] for m in marks] == ["冬冰"]
+    reads2 = [[it for it in r if it[1] != "冬冰"] for r in reads]
+    assert _static_marks_spans(times, reads2, 120.0) == []
+    m = [("东部666分区生存人数为", 300.0, 10.0, 700.0, 50.0)]
+    assert not _is_mark((box(320, 10, 360, 40), "没想到你也有这一天", 0.9), m)
+    assert _is_mark((box(320, 10, 360, 40), "东部666分区生存人", 0.9), m)
+    assert _is_mark((box(480, 10, 30, 40), "水", 0.9), m)
+
+
+def test_ocr_lone_line_scan_2141(tmp_path):
+    """Quét thật: câu thoại lặp lại đúng chỗ phụ đề -> đủ mọi câu (không nhận thành logo). Logo tự tìm sai từ lần quét trước
+    (đứng yên ở chỗ phụ đề) không còn nuốt câu khác; công tắc "Tự lọc logo chữ" tắt -> chỉ bỏ logo người dùng tự thêm;
+    dự án không dùng lại logo tool tự tìm ở lần trước."""
+    _need_ocr3()
+    from trami import ocr, pipeline
+    from trami.project import Project
+
+    v = tmp_path / "hud.mp4"
+    want = _hud_video_2141(v)
+    reg = {"x": 0.0, "y": 0.70, "w": 1.0, "h": 0.30, "exact": True}
+    st: dict = {}
+    segs = ocr.extract_hardsubs(v, reg, stats=st)
+    assert [s.text for s in segs] == want and st["logos"] == [] and st["logo_only"] == []
+    line = "东部666分区生存人数为"
+    bad = {"text": line, "variants": {line: 9}, "w": 0.89, "h": 0.074, "static": [0.27, 0.835, 0.73, 0.94],
+           "hits": 9, "share": 0.4, "places": 1, "on": True}
+    # logo sai được đưa vào (bật công tắc): chỉ bỏ đúng câu đó, các câu khác còn đủ
+    segs = ocr.extract_hardsubs(v, reg, settings={"ocr_logo": True}, logos=[bad])
+    assert [s.text for s in segs] == [x for x in want if x != line]
+    # tắt công tắc: logo tool tự tìm không áp; logo người dùng thêm vẫn áp
+    st = {}
+    segs = ocr.extract_hardsubs(v, reg, settings={"ocr_logo": False}, logos=[bad], stats=st)
+    assert [s.text for s in segs] == want and st["logo_off"]
+    segs = ocr.extract_hardsubs(v, reg, settings={"ocr_logo": False}, logos=[dict(bad, user=True)])
+    assert [s.text for s in segs] == [x for x in want if x != line]
+    p = Project.create("hud2141")
+    try:
+        p.data["ocr_logos"] = [bad, dict(bad, text="@纵横", variants={"@纵横": 3}, on=False),
+                               dict(bad, text="频道号", variants={"频道号": 1}, user=True)]
+        kn = [d["text"] for d in pipeline.ocr_known_logos(p, {})]
+        assert kn == ["@纵横", "频道号"]
+        p.data["ocr_stats"] = {"frames": 10, "logo_off": True}
+        note = pipeline.ocr_note(p)
+        assert "logo 频道号" in note and line not in note
+    finally:
+        p.delete()
