@@ -2739,26 +2739,65 @@ class ProjectPage(QWidget):
         # chọn là áp luôn cho câu đã tích (trước phải bấm thêm "Đổi giọng" – chọn xong bấm thẳng Tạo lại giọng thì câu
         # vẫn đọc giọng cũ)
         self.d_line_voice.activated.connect(lambda _i: self._set_line_voice() if self.model.selected else None)
+        # ---- tốc độ giọng theo loại câu (2.1.38): tích theo loại -> đổi đúng tốc độ (nhanh hay chậm) / % / tối thiểu
         self.d_speed = QDoubleSpinBox()
-        self.d_speed.setRange(0.5, 2.0)
+        self.d_speed.setRange(pipeline.SPEED_LO, pipeline.SPEED_HI)
         self.d_speed.setSingleStep(0.05)
         self.d_speed.setDecimals(2)
-        self.d_speed.setValue(1.2)
+        self.d_speed.setValue(1.0)
         self.d_speed.setPrefix("×")
+        self.d_speed.setToolTip("Tốc độ đọc cho các câu đã tích (×1 = tốc độ bộ đọc tự nhiên, ×0,9 = chậm 10 %)")
+        self.d_speed_pct = QSpinBox()
+        self.d_speed_pct.setRange(-30, 100)
+        self.d_speed_pct.setSingleStep(5)
+        self.d_speed_pct.setSuffix(" %")
+        self.d_speed_pct.setValue(int(self.settings.get("dub_speed_pct", -10)))
+        self.d_speed_pct.setToolTip("So với tốc độ mỗi câu ĐANG đọc: −10 % = chậm đi 10 % (×1,25 -> ×1,13), +10 % = nhanh "
+                                    "hơn 10 %. Các câu vẫn giữ chênh lệch với nhau")
+        self.d_speed_mode = combo(list(pipeline.SPEED_MODES), self.settings.get("dub_speed_mode", "exact"))
+        self.d_speed_mode.setToolTip("Đúng tốc độ: nhanh hay chậm đều đọc đúng số đặt (câu đang đọc nhanh cũng chậm lại "
+                                     "được – dài hơn chỗ trống thì xử lý theo 'Khi câu dài').\nNhanh / chậm hơn hiện tại: "
+                                     "mỗi câu đổi theo % so với tốc độ nó đang đọc.\nÍt nhất tốc độ này: cách cũ – chỉ "
+                                     "nâng câu đang đọc chậm hơn, câu đang đọc nhanh giữ nguyên")
+        self.d_speed_mode.currentIndexChanged.connect(self._speed_mode_changed)
+        self.d_speed.valueChanged.connect(lambda _v: self._speed_note_later())
+        self.d_speed_pct.valueChanged.connect(self._speed_pct_changed)
+        self.d_cat = QComboBox()
+        self.d_cat.setMinimumContentsLength(18)
+        for c, name in pipeline.SPEED_CATS:
+            self.d_cat.addItem(name, c)
+            self.d_cat.setItemData(self.d_cat.count() - 1, pipeline.SPEED_CAT_HELP[c], Qt.ItemDataRole.ToolTipRole)
+        self.d_cat.setToolTip("Loại câu theo cột Độ vừa lúc tool tự xếp (chưa đặt tốc độ tay): ⚠ rất dài – đã tăng tốc "
+                              "tối đa vẫn tràn sang câu sau; ⚡ dài – phải đọc nhanh hơn mới vừa; ✓ bình thường – vừa ở ×1. "
+                              "Đổi tốc độ xong câu vẫn thuộc loại cũ")
+        self.d_speed_note = label("", "muted", wrap=True)
+        self._speed_timer = QTimer(self)
+        self._speed_timer.setSingleShot(True)
+        self._speed_timer.setInterval(350)
+        self._speed_timer.timeout.connect(self._speed_refresh)
+        self.model.picked.connect(self._speed_note_later)
+        self.model.modelReset.connect(self._speed_note_later)
+        self.model.dataChanged.connect(lambda *_a: self._speed_note_later())
+        spk.add(flow(label("Tốc độ giọng", "muted"), self.d_cat,
+                     button("Tích loại câu này", "check", "Bỏ tích cũ, tích mọi câu thuộc loại đang chọn",
+                            flat=True, on_click=self._pick_speed_cat),
+                     hbox(label("Cách đổi", "muted"), self.d_speed_mode), self.d_speed, self.d_speed_pct,
+                     button("Đổi tốc độ giọng", "bolt", "Đổi tốc độ các câu đã tích – xếp lại bản lồng ngay, không đọc "
+                            "lại câu nào (Ctrl+Z hoàn tác)", on_click=self._change_speed),
+                     button("Về tốc độ gốc", "refresh", "Bỏ tốc độ đặt tay của các câu đã tích – tool tự tính lại như "
+                            "lúc tạo bản lồng", flat=True,
+                            on_click=lambda: self._apply_speed(sorted(self.model.selected), None)),
+                     button("Về gốc tất cả", "refresh", "Bỏ tốc độ đặt tay của MỌI câu trong phim (hỏi lại)", flat=True,
+                            on_click=self._speed_reset_all)))
+        spk.add(self.d_speed_note)
+        self._speed_mode_changed(-1)
         from ..tts import OVERFLOW_HELP, OVERFLOW_MODES
 
         self.d_line_mode = combo([("", "Theo cài đặt chung")] + list(OVERFLOW_MODES), "")
         self.d_line_mode.setMinimumContentsLength(12)
-        self.d_speed.setToolTip("Tốc độ đọc tối thiểu cho các câu đã tích: câu đang tự đọc nhanh hơn mức này (để vừa thời "
-                                "gian nhân vật nói) giữ nguyên, câu chậm hơn được nâng lên. Dưới ×1 = đọc chậm lại nếu còn chỗ")
         spk.add(flow(self.d_picked, hbox(label("Giọng cho câu đã tích", "muted"), self.d_line_voice),
                      button("Đổi giọng", "users", "Đặt giọng riêng cho các câu đã tích (chưa đọc lại)",
                             on_click=self._set_line_voice),
-                     hbox(label("Tốc độ đọc", "muted"), self.d_speed),
-                     button("Đặt tốc độ", "bolt", "Áp dụng tốc độ cho các câu đã tích – xếp lại bản lồng ngay (không đọc lại)",
-                            on_click=lambda: self._apply_speed(sorted(self.model.selected), self.d_speed.value())),
-                     button("Về tốc độ gốc", "refresh", "Bỏ tốc độ đặt tay của các câu đã tích – đọc như lúc tạo bản lồng",
-                            flat=True, on_click=lambda: self._apply_speed(sorted(self.model.selected), None)),
                      hbox(label("Khi câu dài", "muted"), self.d_line_mode),
                      button("Đặt cách xếp", "layers", "Cách xử lý riêng cho các câu đã tích khi đọc dài hơn chỗ trống "
                             "– xếp lại bản lồng ngay (không đọc lại)",
@@ -3135,6 +3174,7 @@ class ProjectPage(QWidget):
             self._logo_label()
         finally:
             self.loading = False
+        self._speed_note_later()
         self._method_rows()
         self._apply_live()
         self._load_timeline_assets()
@@ -4874,7 +4914,9 @@ class ProjectPage(QWidget):
                 return self.win.toast("Bấm chọn câu trên timeline trước", "warn")
             return self._play_line(rows[0]) if name == "play" else self._redub_rows(rows)
         if name in ("dub_speed", "dub_speed_reset"):
-            return self._apply_speed(rows, tl.speed.value() if name == "dub_speed" else None)
+            # ô ×… trên timeline: đúng tốc độ (cách 'Ít nhất' nếu tab Lồng tiếng mục 2 đang chọn cách đó)
+            mode = "min" if self.d_speed_mode.currentData() == "min" else "exact"
+            return self._apply_speed(rows, tl.speed.value() if name == "dub_speed" else None, mode)
         if name.startswith("dub_mode:"):
             return self._apply_overflow(rows, name.split(":", 1)[1] or None)
         if name in ("dub_toggle", "dub_reset_pos"):
@@ -6278,6 +6320,8 @@ class ProjectPage(QWidget):
                 ex.pop("overflow", None)
             changed += old != ex.get("overflow")
         self.model.dataChanged.emit(self.model.index(rows[0], 0), self.model.index(rows[-1], self.model.columnCount() - 1))
+        if changed:
+            self._undo_mark()
         self._save_segs_now()
         what = f"'{OVERFLOW_SHORT.get(mode, mode)}'" if mode else "cách xếp chung"
         if not changed:
@@ -6870,30 +6914,101 @@ class ProjectPage(QWidget):
         name = self.d_line_voice.currentText() if vid else "giọng của người nói"
         self.win.toast(f"{len(rows)} câu đã tích đọc bằng {name} – bấm 'Tạo lại giọng các câu đã tích' để đọc lại", "ok")
 
-    def _apply_speed(self, rows: list[int], speed: float | None):
-        """Tốc độ đọc tối thiểu cho các câu (None = về tốc độ gốc) -> xếp lại bản lồng đang dùng (không đọc lại câu nào),
-        trình phát nghe ngay."""
+    def _apply_speed(self, rows: list[int], speed: float | None, mode: str = "exact"):
+        """Tốc độ giọng cho các câu (2.1.38): mode exact = ĐÚNG tốc độ (nhanh hay chậm), rel = speed là % so với tốc độ
+        đang đọc, min = tốc độ tối thiểu (cách cũ); speed None = về tốc độ gốc -> xếp lại bản lồng đang dùng (không đọc
+        lại câu nào), trình phát nghe ngay, Ctrl+Z hoàn tác được."""
         segs = self.model.segs
         rows = [r for r in rows if 0 <= r < len(segs)]
         if not rows:
-            return self.win.toast("Tích chọn câu trước (cột Chọn, hoặc chọn khối trên dòng Lồng tiếng của timeline)", "warn")
-        changed = 0
-        for r in rows:
-            ex = segs[r].extra
-            old = ex.get("speed")
-            if speed is None:
-                ex.pop("speed", None)
-            else:
-                ex["speed"] = round(float(speed), 2)
-            changed += old != ex.get("speed")
+            return self.win.toast("Tích chọn câu trước (cột Chọn, nút 'Tích loại câu này', hoặc chọn khối trên dòng "
+                                  "Lồng tiếng của timeline)", "warn")
+        changed = pipeline.apply_speed(segs, rows, mode, speed)
         self.model.dataChanged.emit(self.model.index(rows[0], 0), self.model.index(rows[-1], self.model.columnCount() - 1))
+        if changed:
+            self._undo_mark()
         self._save_segs_now()
-        what = f"tốc độ ×{speed:.2f}" if speed is not None else "tốc độ gốc"
+        if speed is None:
+            what = "tốc độ gốc"
+        elif mode == "rel":
+            what = f"tốc độ {'nhanh' if speed >= 0 else 'chậm'} hơn {abs(speed):g} %"
+        elif mode == "min":
+            what = f"tốc độ ít nhất ×{speed:.2f}"
+        else:
+            what = f"đúng tốc độ ×{speed:.2f}"
         if not changed:
             return self.win.toast(f"{len(rows)} câu đã ở {what}", "info")
         if not any(s.extra.get("tts_file") for s in segs):
-            return self.win.toast(f"Đã đặt {what} cho {len(rows)} câu – áp dụng khi bấm Tạo bản lồng tiếng", "ok")
-        self._relayout(f"Đã đặt {what} cho {len(rows)} câu", rows[0])
+            return self.win.toast(f"Đã đặt {what} cho {len(changed)} câu – áp dụng khi bấm Tạo bản lồng tiếng", "ok")
+        self._relayout(f"Đã đặt {what} cho {len(changed)} câu", changed[0])
+
+    # ---- tốc độ giọng theo loại câu (2.1.38)
+    def _speed_mode_changed(self, _i: int):
+        mode = self.d_speed_mode.currentData() or "exact"
+        self.d_speed.setVisible(mode != "rel")
+        self.d_speed_pct.setVisible(mode == "rel")
+        if _i >= 0 and not self.loading:
+            self._save_setting("dub_speed_mode", mode)
+        self._speed_note_later()
+
+    def _speed_pct_changed(self, v: int):
+        if not self.loading:
+            self._save_setting("dub_speed_pct", int(v))
+        self._speed_note_later()
+
+    def _speed_value(self) -> float:
+        return float(self.d_speed_pct.value()) if self.d_speed_mode.currentData() == "rel" else self.d_speed.value()
+
+    def _change_speed(self):
+        self._apply_speed(sorted(self.model.selected), self._speed_value(), self.d_speed_mode.currentData() or "exact")
+
+    def _speed_reset_all(self):
+        rows = [i for i, s in enumerate(self.model.segs) if s.extra.get("speed")]
+        if not rows:
+            return self.win.toast("Không có câu nào đặt tốc độ tay", "info")
+        if QMessageBox.question(self, "Về gốc tất cả", f"Bỏ tốc độ đặt tay của {len(rows)} câu? Tool tự tính lại tốc độ "
+                                "như lúc tạo bản lồng (không đọc lại câu nào).") != QMessageBox.StandardButton.Yes:
+            return
+        self._apply_speed(rows, None)
+
+    def _pick_speed_cat(self):
+        cat = self.d_cat.currentData()
+        rows = pipeline.speed_groups(self.model.segs).get(cat, [])
+        name = self.d_cat.currentText().split(" (")[0]
+        if not rows:
+            return self.win.toast(f"Không có câu {name} (hoặc chưa tạo bản lồng tiếng)", "info")
+        self.model.set_picked(range(len(self.model.segs)), False)
+        self.model.set_picked(rows)
+        self.win.toast(f"Đã tích {len(rows)} câu {name} – chọn cách đổi + tốc độ rồi bấm 'Đổi tốc độ giọng'", "ok")
+
+    def _speed_note_later(self, *_a):
+        if hasattr(self, "_speed_timer") and not self.loading:
+            self._speed_timer.start()
+
+    def _speed_refresh(self):
+        """Số câu từng loại trong ô Loại câu + dòng báo trước khi đổi (ước tính nhanh bằng bộ xếp nháp)."""
+        if not self.p or not hasattr(self, "d_cat"):
+            return
+        segs = self.model.segs
+        groups = pipeline.speed_groups(segs)
+        for i, (c, name) in enumerate(pipeline.SPEED_CATS):
+            txt = f"{name} ({len(groups.get(c, []))} câu)"
+            if self.d_cat.itemText(i) != txt:
+                self.d_cat.setItemText(i, txt)
+        rows = sorted(self.model.selected)
+        if not rows:
+            self.d_speed_note.setText("Chọn loại câu → 'Tích loại câu này' (hoặc tích tay) → chọn cách đổi + tốc độ → "
+                                      "'Đổi tốc độ giọng'. Câu chậm lại mà dài hơn chỗ trống thì xử lý theo 'Khi câu "
+                                      "dài' (đọc sớm / câu sau lùi / đọc đè) – bật thêm tab Chỉnh sửa → Làm chậm 'theo "
+                                      "câu dài' để video giãn khoảng nghỉ cho đủ chỗ.")
+            return
+        mode = self.d_speed_mode.currentData() or "exact"
+        try:
+            pv = pipeline.speed_preview(self.p, segs, rows, mode, self._speed_value(), self.settings)
+            self.d_speed_note.setText("Nếu bấm Đổi tốc độ giọng: " + pipeline.speed_note(pv, mode, self._speed_value()))
+        except Exception:  # noqa: BLE001 – chỉ là dòng báo trước
+            log_error("Ước tính đổi tốc độ giọng")
+            self.d_speed_note.setText("")
 
     def _play_line(self, row: int | None = None):
         rows = [row] if row is not None else self._dub_current_rows()

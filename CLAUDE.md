@@ -650,6 +650,23 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   mỗi vế trọn nghĩa, `REVIEW_PROMPT` mục 4. Dự án đã dịch: `pipeline.fix_punct` + nút "Sửa dấu câu" (tab Phụ đề → Công
   cụ → Sửa câu, không AI, đã lồng -> tích sẵn câu đổi). Kỹ năng `dub_short` "Lồng tiếng – vừa thời gian, dễ đọc" (lược từ
   thừa chỉ khi dài hơn mức tối đa, ngắn thì giữ / thêm từ đệm như luật 8).
+- Tốc độ giọng theo loại câu (2.1.38): `extra["speed"]` + `extra["speed_lock"]` (True = ĐÚNG tốc độ – nhanh hay chậm
+  đều theo; không có = tốc độ TỐI THIỂU như 2.0.40, dự án cũ giữ nghĩa này). `tts.plan_layout` item "lock": cap = base
+  (không tự tăng tốc cho vừa), câu khoá đứng riêng 1 cụm (không kéo câu bên cạnh lên tốc độ tối đa), tràn chỗ -> đọc sớm
+  / câu sau lùi / đè / cắt theo cách xếp, trả "lock"; `synthesize_dub` chạy thêm 1 lượt `plan_layout` không tốc độ tay
+  (chỉ khi có câu đặt tay) -> `extra["fit_auto"]` / `fit_auto_speed` (loại câu "gốc", vào `DUB_MARKS` / `_DUB_EXTRA`),
+  câu khoá không đọc nhanh riêng vế (`plan_pauses` part_speed 1) và không vào `too_long` (AI tự rút gọn). `pipeline`:
+  `SPEED_CATS` (long ⚠ Rất dài / fast ⚡ Dài / ok ✓ Bình thường), `speed_cat` (fit_auto, không có thì fit; bỏ lồng / chưa
+  lồng -> None), `speed_groups`, `SPEED_MODES` exact / rel (% so với `fit_speed` đang đọc) / min, `SPEED_LO` 0,7 –
+  `SPEED_HI` 2,0, `speed_values`, `apply_speed` (trả câu đổi), `speed_preview` (bộ xếp nháp trên `fit_need` qua
+  `_layout_items`: đang đọc = fit_speed, sẽ đọc, thêm câu bị lùi ≥ 0,3 s / chỗ đè, câu vẫn tràn, câu < `SPEED_DRAG` 0,8)
+  -> `speed_note`. GUI tab Lồng tiếng mục 2 hàng "Tốc độ giọng": `d_cat` (số câu từng loại) + "Tích loại câu này"
+  (`_pick_speed_cat`), "Cách đổi" `d_speed_mode` (Cài đặt `dub_speed_mode`) + `d_speed` × / `d_speed_pct` % (`dub_speed_pct`
+  −10), "Đổi tốc độ giọng" (`_change_speed` -> `_apply_speed(rows, value, mode)` + `_undo_mark` -> `_relayout`, không đọc
+  lại), "Về tốc độ gốc", "Về gốc tất cả" (`_speed_reset_all`, hỏi lại); dòng báo trước `d_speed_note` (`_speed_refresh`,
+  hẹn 0,35 s khi tích / đổi ô / dữ liệu đổi). Timeline nút "Đặt tốc độ" = đúng tốc độ (cách "Ít nhất" nếu mục 2 chọn).
+  Cột Độ vừa "×1.00 🔒" (khoá) / "✎" (tối thiểu), tooltip tốc độ tool tự tính + loại câu gốc. `_apply_overflow` cũng ghi
+  hoàn tác.
 - Giờ HIỆN phụ đề (2.0.96): `subtitle.follow_dub(mode="always", lead, hold, min_dur, join)` + `pipeline.follow_params`
   (Cài đặt `sub_follow_mode` / `sub_lead` 0,1 / `sub_hold` 0,3 / `sub_min_dur` 1 / `sub_join_gap` 0,3, công tắc
   `dub_subs_follow`) – xem trước, xuất video, SRT đã dịch (`export_subs`, `_export_sub`); tab Phụ đề → Công cụ → "Giờ
@@ -709,7 +726,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (289 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
+- `tests/test_core.py` – `python -m pytest -q tests` (293 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2520,7 +2537,20 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   nguyên logo ("我@纵横们") -> logo giữa câu, không cắt; logo đã tắt không hút bản đọc lệch -> tìm lại thành logo mới. Bộ đọc
   lớn chỉ thử với bộ đọc giả (chưa tải v5 server – ModelScope bị chặn); card chưa đo.
 
+- 2.1.38: "chỉnh tốc độ giọng lồng theo loại câu (rất dài / dài / bình thường): chọn loại -> tool tự tích -> chỉnh nhanh hoặc
+  chậm -> Đổi tốc độ giọng; có nút về gốc; hiện chỉ làm câu chậm thành nhanh, câu nhanh không chậm lại được". Nguyên nhân:
+  từ 2.0.40 ô "Tốc độ đọc" là tốc độ TỐI THIỂU – bộ xếp lấy max(số đặt, tốc độ cần cho vừa) -> câu ⚡ ×1,25 đặt ×1,0 vẫn
+  ×1,25. Làm: khoá đúng tốc độ, 3 cách đổi (đúng tốc độ / ± % so với đang đọc / ít nhất), tích theo loại câu gốc (không
+  nhảy loại sau khi đổi), dòng báo trước, về gốc từng câu / tất cả – xem Cấu trúc "Tốc độ giọng theo loại câu". Thử: bộ xếp
+  400 tình huống ngẫu nhiên × 5 cách xếp (câu khoá đúng tốc độ, thứ tự câu không đảo), lồng tiếng Edge giả (khoá ×1,0 ->
+  xếp lại không đọc lại, câu sau lùi, về gốc như cũ), giao diện offscreen (tích loại, ×/%, 🔒, Ctrl+Z, về gốc tất cả).
+  Logo chữ chạy liên tục (kế hoạch 2.1.38 cũ: chữ chuyển động không phải phụ đề + dải chữ chạy tự bỏ qua) – người dùng để sau.
+
 ## Vấn đề đang mở
+- 2.1.38: chờ người dùng thử tab Lồng tiếng mục 2 → Tốc độ giọng: chọn "⚡ Dài" → Tích loại câu này → Đúng tốc độ ×1,00 (hoặc
+  Nhanh / chậm hơn hiện tại −10 %) → xem dòng báo trước → Đổi tốc độ giọng: nghe câu chậm lại có tự nhiên không, câu sau
+  bị lùi / đè có chấp nhận được không (không thì bật tab Chỉnh sửa → Làm chậm "theo câu dài"), Ctrl+Z / Về gốc tất cả.
+- Chưa làm (người dùng để sau): lọc logo chữ chạy liên tục trong khung hình (chuyển động / dải chữ chạy).
 - 2.1.37: chờ người dùng quét lại 1 video có logo nhảy chỗ / in mờ (tab Tự động → Nguồn phụ đề OCR, "Tự lọc logo chữ" bật):
   thông báo có "logo @… (nhảy chỗ, mờ…)" + thời gian từng công đoạn (gửi dòng này để biết máy chậm ở đâu); còn câu dính logo
   -> tab Phụ đề → Công cụ → Sửa câu → "Đây là logo"; logo bị nhận nhầm (câu thoại thật) -> "Danh sách logo…" bỏ tích (đã bỏ

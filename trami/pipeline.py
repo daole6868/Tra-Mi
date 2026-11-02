@@ -732,7 +732,7 @@ def diarize(p: Project, settings: dict | None = None, progress: Prog | None = No
     return n
 
 
-DUB_MARKS = ("dub_at", "fit", "fit_speed", "fit_shift", "fit_over", "fit_need", "fit_have")
+DUB_MARKS = ("dub_at", "fit", "fit_speed", "fit_shift", "fit_over", "fit_need", "fit_have", "fit_auto", "fit_auto_speed")
 
 
 def forget_stale_voice(old_texts: set, segs: list, moved: bool) -> int:
@@ -4184,7 +4184,7 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
 
 # kết quả lồng tiếng ghi vào từng câu (xếp lại / đọc lại) – được ghép vào câu tương ứng khi người dùng sửa song song
 _DUB_EXTRA = ("tts_file", "dub_at", "fit", "fit_speed", "fit_need", "fit_have", "fit_shift", "fit_over", "voice_used",
-              "take", "take_pending", "dub_pauses")
+              "take", "take_pending", "dub_pauses", "fit_auto", "fit_auto_speed")
 
 
 def _seg_sig(s) -> tuple:
@@ -4808,6 +4808,158 @@ def shorten_target(s, slot: float, lang: str = "vi") -> int | None:
     return max(2, min(syl - 1, int(syl * min(1.0, ratio) * 0.95)))
 
 
+# ---- tốc độ giọng lồng theo loại câu (2.1.38) ---------------------------------------------------------------------
+SPEED_CATS = (("long", "⚠ Rất dài"), ("fast", "⚡ Dài"), ("ok", "✓ Bình thường"))
+SPEED_CAT_HELP = {"long": "đã tăng tốc tối đa mà vẫn tràn sang câu sau", "fast": "phải đọc nhanh hơn mới vừa",
+                  "ok": "vừa thời gian nhân vật nói ở tốc độ ×1"}
+SPEED_MODES = (("exact", "Đúng tốc độ"), ("rel", "Nhanh / chậm hơn hiện tại"), ("min", "Ít nhất tốc độ này"))
+SPEED_LO, SPEED_HI = 0.7, 2.0
+SPEED_DRAG = 0.8           # chậm hơn mức này giọng nghe kéo lê -> nhắc
+
+
+def speed_cat(s) -> str | None:
+    """Loại câu theo độ vừa LÚC CHƯA ĐẶT TỐC ĐỘ TAY (fit_auto – bộ xếp tính song song), không có thì độ vừa đang hiện;
+    None = câu chưa có giọng lồng / bỏ lồng."""
+    ex = s.extra
+    if ex.get("nodub") or not ex.get("fit"):
+        return None
+    return ex.get("fit_auto") or ex.get("fit")
+
+
+def speed_groups(segs: list) -> dict[str, list[int]]:
+    """{loại: [số thứ tự câu]} cho 3 loại câu (⚠ rất dài / ⚡ dài / ✓ bình thường)."""
+    out: dict[str, list[int]] = {c: [] for c, _ in SPEED_CATS}
+    for i, s in enumerate(segs):
+        c = speed_cat(s)
+        if c in out:
+            out[c].append(i)
+    return out
+
+
+def speed_values(segs: list, rows: list[int], mode: str, value: float | None) -> dict[int, float | None]:
+    """Tốc độ mới cho từng câu. mode exact / min: value = tốc độ (×); rel: value = % nhanh (+) / chậm (−) so với tốc độ
+    câu ĐANG đọc (fit_speed; chưa lồng = ×1). value None = về tốc độ gốc (bỏ tốc độ đặt tay)."""
+    out: dict[int, float | None] = {}
+    for r in rows:
+        if not 0 <= r < len(segs):
+            continue
+        if value is None:
+            out[r] = None
+            continue
+        if mode == "rel":
+            cur = float(segs[r].extra.get("fit_speed") or 1.0)
+            v = cur * (1 + float(value) / 100)
+        else:
+            v = float(value)
+        out[r] = round(min(SPEED_HI, max(SPEED_LO, v)), 2)
+    return out
+
+
+def apply_speed(segs: list, rows: list[int], mode: str, value: float | None) -> list[int]:
+    """Đặt tốc độ giọng cho các câu: exact / rel -> extra["speed"] + speed_lock (ĐÚNG tốc độ, chậm lại được); min ->
+    extra["speed"] là mức tối thiểu (cách cũ); value None -> bỏ cả hai. Trả các câu có thay đổi."""
+    changed = []
+    for r, v in speed_values(segs, rows, mode, value).items():
+        ex = segs[r].extra
+        old = (ex.get("speed"), bool(ex.get("speed_lock")))
+        if v is None:
+            ex.pop("speed", None)
+            ex.pop("speed_lock", None)
+        else:
+            ex["speed"] = v
+            if mode == "min":
+                ex.pop("speed_lock", None)
+            else:
+                ex["speed_lock"] = True
+        if old != (ex.get("speed"), bool(ex.get("speed_lock"))):
+            changed.append(r)
+    return changed
+
+
+def _layout_items(segs: list, speeds: dict | None = None) -> list[dict]:
+    """Mục cho tts.plan_layout dựng lại từ các câu đã lồng (độ dài giọng ×1 = fit_need) – ước tính nhanh, không đụng âm
+    thanh. speeds: {câu: (tốc độ | None, khoá)} thay cho tốc độ đang đặt."""
+    items = []
+    for k, s in enumerate(segs):
+        ex = s.extra
+        if not ex.get("dub_at") or not ex.get("fit_need"):
+            continue
+        sp, lk = (speeds[k] if speeds and k in speeds else (ex.get("speed"), bool(ex.get("speed_lock"))))
+        items.append({"k": k, "want": max(0.0, s.start + float(ex.get("dub_shift", 0) or 0)),
+                      "dur": float(ex["fit_need"]), "user": float(sp or 0), "lock": bool(sp) and bool(lk),
+                      "fixed": bool(ex.get("dub_shift")), "mode": ex.get("overflow") or "",
+                      "pause": float(ex.get("pause_before") or 0)})
+    return items
+
+
+def speed_preview(p: Project, segs: list, rows: list[int], mode: str, value: float | None,
+                  settings: dict | None = None) -> dict:
+    """Ước tính TRƯỚC khi đổi tốc độ (bộ xếp chạy nháp trên độ dài giọng đã lưu): {n, before (min, max), after (min,
+    max), long (câu đã tích vẫn / sẽ tràn), late (thêm bao nhiêu câu bị lùi ≥ 0,3 s), over (thêm bao nhiêu chỗ đọc đè),
+    drag (câu chậm hơn ×0,8), dubbed (câu đã tích có giọng lồng)}."""
+    from .tts import plan_layout
+
+    settings = settings or load_settings()
+    vals = speed_values(segs, rows, mode, value)
+    out = {"n": len(vals), "before": None, "after": None, "long": 0, "late": 0, "over": 0, "dubbed": 0,
+           "drag": sum(1 for v in vals.values() if v is not None and v < SPEED_DRAG)}
+    new = {r: (v, mode != "min") for r, v in vals.items()}
+    cur_items, new_items = _layout_items(segs), _layout_items(segs, new)
+    if not cur_items:
+        return out
+    total = max(float(p.data.get("info", {}).get("duration", 0) or 0), max(x.end for x in segs) + 1)
+    args = (total, settings.get("dub_overflow", "smart"), float(settings.get("tts_max_speedup", 1.3)),
+            float(settings.get("dub_lead_max", 1.0)), float(settings.get("dub_max_lag", 2.0)))
+    a, b = plan_layout(cur_items, *args), plan_layout(new_items, *args)
+    mine = [r for r in vals if r in a and r in b]
+    out["dubbed"] = len(mine)
+    if mine:
+        # "đang đọc" = đúng tốc độ cột Độ vừa đang hiện (bản lồng đang dùng), "sẽ đọc" = bộ xếp nháp với tốc độ mới
+        cur = [float(segs[r].extra.get("fit_speed") or a[r]["speed"]) for r in mine]
+        out["before"] = (min(cur), max(cur))
+        out["after"] = (min(b[r]["speed"] for r in mine), max(b[r]["speed"] for r in mine))
+        out["long"] = sum(1 for r in mine if b[r]["fit"] == "long")
+
+    def count(plan, key, thr):
+        return sum(1 for x in plan.values() if x[key] >= thr)
+
+    out["late"] = max(0, count(b, "shift", 0.3) - count(a, "shift", 0.3))
+    out["over"] = max(0, count(b, "over", 0.1) - count(a, "over", 0.1))
+    return out
+
+
+def speed_note(pv: dict, mode: str, value: float | None) -> str:
+    """Dòng báo trước khi bấm Đổi tốc độ giọng."""
+    if not pv.get("n"):
+        return ""
+    fmt = (lambda r: f"×{r[0]:.2f}" if abs(r[1] - r[0]) < 0.005 else f"×{r[0]:.2f}–×{r[1]:.2f}")
+    if value is None:
+        what = "về tốc độ tool tự tính"
+    elif mode == "rel":
+        what = f"{'nhanh' if value >= 0 else 'chậm'} hơn {abs(value):g} %"
+    elif mode == "min":
+        what = f"ít nhất ×{value:.2f}"
+    else:
+        what = f"đúng ×{value:.2f}"
+    parts = [f"{pv['n']} câu → {what}"]
+    if pv.get("before") and pv.get("after"):
+        parts.append(f"đang đọc {fmt(pv['before'])} → {fmt(pv['after'])}")
+    if not pv.get("dubbed"):
+        parts.append("chưa có giọng lồng – áp dụng khi bấm Tạo bản lồng tiếng")
+    else:
+        if pv.get("late"):
+            parts.append(f"thêm ~{pv['late']} câu bị lùi")
+        if pv.get("over"):
+            parts.append(f"thêm ~{pv['over']} chỗ đọc đè")
+        if pv.get("long"):
+            parts.append(f"{pv['long']} câu vẫn dài hơn chỗ trống")
+        if not (pv.get("late") or pv.get("over") or pv.get("long")):
+            parts.append("vẫn vừa chỗ")
+    if pv.get("drag"):
+        parts.append(f"⚠ {pv['drag']} câu chậm hơn ×{SPEED_DRAG:.1f} – giọng dễ nghe kéo lê")
+    return " · ".join(parts)
+
+
 def needs_shorten(s, lang: str = "vi") -> bool:
     """Câu đã lồng tiếng có cần AI rút gọn không (nút "Tích câu ⚠ quá dài")."""
     return bool(s.extra.get("fit")) and bool((s.trans or "").strip()) and \
@@ -4955,7 +5107,7 @@ def apply_translation(segs: list, cues: list, stats: dict | None = None) -> list
             m = Segment(parts[0].start, max(x.end for x in parts), text, "", parts[0].speaker,
                         {k: v for k, v in parts[0].extra.items()
                          if k not in ("tts_file", "take", "dub_at", "dub_shift", "fit", "fit_need", "fit_have",
-                                      "fit_shift", "fit_over")})
+                                      "fit_shift", "fit_over", "fit_auto", "fit_auto_speed")})
             put(m, t)
             st["merged"] += len(ks) - 1
             new.append(m)

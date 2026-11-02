@@ -1029,8 +1029,8 @@ class TrackTimeline(QWidget):
         "dub": [("play", "play", "Nghe", "Nghe câu đang chọn (bấm đúp vào đoạn giọng cũng được)"),
                 ("dub_redo", "refresh", "Tạo lại giọng", "Đọc lại các câu đang chọn"),
                 ("speed", None, None, None),
-                ("dub_speed", "bolt", "Đặt tốc độ", "Tốc độ tối thiểu cho các câu đang chọn – câu đang đọc nhanh hơn giữ "
-                 "nguyên, câu chậm hơn được nâng lên. Xếp lại ngay, không đọc lại"),
+                ("dub_speed", "bolt", "Đặt tốc độ", "Đọc các câu đang chọn đúng tốc độ ở ô ×… (nhanh hay chậm đều theo; "
+                 "tab Lồng tiếng mục 2 chọn cách 'Ít nhất' thì chỉ nâng câu chậm). Xếp lại ngay, không đọc lại"),
                 ("dub_speed_reset", "refresh", "Về tốc độ gốc", "Bỏ tốc độ đặt tay của các câu đang chọn"),
                 ("dub_mode", "layers", "Cách xếp", "Câu đang chọn đọc dài hơn chỗ trống thì: Tự động / Nối tiếp / "
                  "Đọc đè / Đọc sớm / Cắt bớt (riêng các câu này) – xếp lại ngay, không đọc lại"),
@@ -1111,13 +1111,13 @@ class TrackTimeline(QWidget):
         self.tools.setSpacing(2)
         tb.addLayout(self.tools)
         self.speed = QDoubleSpinBox()
-        self.speed.setRange(0.5, 2.0)
+        self.speed.setRange(0.7, 2.0)
         self.speed.setSingleStep(0.05)
         self.speed.setDecimals(2)
-        self.speed.setValue(1.2)
+        self.speed.setValue(1.0)
         self.speed.setPrefix("×")
         self.speed.setFixedWidth(78)
-        self.speed.setToolTip("Tốc độ đọc tối thiểu cho các câu đang chọn (bấm 'Đặt tốc độ' để áp dụng)")
+        self.speed.setToolTip("Tốc độ đọc cho các câu đang chọn (bấm 'Đặt tốc độ' để áp dụng)")
         self.speed.hide()
         tb.addStretch(1)
         for ic, tip, fn in (("minus", "Thu nhỏ", lambda: self.zoom(0.7)), ("plus", "Phóng to", lambda: self.zoom(1.4)),

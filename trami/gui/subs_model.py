@@ -65,8 +65,9 @@ def fit_text(s: Segment) -> str:
     if ex.get("song") and not ex.get("dub_at"):
         return "🎵 bài hát"
     fit = ex.get("fit")
+    mark = " 🔒" if ex.get("speed") and ex.get("speed_lock") else " ✎"
     if not fit:
-        return "✎ ×" + f"{float(ex['speed']):.2f}" if ex.get("speed") else ""
+        return (mark.strip() + " ×" + f"{float(ex['speed']):.2f}") if ex.get("speed") else ""
     sp = float(ex.get("fit_speed", 1) or 1)
     out = FIT_TEXT.get(fit, "") + (f" ×{sp:.2f}" if sp > 1.06 or ex.get("speed") else "")
     sh = float(ex.get("fit_shift", 0) or 0)
@@ -76,7 +77,9 @@ def fit_text(s: Segment) -> str:
         out += f" ▶{sh:.1f}s"
     if float(ex.get("fit_over", 0) or 0) >= 0.1:
         out += f" ⧉{float(ex['fit_over']):.1f}s"
-    if ex.get("overflow") or ex.get("speed"):
+    if ex.get("speed"):
+        out += mark
+    elif ex.get("overflow"):
         out += " ✎"
     return out
 
@@ -155,7 +158,15 @@ def fit_tip(s: Segment) -> str:
     if ex.get("overflow"):
         lines.append(f"✎ Cách xếp riêng câu này: {OVERFLOW_SHORT.get(ex['overflow'], ex['overflow'])}")
     if ex.get("speed"):
-        lines.append(f"✎ Tốc độ đặt tay: tối thiểu ×{float(ex['speed']):.2f} (đang đọc ×{sp:.2f}) – 'Về tốc độ gốc' để bỏ")
+        auto = ex.get("fit_auto_speed")
+        auto_txt = f", tool tự tính: ×{float(auto):.2f}" if auto else ""
+        cat = {"long": "⚠ rất dài", "fast": "⚡ dài", "ok": "✓ bình thường"}.get(ex.get("fit_auto") or "", "")
+        cat_txt = f" – loại câu: {cat}" if cat and ex.get("fit_auto") != fit else ""
+        if ex.get("speed_lock"):
+            lines.append(f"🔒 Tốc độ đặt tay: đúng ×{float(ex['speed']):.2f}{auto_txt}{cat_txt} – 'Về tốc độ gốc' để bỏ")
+        else:
+            lines.append(f"✎ Tốc độ đặt tay: tối thiểu ×{float(ex['speed']):.2f} (đang đọc ×{sp:.2f}{auto_txt})"
+                         f"{cat_txt} – 'Về tốc độ gốc' để bỏ")
     if ex.get("trans_long"):
         lines.append(f"AI đã rút gọn từ: {ex['trans_long']}")
     return "\n".join(lines)

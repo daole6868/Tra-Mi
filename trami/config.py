@@ -136,6 +136,8 @@ DEFAULT_SETTINGS: dict = {
     "tts_voice": "vi-VN-HoaiMyNeural",
     "tts_rate": "+0%",
     "tts_max_speedup": 1.3,           # tăng tốc giọng lồng tối đa (cao hơn nghe vội, mất tự nhiên)
+    "dub_speed_mode": "exact",        # cách đổi tốc độ giọng câu đã tích: exact (đúng tốc độ) / rel (%) / min (tối thiểu)
+    "dub_speed_pct": -10,             # % nhanh (+) / chậm (−) so với tốc độ đang đọc khi cách đổi = rel
     "dub_overflow": "smart",          # câu đọc dài hơn chỗ trống: smart / push / overlap / early / cut (tts.OVERFLOW_MODES)
     "dub_lead_max": 1.0,              # "Tự động": câu dài được bắt đầu sớm tối đa (giây)
     "dub_max_lag": 2.0,               # "Tự động": câu sau bị lùi tối đa (giây), quá thì đọc đè

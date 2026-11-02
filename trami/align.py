@@ -1522,7 +1522,7 @@ CLAUSE_TR_DEFAULT = ",;:，；："
 END_TR = "。！？!?."
 _TAIL_JUNK = " \t\"'”’)）」』】…。！？!?.,，;；:："
 _AFTER_MARK = "”’\"')）」』】"
-SPLIT_KEEP = ("voice", "speed", "overflow", "nodub", "trans_user", "song", "not_song")
+SPLIT_KEEP = ("voice", "speed", "speed_lock", "overflow", "nodub", "trans_user", "song", "not_song")
 PAIR_TOL = 0.12          # số dấu câu 2 bên khác nhau: vế dịch ứng với vế gốc khi vị trí (tỉ lệ độ dài) lệch ≤ 12 %
 END_PAUSE = 1.6          # tách ở chỗ hết câu (? ! .) nghỉ dài hơn tách ở dấu phẩy
 

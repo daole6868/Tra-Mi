@@ -12510,3 +12510,205 @@ def test_ocr_logo_gui_2137(sample_video, monkeypatch):
         save_settings({"ocr_logo": True, "ocr_dict_fix": True, "ocr_logo_known": []})
         win.timer.stop()
         p.delete()
+
+
+def test_plan_layout_speed_lock_2138():
+    """Tốc độ khoá (2.1.38): câu đang phải đọc nhanh đặt đúng ×1,0 thì đọc ×1,0 (không tự tăng tốc), câu sau bị lùi /
+    đè theo cách xếp; câu khoá không kéo câu khác trong cụm lên tốc độ tối đa; cách 'tối thiểu' cũ giữ nguyên; thứ tự câu
+    không bao giờ đảo."""
+    import random
+
+    from trami.tts import plan_layout
+
+    items = [{"k": 0, "want": 0, "dur": 2.4, "user": 0}, {"k": 1, "want": 2.0, "dur": 1.5, "user": 0},
+             {"k": 2, "want": 5, "dur": 1, "user": 0}]
+    a = plan_layout(items, 10)
+    assert a[0]["fit"] == "fast" and a[0]["speed"] > 1.1 and abs(a[1]["shift"]) < 0.1
+    items[0].update(user=1.0, lock=True)
+    b = plan_layout(items, 10)
+    assert b[0]["speed"] == 1.0 and b[0]["lock"] and b[0]["fit"] == "long" and b[1]["shift"] >= 0.3
+    items[0].update(user=1.0, lock=False)                     # cách cũ: tối thiểu -> vẫn tự tăng tốc cho vừa
+    assert abs(plan_layout(items, 10)[0]["speed"] - a[0]["speed"]) < 1e-6
+    items[0].update(user=0.9, lock=True)
+    ov = plan_layout(items, 10, "overlap")
+    assert ov[0]["speed"] == 0.9 and ov[1]["start"] == 2.0 and ov[0]["over"] > 0.3     # đọc đè: câu sau đúng giờ
+    items[0].update(user=1.6, lock=True)                      # khoá nhanh hơn cần
+    assert plan_layout(items, 10)[0]["speed"] == 1.6 and plan_layout(items, 10)[0]["fit"] == "ok"
+    # câu khoá đứng trong cụm câu dài: câu bên cạnh không bị đẩy lên tốc độ tối đa vì câu khoá không vừa
+    run = [{"k": 0, "want": 0, "dur": 2.0, "user": 0}, {"k": 1, "want": 1.8, "dur": 3.5, "user": 1.0, "lock": True},
+           {"k": 2, "want": 4.0, "dur": 1.0, "user": 0}]
+    r = plan_layout(run, 12)
+    assert r[1]["speed"] == 1.0 and r[0]["speed"] < 1.3
+    rnd = random.Random(7)
+    for _ in range(400):
+        n = rnd.randint(2, 9)
+        t, its = 0.0, []
+        for k in range(n):
+            t += rnd.uniform(0.3, 3.0)
+            it = {"k": k, "want": t, "dur": rnd.uniform(0.3, 4.0), "user": 0}
+            if rnd.random() < 0.4:
+                it.update(user=round(rnd.uniform(0.7, 2.0), 2), lock=rnd.random() < 0.7)
+            its.append(it)
+        for mode in ("smart", "push", "overlap", "early", "cut"):
+            out = plan_layout(its, t + 5, mode)
+            for it in its:
+                if it.get("lock") and it["user"]:
+                    assert abs(out[it["k"]]["speed"] - it["user"]) < 1e-9
+            sts = [out[k]["start"] for k in range(n)]
+            assert sts == sorted(sts), (mode, its)
+
+
+def test_speed_by_category_2138():
+    """Loại câu theo độ vừa lúc chưa đặt tốc độ tay (fit_auto), tốc độ mới theo 3 cách, ước tính trước khi đổi."""
+    from types import SimpleNamespace
+
+    from trami import pipeline
+
+    def seg(a, b, fit, sp, need, auto=None, **ex):
+        return Segment(a, b, "x", "Một hai ba", "S1", dict({"fit": fit, "fit_speed": sp, "fit_need": need,
+                                                             "dub_at": [a, a + need / sp]},
+                                                            **({"fit_auto": auto} if auto else {}), **ex))
+
+    segs = [seg(0, 1.0, "fast", 1.25, 1.5), seg(1.2, 2.0, "ok", 1.0, 0.8), seg(4.0, 4.6, "long", 1.3, 1.6),
+            seg(6.0, 7.0, "ok", 1.0, 1.4, auto="fast", speed=1.0, speed_lock=True),
+            Segment(8, 9, "y", "", "S1", {"nodub": True, "fit": "ok"})]
+    g = pipeline.speed_groups(segs)
+    assert g == {"long": [2], "fast": [0, 3], "ok": [1]}          # câu 3 đã đặt tay vẫn thuộc loại ⚡ gốc
+    assert pipeline.speed_values(segs, [0, 1], "exact", 1.0) == {0: 1.0, 1: 1.0}
+    assert pipeline.speed_values(segs, [0, 1], "rel", -10) == {0: 1.12, 1: 0.9}
+    assert pipeline.speed_values(segs, [0], "exact", 0.3) == {0: pipeline.SPEED_LO}
+    assert pipeline.apply_speed(segs, [0, 1], "exact", 1.0) == [0, 1]
+    assert segs[0].extra["speed"] == 1.0 and segs[0].extra["speed_lock"] is True
+    assert pipeline.apply_speed(segs, [0, 1], "exact", 1.0) == []                 # không đổi gì
+    assert pipeline.apply_speed(segs, [0], "min", 1.1) == [0] and "speed_lock" not in segs[0].extra
+    assert pipeline.apply_speed(segs, [0, 1, 3], "exact", None) == [0, 1, 3]
+    assert not any(s.extra.get("speed") or s.extra.get("speed_lock") for s in segs)
+    p = SimpleNamespace(data={"info": {"duration": 10}})
+    pv = pipeline.speed_preview(p, segs, [0], "exact", 1.0, {})
+    assert pv["dubbed"] == 1 and pv["before"][0] > 1.1 and pv["after"] == (1.0, 1.0) and pv["late"] >= 1
+    note = pipeline.speed_note(pv, "exact", 1.0)
+    assert "đúng ×1.00" in note and "bị lùi" in note
+    pv = pipeline.speed_preview(p, segs, [1], "rel", -30, {})
+    assert pv["drag"] == 1 and "kéo lê" in pipeline.speed_note(pv, "rel", -30)
+    assert "chưa có giọng lồng" in pipeline.speed_note(
+        pipeline.speed_preview(p, [Segment(0, 1, "x", "a")], [0], "exact", 1.0, {}), "exact", 1.0)
+
+
+def test_dub_speed_lock_relayout_2138(monkeypatch):
+    """Lồng tiếng thật (Edge giả): câu phải đọc nhanh khoá đúng ×1,0 -> xếp lại đọc ×1,0, không đọc lại câu nào, câu sau
+    lùi, loại câu gốc vẫn ⚡ (fit_auto); về tốc độ gốc -> như cũ; đặt chậm hơn 10 % theo %."""
+    from trami import pipeline, tts
+    from trami.project import Project
+
+    spoken = []
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, p, voice in items:
+            spoken.append(i)
+            _fake_audio(p, 1.6 if i == 0 else 0.6, 300 + 100 * i)
+        return []
+
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    p = Project.create("speedlock")
+    p.data["info"] = {"duration": 8}
+    p.segments = [Segment(0.0, 1.0, "a", "Một", "S1"), Segment(1.4, 2.2, "b", "Hai", "S1"),
+                  Segment(5.0, 6.0, "c", "Ba", "S2")]
+    p.save()
+    st = {"translate_engine": "google", "tts_voice": "vi-VN-HoaiMyNeural"}
+    try:
+        pipeline.dub(p, None, settings=st, engine="edge")
+        s0 = p.segments[0].extra
+        assert s0["fit"] == "fast" and s0["fit_speed"] > 1.1 and s0["fit_auto"] == "fast"
+        auto_sp = s0["fit_speed"]
+        lay = {int(k): a for a, b, k, f in p.data["dub_layout"]}
+        assert abs(lay[1] - 1.4) < 0.1
+        spoken.clear()
+        segs = p.segments
+        assert pipeline.apply_speed(segs, [0], "exact", 1.0) == [0]
+        p.segments = segs
+        p.save()
+        pipeline.relayout(p, st)
+        s0 = p.segments[0].extra
+        assert spoken == [] and s0["fit_speed"] == 1.0 and s0["fit_auto"] == "fast"
+        assert abs(s0["fit_auto_speed"] - auto_sp) < 0.02
+        assert pipeline.speed_groups(p.segments)["fast"] == [0]
+        lay = {int(k): (a, b) for a, b, k, f in p.data["dub_layout"]}
+        assert lay[0][1] - lay[0][0] > 1.5 and lay[1][0] >= lay[0][1]        # giọng đủ 1,6 s, câu sau lùi
+        segs = p.segments
+        pipeline.apply_speed(segs, [0], "exact", None)
+        p.segments = segs
+        p.save()
+        pipeline.relayout(p, st)
+        assert abs(p.segments[0].extra["fit_speed"] - auto_sp) < 0.02 and spoken == []
+        segs = p.segments
+        pipeline.apply_speed(segs, [0], "rel", -10)
+        assert abs(segs[0].extra["speed"] - round(auto_sp * 0.9, 2)) < 0.011
+    finally:
+        p.delete()
+
+
+def test_dub_speed_gui_2138(monkeypatch):
+    """Tab Lồng tiếng mục 2: ô Loại câu có số câu, Tích loại câu này, cách đổi (×/%), dòng báo trước, Đổi tốc độ giọng
+    (khoá, cột Độ vừa có 🔒), Ctrl+Z, Về gốc tất cả."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from trami.config import load_settings, save_settings
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.gui.subs_model import C_FIT
+    from trami.gui.widgets import set_combo
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+
+    def seg(a, b, fit, sp, need):
+        return Segment(a, b, "x", "Một hai ba", "S1", {"fit": fit, "fit_speed": sp, "fit_need": need,
+                                                        "dub_at": [a, a + need / sp]})
+
+    p = Project.create("speedgui")
+    p.data["info"] = {"duration": 12}
+    p.segments = [seg(0, 1.0, "fast", 1.25, 1.6), seg(2.0, 3.0, "ok", 1.0, 0.8), seg(4.0, 4.6, "long", 1.3, 1.6),
+                  seg(6.0, 7.0, "fast", 1.2, 1.4)]
+    p.save()
+    win = MainWindow()
+    win.show()
+    win.open_project(p.id)
+    pp = win.project_page
+    toasts = []
+    monkeypatch.setattr(win, "toast", lambda m, *a, **k: toasts.append(m))
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    try:
+        app.processEvents()
+        pp._speed_refresh()
+        assert pp.d_cat.itemText(1) == "⚡ Dài (2 câu)" and "(1 câu)" in pp.d_cat.itemText(0)
+        set_combo(pp.d_cat, "fast")
+        pp._pick_speed_cat()
+        assert sorted(pp.model.selected) == [0, 3]
+        set_combo(pp.d_speed_mode, "exact")
+        assert not pp.d_speed.isHidden() and pp.d_speed_pct.isHidden()
+        pp.d_speed.setValue(1.0)
+        pp._speed_refresh()
+        assert "2 câu → đúng ×1.00" in pp.d_speed_note.text() and "×1.20–×1.25 → ×1.00" in pp.d_speed_note.text()
+        pp._change_speed()
+        assert [s.extra.get("speed") for s in pp.model.segs] == [1.0, None, None, 1.0]
+        assert all(pp.model.segs[r].extra.get("speed_lock") for r in (0, 3))
+        assert "🔒" in pp.model.data(pp.model.index(0, C_FIT))
+        p.reload()
+        assert p.segments[3].extra["speed_lock"] is True
+        pp.undo()
+        assert not any(s.extra.get("speed") for s in pp.model.segs)
+        set_combo(pp.d_speed_mode, "rel")
+        app.processEvents()
+        assert not pp.d_speed_pct.isHidden() and pp.d_speed.isHidden()
+        assert load_settings()["dub_speed_mode"] == "rel"
+        pp.d_speed_pct.setValue(-20)
+        pp._change_speed()
+        assert [s.extra.get("speed") for s in pp.model.segs] == [1.0, None, None, 0.96]
+        pp._speed_reset_all()
+        assert not any(s.extra.get("speed") or s.extra.get("speed_lock") for s in pp.model.segs)
+    finally:
+        save_settings({"dub_speed_mode": "exact", "dub_speed_pct": -10})
+        win.timer.stop()
+        p.delete()
