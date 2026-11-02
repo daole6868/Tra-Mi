@@ -335,6 +335,8 @@ class LayersTab(QWidget):
             return
         self._fill_fonts(fam)
         self._set("font", fam)
+        if hasattr(self.page, "_fill_sub_fonts"):       # font mới cũng có ở ô Font chữ phụ đề (tab Kiểu chữ)
+            self.page._fill_sub_fonts()
         self.page.win.toast(f"Đã nạp font {fam}", "ok")
 
     def _rows(self):

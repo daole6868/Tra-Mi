@@ -12939,3 +12939,96 @@ def test_ocr_controls_reach_job_2142(sample_video, monkeypatch):
         save_settings({**old, **{k: v for k, v in DEFAULT_SETTINGS.items() if k.startswith("ocr_eq")}})
         win.close()
         p.delete()
+
+
+def test_user_font_subtitles_2143(sample_video, tmp_path, monkeypatch):
+    """Font riêng nạp vào data/fonts (tên file bất kỳ, vd. "zh-cn.ttf") -> phụ đề xuất bằng libass dùng đúng font đó."""
+    import numpy as np
+    from fontTools.ttLib import TTFont
+
+    from trami import config, overlay, textfit, video     # nạp overlay TRƯỚC khi đổi tạm thư mục font
+    from trami.config import FONTS_DIR, load_settings
+
+    uf = tmp_path / "userfonts"
+    uf.mkdir()
+    tt = TTFont(str(FONTS_DIR / "Bungee-Regular.ttf"))
+    for rec in tt["name"].names:            # đổi tên họ font -> chỉ có trong thư mục font riêng
+        if rec.nameID in (1, 3, 4, 6, 16):
+            rec.string = "UserFontTest" if rec.nameID != 6 else "UserFontTest-Regular"
+    tt.save(str(uf / "zh-cn.ttf"))
+    monkeypatch.setattr(video, "USER_FONTS_DIR", uf)
+    monkeypatch.setattr(config, "USER_FONTS_DIR", uf)
+    monkeypatch.setattr(overlay, "USER_FONTS_DIR", uf)
+    names = [n for _f, n in video.font_files()]
+    assert "u_zh-cn.ttf" in names and "Bungee-Regular.ttf" in names
+
+    segs = [Segment(0.5, 5.5, "你好", "XIN CHÀO VIỆT NAM")]
+
+    def frame(font, tag):
+        spec = {"subtitles": {"burn": True, "which": "trans",
+                              "style": {"font": font, "size": 40, "position": "top", "outline": 0, "shadow": 0,
+                                        "color": "#FF00FF", "box": False}},
+                "dub": {}}
+        out = video.build_and_render(sample_video, tmp_path / f"{tag}.mp4", spec, load_settings(),
+                                     tmp_path / f"w_{tag}", segs)
+        raw = subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-ss", "2", "-i", str(out), "-frames:v", "1",
+                              "-vf", "crop=640:100:0:0", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                             capture_output=True, check=True).stdout
+        return np.frombuffer(raw, np.uint8).astype(float)
+
+    user, orig, missing = frame("UserFontTest", "u"), frame("Bungee", "b"), frame("NoSuchFontXyz", "m")
+    assert np.abs(user - orig).mean() < 1.0            # libass tìm được font riêng trong work/render/fonts
+    assert (np.abs(user - missing) > 40).sum() > 300      # font khác (không thấy font -> font dự phòng)
+    # đo bề rộng chữ (xuống dòng) không cần Qt: Pillow tìm được font riêng dù tên file khác tên font
+    textfit._PIL_FONTS.clear()
+    assert textfit._pil_font("UserFontTest", False) is not None
+
+
+def test_user_font_gui_2143(sample_video, tmp_path, monkeypatch):
+    """Tab Kiểu chữ: "Nạp font riêng…" -> font vào data/fonts, ô Font chữ phụ đề chọn ngay + lưu vào dự án, danh sách font
+    tab Chữ+Logo cũng có; mở lại dự án vẫn giữ font."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from fontTools.ttLib import TTFont
+    from PySide6.QtWidgets import QApplication, QFileDialog
+
+    from trami import pipeline
+    from trami.config import FONTS_DIR, USER_FONTS_DIR
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+    from trami.subtitle import Segment
+
+    src = tmp_path / "zh-cn.ttf"
+    tt = TTFont(str(FONTS_DIR / "Lobster-Regular.ttf"))
+    for rec in tt["name"].names:
+        if rec.nameID in (1, 3, 4, 6, 16):
+            rec.string = "GuiUserFont" if rec.nameID != 6 else "GuiUserFont-Regular"
+    tt.save(str(src))
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    p = Project.create("userfontgui")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [Segment(0.5, 2.0, "你好", "Xin chào")]
+    p.save()
+    win = MainWindow()
+    win.show()
+    win.open_project(p.id)
+    pp = win.project_page
+    toasts = []
+    monkeypatch.setattr(win, "toast", lambda m, *a, **k: toasts.append(m))
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(src), "")))
+    try:
+        pp._add_sub_font()
+        app.processEvents()
+        assert (USER_FONTS_DIR / "zh-cn.ttf").exists()
+        assert pp.st_font.currentData() == "GuiUserFont"
+        assert "font của bạn" in pp.st_font.currentText()
+        assert pp.layers_tab.p_font.findData("GuiUserFont") >= 0
+        assert toasts and "GuiUserFont" in toasts[-1]
+        pp._save_edit_now()
+        assert Project(p.id).edit["subtitles"]["style"]["font"] == "GuiUserFont"
+        pp._fill_sub_fonts("FontDaXoaMat")          # font của dự án không còn file -> vẫn giữ tên trong ô
+        assert pp.st_font.currentData() == "FontDaXoaMat" and "không thấy" in pp.st_font.currentText()
+    finally:
+        win.close()
+        (USER_FONTS_DIR / "zh-cn.ttf").unlink(missing_ok=True)

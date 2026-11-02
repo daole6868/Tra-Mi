@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import ffmpeg as ff
-from .config import FONTS_DIR
+from .config import FONTS_DIR, USER_FONTS_DIR
 from .subtitle import Segment, remap_after_cut, scale_time, save_subtitles
 
 ProgressCB = Callable[[float, str], None]
@@ -76,6 +76,20 @@ def edit_for_ratio(edit: dict, ratio: str) -> dict:
 
 def ratio_tag(ratio: str) -> str:
     return str(ratio).replace(":", "x")
+
+
+FONT_EXTS = (".ttf", ".otf", ".ttc")
+
+
+def font_files() -> list[tuple[Path, str]]:
+    """[(file font, tên chép vào work/render/fonts)]: font đi kèm + font riêng của bạn (data/fonts)."""
+    out = []
+    for d, pre in ((FONTS_DIR, ""), (USER_FONTS_DIR, "u_")):
+        try:
+            out += [(f, pre + f.name) for f in sorted(d.iterdir()) if f.is_file() and f.suffix.lower() in FONT_EXTS]
+        except OSError:
+            continue
+    return out
 
 
 def keep_ranges(duration: float, trim: dict | None, cuts: list | None) -> list[tuple[float, float]]:
@@ -794,8 +808,10 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
         # thư mục font cục bộ để libass/drawtext dùng đường dẫn tương đối (tránh lỗi escape trên Windows)
         fonts_local = work / "fonts"
         fonts_local.mkdir(parents=True, exist_ok=True)
-        for f in FONTS_DIR.glob("*.[ot]tf"):          # chép cả font mới thêm vào bản cập nhật (vd. Bangers)
-            dst = fonts_local / f.name
+        # font đi kèm (cả font mới của bản cập nhật, vd. Bangers) + font riêng bạn nạp (data/fonts – 2.1.43,
+        # chép tên "u_<file>" để không đè font đi kèm cùng tên file)
+        for f, name in font_files():
+            dst = fonts_local / name
             if not dst.exists() or dst.stat().st_size != f.stat().st_size:
                 shutil.copy2(f, dst)
 

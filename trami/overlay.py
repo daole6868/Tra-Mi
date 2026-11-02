@@ -22,9 +22,8 @@ import threading
 import uuid
 from pathlib import Path
 
-from .config import DATA_DIR, FONTS_DIR
+from .config import DATA_DIR, FONTS_DIR, USER_FONTS_DIR
 
-USER_FONTS_DIR = DATA_DIR / "fonts"
 LOGOS_DIR = DATA_DIR / "logos"
 
 # font có đủ chữ tiếng Việt (đi kèm tool, giấy phép OFL – fonts/Fonts-more-OFL.txt)

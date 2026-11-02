@@ -1868,15 +1868,11 @@ class ProjectPage(QWidget):
         f = Form()
         self.st_burn = f.row("Ghép phụ đề vào video", Switch(True))
         self.st_which = f.row("Hiển thị", combo(C.WHICH[:3], "trans"))
-        from ..overlay import FONTS as _LAYER_FONTS
-
-        self.st_font = f.row("Font chữ", combo([("Be Vietnam Pro", "Be Vietnam Pro – gọn, rõ (mặc định)"),
-                                                 ("Bangers", "Bangers – kiểu truyện tranh, chữ hoa nghiêng")] +
-                                                [(fam, name) for fam, name in _LAYER_FONTS
-                                                 if fam not in ("Be Vietnam Pro", "Bangers")] +
-                                                [("Arial", "Arial"), ("Roboto", "Roboto"), ("Tahoma", "Tahoma"),
-                                                 ("Segoe UI", "Segoe UI"), ("Times New Roman", "Times New Roman")],
-                                                "Be Vietnam Pro"))
+        self.st_font = f.row("Font chữ", combo([], None))
+        self._fill_sub_fonts("Be Vietnam Pro")
+        f.row("", flow(button("Nạp font riêng…", "upload", "Chọn file font .ttf / .otf trên máy – dùng được cho "
+                              "phụ đề và chữ ở tab Chữ+Logo (chép vào thư mục data\\fonts)",
+                              flat=True, on_click=self._add_sub_font)))
         self.st_size = f.row("Cỡ chữ (0 = tự động)", QSpinBox())
         self.st_size.setRange(0, 200)
         self.st_pos = f.row("Vị trí", combo([("auto", "Tự động – đúng chỗ phụ đề cũ"), ("bottom", "Dưới"),
@@ -3214,7 +3210,53 @@ class ProjectPage(QWidget):
                 "patch_from": self.hs_patch.currentData(), "stretch_from": self.hs_stretch.currentData(),
                 "stretch_smooth": int(self.hs_ssmooth.value())}
 
+    def _fill_sub_fonts(self, cur: str | None = None):
+        """Ô Font chữ (tab Kiểu chữ): font đi kèm + font riêng bạn nạp (data/fonts) + font Windows thường có."""
+        from .. import overlay
+
+        cb = self.st_font
+        cur = cur if cur is not None else cb.currentData()
+        cb.blockSignals(True)
+        cb.clear()
+        items = [("Be Vietnam Pro", "Be Vietnam Pro – gọn, rõ (mặc định)"),
+                 ("Bangers", "Bangers – kiểu truyện tranh, chữ hoa nghiêng")]
+        items += [(fam, name) for fam, name in overlay.FONTS if fam not in ("Be Vietnam Pro", "Bangers")]
+        items += [(fam, f"{fam} – font của bạn") for fam, _fn in overlay.user_fonts()]
+        items += [(fam, fam) for fam in ("Arial", "Roboto", "Tahoma", "Segoe UI", "Times New Roman")]
+        for fam, name in items:
+            if cb.findData(fam) < 0:
+                cb.addItem(name, fam)
+        if cur and cb.findData(cur) < 0:        # font của dự án mà máy không còn file -> vẫn giữ tên
+            cb.addItem(f"{cur} – không thấy file font", cur)
+        set_combo(cb, cur or "Be Vietnam Pro")
+        cb.blockSignals(False)
+
+    def _add_sub_font(self):
+        from .. import overlay
+
+        path, _ = QFileDialog.getOpenFileName(self, "Chọn font", "", "Font (*.ttf *.otf *.TTF *.OTF)")
+        if not path:
+            return
+        try:
+            fam = overlay.add_user_font(path)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "Nạp font", str(e))
+            return
+        self.fonts_changed()
+        self._fill_sub_fonts(fam)
+        self.st_font.currentIndexChanged.emit(self.st_font.currentIndex())     # lưu + vẽ lại phụ đề xem trước
+        self.win.toast(f"Đã nạp font {fam} – đang dùng cho phụ đề", "ok")
+
+    def fonts_changed(self):
+        """Vừa nạp font riêng (tab Kiểu chữ hoặc Chữ+Logo) -> cập nhật cả 2 danh sách font."""
+        self._fill_sub_fonts()
+        lt = getattr(self, "layers_tab", None)
+        if lt is not None:
+            lt._fill_fonts(lt.p_font.currentData())
+
     def _set_style_widgets(self, st: dict):
+        if self.st_font.findData(st.get("font", "Be Vietnam Pro")) < 0:
+            self._fill_sub_fonts(st.get("font"))
         set_combo(self.st_font, st.get("font", "Be Vietnam Pro"))
         self.st_size.setValue(int(st.get("size") or 0))
         set_combo(self.st_pos, st.get("position", "auto"))

@@ -698,7 +698,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - `trami/overlay.py` – lớp phủ chữ / logo (`edit["layers"]`, thứ tự = thứ tự chồng; giờ = giây video GỐC, end 0 = hết
   video; x / y = tâm theo khung xuất; cỡ chữ × cạnh ngắn, logo × bề rộng khung): `render_text` / `render_logo` vẽ bằng Qt
   (CÙNG hàm cho xem trước `player.LayerItem` và xuất), mẫu `TEMPLATES` (cọ vàng `_brush_path`…) + `LOGO_TEMPLATES` (tên
-  kênh), `FONTS` (13 font OFL có tiếng Việt trong fonts/), font riêng `data/fonts` (`add_user_font`), thư viện logo
+  kênh), `FONTS` (13 font OFL có tiếng Việt trong fonts/), font riêng `data/fonts` (`config.USER_FONTS_DIR`, `add_user_font`; từ 2.1.43 dùng cả cho PHỤ ĐỀ: tab Kiểu chữ "Nạp font riêng…" `_add_sub_font` / `_fill_sub_fonts` / `fonts_changed`, xuất chép vào work/render/fonts tên `u_<file>` – `video.font_files`, `textfit` tìm theo tên họ font dù tên file khác), thư viện logo
   `data/logos/index.json` (`add_logos`, GIF động `is_animated`), hiệu ứng `anim_state` = `ffmpeg_xy` + `fades`,
   `build_overlays` (PNG `-loop 1` + `setpts` dời tới lúc hiện + `fade alpha` + `overlay eof_action=pass`; GIF `-ignore_loop 0`;
   xuất từng đoạn chỉ lấy lớp có mặt trong đoạn), `migrate` (edit["text"] / ["watermark"] cũ -> lớp). `ensure_qt` tạo
@@ -722,7 +722,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (298 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
+- `tests/test_core.py` – `python -m pytest -q tests` (300 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2591,6 +2591,14 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (3) "tắt Xoá câu OCR không chắc, thay bằng nghe câu không chắc: câu dưới mức tách đúng mốc thời gian gửi đi nghe lại,
   nghe cũng không chắc thì xoá, nghe ra câu khác chắc thì điền đúng vị trí" -> "Nghe lại câu OCR không chắc" (xem Cấu trúc).
   Thử với bộ nghe giả (Qwen3 thật chưa chạy – sandbox chặn HF). Gửi bản FULL tool.
+- 2.1.43: "tôi có thể tự thêm font chữ không" (gửi font Genshin Impact `zh-cn.ttf` = HYWenHei-85W của Hanyi, 7 MB, đủ
+  chữ Việt dựng sẵn + 20.902 chữ Hán; bản quyền Hanyi – dùng video kiếm tiền có rủi ro). Trước đây font riêng chỉ dùng
+  được cho lớp chữ tab Chữ+Logo (vẽ bằng Qt); ô Font chữ phụ đề (tab Kiểu chữ) chỉ có font đi kèm + font Windows và xuất
+  video không chép data/fonts cho libass. Giờ: nút "Nạp font riêng…" dưới ô Font chữ (chọn luôn font vừa nạp, cả 2 danh
+  sách cùng cập nhật), font riêng hiện "– font của bạn", font của dự án mà máy không còn file vẫn giữ tên ("không thấy file
+  font"); xuất chép font riêng vào work/render/fonts (`u_<tên file>`, không đè font đi kèm); đo bề rộng chữ bằng Pillow
+  nhận font riêng tên file bất kỳ. Thử: font đổi tên đặt tên file "zh-cn.ttf" -> libass vẽ giống hệt font gốc (lệch 0),
+  không có font -> font dự phòng; libass vẽ font HYWenHei câu Việt có dấu + chữ Hán đúng; giao diện offscreen.
 ## Vấn đề đang mở
 - Test `test_subtitle_line_fit_and_rounded_box` hỏng khi chạy CẢ bộ test (chạy riêng thì qua): có QApplication thì
   `textfit.width` đo bằng Qt – "Noto Sans CJK JP" đậm cỡ 40 Qt đo 705 px, Pillow 588 px -> câu Nhật không ngắt được sau

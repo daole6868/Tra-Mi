@@ -58,9 +58,9 @@ def qt_font(family: str, bold: bool):
 
 
 def _font_dirs() -> list[Path]:
-    from .config import FONTS_DIR
+    from .config import FONTS_DIR, USER_FONTS_DIR
 
-    dirs = [FONTS_DIR]
+    dirs = [FONTS_DIR, USER_FONTS_DIR]
     if sys.platform == "win32":
         import os
 
@@ -84,11 +84,14 @@ def _pil_font(family: str, bold: bool):
         from fontTools.ttLib import TTFont
         from PIL import ImageFont
 
+        from .config import USER_FONTS_DIR
+
         want = family.lower().replace(" ", "")
         best = None
         for d in _font_dirs():
+            any_name = d == USER_FONTS_DIR      # font riêng: tên file bất kỳ (vd. "zh-cn.ttf" chứa HYWenHei) – ít file
             for f in d.rglob("*.[ot]t[fc]"):
-                if not f.name.lower().replace(" ", "").replace("-", "").startswith(want[:6]):
+                if not any_name and not f.name.lower().replace(" ", "").replace("-", "").startswith(want[:6]):
                     continue
                 try:
                     tt = TTFont(str(f), fontNumber=0, lazy=True)

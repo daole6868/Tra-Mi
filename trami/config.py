@@ -44,6 +44,7 @@ ROOT_DIR = APP_DIR
 FONTS_DIR = BUNDLE_DIR / "fonts"
 
 DATA_DIR = Path(os.environ.get("TRAMI_DATA", _default_data))
+USER_FONTS_DIR = DATA_DIR / "fonts"     # font riêng người dùng nạp (tab Chữ+Logo / Kiểu chữ)
 PROJECTS_DIR = DATA_DIR / "projects"
 MODELS_DIR = DATA_DIR / "models"
 CACHE_DIR = DATA_DIR / "cache"
