@@ -546,42 +546,23 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (giá trị -> mẫu / custom), `preview_scan(src, t, region, settings)` (PNG vùng quét gốc + đã lọc xám); stats["eq"] ->
   `ocr_note` "đã lọc ảnh làm rõ chữ". Độ chắc từng câu OCR: gom đoạn chọn chữ nhiều phiếu nhất -> `extra["ocr_conf"]` =
   trung bình theo thời lượng độ chắc các lần đọc ra đúng chữ đó (gộp câu nháy chữ -> trung bình). `pipeline.unsure_rows(segs,
-  thr, ocr_thr=None, asr=True)` (câu có asr_conf xét mức nghe, câu chỉ có ocr_conf xét `ocr_thr`), `OCR_UNSURE` 0,85,
-  `drop_unsure(asr=, ocr=)` (recognize bước 2i: `asr_drop_unsure` khi nguồn khác OCR, `ocr_drop_unsure` khi OCR / OCR +
-  nghe; `unsure_dropped` thêm ocr_n / ocr_thr / ocr_known -> `unsure_note`), "Khôi phục câu đã xoá" dùng chung. GUI tab Tự
+  thr, ocr_thr=None, asr=True)` (câu có asr_conf xét mức nghe, câu chỉ có ocr_conf xét `ocr_thr`), `OCR_UNSURE` 0,85
+  (2.1.42: câu OCR không chắc được NGHE LẠI thay vì xoá – mục "Nghe lại câu OCR không chắc"). GUI tab Tự
   động nhóm 1 (chỉ khi nguồn OCR / OCR + nghe – `_method_rows`): "Làm rõ chữ khi quét" `a_ocreq_box` (Mẫu
   `a_ocreq_preset` – chọn là áp ngay `_ocr_eq_preset`; sửa ô `a_eq` / `a_eq_sharp` -> "Tuỳ chỉnh" `_ocr_eq_edited`; Về gốc
   = mẫu Ảnh gốc; Lấy từ tab Chỉnh sửa `_ocr_eq_from_edit`; Xem thử `_ocr_eq_preview` hộp 2 ảnh; dòng nhắc `a_ocreq_hint`;
   `_ocr_eq_save` lưu Cài đặt) – đang ở tab Tự động + nguồn OCR + có làm rõ: `_apply_live` cho trình phát màu làm rõ (độ
   bão hoà 0 = đúng ảnh xám bộ đọc chữ thấy), `_tab_changed` làm mới; chọn nguồn OCR mà chưa làm rõ -> toast nhắc 1 lần
-  (`_ocr_eq_told`). "Xoá câu OCR không chắc" `a_ocrdrop` + mức `a_ocrconf` = `s_ocrconf` tab Phụ đề (hàng Không chắc: "nghe
+  (`_ocr_eq_told`). Mức `a_ocrconf` = `s_ocrconf` tab Phụ đề (hàng Không chắc: "nghe
   chắc dưới" + "OCR đọc chắc dưới", `_ocr_conf_changed`, Cài đặt `ocr_pick_conf`) -> `SubsModel.ocr_thr` / `ocr_low`
   (chữ gốc đỏ cam #F08A6E + tooltip), "Tích câu không chắc" (`_pick_unsure`) tích cả câu OCR. Cài đặt → Nhận dạng giọng
-  nói: Làm rõ chữ trước khi OCR, Xoá câu OCR không chắc, mức. Tab Chỉnh sửa → Màu sắc & hình ảnh nút "Về gốc"
-  (`_color_reset`). `autoflow.summary` ghi "(làm rõ chữ, xoá câu không chắc)". `C.OCR_EQ_HELP` / `OCR_UNSURE_HELP`.
-- OCR logo chữ + đọc chữ kỹ (2.1.37): `trami/ocrlogo.py` (hàm thuần) – `Logo` (text = bản đọc nhiều nhất, variants bản
-  đọc lệch, w / h cỡ khung chữ, static khung khi đứng yên 1 chỗ, hits / share / places / transparent, user, on (tắt = trả
-  chữ lại), cut / dropped / hidden; `to_dict(k)` / `from_dict(d, k)` – dự án lưu cỡ theo tỉ lệ CHIỀU CAO khung hình, static
-  theo tỉ lệ khung; 2.1.41: chữ hiện 1 mình chỉ là logo khi có @ # / tên Latin + ≤ 4 chữ Hán, chỗ logo đứng yên chỉ
-  bỏ chữ giống logo – `at_static` / `looks_like`), `norm` (NFKC, chữ thường, bỏ khoảng trắng), `find(obs, covered, known)` (gom theo NỘI DUNG gần giống:
-  hạt = bản đọc y hệt ở ≥ 3 lần đọc, gộp bản lệch giống ≥ `VAR_SIM` 0,6 hoặc ≥ `SIZE_SIM` 0,34 + cùng cỡ; mảnh dính câu
-  ("@纵横没想到…") tính là 1 lần thấy; logo khi ≥ `MIN_HITS` 4 lần, ≥ max(`SHARE` 4 %, min(12 s, 30 %)) thời lượng, trải
-  ≥ min(20 %, 120 s) VÀ (hiện cùng lúc với chữ khác ≥ `COOC` 30 % hoặc có @ # Latin / số hoặc ≥ 3 chỗ hoặc trong suốt
-  `ALPHA_MIN`); câu 1 chữ không bao giờ là logo, câu thoại lặp lại đứng 1 mình không phải logo; logo đã biết / đã tắt giữ
-  nguyên + hút bản đọc giống – `match(any_state=True)`), `match` (bản đọc đã gặp / gần giống + cùng cỡ / đúng chỗ logo
-  đứng yên; mảnh có logo ở đầu / cuối kèm chữ khác -> None để `strip` cắt; logo người dùng gõ chưa biết cỡ: giống ≥ 0,75),
-  `strip` (cắt logo dính ĐẦU / CUỐI câu: bản y hệt trước, gần giống ≥ 0,66 chỉ khi logo có @ # và @ # đúng vị trí; mẩu
-  chứa nguyên logo = logo giữa câu -> không cắt; bỏ dấu ngắt sót), `strip_all`, `merge`, `note`. `trami/ocr.py`: `_It`
-  (tuple 3 phần + ch / logo / raw / alpha), C1 `_logo_prescan` (≤ `LOGO_SAMPLES` 80 khung, phim ngắn 1 khung / 2 s ≥ 12;
-  video < 10 phút giải mã 1 lượt `fps=`, dài hơn tua khung khoá `-noaccurate_seek` 4 luồng; tìm + đọc mọi chữ trong dải
-  quét -> `ocrlogo.Obs`), C2 `_LogoGuard` (trong `_Tracker._det`: khung chữ trùng chỗ logo đứng yên / vùng bỏ qua -> logo;
-  khung cỡ gần cỡ logo hoặc rộng hơn (có thể dính logo) -> đọc thử `recognize_ex` -> logo / tách khung theo vị trí từng
-  chữ (`strip` hoặc `_static_cut`); khung y hệt lần tìm trước dùng lại kết quả; khung logo bỏ khỏi `_glyph_pixels(skip=)`
-  -> logo nhảy tới / đi không làm tách câu, không kéo dài giờ câu; `hid` số lần bỏ / logo), C3 sau khi đọc: `find` lại trên
-  mọi lần đọc (kèm logo đã biết) -> mảnh là logo gắn `.logo` (không vào câu, giữ để trả lại), dính câu -> `_shrink` (khung
-  co theo tâm chữ còn giữ) hoặc `_static_cut` (logo đứng yên đọc ra chữ lạ "@黄AGC": cắt chữ đầu / cuối có tâm trong khung
-  logo thu lại 0,3 cao dòng, ≤ số chữ logo + 1, có @ # / chữ của logo); câu: `extra["ocr_raw"]` = chữ trước khi bỏ logo,
-  đoạn chỉ có logo -> stats["logo_only"]. `extract_hardsubs(logos=, ignore=)` (logo đã biết dict + vùng bỏ qua tỉ lệ khung).
+  nói: Làm rõ chữ trước khi OCR, mức. Tab Chỉnh sửa → Màu sắc & hình ảnh nút "Về gốc"
+  (`_color_reset`). `autoflow.summary` ghi "(làm rõ chữ…)". `C.OCR_EQ_HELP` / `OCR_UNSURE_HELP`.
+- OCR đọc chữ kỹ (2.1.37) – chức năng LOGO CHỮ của 2.1.37 (`ocrlogo.py`, dò logo trước khi quét, `_LogoGuard`, lọc /
+  cắt logo sau khi đọc, vùng bỏ qua, Danh sách logo / "Đây là logo", Cài đặt `ocr_logo` / `ocr_logo_known`) ĐÃ BỎ HẲN ở
+  2.1.42 (nhận nhầm câu thoại thành logo -> mất câu); chữ logo dính câu xoá bằng "Lọc từ". Còn lại: watermark kênh cũ
+  (2.0.23 `_static_marks_spans` + `_is_mark`: chữ Y HỆT đứng yên ≥ 30 % video, hiện cùng lúc chữ khác ≥ `MARK_COOC` 20 %,
+  chữ ở chỗ đó phải giống watermark `_mark_like` – 2.1.41). `_It` = tuple 3 phần + ch.
   B1 `ocr_engine._Detail` bọc bộ giải mã CTC: `Engine.recognize_ex` -> (chữ, độ chắc, [(chữ, độ chắc, tâm chữ theo tỉ lệ
   bề rộng ảnh dòng, [(chữ ứng viên, xác suất ≥ `ALT_MIN`)])]); câu: `extra["ocr_cc"]` độ chắc từng chữ (trung bình theo
   thời lượng các lần đọc đúng chữ đã chọn), `ocr_alt` ứng viên (chữ < 0,97), `ocr_conf` = `ocrfix.line_conf` (trung bình +
@@ -593,18 +574,23 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `ocr_dict_fix`. B3 `_Reader(keep_weak=)` giữ ảnh dòng chữ câu có chữ < `BIG_BELOW` 0,93 (≤ `BIG_MAX` 4000) -> cuối lần quét
   `big_model(settings, eng)` (Cài đặt `ocr_big`, bộ đang dùng là v6_small, đã tải v5_server / v6_medium) đọc lại, nhận khi
   độ chắc ≥ bản cũ − 0,1; lỗi -> giữ bản nhỏ + stats["big"]["error"]. A1 stats["t"] {decode = thời gian CHỜ giải mã,
-  detect, read, logo, big} -> `ocr_note` "(chờ giải mã x s, tìm chữ y s…)" + gợi ý chỗ chậm nhất. `pipeline.ocr_known_logos`
-  (logo dự án `p.data["ocr_logos"]` kể cả đã tắt + Cài đặt `ocr_logo_known` – logo nhớ cho mọi video), `ocr_logos`,
-  `logo_apply(p, segs, logos, prev)` (áp lại danh sách logo: câu tính từ `ocr_raw` bỏ logo đang bật – câu người dùng đã sửa
-  tay không đụng; câu chỉ còn logo -> `p.data["ocr_logo_only"]`; đoạn chỉ có logo mà logo tắt -> thêm lại câu; logo vừa tắt
-  mà lúc quét đã bỏ ngay (hidden) -> "rescan": phải quét lại); tách theo đoạn gộp logo / đoạn chỉ có logo. GUI: tab Tự động
-  nhóm 1 (khi OCR) hàng "Logo chữ" (`a_ocrlogo` = Cài đặt `ocr_logo`, "Khoanh vùng bỏ qua…" = `_ocr_capture(ignore=True)` ->
-  `_ocr_ignore_dialog` RegionEditor nhiều khung đỏ -> `_ocr_ignore_set` -> `p.data["ocr_ignore"]`, `OcrBoxItem.set_ignore`
-  vẽ khung đỏ "Bỏ qua") + "Đọc chữ kỹ" (`a_ocrfix`, `a_ocrbig`, `_ocr_read_label`); tab Phụ đề → Công cụ → Sửa câu hàng
-  "Logo chữ" (`_logo_dialog` bảng Bỏ / Logo / Kiểu / Thấy / Đã bỏ khỏi / Nhớ + thêm / xoá logo tự gõ, `_logo_add` "Đây là
-  logo", `_logo_update` -> logo_apply + lưu + tích câu đổi + Ctrl+Z, `_logo_label`); bảng câu `subs_model.MARK_ROLE` /
-  `ocr_marks` -> `WrapDelegate.paint` tô từng chữ (đọc không chắc `WEAK_COLOR` đỏ, đã sửa `FIX_COLOR` xanh, gạch chân),
-  `ocr_tip`; Cài đặt → Nhận dạng giọng nói 3 công tắc. `C.OCR_LOGO_HELP` / `OCR_READ_HELP`.
+  detect, read, big} -> `ocr_note` "(chờ giải mã x s, tìm chữ y s…)" + gợi ý chỗ chậm nhất. GUI tab Tự động nhóm 1 (khi
+  OCR) "Đọc chữ kỹ" (`a_ocrfix`, `a_ocrbig`, `_ocr_read_label`); bảng câu `subs_model.MARK_ROLE` / `ocr_marks` ->
+  `WrapDelegate.paint` tô từng chữ (đọc không chắc `WEAK_COLOR` đỏ, đã sửa `FIX_COLOR` xanh, gạch chân), `ocr_tip`; Cài đặt
+  → Nhận dạng giọng nói 2 công tắc. `C.OCR_READ_HELP`. "Nghe & tách câu" OCR xoá dữ liệu logo cũ của dự án (`ocr_logos`,
+  `ocr_logo_only`, `ocr_ignore`).
+- Nghe lại câu OCR không chắc (2.1.42, thay "Xoá câu OCR không chắc" 2.1.36): Cài đặt `ocr_listen_unsure` (mặc định tắt) +
+  `ocr_pick_conf` 0,85 (OCR đọc chắc dưới) + `ocr_listen_conf` 0,7 (bộ nghe chắc từ) -> `recognize` bước 2i (OCR / OCR +
+  nghe, trước "Xoá câu không chắc" của bộ nghe) `pipeline.ocr_listen_unsure`: `recheck.ocr_targets` (câu có `ocr_conf` <
+  mức, chưa có `asr_conf`, không 🎵) -> `relisten_engine` (Qwen3-ASR / FireRedASR2; không có -> giữ nguyên + `error`) ->
+  `_listen_audio` (tách giọng khi bật "Tách giọng khỏi nhạc trước") -> `recheck.ocr_listen`: `ocr_spans` = giờ câu ±
+  `OCR_LISTEN_PAD` 0,3 s, không lấn câu trước / sau, nghe theo nhóm `GROUP` 40 (conf=True, độ chắc = trung bình xác suất
+  từng chữ) -> `ocr_decide`: chắc + đúng chữ OCR -> "same" (giữ, `asr_same`), chắc + câu khác -> "fix" (chữ nghe được vào
+  ĐÚNG câu đó, giờ giữ, `src_before` = chữ OCR, bỏ ocr_cc / ocr_alt / ocr_fix / ct), không ra chữ / chắc dưới mức -> "drop"
+  (xoá, cất `p.data["unsure_removed"]` -> "Khôi phục câu đã xoá"); `extra["ocr_listen"]` {kind, heard, conf};
+  `p.data["ocr_listen"]` -> `recheck.ocr_listen_note` trong `listen_note`. GUI tab Tự động hàng "Nghe lại câu OCR không chắc"
+  (`a_ocrlisten`, `a_ocrconf` = `s_ocrconf`, `a_olconf`), Cài đặt → Nhận dạng giọng nói (`ocr_listen`, `ocr_conf`,
+  `ocr_lconf`), `C.OCR_LISTEN_HELP`; `autoflow.summary` "(nghe lại câu không chắc)". `drop_unsure` chỉ còn cho bộ nghe.
 - Lọc từ (2.1.33, `trami/wordfilter.py`): `parse` (ô cách nhau bằng , ， ; | xuống dòng), `find` (khớp theo NFKC + chữ
   thường, bỏ khoảng trắng – "＠ 纵横" = "@纵横"; cụm dài trước), `strip_words` (bỏ cụm, `_tidy`: khoảng trắng đôi, 2 dấu ngắt
   liền nhau, cụm ở đầu / cuối câu thì bỏ dấu ngắt còn sót), `empty` (không còn chữ / số), `plan` (xem trước, không sửa),
@@ -736,7 +722,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (300 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
+- `tests/test_core.py` – `python -m pytest -q tests` (298 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2594,7 +2580,25 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   giống watermark, 1 chữ vẫn tính); `ocr_known_logos` chỉ đưa lại logo người dùng thêm + logo đã tắt (logo tự tìm sẽ tìm
   lại); công tắc tắt -> `applied` chỉ logo người dùng thêm, stats["logo_off"] -> `ocr_note` không ghi logo tự tìm. Video thử
   (câu "东部666分区生存人数为" lặp ở mọi khoảng nghỉ đúng chỗ phụ đề): 21/21 câu; đưa logo sai vào vẫn chỉ bỏ đúng câu đó.
+- 2.1.42: (1) "các nút đã hoạt động đúng chưa, sao tôi không bật quét logo mà tool tự quét logo" – rà bằng giao diện
+  thật: mọi nút OCR tab Tự động lưu đúng Cài đặt, việc "1. Nghe & tách câu" / "Bắt đầu dịch tự động" nhận đúng giá trị;
+  "Tự lọc logo chữ" MẶC ĐỊNH BẬT từ 2.1.37 nên chưa bật vẫn dò logo. (2) "từ khi có chức năng logo tool quét sai rất nhiều –
+  loại bỏ hoàn toàn mọi thứ liên quan tới logo, test lại chuẩn": xoá `ocrlogo.py` + mọi bước dò / che / lọc / cắt logo,
+  vùng bỏ qua, Danh sách logo / "Đây là logo", Cài đặt `ocr_logo` / `ocr_logo_known` (~1.500 dòng). Watermark kênh cũ
+  (2.0.23) GIỮ: thử bỏ luôn thì chữ "频道水印" dính vào mọi câu (3 test OCR hỏng). Đo 6 kiểu video (nền nhiễu / testsrc2 có
+  watermark, làm rõ chữ, câu thoại lặp đúng chỗ phụ đề, logo nhảy chỗ, logo đứng yên) – bản mới = y hệt bản 2.1.36 (trước
+  khi có logo): đúng chữ, giờ lệch 0,000 s, cùng tốc độ; logo "@纵横" giờ dính câu như trước 2.1.37 (xoá bằng Lọc từ).
+  (3) "tắt Xoá câu OCR không chắc, thay bằng nghe câu không chắc: câu dưới mức tách đúng mốc thời gian gửi đi nghe lại,
+  nghe cũng không chắc thì xoá, nghe ra câu khác chắc thì điền đúng vị trí" -> "Nghe lại câu OCR không chắc" (xem Cấu trúc).
+  Thử với bộ nghe giả (Qwen3 thật chưa chạy – sandbox chặn HF). Gửi bản FULL tool.
 ## Vấn đề đang mở
+- Test `test_subtitle_line_fit_and_rounded_box` hỏng khi chạy CẢ bộ test (chạy riêng thì qua): có QApplication thì
+  `textfit.width` đo bằng Qt – "Noto Sans CJK JP" đậm cỡ 40 Qt đo 705 px, Pillow 588 px -> câu Nhật không ngắt được sau
+  "、" trong khung 700 px. Chưa xác định cách nào khớp libass (chỉ ảnh hưởng xuống dòng phụ đề Nhật / Hàn / Trung).
+- 2.1.42: chờ người dùng quét lại phim 2 tiếng (bản FULL): không còn hàng Logo chữ, số câu về ~2.900; bật "Nghe lại câu
+  OCR không chắc" (tab Tự động, cần Qwen3-ASR / FireRedASR2 ở tab Tài liệu, nên bật Tách giọng khỏi nhạc trước) – xem thông
+  báo "nghe lại N câu OCR không chắc: … điền … xoá …", câu bị xoá nhầm nhiều -> hạ "bộ nghe chắc từ" (0,7 -> 0,5) hoặc
+  "Khôi phục câu đã xoá"; logo chữ dính câu -> tab Phụ đề → Công cụ → Sửa câu → Lọc từ.
 - 2.1.41: chờ người dùng quét lại phim 2 tiếng (tab Tự động → "1. Nghe & tách câu", nguồn OCR): số câu phải về ~2.900,
   câu "东部666分区生存人数为" giữ là câu thoại, thông báo không còn "logo 东部666…"; còn thiếu câu -> gửi lại dòng thông báo.
 - 2.1.40: chờ người dùng bấm Cài đặt → Nhận dạng giọng nói → "Cài bản chạy card" (tắt mở lại tool trước – cài

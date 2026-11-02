@@ -705,8 +705,9 @@ class SettingsPage(QWidget):
         ("asr_engine", "asr_engine", "c"), ("qwen_model", "qwen_asr_model", "c"), ("asr_model", "asr_model", "c"),
         ("ocr_fps", "ocr_fps", "c"), ("ocr_model", "ocr_model", "c"), ("ocr_device", "ocr_device", "c"),
         ("ocr_hwdec", "ocr_hwdec", "b"), ("ocr_clean", "ocr_clean", "b"), ("ocr_timing", "ocr_timing", "c"),
-        ("ocr_eq", "ocr_eq", "b"), ("ocr_drop", "ocr_drop_unsure", "b"), ("ocr_conf", "ocr_pick_conf", "f"),
-        ("ocr_logo", "ocr_logo", "b"), ("ocr_fix", "ocr_dict_fix", "b"), ("ocr_big", "ocr_big", "b"),
+        ("ocr_eq", "ocr_eq", "b"), ("ocr_listen", "ocr_listen_unsure", "b"), ("ocr_conf", "ocr_pick_conf", "f"),
+        ("ocr_lconf", "ocr_listen_conf", "f"),
+        ("ocr_fix", "ocr_dict_fix", "b"), ("ocr_big", "ocr_big", "b"),
         ("asr_device", "asr_device", "c"),
         ("asr_max", "asr_max_chars", "i"), ("asr_beam", "asr_beam_size", "i"), ("asr_vad", "asr_vad", "b"),
         ("split_style", "split_style", "c"), ("asr_dual", "asr_dual", "b"), ("asr_ai", "asr_ai", "c"),
@@ -808,14 +809,19 @@ class SettingsPage(QWidget):
                                "chuyển động tô đen) rồi mới đọc -> ít đọc sai khi nền rối. Kém chắc thì tự đọc thêm khung "
                                "gốc và chọn bản tốt hơn")
         self.ocr_eq = f.row("Làm rõ chữ trước khi OCR", Switch(), C.OCR_EQ_HELP)
-        self.ocr_drop = f.row("Xoá câu OCR không chắc", Switch(), C.OCR_UNSURE_HELP)
+        self.ocr_listen = f.row("Nghe lại câu OCR không chắc", Switch(), C.OCR_LISTEN_HELP)
         self.ocr_conf = QDoubleSpinBox()
         self.ocr_conf.setRange(0.3, 0.99)
         self.ocr_conf.setSingleStep(0.05)
         self.ocr_conf.setDecimals(2)
         self.ocr_conf.setMaximumWidth(110)
         f.row("Câu OCR không chắc khi đọc chắc dưới", self.ocr_conf, C.OCR_UNSURE_HELP)
-        self.ocr_logo = f.row("Tự lọc logo chữ khi OCR", Switch(), C.OCR_LOGO_HELP)
+        self.ocr_lconf = QDoubleSpinBox()
+        self.ocr_lconf.setRange(0.3, 0.95)
+        self.ocr_lconf.setSingleStep(0.05)
+        self.ocr_lconf.setDecimals(2)
+        self.ocr_lconf.setMaximumWidth(110)
+        f.row("Nghe lại: bộ nghe chắc từ", self.ocr_lconf, C.OCR_LISTEN_HELP)
         self.ocr_fix = f.row("Sửa chữ OCR dễ nhầm theo từ điển", Switch(), C.OCR_READ_HELP)
         self.ocr_big = f.row("Đọc lại câu OCR kém chắc bằng bộ đọc lớn", Switch(), C.OCR_READ_HELP)
         self.split_style = f.row("Kiểu tách câu", combo(C.SPLIT_STYLES), C.SPLIT_HELP)

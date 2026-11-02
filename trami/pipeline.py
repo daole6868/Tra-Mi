@@ -1689,16 +1689,9 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         boxes = p.work / ("ocr_boxes_span.json" if spans else "ocr_boxes.json")
         stats: dict = {}
         segs = extract_hardsubs(src, scan, fps=float(ocr_fps or 4), progress=_sub(opr, 0.05, 0.85),
-                                cancel=cancel, boxes_out=boxes, stats=stats, settings=settings, windows=spans,
-                                logos=ocr_known_logos(p, settings), ignore=p.data.get("ocr_ignore") or None)
-        # 2.1.37: logo chữ tìm được (gồm logo đã biết) + đoạn chỉ có logo đã bỏ (trả lại khi tắt logo đó)
-        p.data["ocr_logos"] = stats.get("logos") or []
-        if spans:
-            keep_lo = [r for r in (p.data.get("ocr_logo_only") or []) if not any(a <= (r[0] + r[1]) / 2 <= b
-                                                                                   for a, b in spans)]
-            p.data["ocr_logo_only"] = sorted(keep_lo + list(stats.get("logo_only") or []))
-        else:
-            p.data["ocr_logo_only"] = list(stats.get("logo_only") or [])
+                                cancel=cancel, boxes_out=boxes, stats=stats, settings=settings, windows=spans)
+        for k in ("ocr_logos", "ocr_logo_only", "ocr_ignore"):   # 2.1.42: bỏ hẳn chức năng logo chữ (dữ liệu cũ)
+            p.data.pop(k, None)
         dict_fix = 0
         if segs and settings.get("ocr_dict_fix", True):    # B2: sửa chữ dễ nhầm theo từ điển (己经 -> 已经)
             from . import ocrfix
@@ -1715,8 +1708,7 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         p.data["ocr_boxes"] = str(boxes)
         p.data["ocr_stats"] = {"fps": float(ocr_fps or 4), "first_t": scan.get("first_t"), "dict_fix": dict_fix,
                                **{k: stats.get(k) for k in ("frames", "ocr_runs", "spans", "det", "cleaned", "engine",
-                                                             "engine_warn", "hw", "chunks", "secs", "eq", "t", "big",
-                                                             "logo_rec", "logo_hidden", "logo_off")}}
+                                                             "engine_warn", "hw", "chunks", "secs", "eq", "t", "big")}}
         p.data["ocr_warning"] = "" if segs else (
             "Không đọc được câu phụ đề nào – video có thể không có chữ Trung in sẵn, hoặc chữ nằm ngoài vùng quét: "
             "tab Tự động → Vùng phụ đề: kéo khung đúng chỗ chữ (hoặc bấm Tự dò), hoặc dùng Nhận dạng giọng nói.")
@@ -2026,10 +2018,14 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
     # 2i) lớp lọc CUỐI CÙNG trước khi dịch (2.1.19): bỏ hẳn câu bộ nghe không chắc – sau mọi bước nghe lại / 2 bộ nghe
     p.data.pop("unsure_dropped", None)
     p.data.pop("unsure_removed", None)
+    p.data.pop("ocr_listen", None)
+    # câu OCR đọc không chắc (2.1.42 thay "Xoá câu OCR không chắc"): bộ nghe nghe lại đúng khúc giờ câu đó – chắc thì
+    # giữ / điền chữ nghe được, không chắc thì xoá
+    if segs and method in ("ocr", "hybrid") and settings.get("ocr_listen_unsure"):
+        segs = ocr_listen_unsure(p, segs, settings, language, denoise, _sub(progress, 0.985, 0.995), cancel)
     asr_drop = method != "ocr" and bool(settings.get("asr_drop_unsure"))
-    ocr_drop = method in ("ocr", "hybrid") and bool(settings.get("ocr_drop_unsure"))   # câu OCR đọc không chắc (2.1.36)
-    if segs and (asr_drop or ocr_drop):
-        segs = drop_unsure(p, segs, settings, asr=asr_drop, ocr=ocr_drop)
+    if segs and asr_drop:
+        segs = drop_unsure(p, segs, settings)
     # 2j) lọc từ (2.1.33, Cài đặt sub_filter_auto): bỏ cụm người dùng điền (logo / watermark OCR đọc dính "@纵横") ở
     # mọi câu, câu chỉ có cụm đó thì bỏ cả câu; giờ các câu không đổi
     p.data.pop("word_filtered", None)
@@ -2278,9 +2274,6 @@ def recognize_spans(p: Project, spans, method: str | None = None, language: str 
     res = spm.merge(old, new, sp, mode)
     if method in ("ocr", "hybrid"):
         _merge_ocr_boxes(p, sp, mode)
-        if sh.data.get("ocr_logos") is not None:      # logo tìm thêm khi quét đoạn (gồm logo đã biết của dự án)
-            p.data["ocr_logos"] = sh.data["ocr_logos"]
-            p.data["ocr_logo_only"] = sh.data.get("ocr_logo_only") or []
     else:
         (p.work / "ocr_boxes_span.json").unlink(missing_ok=True)
     p.segments = res["segs"]
@@ -2982,7 +2975,7 @@ def fix_names_now(p: Project, settings: dict | None = None) -> list[int]:
 
 def listen_note(p: Project) -> str:
     """Kết quả các bước nghe chính xác hơn (2.1.0) cho thông báo xong "1. Nghe & tách câu" / Tự động."""
-    from .recheck import note as recheck_note
+    from .recheck import note as recheck_note, ocr_listen_note
 
     from .vreview import note as gemini_note
 
@@ -3019,6 +3012,8 @@ def listen_note(p: Project) -> str:
     if p.data.get("asr_repeat"):
         out.append(f"⚠ {p.data['asr_repeat']} câu còn lặp lời / 2 câu liền giống nhau (chữ gốc màu hồng) – nghe lại, "
                    "hoặc tab Phụ đề → Công cụ → Lời hát & nghe nhầm → 'Dọn câu bịa / câu lặp'")
+    if note := ocr_listen_note(p.data.get("ocr_listen")):
+        out.append(note)
     if note := unsure_note(p.data.get("unsure_dropped")):
         out.append(note)
     return " · ".join(out)
@@ -3050,24 +3045,58 @@ def unsure_rows(segs, thr: float = UNSURE_CONF, ocr_thr: float | None = None, as
     return out
 
 
-def drop_unsure(p: Project, segs, settings: dict, asr: bool = True, ocr: bool = False) -> list:
+def drop_unsure(p: Project, segs, settings: dict) -> list:
     """Bước cuối "1. Nghe & tách câu" / Tự động khi bật "Xoá câu không chắc" (Cài đặt `asr_drop_unsure`, mức
-    `asr_pick_conf`) / "Xoá câu OCR không chắc" (`ocr_drop_unsure`, mức `ocr_pick_conf` – 2.1.36): bỏ hẳn các câu
-    `unsure_rows` để không gửi đi dịch / lồng tiếng. Câu bỏ cất vào p.data["unsure_removed"] (nút "Khôi phục câu đã
-    xoá" tab Phụ đề). Trả danh sách câu còn lại."""
+    `asr_pick_conf`): bỏ hẳn các câu bộ nghe không chắc (`unsure_rows`) để không gửi đi dịch / lồng tiếng. Câu bỏ cất
+    vào p.data["unsure_removed"] (nút "Khôi phục câu đã xoá" tab Phụ đề). Trả danh sách câu còn lại."""
     thr = float(settings.get("asr_pick_conf", UNSURE_CONF) or UNSURE_CONF)
-    othr = float(settings.get("ocr_pick_conf", OCR_UNSURE) or OCR_UNSURE) if ocr else None
-    rows = set(unsure_rows(segs, thr, othr, asr=asr))
-    known = sum(1 for s in segs if s.extra.get("asr_conf") is not None) if asr else 0
-    ocr_rows = [i for i in rows if segs[i].extra.get("asr_conf") is None]
-    p.data["unsure_dropped"] = {"n": len(rows) - len(ocr_rows), "thr": thr, "known": known, "asr": asr}
-    if ocr:
-        p.data["unsure_dropped"].update({"ocr_n": len(ocr_rows), "ocr_thr": othr,
-                                         "ocr_known": sum(1 for s in segs if s.extra.get("ocr_conf") is not None)})
+    rows = set(unsure_rows(segs, thr))
+    known = sum(1 for s in segs if s.extra.get("asr_conf") is not None)
+    p.data["unsure_dropped"] = {"n": len(rows), "thr": thr, "known": known}
     if not rows:
         return segs
-    p.data["unsure_removed"] = [segs[i].to_dict() for i in sorted(rows)]
+    p.data["unsure_removed"] = list(p.data.get("unsure_removed") or []) + [segs[i].to_dict() for i in sorted(rows)]
     return [s for i, s in enumerate(segs) if i not in rows]
+
+
+def ocr_listen_unsure(p: Project, segs, settings: dict, language: str = "zh", denoise: bool = False,
+                      progress: Prog | None = None, cancel=None) -> list:
+    """"Nghe lại câu OCR không chắc" (2.1.42, Cài đặt `ocr_listen_unsure`): câu OCR đọc chắc dưới `ocr_pick_conf` ->
+    bộ nghe (Qwen3-ASR / FireRedASR2) nghe đúng khúc giờ câu đó (trên giọng đã tách khi bật "Tách giọng khỏi nhạc
+    trước") -> chắc từ `ocr_listen_conf`: ra đúng chữ thì giữ, ra câu khác thì điền chữ nghe được vào đúng câu; không ra
+    chữ / không đủ chắc thì xoá câu (cất vào "Khôi phục câu đã xoá"). Chưa có bộ nghe -> giữ nguyên + báo. Trả câu còn lại."""
+    from . import recheck
+    from .asr_qwen import release
+
+    othr = float(settings.get("ocr_pick_conf", OCR_UNSURE) or OCR_UNSURE)
+    rows = recheck.ocr_targets(segs, othr)
+    p.data["ocr_listen"] = {"checked": 0, "ocr_thr": othr}
+    if not rows:
+        return segs
+    engine, why = relisten_engine(p, settings)
+    if engine is None:
+        p.data["ocr_listen"] = {"checked": len(rows), "ocr_thr": othr, "error": why}
+        return segs
+    try:
+        _audio, wav = _listen_audio(p, settings, denoise, _sub(progress, 0.0, 0.3), cancel)
+        _asr_context(p, settings)
+        st = recheck.ocr_listen(segs, rows, wav, engine, language, settings,
+                                p.data.get("info", {}).get("duration", 0), _sub(progress, 0.3, 1.0), cancel)
+    except ff.Cancelled:
+        raise
+    except Exception as e:  # noqa: BLE001 – bộ nghe lỗi: giữ nguyên câu OCR, báo
+        log_error("Nghe lại câu OCR không chắc")
+        p.data["ocr_listen"] = {"checked": len(rows), "ocr_thr": othr, "error": err_text(e)[:160]}
+        return segs
+    finally:
+        release()
+    drop = set(st.pop("drop"))
+    st["engine"], st["ocr_thr"] = engine, othr
+    st["rows_fixed"] = []                     # số thứ tự đổi sau khi xoá – không giữ
+    p.data["ocr_listen"] = st
+    if drop:
+        p.data["unsure_removed"] = list(p.data.get("unsure_removed") or []) + [segs[i].to_dict() for i in sorted(drop)]
+    return [s for i, s in enumerate(segs) if i not in drop]
 
 
 def unsure_note(st: dict | None) -> str:
@@ -3083,14 +3112,6 @@ def unsure_note(st: dict | None) -> str:
             out.append(f"lọc câu không chắc: không có câu nào độ chắc dưới {thr}")
         else:
             out.append(f"xoá {st['n']} câu bộ nghe không chắc (độ chắc dưới {thr})" + back)
-    if "ocr_thr" in st:   # câu OCR đọc không chắc (2.1.36)
-        othr = f"{float(st['ocr_thr']):.2f}".replace(".", ",")
-        if not st.get("ocr_known"):
-            out.append("chưa lọc được câu OCR không chắc (bản OCR trước 2.1.36 chưa có độ chắc – OCR lại)")
-        elif not st.get("ocr_n"):
-            out.append(f"lọc câu OCR không chắc: không có câu nào đọc chắc dưới {othr}")
-        else:
-            out.append(f"xoá {st['ocr_n']} câu OCR đọc không chắc (dưới {othr})" + ("" if st.get("n") else back))
     return " · ".join(out)
 
 
@@ -5595,85 +5616,6 @@ def ocr_box(p: Project) -> dict | None:
     return None
 
 
-def ocr_known_logos(p: Project, settings: dict | None) -> list[dict]:
-    """Logo chữ đã biết khi quét (2.1.37): logo người dùng thêm / logo đã tắt (không bị tìm lại) của lần quét trước + logo
-    người dùng nhớ cho mọi video (Cài đặt ocr_logo_known). 2.1.41: logo tool TỰ tìm ở lần quét trước KHÔNG được dùng lại
-    nguyên xi (lần trước có thể nhận nhầm câu thoại) – logo thật sẽ được tìm lại."""
-    from . import ocrlogo
-
-    out = [dict(d) for d in (p.data.get("ocr_logos") or []) if d.get("text")
-           and (d.get("user") or d.get("on", True) is False)]
-    have = {ocrlogo.norm(d["text"]) for d in out}
-    for t in (settings or {}).get("ocr_logo_known") or []:
-        n = ocrlogo.norm(t)
-        if n and n not in have:
-            out.append({"text": n, "variants": {n: 1}, "user": True, "on": True, "remember": True})
-            have.add(n)
-    return out
-
-
-def ocr_logos(p: Project) -> list:
-    """Logo chữ của dự án (ocrlogo.Logo, khung chữ theo tỉ lệ chiều cao khung hình)."""
-    from . import ocrlogo
-
-    return [ocrlogo.Logo.from_dict(d) for d in (p.data.get("ocr_logos") or []) if d.get("text")]
-
-
-def logo_apply(p: Project, segs: list, logos: list[dict], prev: list[dict] | None = None) -> dict:
-    """Áp lại danh sách logo chữ (C4 – bật / tắt / thêm / bỏ logo ở tab Phụ đề) lên phụ đề, sửa `segs` tại chỗ:
-      * câu có chữ đầy đủ ocr_raw (lúc quét có cắt logo) hoặc câu thường: chữ = bỏ các logo đang bật; câu người dùng đã
-        sửa tay (chữ hiện tại khác chữ tool tính theo danh sách cũ) không đụng;
-      * câu chỉ còn logo -> bỏ (cất vào p.data["ocr_logo_only"]); đoạn chỉ có logo đã cất mà logo đó bị tắt -> thêm lại câu.
-    Trả {"changed": [câu đổi chữ], "removed": n, "added": [câu thêm lại]} và ghi p.data["ocr_logos"] = logos."""
-    from . import ocrlogo
-
-    prev = prev if prev is not None else (p.data.get("ocr_logos") or [])
-    old_act = [L for L in (ocrlogo.Logo.from_dict(d) for d in prev if d.get("text")) if L.on]
-    act = [L for L in (ocrlogo.Logo.from_dict(d) for d in logos if d.get("text")) if L.on]
-    changed, removed = [], 0
-    lo = [list(r) for r in (p.data.get("ocr_logo_only") or [])]
-    keep = []
-    for s in segs:
-        base = s.extra.get("ocr_raw") or s.text
-        if s.text != ocrlogo.strip_all(base, old_act) and s.extra.get("ocr_raw"):
-            keep.append(s)            # người dùng đã sửa tay câu này: giữ nguyên
-            continue
-        new = ocrlogo.strip_all(base, act)
-        if not new.strip():
-            lo.append([round(s.start, 3), round(s.end, 3), base])
-            removed += 1
-            continue
-        if new != s.text:
-            s.text = new
-            if new != base:
-                s.extra["ocr_raw"] = base
-            else:
-                s.extra.pop("ocr_raw", None)
-            s.extra.pop("ocr_cc", None)
-            s.extra.pop("ocr_alt", None)
-            changed.append(s)
-        keep.append(s)
-    added = []
-    rest = []
-    for a, b, raw in lo:
-        new = ocrlogo.strip_all(raw, act)
-        if new.strip() and not any(min(b, o.end) - max(a, o.start) > 0.5 * (b - a) for o in keep):
-            s = Segment(float(a), float(b), new, extra={"ocr_raw": raw} if new != raw else {})
-            keep.append(s)
-            added.append(s)
-        else:
-            rest.append([a, b, raw])
-    keep.sort(key=lambda x: (x.start, x.end))
-    segs[:] = keep
-    p.data["ocr_logos"] = [dict(d) for d in logos]
-    p.data["ocr_logo_only"] = rest
-    # logo vừa tắt mà lúc quét đã bị bỏ ngay (không đọc) -> chữ đó không có để trả lại: phải quét lại
-    was_on = {ocrlogo.norm(d.get("text", "")) for d in prev if d.get("on", True) is not False}
-    rescan = [d["text"] for d in logos if d.get("on", True) is False and ocrlogo.norm(d.get("text", "")) in was_on
-              and int(d.get("hidden", 0) or 0) > 0]
-    return {"changed": changed, "removed": removed, "added": added, "rescan": rescan}
-
-
 def ocr_note(p: Project) -> str:
     """Dòng tóm tắt lần OCR gần nhất: số câu / lần đọc, bộ đọc, card, thời gian."""
     o = p.data.get("ocr_stats") or {}
@@ -5698,8 +5640,7 @@ def ocr_note(p: Project) -> str:
         msg += f" · {o['secs']:g} s"
     tt = o.get("t") or {}
     if tt:      # A1 (2.1.37): thời gian từng công đoạn -> biết máy chậm ở đâu
-        names = [("decode", "chờ giải mã"), ("detect", "tìm chữ"), ("read", "đọc chữ"), ("logo", "dò logo"),
-                 ("big", "đọc lại bằng bộ lớn")]
+        names = [("decode", "chờ giải mã"), ("detect", "tìm chữ"), ("read", "đọc chữ"), ("big", "đọc lại bằng bộ lớn")]
         parts = [f"{t} {float(tt[k]):.0f} s" for k, t in names if float(tt.get(k, 0) or 0) >= 0.5]
         if parts:
             msg += " (" + ", ".join(parts) + ")"
@@ -5716,12 +5657,6 @@ def ocr_note(p: Project) -> str:
         msg += f" · ⚠ bộ đọc lớn lỗi: {big['error']}"
     if o.get("dict_fix"):
         msg += f" · sửa chữ dễ nhầm theo từ điển ở {o['dict_fix']} câu"
-    from . import ocrlogo
-
-    lg = [L for L in ocr_logos(p) if L.user or not o.get("logo_off")]
-    ln = ocrlogo.note(lg)
-    if ln:
-        msg += " · " + ln
     tn = ocr_timing_note(p)
     if tn:
         msg += " · " + tn

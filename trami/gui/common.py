@@ -100,9 +100,17 @@ OCR_EQ_HELP = ("Chỉnh ảnh trước khi bộ đọc chữ quét (độ sáng 
                "đúng giờ hơn. CHỈ ảnh đưa vào OCR – video xuất không đổi. 'Về gốc' = bỏ hết chỉnh. 'Xem thử' = ảnh vùng "
                "quét trước / sau khi làm rõ")
 OCR_UNSURE_HELP = ("Bộ đọc chữ chấm độ chắc từng câu (0–1; chữ rõ thường ≥ 0,9). Câu đọc chắc dưới mức này: chữ gốc tô đỏ "
-                   "cam ở tab Phụ đề (rê chuột xem độ chắc), 'Tích câu không chắc' tích được; bật Xoá thì bỏ luôn lúc lấy "
-                   "phụ đề (OCR / OCR + nghe / Bắt đầu dịch tự động) – lấy lại bằng 'Khôi phục câu đã xoá'. Mức cao hơn = "
-                   "nhiều câu hơn")
+                   "cam ở tab Phụ đề (rê chuột xem độ chắc), 'Tích câu không chắc' tích được. Mức cao hơn = nhiều câu hơn")
+OCR_LISTEN_HELP = ("<b>Nghe lại câu OCR không chắc</b> (2.1.42, thay 'Xoá câu OCR không chắc'): lúc lấy phụ đề (OCR / OCR + "
+                   "nghe / Bắt đầu dịch tự động) câu OCR đọc chắc dưới mức 'đọc chắc dưới' được cắt ĐÚNG khúc giờ của câu "
+                   "gửi bộ nghe (Qwen3-ASR / FireRedASR2) nghe lại:<br>"
+                   "• bộ nghe chắc từ mức 'nghe chắc từ' và ra đúng chữ OCR -> giữ câu;<br>"
+                   "• chắc mà ra câu khác -> điền chữ nghe được vào đúng câu đó (giờ giữ nguyên; rê chuột chữ gốc xem chữ "
+                   "OCR cũ);<br>"
+                   "• không nghe ra chữ / nghe không đủ chắc -> XOÁ câu (lấy lại: tab Phụ đề → Công cụ → Lời hát & nghe "
+                   "nhầm → 'Khôi phục câu đã xoá').<br>"
+                   "Bật 'Tách giọng khỏi nhạc trước' thì nghe trên giọng đã tách (chính xác hơn khi có nhạc nền). Chưa tải "
+                   "bộ nghe Qwen3-ASR / FireRedASR2 (tab Tài liệu) thì câu giữ nguyên + báo.")
 OCR_TIMINGS = [("sub", "Theo giờ phụ đề trên hình"), ("mix", "Kết hợp: câu theo phụ đề + chỗ ngừng theo giọng nói")]
 OCR_TIMING_HELP = ("Giờ câu khi lấy phụ đề bằng OCR. Theo giờ phụ đề: đúng lúc chữ hiện / tắt trên hình (nhanh, không cần "
                    "tách giọng). Kết hợp: chữ và cách chia câu giữ đúng phụ đề, nhưng tool tách giọng rồi đo từng chữ "
@@ -119,15 +127,6 @@ TTS_ENGINES = [("edge", "Microsoft Edge (giọng Việt / Anh / Thái / Nhật /
                ("omnivoice", "OmniVoice (23 giọng chọn sẵn + nhái giọng từ file mẫu, offline, đọc được nhiều tiếng)")]
 TARGETS = [("vi", "Tiếng Việt"), ("en", "Tiếng Anh (English)"), ("th", "Tiếng Thái (ภาษาไทย)"),
            ("ja", "Tiếng Nhật (日本語)"), ("ko", "Tiếng Hàn (한국어)")]
-OCR_LOGO_HELP = ("<b>Logo chữ quanh phụ đề</b> (2.1.37) – logo / tên kênh kiểu \"@纵横\" nhảy chỗ vài giây 1 lần, in mờ đè "
-                 "lên hình, hay nằm sát dòng phụ đề làm OCR đọc dính vào câu (\"…进来@纵横\").<br>"
-                 "• <b>Tự lọc logo chữ</b>: trước khi quét tool xem ~80 khung rải khắp video, chữ nào LẶP LẠI ở nhiều lúc, "
-                 "hiện cùng lúc với phụ đề (hoặc có @ #, nhảy nhiều chỗ, in mờ) là logo – kể cả khi mỗi lần đọc ra 1 "
-                 "kiểu. Lúc quét logo bị bỏ khỏi việc theo dõi chữ (logo nhảy tới / đi không làm tách câu, không kéo dài "
-                 "giờ câu), sau khi đọc thì bỏ mảnh logo và cắt logo dính đầu / cuối câu. Câu thoại lặp lại (\"师父\") "
-                 "và câu 1 chữ (\"嗯\") không bị coi là logo.<br>"
-                 "• <b>Khoanh vùng bỏ qua</b>: logo đứng yên 1 chỗ – khoanh khung đỏ, chữ trong đó không được đọc.<br>"
-                 "Xem / tắt logo tìm được, thêm logo tự gõ: tab Phụ đề → Công cụ → Sửa câu → hàng Logo chữ.")
 OCR_READ_HELP = ("<b>Đọc chữ kỹ</b> (2.1.37)<br>"
                  "• <b>Sửa chữ dễ nhầm theo từ điển</b>: chữ bộ đọc chưa chắc mà đứng lẻ (không thành từ) được thử thay bằng "
                  "chữ giống hình (己/已, 未/末, 土/士, 人/入…) – chỉ đổi khi ghép thành từ có trong từ điển (\"己经\" → "

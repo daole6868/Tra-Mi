@@ -422,32 +422,25 @@ class ProjectPage(QWidget):
         eb.addWidget(flow(*eq_row))
         eb.addWidget(self.a_ocreq_hint)
         self.a_ocreq_row = f.row("Làm rõ chữ khi quét", self.a_ocreq_box, C.OCR_EQ_HELP)
-        # câu OCR đọc không chắc: tô màu / tích được; bật Xoá thì bỏ luôn khi lấy phụ đề (như phần nghe)
-        self.a_ocrdrop = Switch(bool(s.get("ocr_drop_unsure", False)))
-        self.a_ocrdrop.setToolTip(C.OCR_UNSURE_HELP)
-        self.a_ocrdrop.toggled.connect(self._ocr_drop_changed)
+        # câu OCR đọc không chắc (2.1.42 thay "Xoá câu OCR không chắc"): bộ nghe nghe lại đúng khúc giờ câu đó – chắc thì
+        # giữ / điền chữ nghe được, không chắc thì xoá
+        self.a_ocrlisten = Switch(bool(s.get("ocr_listen_unsure", False)))
+        self.a_ocrlisten.setToolTip(C.OCR_LISTEN_HELP)
+        self.a_ocrlisten.toggled.connect(
+            lambda v: not self.loading and self._save_setting("ocr_listen_unsure", bool(v)))
         self.a_ocrconf = _conf_spin(float(s.get("ocr_pick_conf", 0.85) or 0.85))
         self.a_ocrconf.setRange(0.3, 0.99)
         self.a_ocrconf.setToolTip(C.OCR_UNSURE_HELP)
         self.a_ocrconf.valueChanged.connect(self._ocr_conf_changed)
-        self.a_ocrdrop_row = f.row("Xoá câu OCR không chắc", wrap(hbox(self.a_ocrdrop, label("đọc chắc dưới", "muted"),
-                                                                      self.a_ocrconf, None)), C.OCR_UNSURE_HELP)
-        # 2.1.37: logo chữ quanh phụ đề (nhảy chỗ / mờ / dính câu) + vùng bỏ qua; đọc kỹ (từ điển, bộ đọc lớn)
-        self.a_ocrlogo = Switch(bool(s.get("ocr_logo", True)))
-        self.a_ocrlogo.toggled.connect(lambda v: not self.loading and self._save_setting("ocr_logo", bool(v)))
-        self.a_ocrign_lb = label("", "muted", wrap=True)
-        lw = QWidget()
-        lb_ = QVBoxLayout(lw)
-        lb_.setContentsMargins(0, 0, 0, 0)
-        lb_.setSpacing(6)
-        lb_.addWidget(flow(hbox(self.a_ocrlogo, label("Tự lọc logo chữ (nhảy chỗ, in mờ, dính vào câu)", "muted")),
-                           button("Khoanh vùng bỏ qua…", "image", "Chụp khung đang phát rồi khoanh chỗ có logo / chữ cố "
-                                  "định cần bỏ qua (khung đỏ) – tool không đọc chữ trong các vùng này", flat=True,
-                                  on_click=lambda: self._ocr_capture(ignore=True)),
-                           button("Bỏ vùng bỏ qua", "x", "Bỏ hết các vùng bỏ qua", flat=True,
-                                  on_click=lambda: self._ocr_ignore_set([]))))
-        lb_.addWidget(self.a_ocrign_lb)
-        self.a_ocrlogo_row = f.row("Logo chữ", lw, C.OCR_LOGO_HELP)
+        self.a_olconf = _conf_spin(float(s.get("ocr_listen_conf", 0.7) or 0.7))
+        self.a_olconf.setToolTip("Bộ nghe chấm độ chắc từng chữ (0–1). Nghe lại chắc từ mức này mới giữ / điền câu, "
+                                 "dưới mức thì xoá câu")
+        self.a_olconf.valueChanged.connect(
+            lambda v: not self.loading and self._save_setting("ocr_listen_conf", round(float(v), 2)))
+        self.a_ocrlisten_row = f.row("Nghe lại câu OCR không chắc", flow(
+            hbox(self.a_ocrlisten, label("OCR đọc chắc dưới", "muted"), self.a_ocrconf),
+            hbox(label("· bộ nghe chắc từ", "muted"), self.a_olconf)), C.OCR_LISTEN_HELP)
+        # 2.1.37: đọc kỹ (từ điển, bộ đọc lớn). 2.1.42: bỏ hẳn hàng "Logo chữ" (tự lọc logo + vùng bỏ qua)
         self.a_ocrfix = Switch(bool(s.get("ocr_dict_fix", True)))
         self.a_ocrfix.toggled.connect(lambda v: not self.loading and self._save_setting("ocr_dict_fix", bool(v)))
         self.a_ocrbig = Switch(bool(s.get("ocr_big", True)))
@@ -772,7 +765,6 @@ class ProjectPage(QWidget):
         self.s_wf_auto.setToolTip("Bật: mỗi lần lấy phụ đề mới (1. Nghe & tách câu, OCR, Bắt đầu dịch tự động – mọi dự án) "
                                   "tự lọc các cụm trong ô bên cạnh")
         self.s_wf_auto.toggledOn.connect(self._word_filter_auto)
-        self.s_logo_lb = label("", "muted", wrap=True)
         pg_edit = [
             "Bấm đúp vào ô để sửa chữ · Ctrl / Shift chọn nhiều dòng · tích cột Chọn để làm nhiều câu cùng lúc",
             flow(button("Thêm", "plus", "Thêm câu tại vị trí đang phát", on_click=lambda: self._seg_op("insert")),
@@ -806,15 +798,7 @@ class ProjectPage(QWidget):
                         "Enter trong ô cũng lọc", on_click=self._word_find),
                  self.s_wf_clear,
                  button("Xoá chữ này", "trash", C.WORD_FILTER_HELP, danger=True, on_click=self._word_filter),
-                 hbox(self.s_wf_auto, label("tự xoá khi lấy phụ đề mới", "muted"))),
-            flow(_rowlbl("Logo chữ"),
-                 button("Danh sách logo…", "image", "Logo chữ OCR tự tìm được (nhảy chỗ / in mờ / dính câu): bật = bỏ khỏi "
-                        "phụ đề, tắt = trả chữ lại; nhớ cho video sau; thêm logo tự gõ", flat=True,
-                        on_click=self._logo_dialog),
-                 button("Đây là logo", "plus", "Câu đang chọn có chữ logo dính vào: gõ đúng chữ logo -> tool bỏ chữ đó ở "
-                        "đầu / cuối mọi câu (câu chỉ có logo bỏ cả câu) và nhớ cho lần quét sau", flat=True,
-                        on_click=self._logo_add),
-                 self.s_logo_lb)]
+                 hbox(self.s_wf_auto, label("tự xoá khi lấy phụ đề mới", "muted")))]
         # câu dịch dài: tách ở chỗ hết câu (? ! .) / dấu phẩy thành nhiều dòng phụ đề + đoạn giọng, giữa 2 vế nghỉ 1 nhịp
         self.s_split = Switch(bool(self.settings.get("split_long_trans", True)))
         self.s_split.setToolTip("Sau khi dịch cả phim: câu dịch dài hơn mức đặt có dấu ? ! . hoặc dấu phẩy ở giữa câu (cả câu gốc lẫn "
@@ -2067,8 +2051,7 @@ class ProjectPage(QWidget):
             f.setRowVisible(self.a_ocrmodel, ocr)
             f.setRowVisible(self.a_ocrtime, self.a_method.currentData() == "ocr")   # OCR + nghe: giờ luôn theo giọng
             f.setRowVisible(self.a_ocreq_box, ocr)
-            f.setRowVisible(self.a_ocrdrop_row, ocr)
-            f.setRowVisible(self.a_ocrlogo_row, ocr)
+            f.setRowVisible(self.a_ocrlisten_row, ocr)
             f.setRowVisible(self.a_ocrread_row, ocr)
         if ocr:
             self._ocr_read_label()
@@ -2092,11 +2075,6 @@ class ProjectPage(QWidget):
             t = ("Chưa khoanh: dừng video ở chỗ có phụ đề rồi kéo chuột trên video bên phải để khoanh vùng chữ (nên chừa "
                  "chỗ cho câu 2 dòng). Để trống thì lúc chạy tool tự dò.")
         self.a_ocrbox_lb.setText(t)
-        if hasattr(self, "a_ocrign_lb"):
-            n = len((self.p.data.get("ocr_ignore") or []) if self.p else [])
-            self.a_ocrign_lb.setText(f"{n} vùng bỏ qua (khung đỏ trên video) – chữ trong đó không được đọc." if n else
-                                     "Logo nhảy chỗ / in mờ: tool tự nhận ra (chữ lặp lại suốt video, hiện cùng lúc với "
-                                     "phụ đề). Logo đứng yên 1 chỗ: có thể khoanh vùng bỏ qua cho chắc.")
 
     def _ocr_box_set(self, box: dict | None):
         """Lưu khung vùng quét phụ đề (kéo trên video / chụp khung / tự dò / bỏ)."""
@@ -2196,10 +2174,6 @@ class ProjectPage(QWidget):
         self.win.toast("Đã chép màu tab Chỉnh sửa vào 'Làm rõ chữ khi quét' (chỉ dùng khi OCR). Không muốn video xuất bị "
                        "đổi màu thì bấm 'Về gốc' ở tab Chỉnh sửa → Màu sắc & hình ảnh", "ok")
 
-    def _ocr_drop_changed(self, *_):
-        if not self.loading:
-            self._save_setting("ocr_drop_unsure", self.a_ocrdrop.isChecked())
-
     def _ocr_eq_preview(self):
         """Ảnh vùng quét tại vị trí đang phát: gốc + bộ đọc chữ thấy (đã làm rõ, ảnh xám) – xếp trên / dưới."""
         if not self.p or not self.p.data.get("source") or pipeline.source_missing(self.p):
@@ -2258,9 +2232,8 @@ class ProjectPage(QWidget):
 
             self.settings = save_settings({"ocr_pick_conf": round(float(v), 2)})
 
-    def _ocr_capture(self, ignore: bool = False):
-        """Chụp khung hình ĐANG PHÁT (đủ độ phân giải) rồi khoanh vùng phụ đề trên ảnh lớn (ignore: khoanh các vùng bỏ
-        qua – logo / chữ cố định, 2.1.37)."""
+    def _ocr_capture(self):
+        """Chụp khung hình ĐANG PHÁT (đủ độ phân giải) rồi khoanh vùng phụ đề trên ảnh lớn."""
         if not self.p or not self.p.data.get("source") or pipeline.source_missing(self.p):
             return self.win.toast("Dự án chưa có video", "warn")
         from .. import ffmpeg as ff
@@ -2275,12 +2248,10 @@ class ProjectPage(QWidget):
             if not out.exists():
                 ff.snapshot(src, t, out)
             return str(out)
-        run_async(job, lambda path: self._ocr_capture_dialog(path, ignore),
+        run_async(job, self._ocr_capture_dialog,
                   lambda m: self.win.toast("Không chụp được khung hình: " + m, "err"))
 
-    def _ocr_capture_dialog(self, path: str, ignore: bool = False):
-        if ignore:
-            return self._ocr_ignore_dialog(path)
+    def _ocr_capture_dialog(self, path: str):
         from PySide6.QtWidgets import QDialog, QDialogButtonBox
 
         from .player import OcrBoxItem
@@ -2313,57 +2284,6 @@ class ProjectPage(QWidget):
         except OSError:
             pass
 
-    def _ocr_ignore_dialog(self, path: str):
-        """Khoanh các vùng bỏ qua (khung đỏ) trên ảnh chụp khung đang phát – tool không đọc chữ trong các vùng này."""
-        from PySide6.QtWidgets import QDialog, QDialogButtonBox
-
-        from .player import OcrBoxItem
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Khoanh vùng bỏ qua khi quét phụ đề")
-        scr = self.screen().availableGeometry() if self.screen() else None
-        dlg.resize(int(scr.width() * 0.85) if scr else 1400, int(scr.height() * 0.85) if scr else 850)
-        ed = RegionEditor(multi=True)
-        ed.color = OcrBoxItem.IGNORE_COLOR
-        ed.label = "Bỏ qua"
-        ed.extra_label = "Vùng quét"
-        ed.hint = "Kéo chuột quanh logo / chữ cố định cần bỏ qua (khoanh được nhiều chỗ)"
-        ed.set_image(path)
-        b = pipeline.ocr_box(self.p)
-        if b:
-            ed.extra = [{k: b[k] for k in ("x", "y", "w", "h")}]
-        ed.set_regions([dict(r) for r in (self.p.data.get("ocr_ignore") or [])])
-        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        bb.accepted.connect(dlg.accept)
-        bb.rejected.connect(dlg.reject)
-        v = QVBoxLayout(dlg)
-        v.addWidget(label("Kéo chuột quanh logo / tên kênh / chữ cố định nằm trong vùng quét (mỗi chỗ 1 khung đỏ). Logo "
-                          "nhảy nhiều chỗ thì không cần khoanh – để 'Tự lọc logo chữ' bật là đủ. Kéo giữa khung để dời, "
-                          "4 cạnh / 4 góc để đổi cỡ, × để bỏ.", "muted", wrap=True))
-        v.addWidget(ed, 1)
-        v.addWidget(bb)
-        if dlg.exec():
-            self._ocr_ignore_set(list(ed.regions))
-            self.win.toast(f"Đã lưu {len(ed.regions)} vùng bỏ qua" if ed.regions else "Đã bỏ hết vùng bỏ qua", "ok")
-        try:
-            Path(path).unlink(missing_ok=True)
-        except OSError:
-            pass
-
-    def _ocr_ignore_set(self, regs: list):
-        if not self.p:
-            return
-        self.p.reload()
-        regs = [{k: round(float(r[k]), 4) for k in ("x", "y", "w", "h")} for r in regs or []
-                if float(r.get("w", 0)) >= 0.005 and float(r.get("h", 0)) >= 0.005]
-        if regs:
-            self.p.data["ocr_ignore"] = regs
-        else:
-            self.p.data.pop("ocr_ignore", None)
-        self.p.save()
-        self.player.view.ocrbox.set_ignore(regs)
-        self._ocr_box_label()
-
     def _ocr_read_label(self):
         """Dòng trạng thái hàng "Đọc chữ kỹ": bộ đọc lớn đã tải chưa."""
         from ..ocr import big_model
@@ -2379,191 +2299,6 @@ class ProjectPage(QWidget):
         else:
             t = "Chưa tải bộ đọc lớn: tab Tài liệu → PP-OCRv5 server (hoặc PP-OCRv6 medium) để đọc lại câu kém chắc."
         self.a_ocrbig_lb.setText(t)
-
-    def _logo_label(self):
-        """Hàng "Logo chữ" (tab Phụ đề → Công cụ → Sửa câu): logo đã thấy / đã tắt."""
-        if not hasattr(self, "s_logo_lb"):
-            return
-        logos = pipeline.ocr_logos(self.p) if self.p else []
-        if not logos:
-            self.s_logo_lb.setText("Chưa thấy logo chữ (OCR tự tìm khi quét; thấy logo dính câu thì bấm 'Đây là logo')")
-            return
-        parts = []
-        for L in logos[:4]:
-            parts.append(f"{L.text} ({'đã bỏ' if L.on else 'đang tắt – giữ trong câu'})")
-        more = f" +{len(logos) - 4}" if len(logos) > 4 else ""
-        self.s_logo_lb.setText("Logo: " + ", ".join(parts) + more)
-
-    def _logo_dialog(self):
-        """Danh sách logo chữ: bật (bỏ khỏi câu) / tắt (trả chữ lại), nhớ cho video sau, thêm / bỏ logo tự gõ."""
-        from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QHeaderView, QLineEdit, QTableWidget,
-                                       QTableWidgetItem)
-
-        from .. import ocrlogo
-
-        if not self.p:
-            return
-        if self._live_draft:
-            return self.win.toast("Đang hiện câu nháp lúc dịch tự động – chờ việc chạy xong", "warn")
-        rows = [dict(d) for d in (self.p.data.get("ocr_logos") or []) if d.get("text")]
-        mem = {ocrlogo.norm(t) for t in (self.settings.get("ocr_logo_known") or [])}
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Logo chữ")
-        dlg.resize(760, 420)
-        v = QVBoxLayout(dlg)
-        v.addWidget(label("Tích = bỏ logo khỏi phụ đề; bỏ tích = trả chữ logo lại vào câu (và các đoạn chỉ có logo). "
-                          "'Nhớ' = tự lọc logo này ở mọi video sau (khi quét OCR). Ctrl+Z hoàn tác.", "muted", wrap=True))
-        tb = QTableWidget(0, 6)
-        tb.setHorizontalHeaderLabels(["Bỏ", "Logo", "Kiểu", "Thấy", "Đã bỏ khỏi", "Nhớ"])
-        tb.verticalHeader().setVisible(False)
-        tb.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        chk = Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled
-
-        def add_row(d: dict):
-            r = tb.rowCount()
-            tb.insertRow(r)
-            it = QTableWidgetItem()
-            it.setFlags(chk)
-            it.setCheckState(Qt.CheckState.Checked if d.get("on", True) is not False else Qt.CheckState.Unchecked)
-            tb.setItem(r, 0, it)
-            L = ocrlogo.Logo.from_dict(d)
-            vs = [x for x in L.texts() if x != L.text][:5]
-            t = QTableWidgetItem(L.text + (f"   (còn đọc thành: {', '.join(vs)})" if vs else ""))
-            t.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            t.setData(Qt.ItemDataRole.UserRole, d)
-            tb.setItem(r, 1, t)
-            kind = ", ".join(x for x in (L.kind(), "mờ" if L.transparent else "") if x)
-            gone = [x for x in (f"{L.cut} câu" if L.cut else "", f"{L.dropped} đoạn chỉ có logo" if L.dropped else "",
-                                f"bỏ ngay lúc quét {L.hidden} lần" if L.hidden else "") if x]
-            for c, val in ((2, kind), (3, f"{L.share * 100:.0f} % thời lượng" if L.share else "–"),
-                           (4, ", ".join(gone) or "–")):
-                x = QTableWidgetItem(val)
-                x.setFlags(Qt.ItemFlag.ItemIsEnabled)
-                tb.setItem(r, c, x)
-            m = QTableWidgetItem()
-            m.setFlags(chk)
-            m.setCheckState(Qt.CheckState.Checked if (L.text in mem or d.get("remember")) else Qt.CheckState.Unchecked)
-            tb.setItem(r, 5, m)
-        for d in rows:
-            add_row(d)
-        tb.resizeColumnsToContents()
-        tb.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        v.addWidget(tb, 1)
-        ed = QLineEdit()
-        ed.setMinimumWidth(240)
-        ed.setPlaceholderText("Gõ chữ logo cần bỏ, VD: @纵横")
-
-        def add_new():
-            n = ocrlogo.norm(ed.text())
-            if ocrlogo.literal(n) < 2:
-                return self.win.toast("Gõ ít nhất 2 chữ của logo", "warn")
-            for r in range(tb.rowCount()):
-                d = tb.item(r, 1).data(Qt.ItemDataRole.UserRole)
-                if ocrlogo.norm(d.get("text", "")) == n:
-                    tb.item(r, 0).setCheckState(Qt.CheckState.Checked)
-                    ed.clear()
-                    return
-            add_row({"text": n, "variants": {n: 1}, "user": True, "on": True, "remember": True})
-            ed.clear()
-
-        def del_row():
-            r = tb.currentRow()
-            if r < 0:
-                return
-            d = tb.item(r, 1).data(Qt.ItemDataRole.UserRole)
-            if not d.get("user"):
-                return self.win.toast("Logo tool tự tìm thì bỏ tích cột 'Bỏ' để trả chữ lại (không xoá được)", "warn")
-            tb.removeRow(r)
-        v.addWidget(flow(label("Thêm logo", "muted"), ed, button("Thêm", "plus", on_click=add_new),
-                         button("Xoá logo tự gõ đang chọn", "trash", flat=True, on_click=del_row)))
-        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        bb.accepted.connect(dlg.accept)
-        bb.rejected.connect(dlg.reject)
-        v.addWidget(bb)
-        if not dlg.exec():
-            return
-        new, remember = [], set(mem)
-        for r in range(tb.rowCount()):
-            d = dict(tb.item(r, 1).data(Qt.ItemDataRole.UserRole))
-            d["on"] = tb.item(r, 0).checkState() == Qt.CheckState.Checked
-            d.pop("remember", None)
-            n = ocrlogo.norm(d["text"])
-            if tb.item(r, 5).checkState() == Qt.CheckState.Checked:
-                remember.add(n)
-            else:
-                remember.discard(n)
-            new.append(d)
-        gone = {ocrlogo.norm(d["text"]) for d in rows} - {ocrlogo.norm(d["text"]) for d in new}
-        remember -= gone
-        self._logo_update(new, remember)
-
-    def _logo_add(self):
-        """"Đây là logo": thêm 1 logo tự gõ (mặc định = chữ ô Lọc từ / chữ câu đang chọn) rồi bỏ khỏi mọi câu."""
-        from PySide6.QtWidgets import QInputDialog
-
-        from .. import ocrlogo
-
-        if not self.p:
-            return
-        if self._live_draft:
-            return self.win.toast("Đang hiện câu nháp lúc dịch tự động – chờ việc chạy xong", "warn")
-        guess = self.s_wf.text().strip() if hasattr(self, "s_wf") else ""
-        if not guess or any(c in guess for c in "*?,，;|"):
-            r = self._selected_row()
-            guess = self.model.segs[r].text if 0 <= r < len(self.model.segs) else ""
-        t, ok = QInputDialog.getText(self, "Đây là logo", "Gõ đúng chữ logo (xoá phần lời thoại), VD: @纵横 – tool bỏ "
-                                     "chữ này ở đầu / cuối mọi câu, câu chỉ có logo thì bỏ cả câu:", text=guess)
-        if not ok:
-            return
-        n = ocrlogo.norm(t)
-        if ocrlogo.literal(n) < 2:
-            return self.win.toast("Gõ ít nhất 2 chữ của logo", "warn")
-        rows = [dict(d) for d in (self.p.data.get("ocr_logos") or []) if d.get("text")]
-        hit = next((d for d in rows if ocrlogo.norm(d["text"]) == n), None)
-        if hit:
-            hit["on"] = True
-        else:
-            rows.append({"text": n, "variants": {n: 1}, "user": True, "on": True})
-        mem = {ocrlogo.norm(x) for x in (self.settings.get("ocr_logo_known") or [])} | {n}
-        self._logo_update(rows, mem)
-
-    def _logo_update(self, logos: list, remember: set | None = None):
-        """Áp danh sách logo mới lên phụ đề (pipeline.logo_apply) + lưu + làm mới bảng; Ctrl+Z hoàn tác."""
-        if not self.p:
-            return
-        self.flush()
-        segs = self.model.segs
-        prev = [dict(d) for d in (self.p.data.get("ocr_logos") or [])]
-        res = pipeline.logo_apply(self.p, segs, logos, prev)
-        keep = (self.p.data.get("ocr_logos"), self.p.data.get("ocr_logo_only"))
-        self.model.set_segments(segs)
-        self._fit_rows()
-        self._segs_edited()
-        self._save_segs_now()
-        self.p.reload()
-        self.p.data["ocr_logos"], self.p.data["ocr_logo_only"] = keep
-        self.p.save()
-        if remember is not None:
-            self._save_setting("ocr_logo_known", sorted(remember))
-        self._logo_label()
-        segs = self.model.segs
-        rows = [i for i, x in enumerate(segs) if any(x is c for c in res["changed"] + res["added"])]
-        msg = f"Logo: đổi chữ {len(res['changed'])} câu"
-        if res["removed"]:
-            msg += f", bỏ {res['removed']} câu chỉ có logo"
-        if res["added"]:
-            msg += f", trả lại {len(res['added'])} câu"
-        if rows:
-            self.model.set_picked(range(len(segs)), False)
-            self.model.set_picked(rows, True)
-            msg += f" – đã tích {len(rows)} câu đổi (đã dịch thì bấm 'Dịch câu đã tích')"
-        dubbed = any(x.extra.get("tts_file") for x in segs) and (self.p.edit.get("dub") or {}).get("wav")
-        if dubbed and res["removed"]:       # giọng lồng của câu chỉ có logo bỏ khỏi bản lồng (không đọc lại câu nào)
-            self._relayout("", deleted=res["removed"])
-        if res.get("rescan"):
-            msg += (f" · {', '.join(res['rescan'])}: lúc quét đã bỏ ngay chữ này (không đọc) – muốn lấy lại thì chạy lại "
-                    "'1. Nghe & tách câu' (logo đang tắt sẽ không bị lọc nữa)")
-        self.win.toast(msg + " · Ctrl+Z hoàn tác", "warn" if res.get("rescan") else "ok")
 
     def _ocr_detect(self):
         if not self.p or not self.p.data.get("source") or pipeline.source_missing(self.p):
@@ -3153,9 +2888,7 @@ class ProjectPage(QWidget):
             self.inspector.set_row(self._sel_row)
             self.tracks.set_selected(self._sel_row)
             self.player.view.ocrbox.set_box(pipeline.ocr_box(p))
-            self.player.view.ocrbox.set_ignore(p.data.get("ocr_ignore") or [])
             self._ocr_box_label()
-            self._logo_label()
         finally:
             self.loading = False
         self._speed_note_later()
@@ -4018,8 +3751,8 @@ class ProjectPage(QWidget):
             self.a_eq_sharp.setChecked(eqv["sharpen"])
             set_combo(self.a_ocreq_preset, eq_preset_of(eqv, bool(st.get("ocr_eq", False))))
             self._ocr_eq_hint()
-            self.a_ocrdrop.setChecked(bool(st.get("ocr_drop_unsure", False)))
-            self.a_ocrlogo.setChecked(bool(st.get("ocr_logo", True)))
+            self.a_ocrlisten.setChecked(bool(st.get("ocr_listen_unsure", False)))
+            self.a_olconf.setValue(float(st.get("ocr_listen_conf", 0.7) or 0.7))
             self.a_ocrfix.setChecked(bool(st.get("ocr_dict_fix", True)))
             self.a_ocrbig.setChecked(bool(st.get("ocr_big", True)))
             for w in (self.s_ocrconf, self.a_ocrconf):

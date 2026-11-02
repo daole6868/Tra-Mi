@@ -782,13 +782,11 @@ class OcrBoxItem(QGraphicsItem):
     vẽ khung, kéo giữa để dời, 4 cạnh + 4 góc đổi cỡ. Tool chỉ quét đúng khung này. Gắn vào video item nên đúng cả khi
     phóng to / lật / xoay."""
     COLOR = "#36D399"
-    IGNORE_COLOR = "#FF5C5C"     # 2.1.37: vùng bỏ qua (logo / chữ cố định) – chỉ vẽ, sửa ở hộp "Khoanh vùng bỏ qua…"
 
     def __init__(self, video):
         super().__init__(video)
         self.video = video
         self.box: dict | None = None
-        self.ignore: list[dict] = []
         self.editing = False
         self.on_changed = None      # thả chuột -> on_changed(khung | None)
         self._drag = None
@@ -805,10 +803,6 @@ class OcrBoxItem(QGraphicsItem):
         if self._drag:
             return
         self.box = {k: float(box[k]) for k in ("x", "y", "w", "h")} if box else None
-        self.update()
-
-    def set_ignore(self, regs: list | None):
-        self.ignore = [{k: float(r[k]) for k in ("x", "y", "w", "h")} for r in (regs or [])]
         self.update()
 
     def set_editing(self, on: bool):
@@ -838,16 +832,6 @@ class OcrBoxItem(QGraphicsItem):
         br = self.boundingRect()
         r = self._rect()
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        for g in self.ignore:          # vùng bỏ qua: khung đỏ nét đứt + gạch chéo mờ
-            gr = QRectF(br.width() * g["x"], br.height() * g["y"], br.width() * g["w"], br.height() * g["h"])
-            p.fillRect(gr, QColor(255, 92, 92, 50))
-            gp = QPen(QColor(self.IGNORE_COLOR), 1.6, Qt.PenStyle.DashLine)
-            gp.setCosmetic(True)
-            p.setPen(gp)
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRect(gr)
-            p.setFont(theme.font(8, QFont.Weight.Bold))
-            p.drawText(gr.adjusted(4, 2, 0, 0), Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft, "Bỏ qua")
         if r is None:
             if br.width() > 60:
                 p.setPen(QColor("#FFFFFF"))

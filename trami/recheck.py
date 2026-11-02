@@ -24,7 +24,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable
 
-from .dual import CORE, core
+from .dual import CORE, core, merge_alt
 
 Prog = Callable[[float, str], None]
 
@@ -402,4 +402,117 @@ def note(st: dict | None) -> str:
         out += f" ({st['fixed_orig']} câu theo tiếng gốc)"
     if st.get("unsure"):
         out += f", {st['unsure']} câu nghe lại ra khác mà chưa chắc – chữ gốc màu xanh (nghe lại để chọn)"
+    return out
+
+
+# ------------------------------------------------------------------ 2.1.42: nghe lại câu OCR đọc không chắc
+
+OCR_LISTEN_CONF = 0.7    # bộ nghe phải chắc từ mức này (Cài đặt ocr_listen_conf) mới nhận / giữ câu
+OCR_LISTEN_PAD = 0.3     # nghe thêm mỗi bên (không lấn sang câu bên cạnh) – giờ chữ hiện hay lệch lời nói 1 chút
+
+
+def ocr_targets(segs, ocr_thr: float) -> list[int]:
+    """Câu OCR đọc chắc dưới `ocr_thr` (có `ocr_conf`, chưa có độ chắc của bộ nghe), bỏ câu 🎵 / câu không có chữ."""
+    return [i for i, s in enumerate(segs) if s.extra.get("ocr_conf") is not None and s.extra.get("asr_conf") is None
+            and float(s.extra["ocr_conf"]) < ocr_thr and not s.extra.get("song") and core(s.text)]
+
+
+def ocr_spans(segs, rows: list[int], pad: float = OCR_LISTEN_PAD, total: float = 0.0) -> list[tuple[float, float]]:
+    """Khúc nghe của từng câu: đúng giờ câu + `pad` mỗi bên, nhưng không lấn vào câu trước / sau."""
+    out = []
+    for i in rows:
+        s = segs[i]
+        a, b = s.start - pad, s.end + pad
+        if i > 0:
+            a = max(a, min(s.start, segs[i - 1].end))
+        if i + 1 < len(segs):
+            b = min(b, max(s.end, segs[i + 1].start))
+        if total:
+            b = min(b, total)
+        out.append((round(max(0.0, a), 3), round(max(b, a + 0.05), 3)))
+    return out
+
+
+def ocr_decide(old: str, heard: str, conf: float, thr: float) -> str:
+    """"same" (nghe ra đúng chữ OCR, đủ chắc) | "fix" (nghe ra câu khác, đủ chắc -> điền) | "drop" (không nghe ra chữ
+    hoặc nghe không đủ chắc -> xoá câu)."""
+    hc = core(heard)
+    if not hc or conf < thr:
+        return "drop"
+    return "same" if hc == core(old) else "fix"
+
+
+def ocr_listen(segs, rows: list[int], wav: str | Path, engine: str, language: str, settings: dict,
+               total: float = 0.0, progress: Prog | None = None, cancel=None) -> dict:
+    """Nghe lại câu OCR đọc không chắc (2.1.42): mỗi câu cắt đúng khúc giờ của câu gửi bộ nghe (Qwen3-ASR / FireRedASR2 –
+    chấm độ chắc từng chữ). Bộ nghe chắc (≥ ocr_listen_conf) mà ra đúng chữ OCR -> giữ (đã xác nhận); ra câu khác ->
+    điền chữ nghe được vào đúng câu đó (giờ giữ nguyên); không nghe ra / không đủ chắc -> xoá câu.
+    Sửa `segs` tại chỗ (câu điền / giữ), trả thống kê + "drop" (số thứ tự câu cần xoá)."""
+    from . import asr_qwen
+    from .asr import to_simplified
+
+    thr = float(settings.get("ocr_listen_conf", OCR_LISTEN_CONF) or OCR_LISTEN_CONF)
+    st = {"checked": len(rows), "thr": thr, "same": 0, "fixed": 0, "dropped": 0, "drop": [], "rows_fixed": []}
+    if not rows:
+        return st
+    spans = ocr_spans(segs, rows, OCR_LISTEN_PAD, total)
+    w = asr_qwen.asr_worker(engine, settings)
+    req = {"cmd": "asr", "language": language, "prompt": asr_qwen.hotwords(settings), "align": False, "conf": True}
+    simplify = language in ("zh", "yue", "auto")
+    items: list = []
+    for g in range(0, len(spans), GROUP):
+        part = spans[g:g + GROUP]
+        lo, hi = g / len(spans), (g + len(part)) / len(spans)
+        if progress:
+            progress(lo, f"Nghe lại câu OCR không chắc {g + 1}–{g + len(part)}/{len(spans)}…")
+        pr = (lambda x, m, lo=lo, hi=hi: progress(lo + (hi - lo) * x, m)) if progress else None
+        r = w.call(dict(req, wav=str(Path(wav).resolve()), spans=[[a, b] for a, b in part]), pr, cancel)
+        got = list(r.get("items") or [])
+        items += got + [{}] * (len(part) - len(got))
+    for i, it in zip(rows, items):
+        s = segs[i]
+        t = (it.get("text") or "").strip()
+        cp = asr_qwen._strip_cp(it)
+        if simplify:
+            t2 = to_simplified(t)
+            if len(t2) == len(t):
+                t = t2
+        vals = [float(p) for ch, p in zip(t, cp or []) if CORE.match(ch)] if cp else []
+        conf = round(sum(vals) / len(vals), 3) if vals else round(float(it.get("conf") or 0.0), 3)
+        kind = ocr_decide(s.text, t, conf, thr)
+        s.extra["ocr_listen"] = {"kind": kind, "heard": t, "conf": conf}
+        if kind == "drop":
+            st["dropped"] += 1
+            st["drop"].append(i)
+            continue
+        s.extra["asr_conf"] = conf
+        s.extra["asr_same"] = True            # đã có lần nghe xác nhận -> bước Xoá câu không chắc không đụng
+        if kind == "same":
+            st["same"] += 1
+            continue
+        old = s.text
+        s.text = merge_alt(old, core(t)) if any(not CORE.match(ch) for ch in old) else t
+        s.extra.setdefault("src_before", old)
+        for k in ("ocr_cc", "ocr_alt", "ocr_fix", "ocr_before", "ct"):
+            s.extra.pop(k, None)
+        st["fixed"] += 1
+        st["rows_fixed"].append(i)
+    return st
+
+
+def ocr_listen_note(st: dict | None) -> str:
+    """'nghe lại 12 câu OCR không chắc: 7 đúng, điền 3 câu theo giọng nói, xoá 2 câu (nghe không chắc)'."""
+    if not st:
+        return ""
+    if st.get("error"):
+        return f"⚠ chưa nghe lại được câu OCR không chắc ({st['error']}) – các câu đó giữ nguyên"
+    if not st.get("checked"):
+        return "nghe lại câu OCR không chắc: không có câu nào đọc chắc dưới mức"
+    thr = f"{float(st.get('thr', OCR_LISTEN_CONF)):.2f}".replace(".", ",")
+    out = f"nghe lại {st['checked']} câu OCR không chắc: {st.get('same', 0)} câu nghe ra đúng chữ"
+    if st.get("fixed"):
+        out += f", điền {st['fixed']} câu theo giọng nói"
+    if st.get("dropped"):
+        out += (f", xoá {st['dropped']} câu (nghe không ra / chắc dưới {thr}) – lấy lại: tab Phụ đề → Công cụ → "
+                "Lời hát & nghe nhầm → 'Khôi phục câu đã xoá'")
     return out

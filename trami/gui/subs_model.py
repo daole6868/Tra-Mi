@@ -38,8 +38,6 @@ def ocr_tip(s, thr: float = 0.85, low: bool = False) -> str:
     if fx:
         lines.append("Đã sửa chữ dễ nhầm theo từ điển (tô xanh): " + ", ".join(f"{o}→{w}" for _i, o, w in fx) +
                      (f" – trước: {s.extra['ocr_before']}" if s.extra.get("ocr_before") else ""))
-    if s.extra.get("ocr_raw"):
-        lines.append(f"Đã bỏ logo chữ – chữ đọc được trên hình: {s.extra['ocr_raw']}")
     return "\n".join(lines)
 
 
@@ -361,7 +359,7 @@ class SubsModel(QAbstractTableModel):
                 return tip
             if c == C_ZH and s.extra.get("noise"):
                 return f"⚠ Nghi nghe nhầm: {s.extra['noise']}\nNghe lại câu này – đúng là nhạc / tiếng động thì Xoá"
-            if c == C_ZH and (self.ocr_low(s) or s.extra.get("ocr_fix") or s.extra.get("ocr_raw") or
+            if c == C_ZH and (self.ocr_low(s) or s.extra.get("ocr_fix") or
                               ocr_marks(s, self.ocr_thr)):
                 t = ocr_tip(s, self.ocr_thr, self.ocr_low(s))
                 if t:
