@@ -99,6 +99,9 @@ DEFAULT_SETTINGS: dict = {
     "ocr_eq": False, "ocr_eq_brightness": -0.30, "ocr_eq_contrast": 1.80, "ocr_eq_gamma": 0.50,
     "ocr_eq_sharpen": False,
     "ocr_pick_conf": 0.85, "ocr_drop_unsure": False,
+    # 2.1.37: logo chữ quanh phụ đề (dò trước khi quét + bỏ khi theo dõi nét + lọc / cắt sau khi đọc), sửa chữ dễ nhầm
+    # theo từ điển, đọc lại câu kém chắc bằng bộ đọc lớn đã tải (PP-OCRv5 server / v6 medium), logo nhớ cho mọi video
+    "ocr_logo": True, "ocr_dict_fix": True, "ocr_big": True, "ocr_logo_known": [],
     # tách phụ đề theo đoạn (2.1.35, tab Phụ đề): tìm khoảng chưa có phụ đề dài từ … đến … giây (0 = không giới hạn)
     "span_gap_min": 10.0, "span_gap_max": 60.0, "span_songs": False,
     "span_mode": "keep",              # keep: giữ câu cũ, chỉ thêm câu còn thiếu | replace: thay câu cũ trong đoạn

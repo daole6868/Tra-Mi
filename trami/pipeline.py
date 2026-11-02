@@ -1689,14 +1689,34 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         boxes = p.work / ("ocr_boxes_span.json" if spans else "ocr_boxes.json")
         stats: dict = {}
         segs = extract_hardsubs(src, scan, fps=float(ocr_fps or 4), progress=_sub(opr, 0.05, 0.85),
-                                cancel=cancel, boxes_out=boxes, stats=stats, settings=settings, windows=spans)
+                                cancel=cancel, boxes_out=boxes, stats=stats, settings=settings, windows=spans,
+                                logos=ocr_known_logos(p, settings), ignore=p.data.get("ocr_ignore") or None)
+        # 2.1.37: logo chữ tìm được (gồm logo đã biết) + đoạn chỉ có logo đã bỏ (trả lại khi tắt logo đó)
+        p.data["ocr_logos"] = stats.get("logos") or []
+        if spans:
+            keep_lo = [r for r in (p.data.get("ocr_logo_only") or []) if not any(a <= (r[0] + r[1]) / 2 <= b
+                                                                                   for a, b in spans)]
+            p.data["ocr_logo_only"] = sorted(keep_lo + list(stats.get("logo_only") or []))
+        else:
+            p.data["ocr_logo_only"] = list(stats.get("logo_only") or [])
+        dict_fix = 0
+        if segs and settings.get("ocr_dict_fix", True):    # B2: sửa chữ dễ nhầm theo từ điển (己经 -> 已经)
+            from . import ocrfix
+            from .names import names_of
+
+            try:
+                names = names_of(p, settings)
+            except Exception:  # noqa: BLE001
+                names = []
+            dict_fix = ocrfix.fix_segments(segs, names)
         if on_draft and segs:
             on_draft([Segment(x.start, x.end, x.text) for x in segs])
         p.data["ocr_region"] = scan
         p.data["ocr_boxes"] = str(boxes)
-        p.data["ocr_stats"] = {"fps": float(ocr_fps or 4), "first_t": scan.get("first_t"),
+        p.data["ocr_stats"] = {"fps": float(ocr_fps or 4), "first_t": scan.get("first_t"), "dict_fix": dict_fix,
                                **{k: stats.get(k) for k in ("frames", "ocr_runs", "spans", "det", "cleaned", "engine",
-                                                             "engine_warn", "hw", "chunks", "secs", "eq")}}
+                                                             "engine_warn", "hw", "chunks", "secs", "eq", "t", "big",
+                                                             "logo_rec", "logo_hidden")}}
         p.data["ocr_warning"] = "" if segs else (
             "Không đọc được câu phụ đề nào – video có thể không có chữ Trung in sẵn, hoặc chữ nằm ngoài vùng quét: "
             "tab Tự động → Vùng phụ đề: kéo khung đúng chỗ chữ (hoặc bấm Tự dò), hoặc dùng Nhận dạng giọng nói.")
@@ -2258,6 +2278,9 @@ def recognize_spans(p: Project, spans, method: str | None = None, language: str 
     res = spm.merge(old, new, sp, mode)
     if method in ("ocr", "hybrid"):
         _merge_ocr_boxes(p, sp, mode)
+        if sh.data.get("ocr_logos") is not None:      # logo tìm thêm khi quét đoạn (gồm logo đã biết của dự án)
+            p.data["ocr_logos"] = sh.data["ocr_logos"]
+            p.data["ocr_logo_only"] = sh.data.get("ocr_logo_only") or []
     else:
         (p.work / "ocr_boxes_span.json").unlink(missing_ok=True)
     p.segments = res["segs"]
@@ -5420,6 +5443,83 @@ def ocr_box(p: Project) -> dict | None:
     return None
 
 
+def ocr_known_logos(p: Project, settings: dict | None) -> list[dict]:
+    """Logo chữ đã biết khi quét (2.1.37): logo của lần quét trước (kể cả logo đã tắt – không bị tìm lại) + logo người
+    dùng nhớ cho mọi video (Cài đặt ocr_logo_known)."""
+    from . import ocrlogo
+
+    out = [dict(d) for d in (p.data.get("ocr_logos") or []) if d.get("text")]
+    have = {ocrlogo.norm(d["text"]) for d in out}
+    for t in (settings or {}).get("ocr_logo_known") or []:
+        n = ocrlogo.norm(t)
+        if n and n not in have:
+            out.append({"text": n, "variants": {n: 1}, "user": True, "on": True, "remember": True})
+            have.add(n)
+    return out
+
+
+def ocr_logos(p: Project) -> list:
+    """Logo chữ của dự án (ocrlogo.Logo, khung chữ theo tỉ lệ chiều cao khung hình)."""
+    from . import ocrlogo
+
+    return [ocrlogo.Logo.from_dict(d) for d in (p.data.get("ocr_logos") or []) if d.get("text")]
+
+
+def logo_apply(p: Project, segs: list, logos: list[dict], prev: list[dict] | None = None) -> dict:
+    """Áp lại danh sách logo chữ (C4 – bật / tắt / thêm / bỏ logo ở tab Phụ đề) lên phụ đề, sửa `segs` tại chỗ:
+      * câu có chữ đầy đủ ocr_raw (lúc quét có cắt logo) hoặc câu thường: chữ = bỏ các logo đang bật; câu người dùng đã
+        sửa tay (chữ hiện tại khác chữ tool tính theo danh sách cũ) không đụng;
+      * câu chỉ còn logo -> bỏ (cất vào p.data["ocr_logo_only"]); đoạn chỉ có logo đã cất mà logo đó bị tắt -> thêm lại câu.
+    Trả {"changed": [câu đổi chữ], "removed": n, "added": [câu thêm lại]} và ghi p.data["ocr_logos"] = logos."""
+    from . import ocrlogo
+
+    prev = prev if prev is not None else (p.data.get("ocr_logos") or [])
+    old_act = [L for L in (ocrlogo.Logo.from_dict(d) for d in prev if d.get("text")) if L.on]
+    act = [L for L in (ocrlogo.Logo.from_dict(d) for d in logos if d.get("text")) if L.on]
+    changed, removed = [], 0
+    lo = [list(r) for r in (p.data.get("ocr_logo_only") or [])]
+    keep = []
+    for s in segs:
+        base = s.extra.get("ocr_raw") or s.text
+        if s.text != ocrlogo.strip_all(base, old_act) and s.extra.get("ocr_raw"):
+            keep.append(s)            # người dùng đã sửa tay câu này: giữ nguyên
+            continue
+        new = ocrlogo.strip_all(base, act)
+        if not new.strip():
+            lo.append([round(s.start, 3), round(s.end, 3), base])
+            removed += 1
+            continue
+        if new != s.text:
+            s.text = new
+            if new != base:
+                s.extra["ocr_raw"] = base
+            else:
+                s.extra.pop("ocr_raw", None)
+            s.extra.pop("ocr_cc", None)
+            s.extra.pop("ocr_alt", None)
+            changed.append(s)
+        keep.append(s)
+    added = []
+    rest = []
+    for a, b, raw in lo:
+        new = ocrlogo.strip_all(raw, act)
+        if new.strip() and not any(min(b, o.end) - max(a, o.start) > 0.5 * (b - a) for o in keep):
+            s = Segment(float(a), float(b), new, extra={"ocr_raw": raw} if new != raw else {})
+            keep.append(s)
+            added.append(s)
+        else:
+            rest.append([a, b, raw])
+    keep.sort(key=lambda x: (x.start, x.end))
+    segs[:] = keep
+    p.data["ocr_logos"] = [dict(d) for d in logos]
+    p.data["ocr_logo_only"] = rest
+    # logo vừa tắt mà lúc quét đã bị bỏ ngay (không đọc) -> chữ đó không có để trả lại: phải quét lại
+    was_on = {ocrlogo.norm(d.get("text", "")) for d in prev if d.get("on", True) is not False}
+    rescan = [d["text"] for d in logos if d.get("on", True) is False and ocrlogo.norm(d.get("text", "")) in was_on
+              and int(d.get("hidden", 0) or 0) > 0]
+    return {"changed": changed, "removed": removed, "added": added, "rescan": rescan}
+
+
 def ocr_note(p: Project) -> str:
     """Dòng tóm tắt lần OCR gần nhất: số câu / lần đọc, bộ đọc, card, thời gian."""
     o = p.data.get("ocr_stats") or {}
@@ -5442,6 +5542,31 @@ def ocr_note(p: Project) -> str:
         msg += f" · {o['chunks']} khúc song song"
     if o.get("secs"):
         msg += f" · {o['secs']:g} s"
+    tt = o.get("t") or {}
+    if tt:      # A1 (2.1.37): thời gian từng công đoạn -> biết máy chậm ở đâu
+        names = [("decode", "chờ giải mã"), ("detect", "tìm chữ"), ("read", "đọc chữ"), ("logo", "dò logo"),
+                 ("big", "đọc lại bằng bộ lớn")]
+        parts = [f"{t} {float(tt[k]):.0f} s" for k, t in names if float(tt.get(k, 0) or 0) >= 0.5]
+        if parts:
+            msg += " (" + ", ".join(parts) + ")"
+        slow = max((k for k, _ in names[:3]), key=lambda k: float(tt.get(k, 0) or 0))
+        if float(tt.get(slow, 0) or 0) >= 0.5 * max(1.0, float(o.get("secs") or 0)):
+            if slow == "decode" and not o.get("hw"):
+                msg += " – chậm nhất ở giải mã video: bật 'Giải mã video bằng card' ở Cài đặt"
+            elif slow in ("detect", "read") and "CPU" in str(o.get("engine", "")):
+                msg += " – chậm nhất ở bộ đọc chữ (đang chạy CPU): Cài đặt → 'Cài bản chạy card'"
+    big = o.get("big") or {}
+    if big.get("lines"):
+        msg += f" · bộ đọc lớn đọc lại {big['lines']} câu kém chắc (sửa {big.get('changed', 0)})"
+    elif big.get("error"):
+        msg += f" · ⚠ bộ đọc lớn lỗi: {big['error']}"
+    if o.get("dict_fix"):
+        msg += f" · sửa chữ dễ nhầm theo từ điển ở {o['dict_fix']} câu"
+    from . import ocrlogo
+
+    ln = ocrlogo.note(ocr_logos(p))
+    if ln:
+        msg += " · " + ln
     tn = ocr_timing_note(p)
     if tn:
         msg += " · " + tn

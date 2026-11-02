@@ -303,6 +303,53 @@ def bucket(crop: np.ndarray) -> np.ndarray:
     return np.concatenate([crop, pad], axis=1)
 
 
+ALT_MIN = 0.01          # chữ ứng viên (2.1.37): xác suất tối thiểu để giữ làm phương án thay thế
+
+
+class _Detail:
+    """Bọc bộ giải mã CTC của RapidOCR (2.1.37): khi gọi đọc dòng với return_word_box thì trả thêm chi tiết TỪNG CHỮ –
+    độ chắc (xác suất cao nhất trong các khung của chữ đó), vị trí tâm chữ (tỉ lệ theo bề rộng ảnh đã lấp phải) và tối đa
+    3 chữ ứng viên khác ở đúng khung đó (bộ đọc phân vân 己 / 已…). Gọi thường thì y như bản gốc."""
+
+    def __init__(self, base, img_h: int):
+        self.base, self.img_h = base, img_h
+
+    def __getattr__(self, name):
+        return getattr(self.base, name)
+
+    def __call__(self, preds, return_word_box: bool = False, **kw):
+        lines, _ = self.base(preds, False, **kw)
+        if not return_word_box:
+            return lines, []
+        ratios = list(kw.get("wh_ratio_list") or [1.0] * len(preds))
+        img_w = self.img_h * float(kw.get("max_wh_ratio") or 1.0)
+        chars = self.base.character
+        out = []
+        for b, p in enumerate(np.asarray(preds)):
+            T = p.shape[0]
+            idx = p.argmax(axis=1)
+            res_w = max(1.0, min(img_w, np.ceil(self.img_h * float(ratios[b] if b < len(ratios) else 1.0))))
+            det = []
+            t = 0
+            while t < T:
+                k = int(idx[t])
+                e = t
+                while e + 1 < T and int(idx[e + 1]) == k:
+                    e += 1
+                if k != 0:
+                    tt = t + int(np.argmax(p[t:e + 1, k]))
+                    row = p[tt]
+                    top = np.argsort(-row)[:4]
+                    alts = [(chars[j], round(float(row[j]), 3)) for j in top
+                            if j != k and j != 0 and float(row[j]) >= ALT_MIN and j < len(chars)][:3]
+                    x = (t + e + 1) / 2.0 / T * img_w / res_w
+                    det.append((chars[k] if k < len(chars) else "", round(float(p[t:e + 1, k].max()), 4),
+                                round(float(x), 4), alts))
+                t = e + 1
+            out.append(det)
+        return lines, out
+
+
 class Engine:
     """kind "v3" (RapidOCR 3: tìm chữ / đọc dòng tách riêng, có thể chạy card) | "v1" (RapidOCR 1.x, CPU)."""
 
@@ -347,6 +394,10 @@ class Engine:
         self._e = RapidOCR(params=p)
         self._det = self._e._load_det_model()
         self._rec = self._e._load_rec_model()
+        try:
+            self._rec.postprocess_op = _Detail(self._rec.postprocess_op, int(self._rec.rec_image_shape[1]))
+        except Exception:  # noqa: BLE001 – bản rapidocr khác cấu trúc: đọc dòng vẫn chạy, chỉ không có chi tiết từng chữ
+            pass
         try:
             prov = self._rec.session.session.get_providers()[0]
         except Exception:  # noqa: BLE001
@@ -397,6 +448,34 @@ class Engine:
             r = self._rec(TextRecInput(img=[bucket(_bgr(c)) for c in crops]))
         txts, scores = list(r.txts or ()), list(r.scores or ())
         return [(str(t), float(s)) for t, s in zip(txts, scores)] + [("", 0.0)] * (len(crops) - len(txts))
+
+    def recognize_ex(self, crops: list[np.ndarray]) -> list[tuple[str, float, list | None]]:
+        """Như recognize + chi tiết từng chữ [(chữ, độ chắc, tâm chữ theo tỉ lệ bề rộng ảnh dòng, [(chữ ứng viên,
+        xác suất)])] (None: bộ đọc cũ / không lấy được). Chữ ghép lại = đúng dòng chữ đọc ra."""
+        if not crops:
+            return []
+        if self.kind == "v1" or not isinstance(getattr(self._rec, "postprocess_op", None), _Detail):
+            return [(t, s, None) for t, s in self.recognize(crops)]
+        from rapidocr.ch_ppocr_rec import TextRecInput
+
+        imgs = [bucket(_bgr(c)) for c in crops]
+        with self.rlock:
+            r = self._rec(TextRecInput(img=imgs, return_word_box=True))
+        txts, scores = list(r.txts or ()), list(r.scores or ())
+        words = list(r.word_results or ())
+        out = []
+        for i, c in enumerate(crops):
+            if i >= len(txts):
+                out.append(("", 0.0, None))
+                continue
+            det = words[i] if i < len(words) and isinstance(words[i], list) else None
+            if det is not None:
+                k = imgs[i].shape[1] / max(1, c.shape[1])        # tỉ lệ theo ảnh đã lấp phải -> theo ảnh dòng gốc
+                det = [(ch, cf, round(min(1.0, x * k), 4), al) for ch, cf, x, al in det]
+                if "".join(ch for ch, _, _, _ in det) != str(txts[i]):
+                    det = None
+            out.append((str(txts[i]), float(scores[i]), det))
+        return out
 
     def ocr(self, img: np.ndarray) -> list[tuple[np.ndarray, str, float]]:
         """Tìm chữ + đọc: [(khung (4, 2), chữ, độ tin)] (chưa lọc)."""

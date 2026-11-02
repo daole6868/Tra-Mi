@@ -17,6 +17,43 @@ FIT_COLOR = {"ok": "#4ADE80", "fast": "#F5B841", "long": "#F87171"}
 SPK_COLORS = ["#FF8A3D", "#5B8CFF", "#3CCB7F", "#C07BFF", "#F5B841", "#FF5FA2", "#3BD1D1", "#B5C44B"]
 
 
+MARK_ROLE = int(Qt.ItemDataRole.UserRole) + 31     # 2.1.37: [(vị trí chữ, "weak" | "fix")] – tô từng chữ cột chữ gốc
+WEAK_COLOR, FIX_COLOR = "#FF6B4A", "#7FD1FF"
+
+
+def ocr_tip(s, thr: float = 0.85, low: bool = False) -> str:
+    """Chú thích chữ gốc câu OCR (2.1.37): chữ đọc không chắc (kèm chữ ứng viên), chữ đã sửa theo từ điển, logo đã bỏ."""
+    from ..ocrfix import weak_chars
+
+    lines = []
+    if low:
+        lines.append(f"⚠ OCR đọc chữ không chắc (độ chắc {float(s.extra['ocr_conf']):.2f}, dưới mức {thr:.2f}) – xem chữ "
+                     "trên hình rồi sửa / Xoá. Mức ở tab Phụ đề → Công cụ → Lời hát & nghe nhầm → Không chắc")
+    wk = weak_chars(s, thr)
+    if wk:
+        lines.append("Chữ đọc không chắc (tô đỏ): " + ", ".join(
+            f"{ch} {c:.2f}".replace(".", ",") + (f" (có thể là {'/'.join(al[:2])})" if al else "")
+            for _i, ch, c, al in wk[:6]))
+    fx = s.extra.get("ocr_fix")
+    if fx:
+        lines.append("Đã sửa chữ dễ nhầm theo từ điển (tô xanh): " + ", ".join(f"{o}→{w}" for _i, o, w in fx) +
+                     (f" – trước: {s.extra['ocr_before']}" if s.extra.get("ocr_before") else ""))
+    if s.extra.get("ocr_raw"):
+        lines.append(f"Đã bỏ logo chữ – chữ đọc được trên hình: {s.extra['ocr_raw']}")
+    return "\n".join(lines)
+
+
+def ocr_marks(s, thr: float = 0.85) -> list | None:
+    cc = s.extra.get("ocr_cc")
+    out = []
+    if cc and len(cc) == len(s.text):
+        out += [(i, "weak") for i, c in enumerate(cc) if float(c) < thr]
+    for fx in s.extra.get("ocr_fix") or []:
+        if 0 <= int(fx[0]) < len(s.text) and s.text[int(fx[0])] == fx[2]:
+            out.append((int(fx[0]), "fix"))
+    return out or None
+
+
 OVERFLOW_SHORT = {"smart": "Tự động", "push": "Nối tiếp", "overlap": "Đọc đè", "early": "Đọc sớm", "cut": "Cắt bớt"}
 
 
@@ -271,6 +308,9 @@ class SubsModel(QAbstractTableModel):
                 return Qt.CheckState.Checked if s.extra.get("nodub") else Qt.CheckState.Unchecked
             if c == C_SEL:
                 return Qt.CheckState.Checked if self.is_picked(idx.row()) else Qt.CheckState.Unchecked
+        if role == MARK_ROLE:
+            return ocr_marks(s, self.ocr_thr) if c == C_ZH and s.extra.get("ocr_cc") is not None or \
+                (c == C_ZH and s.extra.get("ocr_fix")) else None
         if role == Qt.ItemDataRole.ForegroundRole:
             if c == C_VOICE:
                 return QColor("#FF8A3D" if s.extra.get("voice") else theme.MUTED)   # cam = câu có giọng riêng
@@ -310,10 +350,11 @@ class SubsModel(QAbstractTableModel):
                 return tip
             if c == C_ZH and s.extra.get("noise"):
                 return f"⚠ Nghi nghe nhầm: {s.extra['noise']}\nNghe lại câu này – đúng là nhạc / tiếng động thì Xoá"
-            if c == C_ZH and self.ocr_low(s):
-                return (f"⚠ OCR đọc chữ không chắc (độ chắc {float(s.extra['ocr_conf']):.2f}, dưới mức "
-                        f"{self.ocr_thr:.2f}) – xem chữ trên hình rồi sửa / Xoá. Mức ở tab Phụ đề → Công cụ → Lời hát & "
-                        "nghe nhầm → Không chắc")
+            if c == C_ZH and (self.ocr_low(s) or s.extra.get("ocr_fix") or s.extra.get("ocr_raw") or
+                              ocr_marks(s, self.ocr_thr)):
+                t = ocr_tip(s, self.ocr_thr, self.ocr_low(s))
+                if t:
+                    return t
             if c == C_ZH and s.extra.get("asr_repeat"):
                 return f"⚠ Nghi bộ nghe lặp lời: \"{s.extra['asr_repeat']}\" lặp liền nhau (hoặc câu bên cạnh gần giống " \
                        "hệt). Nghe lại – nói 1 lần thì sửa chữ / Xoá câu thừa; hoặc tab Phụ đề → Công cụ → Lời hát & " \
@@ -472,6 +513,47 @@ class WrapDelegate(QStyledItemDelegate):
         self.initStyleOption(o, idx)
         h = QFontMetrics(o.font).boundingRect(QRect(0, 0, w, 100000), int(Qt.TextFlag.TextWordWrap), str(text)).height()
         return QSize(base.width(), max(base.height(), h + self.PAD_H))
+
+    def paint(self, painter, opt, idx):
+        """Cột chữ gốc câu OCR (2.1.37): chữ đọc không chắc tô đỏ + gạch chân, chữ đã sửa theo từ điển tô xanh."""
+        marks = idx.data(MARK_ROLE)
+        if not marks:
+            return super().paint(painter, opt, idx)
+        import html
+
+        from PySide6.QtGui import QTextDocument
+        from PySide6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem
+
+        o = QStyleOptionViewItem(opt)
+        self.initStyleOption(o, idx)
+        text = o.text
+        o.text = ""
+        style = o.widget.style() if o.widget is not None else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, o, painter, o.widget)
+        fg = idx.data(Qt.ItemDataRole.ForegroundRole)
+        base = fg.name() if isinstance(fg, QColor) else "#C3CAD6"
+        mk = dict()
+        for i, kind in marks:
+            if kind == "fix" or i not in mk:
+                mk[i] = kind
+        parts = []
+        for i, ch in enumerate(text):
+            e = html.escape(ch)
+            k = mk.get(i)
+            if k:
+                col = FIX_COLOR if k == "fix" else WEAK_COLOR
+                e = f'<span style="color:{col};text-decoration:underline;font-weight:600">{e}</span>'
+            parts.append(e)
+        doc = QTextDocument()
+        doc.setDocumentMargin(0)
+        doc.setDefaultFont(o.font)
+        doc.setTextWidth(max(10, o.rect.width() - self.PAD_W))
+        doc.setHtml(f'<span style="color:{base}">' + "".join(parts) + "</span>")
+        painter.save()
+        dy = max(0.0, (o.rect.height() - doc.size().height()) / 2)
+        painter.translate(o.rect.left() + self.PAD_W / 2, o.rect.top() + dy)
+        doc.drawContents(painter)
+        painter.restore()
 
 
 class VoiceDelegate(QStyledItemDelegate):

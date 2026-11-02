@@ -12204,3 +12204,309 @@ def test_ocr_eq_gui_2136(sample_video, monkeypatch):
         pp.p = None
         win.close()
         p.delete()
+
+
+# ------------------------------------------------------------------ 2.1.37: logo chữ quanh phụ đề, đọc chữ kỹ
+
+def _logo_obs(lines_t, logo=None, places=None, variants=None, every=1):
+    """Lần thấy giả: mỗi đoạn k có 1 câu phụ đề (giữa hàng) + logo (nếu có) ở 1 trong các chỗ."""
+    from trami import ocrlogo
+
+    obs = []
+    for k, (a, b, txt) in enumerate(lines_t):
+        items = []
+        if txt:
+            w = 40 * len(txt)
+            items.append(((480 - w / 2, 70, 480 + w / 2, 110), ocrlogo.norm(txt)))
+        if logo and k % every == 0:
+            x, y = (places or [(60, 20)])[k % len(places or [1])]
+            t = (variants or [logo])[k % len(variants or [logo])]
+            items.append(((x, y, x + 90, y + 30), ocrlogo.norm(t)))
+        for i, (bb, t) in enumerate(items):
+            obs.append(ocrlogo.Obs(k, a, b, bb, t, tuple(o for j, (_, o) in enumerate(items) if j != i)))
+    return obs
+
+
+def test_ocrlogo_find_strip_2137():
+    """Logo nhảy chỗ đọc mỗi lần 1 kiểu -> 1 logo (gộp bản đọc lệch); câu thoại lặp lại ("师父") / câu 1 chữ ("嗯") không
+    phải logo; logo đứng yên (chữ Hán, không @) nhận ra nhờ hiện cùng lúc với phụ đề; logo đã tắt không bị tìm lại; cắt logo
+    dính đầu / cuối câu (đúng bản đọc hoặc gần giống có @ đúng chỗ), không cắt giữa câu / chữ thường."""
+    from trami import ocrlogo as ol
+
+    talk = ["没想到你也有这一天", "师父", "今天的天气真不错啊", "嗯", "我们一起去吃饭好不好", "师父", "这件事情你别管了",
+            "嗯", "快点跑别回头看", "师父", "你说的都是真的吗", "嗯", "他已经走了很久了", "师父", "我不知道该怎么办",
+            "嗯", "别担心一切都会好的", "师父", "明天见", "好的"]
+    lines = [(i * 3.0, i * 3.0 + 2.5, t) for i, t in enumerate(talk)]
+    obs = _logo_obs(lines, "@纵横", [(60, 10), (640, 20), (300, 75), (720, 80)], ["@纵横", "@纵横", "@凯横", "@纵横"])
+    found = ol.find(obs, 60.0)
+    assert [L.text for L in found] == ["@纵横"], [L.text for L in found]
+    L = found[0]
+    assert "@凯横" in L.variants and L.places >= 3 and L.static is None and L.share > 0.5
+    assert L.kind() == "nhảy chỗ"
+    # logo chữ Hán đứng yên, không @ -> nhận ra nhờ hiện cùng lúc với nhiều câu khác
+    obs2 = _logo_obs(lines, "纵横小说", [(700, 10)])
+    f2 = ol.find(obs2, 60.0)
+    assert [L.text for L in f2] == ["纵横小说"] and f2[0].static is not None
+    # không có logo: câu lặp lại không bị coi là logo
+    assert ol.find(_logo_obs(lines), 60.0) == []
+    # logo đã tắt: không tìm lại thành logo mới
+    off = ol.Logo("@纵横", {"@纵横": 3}, 90, 30, on=False)
+    f3 = ol.find(obs, 60.0, [off])
+    assert len(f3) == 1 and f3[0] is off and "@凯横" in off.variants
+    # khớp / cắt
+    lg = [ol.Logo("@纵横", {"@纵横": 10, "@凯横": 2}, 90, 30)]
+    assert ol.match("@纵横", lg) and ol.match("@黄横", lg, (88, 31)) and not ol.match("@黄横", lg, (60, 45))
+    assert not ol.match("嗯@纵横", lg, (90, 30))                         # dính câu -> để strip cắt, không bỏ cả mảnh
+    for t, want in (("进来@纵横", "进来"), ("@纵横没想到你也有这一天", "没想到你也有这一天"), ("@凯横啊是酒虫", "啊是酒虫"),
+                    ("啊是酒虫@黄横", "啊是酒虫"), ("嗯@纵横", "嗯"), ("我们一起去吃饭好不好 @纵横", "我们一起去吃饭好不好"),
+                    ("纵横天下", "纵横天下"), ("我@纵横们", "我@纵横们"), ("@纵横", "@纵横")):
+        assert ol.strip(t, lg)[0] == want, (t, ol.strip(t, lg))
+    assert ol.strip_all("@纵横", lg) == "" and ol.strip_all("进来，@纵横", lg) == "进来"
+    d = L.to_dict(0.5)
+    back = ol.Logo.from_dict(d, 2.0)
+    assert back.text == L.text and abs(back.h - L.h) < 1e-6 and back.variants == {k: v for k, v in L.variants.items()}
+    assert "logo @纵横 (nhảy chỗ" in ol.note([L])
+
+
+def test_ocrfix_2137():
+    """Sửa chữ dễ nhầm theo từ điển: chỉ chữ bộ đọc chưa chắc + đứng lẻ + chữ mới ghép thành từ; không đụng câu đúng /
+    chữ đã thành từ / tên riêng; câu đổi ghi lại chữ cũ, độ chắc câu tính lại."""
+    pytest.importorskip("jieba")
+    from trami import ocrfix
+    from trami.subtitle import Segment
+
+    one = [[] for _ in range(8)]
+    one[1] = [["已", 0.07]]
+    assert ocrfix.fix_line("他己经走了很久了", [1, 0.93, 1, 1, 1, 1, 1, 1], one)[0] == "他已经走了很久了"
+    assert ocrfix.fix_line("土兵们冲啊", [0.95, 1, 1, 1, 1], None)[0] == "士兵们冲啊"
+    assert ocrfix.fix_line("他己经走了很久了", [1] * 8, one)[0] == "他己经走了很久了"        # bộ đọc chắc chắn: giữ
+    assert ocrfix.fix_line("自己的事", [1, 0.9, 1, 1], None)[0] == "自己的事"               # đã thành từ
+    assert ocrfix.fix_line("他入了伙", [1, 0.9, 1, 1], None)[0] == "他入了伙"
+    assert ocrfix.fix_line("王己是我朋友", [1, 0.9, 1, 1, 1, 1], None, names=["王己"])[0] == "王己是我朋友"
+    assert ocrfix.line_conf([1, 1, 1, 0.5]) == round((0.875 + 0.5) / 2, 3)
+    s = Segment(0, 1, "他己经走了很久了", extra={"ocr_cc": [1, 0.6, 1, 1, 1, 1, 1, 1], "ocr_alt": one, "ocr_conf": 0.8})
+    assert ocrfix.fix_segments([s]) == 1
+    assert s.text == "他已经走了很久了" and s.extra["ocr_before"] == "他己经走了很久了"
+    assert s.extra["ocr_fix"] == [[1, "己", "已"]] and s.extra["ocr_cc"][1] == ocrfix.FIXED_CONF
+    assert s.extra["ocr_conf"] == ocrfix.line_conf(s.extra["ocr_cc"])
+    assert ocrfix.weak_chars(s, 0.95) == [(1, "已", 0.9, ["已"])]
+
+
+def _logo_video_2137(path, kind="jump", dur=None):
+    """Video thử: phụ đề đổi ở giờ lẻ + logo "@纵横" in mờ 50 % – jump: nhảy 4 chỗ mỗi 2,4 s (có chỗ sát đuôi dòng phụ đề),
+    có 1 khoảng không phụ đề (chỉ logo); static: đứng yên sát đuôi dòng phụ đề."""
+    font = _cjk_font()
+    lines = ["没想到你也有这一天", "今天的天气真不错啊", "嗯", "我们一起去吃饭好不好", "这件事情你别管了", "他已经走了很久了"]
+    subs, t = [], 0.52
+    for k, txt in enumerate(lines):
+        d = (1.68, 2.04, 1.32, 2.36, 1.56, 1.88)[k]
+        subs.append((round(t, 2), round(t + d, 2), txt))
+        t += d + (0.0, 0.44, 0.0, 1.6, 0.0, 0.0)[k]
+    dur = dur or round(t + 0.9, 2)
+    f = [f"drawtext=fontfile='{font}':text='{x}':fontsize=40:fontcolor=white:borderw=3:bordercolor=black:"
+         f"x=(w-tw)/2:y=h-90:enable='gte(t,{a})*lt(t,{b})'" for a, b, x in subs]
+    if kind == "jump":
+        pos = [(60, 400), (720, 458), (560, 400), (110, 455)]
+        xs = "+".join(f"{x}*eq(mod(floor(t/2.4),4),{i})" for i, (x, y) in enumerate(pos))
+        ys = "+".join(f"{y}*eq(mod(floor(t/2.4),4),{i})" for i, (x, y) in enumerate(pos))
+        f.append(f"drawtext=fontfile='{font}':text='@纵横':fontsize=30:fontcolor=white@0.5:x='{xs}':y='{ys}'")
+    else:
+        f.append(f"drawtext=fontfile='{font}':text='@纵横':fontsize=34:fontcolor=white@0.55:x=720:y=h-87")
+    subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i",
+                    f"color=c=0x406080:s=960x540:r=25:d={dur}", "-vf", ",".join(f), "-c:v", "libx264",
+                    "-preset", "veryfast", "-pix_fmt", "yuv420p", str(path)], check=True)
+    return subs
+
+
+def test_ocr_logo_scan_2137(tmp_path, monkeypatch):
+    """Quét thật: logo "@纵横" in mờ nhảy chỗ / đứng yên sát đuôi câu -> không câu nào dính logo, không câu chỉ có logo,
+    logo nhảy không làm tách câu (giờ câu vẫn đúng tới 1 khung), đoạn chỉ có logo cất lại; có độ chắc từng chữ + thời gian
+    từng công đoạn. Tắt "Tự lọc logo" -> như trước (logo dính câu)."""
+    _need_ocr3()
+    from trami import ocr
+
+    reg = {"x": 0.0, "y": 0.70, "w": 1.0, "h": 0.30, "exact": True}
+    for kind in ("jump", "static"):
+        v = tmp_path / f"{kind}.mp4"
+        subs = _logo_video_2137(v, kind)
+        st: dict = {}
+        segs = ocr.extract_hardsubs(v, reg, stats=st)
+        assert [s.text for s in segs] == [x for _, _, x in subs], (kind, [s.text for s in segs])
+        for s, (a, b, _) in zip(segs, subs):
+            assert abs(s.start - a) <= 0.045 and abs(s.end - b) <= 0.045, (kind, s.text, s.start, s.end, a, b)
+        assert [d["text"] for d in st["logos"]] == ["@纵横"]
+        assert set(st["t"]) >= {"logo", "detect", "read"}
+        assert all(len(s.extra["ocr_cc"]) == len(s.text) for s in segs)
+        assert st["logo_hidden"] > 0 and st["logos"][0]["hidden"] > 0   # logo bỏ ngay khi theo dõi nét (không đọc)
+        if kind == "jump":
+            assert st["spans"] <= len(subs) + 3                            # logo nhảy không làm tách câu
+            assert st["logos"][0]["places"] >= 2
+        else:
+            assert st["logos"][0].get("static")
+    # tắt tự lọc logo: logo dính câu như trước 2.1.37
+    segs = ocr.extract_hardsubs(tmp_path / "static.mp4", reg, settings={"ocr_logo": False})
+    assert any("纵横" in s.text for s in segs)
+
+
+def test_ocr_big_reread_2137(tmp_path, monkeypatch):
+    """Câu kém chắc giữ ảnh chữ -> bộ đọc lớn đọc lại cuối lần quét; bộ đọc lớn lỗi -> giữ kết quả bộ nhỏ + báo."""
+    _need_ocr3()
+    from trami import ocr, ocr_engine
+
+    v = tmp_path / "s.mp4"
+    subs = _logo_video_2137(v, "static")
+    calls = []
+
+    class Big:
+        def __init__(self, key, device="auto"):
+            calls.append(key)
+
+        def recognize_ex(self, crops):
+            return [("大字" * 2, 0.99, [(c, 0.99, (i + 0.5) / 4, []) for i, c in enumerate("大字大字")]) for _ in crops]
+    ocr_engine.get({})                                     # bộ đọc nhỏ thật (đã nạp trước khi thay lớp Engine)
+    monkeypatch.setattr(ocr, "big_model", lambda st, eng=None: "v5_server")
+    monkeypatch.setattr(ocr, "BIG_BELOW", 1.01)          # coi mọi câu là kém chắc
+    monkeypatch.setattr(ocr_engine, "Engine", Big)
+    st: dict = {}
+    segs = ocr.extract_hardsubs(v, {"x": 0.0, "y": 0.70, "w": 1.0, "h": 0.30, "exact": True}, stats=st,
+                                settings={"ocr_logo": False})
+    assert calls == ["v5_server"] and st["big"]["lines"] >= len(subs) and st["big"]["changed"] >= 1
+    assert all(s.text.startswith("大字") for s in segs) and "big" in st["t"]
+
+    class Bad(Big):
+        def recognize_ex(self, crops):
+            raise RuntimeError("hỏng")
+    monkeypatch.setattr(ocr_engine, "Engine", Bad)
+    st = {}
+    segs = ocr.extract_hardsubs(v, {"x": 0.0, "y": 0.70, "w": 1.0, "h": 0.30, "exact": True}, stats=st,
+                                settings={"ocr_logo": False})
+    assert "hỏng" in st["big"]["error"] and any(s.text.startswith("没想到你也有这一天") for s in segs)
+
+
+def test_recognize_ocr_logo_apply_2137(tmp_path):
+    """"Nghe & tách câu" nguồn OCR: lưu logo + đoạn chỉ có logo, thông báo có logo + thời gian; tắt logo -> chữ logo trả
+    lại vào câu + đoạn chỉ có logo thành câu; bật lại -> bỏ; logo tự gõ (người dùng) bỏ đúng chữ; logo nhớ ở Cài đặt được
+    dùng khi quét."""
+    _need_ocr3()
+    from trami import pipeline
+    from trami.config import load_settings
+    from trami.project import Project
+
+    v = tmp_path / "jump.mp4"
+    subs = _logo_video_2137(v, "jump")
+    p = Project.create("ocrlogo2137")
+    try:
+        pipeline.attach_source(p, v)
+        p.data["ocr_box"] = {"x": 0.0, "y": 0.70, "w": 1.0, "h": 0.30, "exact": True}
+        p.save()
+        st = {**load_settings(), "diarize": False, "ocr_timing": "sub", "ocr_logo_known": ["频道号"]}
+        pipeline.recognize(p, "ocr", "zh", None, 4.0, st)
+        p.reload()
+        assert [s.text for s in p.segments] == [x for _, _, x in subs]
+        logos = p.data["ocr_logos"]
+        assert {d["text"] for d in logos} == {"@纵横", "频道号"}
+        note = pipeline.ocr_note(p)
+        assert "logo @纵横" in note and "tìm chữ" in note
+        segs = p.segments
+        off = [dict(d, on=False) if d["text"] == "@纵横" else dict(d) for d in logos]
+        res = pipeline.logo_apply(p, segs, off)       # logo đã bỏ ngay lúc quét: không có chữ để trả -> nhắc quét lại
+        assert res["rescan"] == ["@纵横"] and [s.text for s in segs] == [x for _, _, x in subs]
+        kn = {d["text"]: d for d in pipeline.ocr_known_logos(p, {})}
+        assert kn["@纵横"]["on"] is False                              # quét lại: logo đã tắt không bị lọc nữa
+        # câu có chữ đầy đủ (logo cắt sau khi đọc) + đoạn chỉ có logo: tắt -> trả lại, bật -> bỏ
+        from trami.subtitle import Segment
+
+        p.data["ocr_logo_only"] = [[20.0, 21.0, "@纵横"]]
+        segs3 = [Segment(0, 1, "进来", extra={"ocr_raw": "进来@纵横"}), Segment(2, 3, "好的")]
+        on = [dict(d, on=True) for d in logos]
+        r = pipeline.logo_apply(p, segs3, off, on)
+        assert [s.text for s in segs3] == ["进来@纵横", "好的", "@纵横"] and r["added"]
+        r = pipeline.logo_apply(p, segs3, on, off)
+        assert [s.text for s in segs3] == ["进来", "好的"] and r["removed"] == 1 and p.data["ocr_logo_only"]
+        # logo tự gõ: bỏ chữ ở đầu / cuối câu, câu chỉ có chữ đó bỏ cả câu
+
+        p.data["ocr_logo_only"] = []
+        segs2 = [Segment(0, 1, "黑风寨今天的天气"), Segment(1, 2, "黑风寨"), Segment(2, 3, "风很大")]
+        user = [{"text": "黑风寨", "variants": {"黑风寨": 1}, "user": True, "on": True}]
+        r = pipeline.logo_apply(p, segs2, user, [])
+        assert [s.text for s in segs2] == ["今天的天气", "风很大"] and r["removed"] == 1
+        r = pipeline.logo_apply(p, segs2, [], user)          # bỏ logo tự gõ -> trả lại
+        assert [s.text for s in segs2] == ["黑风寨今天的天气", "黑风寨", "风很大"]
+    finally:
+        p.delete()
+
+
+def test_ocr_logo_gui_2137(sample_video, monkeypatch):
+    """Tab Tự động (nguồn OCR): hàng Logo chữ + Đọc chữ kỹ (lưu Cài đặt), vùng bỏ qua (khung đỏ trên video); tab Phụ đề:
+    chữ đọc không chắc / chữ đã sửa tô riêng từng chữ + chú thích; hàng Logo chữ: đổi danh sách logo (bỏ / trả chữ), nhớ
+    cho video sau, Ctrl+Z."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+
+    from trami import pipeline
+    from trami.config import load_settings, save_settings
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.gui.subs_model import C_ZH, MARK_ROLE
+    from trami.gui.widgets import set_combo
+    from trami.project import Project
+    from trami.subtitle import Segment
+
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    p = Project.create("ocrlogogui")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [Segment(0.2, 1.0, "进来", extra={"ocr_raw": "进来@纵横", "ocr_cc": [1, 1], "ocr_conf": 1.0}),
+                  Segment(1.5, 2.4, "他已经走了", extra={"ocr_cc": [1, 0.9, 1, 1, 0.5], "ocr_fix": [[1, "己", "已"]],
+                                                       "ocr_before": "他己经走了", "ocr_conf": 0.72,
+                                                       "ocr_alt": [[], [], [], [], [["子", 0.3]]]})]
+    p.data["ocr_logos"] = [{"text": "@纵横", "variants": {"@纵横": 5}, "w": 0.1, "h": 0.05, "hits": 9, "share": 0.6,
+                            "places": 3, "on": True, "cut": 1}]
+    p.data["ocr_logo_only"] = [[3.0, 3.5, "@纵横"]]
+    p.save()
+    win = MainWindow()
+    win.show()
+    win.open_project(p.id)
+    pp = win.project_page
+    toasts = []
+    monkeypatch.setattr(win, "toast", lambda m, *a, **k: toasts.append(m))
+    try:
+        app.processEvents()
+        pp.tabs.set_current(0)
+        set_combo(pp.a_method, "ocr")
+        app.processEvents()
+        f = pp._auto_form
+        assert f.isRowVisible(pp.a_ocrlogo_row) and f.isRowVisible(pp.a_ocrread_row)
+        assert "bộ đọc lớn" in pp.a_ocrbig_lb.text()
+        pp.a_ocrlogo.setChecked(False)
+        pp.a_ocrfix.setChecked(False)
+        st = load_settings()
+        assert st["ocr_logo"] is False and st["ocr_dict_fix"] is False
+        pp._ocr_ignore_set([{"x": 0.8, "y": 0.05, "w": 0.15, "h": 0.08}])
+        p.reload()
+        assert p.data["ocr_ignore"] and pp.player.view.ocrbox.ignore and "1 vùng bỏ qua" in pp.a_ocrign_lb.text()
+        # tab Phụ đề: tô từng chữ + chú thích
+        pp.tabs.set_current(1)
+        ix = pp.model.index(1, C_ZH)
+        marks = pp.model.data(ix, MARK_ROLE)
+        assert (4, "weak") in marks and (1, "fix") in marks
+        tip = pp.model.data(ix, Qt.ItemDataRole.ToolTipRole)
+        assert "己→已" in tip and "có thể là 子" in tip
+        assert "Đã bỏ logo" in pp.model.data(pp.model.index(0, C_ZH), Qt.ItemDataRole.ToolTipRole)
+        pp.table.viewport().repaint()                                    # vẽ được ô tô từng chữ
+        assert "@纵横 (đã bỏ)" in pp.s_logo_lb.text()
+        # tắt logo -> trả chữ lại + đoạn chỉ có logo thành câu; nhớ cho video sau
+        logos = [dict(d, on=False) for d in p.data["ocr_logos"]]
+        pp._logo_update(logos, {"@纵横"})
+        texts = [s.text for s in pp.model.segs]
+        assert texts == ["进来@纵横", "他已经走了", "@纵横"], texts
+        assert load_settings()["ocr_logo_known"] == ["@纵横"] and "đang tắt" in pp.s_logo_lb.text()
+        p.reload()
+        assert [s.text for s in p.segments] == texts and p.data["ocr_logos"][0]["on"] is False
+        pp.undo()
+        assert [s.text for s in pp.model.segs] == ["进来", "他已经走了"]
+    finally:
+        save_settings({"ocr_logo": True, "ocr_dict_fix": True, "ocr_logo_known": []})
+        win.timer.stop()
+        p.delete()

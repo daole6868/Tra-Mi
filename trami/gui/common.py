@@ -119,6 +119,23 @@ TTS_ENGINES = [("edge", "Microsoft Edge (giọng Việt / Anh / Thái / Nhật /
                ("omnivoice", "OmniVoice (23 giọng chọn sẵn + nhái giọng từ file mẫu, offline, đọc được nhiều tiếng)")]
 TARGETS = [("vi", "Tiếng Việt"), ("en", "Tiếng Anh (English)"), ("th", "Tiếng Thái (ภาษาไทย)"),
            ("ja", "Tiếng Nhật (日本語)"), ("ko", "Tiếng Hàn (한국어)")]
+OCR_LOGO_HELP = ("<b>Logo chữ quanh phụ đề</b> (2.1.37) – logo / tên kênh kiểu \"@纵横\" nhảy chỗ vài giây 1 lần, in mờ đè "
+                 "lên hình, hay nằm sát dòng phụ đề làm OCR đọc dính vào câu (\"…进来@纵横\").<br>"
+                 "• <b>Tự lọc logo chữ</b>: trước khi quét tool xem ~80 khung rải khắp video, chữ nào LẶP LẠI ở nhiều lúc, "
+                 "hiện cùng lúc với phụ đề (hoặc có @ #, nhảy nhiều chỗ, in mờ) là logo – kể cả khi mỗi lần đọc ra 1 "
+                 "kiểu. Lúc quét logo bị bỏ khỏi việc theo dõi chữ (logo nhảy tới / đi không làm tách câu, không kéo dài "
+                 "giờ câu), sau khi đọc thì bỏ mảnh logo và cắt logo dính đầu / cuối câu. Câu thoại lặp lại (\"师父\") "
+                 "và câu 1 chữ (\"嗯\") không bị coi là logo.<br>"
+                 "• <b>Khoanh vùng bỏ qua</b>: logo đứng yên 1 chỗ – khoanh khung đỏ, chữ trong đó không được đọc.<br>"
+                 "Xem / tắt logo tìm được, thêm logo tự gõ: tab Phụ đề → Công cụ → Sửa câu → hàng Logo chữ.")
+OCR_READ_HELP = ("<b>Đọc chữ kỹ</b> (2.1.37)<br>"
+                 "• <b>Sửa chữ dễ nhầm theo từ điển</b>: chữ bộ đọc chưa chắc mà đứng lẻ (không thành từ) được thử thay bằng "
+                 "chữ giống hình (己/已, 未/末, 土/士, 人/入…) – chỉ đổi khi ghép thành từ có trong từ điển (\"己经\" → "
+                 "\"已经\"). Tên riêng ở Bảng tên riêng / hồ sơ phim không bị đổi. Rê chuột chữ gốc để xem chữ đã sửa.<br>"
+                 "• <b>Đọc lại câu kém chắc bằng bộ đọc lớn</b>: quét cả phim bằng bộ đọc nhỏ (nhanh), câu nào đọc kém chắc "
+                 "thì cuối lần quét bộ đọc lớn đọc lại đúng ảnh chữ đó – gần chính xác như bộ lớn mà chỉ chậm thêm chút. "
+                 "Cần tải PP-OCRv5 server (hoặc PP-OCRv6 medium) ở tab Tài liệu.<br>"
+                 "Chữ bộ đọc không chắc được tô đỏ trong cột chữ gốc (từng chữ).")
 
 
 def which_choices(lang: str = "vi") -> list[tuple[str, str]]:

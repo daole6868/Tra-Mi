@@ -124,6 +124,27 @@ def _bbox(pts) -> tuple[float, float, float, float]:
     return float(pts[:, 0].min()), float(pts[:, 1].min()), float(pts[:, 0].max()), float(pts[:, 1].max())
 
 
+class _It(tuple):
+    """Mảnh chữ đọc được (khung, chữ, độ chắc) – vẫn là tuple 3 phần như trước – kèm (2.1.37):
+      ch    chi tiết từng chữ [(chữ, độ chắc, tâm chữ theo tỉ lệ bề rộng khung, [(chữ ứng viên, xác suất)])] | None;
+      logo  cả mảnh là logo (chữ logo) – không vào câu, chỉ giữ để trả lại khi người dùng tắt logo;
+      raw   chữ trước khi cắt logo dính câu; alpha độ "trong suốt" (nét chữ dao động theo nền)."""
+    ch = None
+    logo = ""
+    raw = None
+    alpha = None
+
+
+def _mk(pts, text: str, score: float, ch=None) -> _It:
+    it = _It((pts, text, score))
+    it.ch = ch
+    return it
+
+
+def _rect_pts(x0: float, y0: float, x1: float, y1: float) -> np.ndarray:
+    return np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], np.float32)
+
+
 def static_marks(frames: list[tuple[float, list]], fps: float, min_share: float = 0.3,
                  min_sec: float = 10.0) -> list[tuple[str, float, float, float, float]]:
     """Chữ đứng yên 1 chỗ gần suốt video (logo / watermark tên kênh như "冬冰 bilibili") -> không phải phụ đề.
@@ -272,8 +293,11 @@ class _Tracker:
     """Theo dõi 1 khúc video: chỉ chạy bước TÌM CHỮ khi nét ở dải quét đổi (nền chuyển động không làm tách câu – câu
     chỉ đổi khi chính các điểm ảnh nét chữ đổi). Giờ hiện / tắt chữ tìm bằng chia đôi các khung giữa 2 mốc (D)."""
 
-    def __init__(self, detect, emit, offset: int):
+    def __init__(self, detect, emit, offset: int, guard=None):
         self.detect, self.emit, self.off = detect, emit, offset
+        self.guard = guard          # _LogoGuard (2.1.37): bỏ khung chữ là logo / vùng bỏ qua khỏi việc theo dõi nét
+        self.cache: list = []       # kết quả xét logo của lần tìm chữ trước (khung đứng yên -> không đọc lại)
+        self.lb: list = []          # khung logo đang thấy
         self.cur: _Span | None = None
         self.vsig = None            # dấu nét của khung đã kiểm tra bằng bộ tìm chữ gần nhất
         self.n_det = 0
@@ -281,7 +305,11 @@ class _Tracker:
     def _det(self, img: np.ndarray, sig) -> list:
         self.n_det += 1
         self.vsig = sig
-        return self.detect(img)
+        boxes = self.detect(img)
+        if self.guard is None:
+            return boxes
+        boxes, self.lb, self.cache = self.guard.split(img, boxes, self.cache)
+        return boxes
 
     def _start(self, pend: list, i: int, img: np.ndarray, boxes: list, idx: np.ndarray) -> int:
         """Khung đầu tiên (trong pend + khung i) đã có các nét chữ idx – chữ hiện từ đó."""
@@ -296,7 +324,7 @@ class _Tracker:
         return pend[hi][0] if hi < len(pend) else i
 
     def _open(self, f0: int, i: int, img: np.ndarray, boxes: list) -> None:
-        idx = _glyph_pixels(img, boxes)
+        idx = _glyph_pixels(img, boxes, skip=self.lb)
         self.cur = _Span(f0, i, boxes, idx, img.ravel()[idx].astype(np.int16), [img], n0=len(idx))
 
     def _close(self, f1: int) -> None:
@@ -316,14 +344,14 @@ class _Tracker:
                 boxes = self._det(img, sig)
                 if not boxes:
                     return
-                idx = _glyph_pixels(img, boxes)
+                idx = _glyph_pixels(img, boxes, skip=self.lb)
                 f0 = self._start(pend, i, img, boxes, idx) if len(idx) else i
                 self._open(f0, i, img, boxes)
                 return
             if len(sp.idx) and _persist(img, sp.idx, sp.ref) >= KEEP:
                 if self.vsig is None or _changed(sig, self.vsig):   # nét đổi: có thêm chữ mới hiện ra không?
                     boxes = self._det(img, sig)
-                    new = _glyph_pixels(img, boxes, skip=sp.boxes)
+                    new = _glyph_pixels(img, boxes, skip=sp.boxes + self.lb)
                     lh = float(np.median([_bbox(b)[3] - _bbox(b)[1] for b in sp.boxes])) if sp.boxes else 20.0
                     if len(new) >= max(40.0, 0.25 * lh * lh):     # thêm ít nhất ~1 chữ (khung lệch vài điểm thì không)
                         f0 = self._start(pend, i, img, boxes, new)
@@ -412,9 +440,12 @@ def preview_scan(src: str | Path, t: float, region: dict | None, settings: dict 
 
 
 def _scan(src: str, rect, size, fps: float, f0: int, count: int | None, step: int, hw: list, detect, emit,
-          stop: threading.Event, seen: list, pre: str = "") -> tuple[int, int]:
+          stop: threading.Event, seen: list, pre: str = "", guard=None, tm: dict | None = None) -> tuple[int, int]:
     """Giải mã 1 khúc video (từ khung f0, count khung) chỉ lấy dải phụ đề ảnh xám -> các câu (_Span, số khung tính từ
-    đầu video). Trả (số khung đã đọc, số lần tìm chữ). pre: lọc ảnh làm rõ chữ (eq_filter) trước khi chuyển xám."""
+    đầu video). Trả (số khung đã đọc, số lần tìm chữ). pre: lọc ảnh làm rõ chữ (eq_filter) trước khi chuyển xám.
+    guard: bỏ logo / vùng bỏ qua khỏi việc theo dõi nét (2.1.37); tm["decode"] cộng thời gian chờ giải mã."""
+    import time as _time
+
     x, y, w, h = rect
     ow, oh = size
     vf = f"fps={fps:.6f},crop={w}:{h}:{x}:{y}" + (f",scale={ow}:{oh}:flags=area" if (ow, oh) != (w, h) else "") + \
@@ -427,12 +458,15 @@ def _scan(src: str, rect, size, fps: float, f0: int, count: int | None, step: in
         cmd += ["-frames:v", str(count)]
     cmd += ["-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=_NO_WINDOW)
-    tr = _Tracker(detect, emit, f0)
+    tr = _Tracker(detect, emit, f0, guard)
     nbytes = ow * oh
     pend, i = [], -1
+    wait = 0.0
     try:
         while not stop.is_set():
+            t0 = _time.perf_counter()
             buf = proc.stdout.read(nbytes)  # type: ignore[union-attr]
+            wait += _time.perf_counter() - t0
             if len(buf) < nbytes:
                 break
             i += 1
@@ -452,7 +486,13 @@ def _scan(src: str, rect, size, fps: float, f0: int, count: int | None, step: in
     finally:
         proc.kill()
         proc.wait()
+        if tm is not None:
+            with _TM_LOCK:
+                tm["decode"] = tm.get("decode", 0.0) + wait
     return i + 1, tr.n_det
+
+
+_TM_LOCK = threading.Lock()
 
 
 def _clean_image(frames: list, clean: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
@@ -490,28 +530,218 @@ def _cover(boxes: list) -> float:
     return float(sum((_bbox(b)[2] - _bbox(b)[0]) * (_bbox(b)[3] - _bbox(b)[1]) for b in boxes))
 
 
+BIG_BELOW = 0.93         # câu đọc kém chắc hơn mức này (theo chữ kém nhất) -> đọc lại bằng bộ đọc lớn cuối lần quét
+BIG_MAX = 4000           # giữ ảnh chữ tối đa chừng này câu để đọc lại
+
+
+def _shrink(it: _It, a: int, b: int) -> _It:
+    """Mảnh chữ chỉ còn chữ [a, b) (cắt logo dính đầu / cuối): khung co theo tâm chữ đầu / cuối còn giữ."""
+    pts, text, score = it
+    ch = it.ch
+    nch = ch[a:b] if ch and len(ch) == len(text) else None
+    x0, y0, x1, y1 = _bbox(pts)
+    if nch:
+        w = x1 - x0
+        cw = w / max(1, len(text))
+        nx0 = x0 + max(0.0, nch[0][2] * w - 0.6 * cw) if a > 0 else x0
+        nx1 = x0 + min(w, nch[-1][2] * w + 0.6 * cw) if b < len(text) else x1
+        if nx1 - nx0 >= 4:
+            x0, x1 = nx0, nx1
+        score = float(np.mean([c[1] for c in nch])) if nch else score
+    out = _mk(_rect_pts(x0, y0, x1, y1), text[a:b], score, nch)
+    out.raw = it.raw if it.raw is not None else text
+    out.alpha = it.alpha
+    return out
+
+
+def _static_cut(bb, det, logos) -> tuple[int, int] | None:
+    """Logo ĐỨNG YÊN dính liền câu trong 1 khung chữ mà đọc ra chữ lạ ("…元石@黄AGC" – logo đọc mỗi lần 1 kiểu): cắt các
+    chữ đầu / cuối có tâm nằm trong khung logo đứng yên (khung bộ tìm chữ nới rộng -> thu lại 0,3 cao dòng mỗi bên), số chữ
+    cắt ≤ số chữ logo + 1 và có dấu hiệu là logo (@ # hoặc chữ của logo) – chữ phụ đề nằm sát logo không bị cắt nhầm.
+    Trả [đầu, cuối) phần giữ."""
+    from . import ocrlogo
+
+    if not det:
+        return None
+    n = len(det)
+    w = bb[2] - bb[0]
+    for L in logos:
+        if not L.on or not L.static or not L.h:
+            continue
+        x0, y0, x1, y1 = L.static
+        if min(bb[3], y1) - max(bb[1], y0) < 0.5 * min(bb[3] - bb[1], y1 - y0):
+            continue
+        sx0, sx1 = x0 + 0.3 * L.h, x1 - 0.3 * L.h
+        if sx1 - sx0 < 0.5 * L.h:
+            sx0, sx1 = (x0 + x1) / 2 - 0.25 * L.h, (x0 + x1) / 2 + 0.25 * L.h
+        inside = [sx0 <= bb[0] + c[2] * w <= sx1 for c in det]
+        chars = set("".join(L.texts()[:8]))
+        lim = ocrlogo.literal(L.text) + 1
+
+        def ok(run) -> bool:
+            t = "".join(c[0] for c in run)
+            return 0 < len(run) <= lim and (any(c in "@#＠＃" for c in t) or
+                                            len(set(t) & chars) >= max(1, len(run) // 2))
+        k = 0
+        while k < n and inside[k]:
+            k += 1
+        if 0 < k < n and not any(inside[k:]) and ok(det[:k]):
+            return k, n
+        k = n
+        while k > 0 and inside[k - 1]:
+            k -= 1
+        if 0 < k < n and not any(inside[:k]) and ok(det[k:]):
+            return 0, k
+    return None
+
+
+class _LogoGuard:
+    """2.1.37: bỏ logo chữ đã biết / vùng bỏ qua ra khỏi việc theo dõi nét chữ khi quét -> logo nhảy tới / đi khỏi không
+    làm tách câu, câu ngắn có logo đứng cạnh không bị kéo dài giờ tắt; logo dính liền dòng phụ đề (bộ tìm chữ gộp chung 1
+    khung) được tách theo vị trí từng chữ. Khung nào đáng ngờ (cỡ gần cỡ logo, hoặc rộng hơn – có thể dính logo) mới đọc
+    thử; khung y hệt lần tìm chữ trước dùng lại kết quả."""
+
+    def __init__(self, eng, logos: list, ignore: list):
+        self.eng, self.logos, self.ignore = eng, [L for L in logos if L.on], list(ignore or [])
+        hs = [L.h for L in self.logos if L.h]
+        self.hmin, self.hmax = (min(hs), max(hs)) if hs else (0.0, 0.0)
+        self.wmin = min((L.w for L in self.logos if L.w), default=0.0)
+        self.n_rec = self.n_logo = self.n_split = 0
+        self.hid: dict[str, int] = {}       # logo -> số lần bị bỏ khi quét
+        self.t = 0.0
+
+    def _ignored(self, bb) -> bool:
+        cx, cy = (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
+        return any(x0 <= cx <= x1 and y0 <= cy <= y1 for x0, y0, x1, y1 in self.ignore)
+
+    def classify(self, img: np.ndarray, box) -> tuple:
+        """("text", None) | ("logo", chữ logo | "" vùng bỏ qua) | ("split", (x0, x1) phần chữ phụ đề, [(x0, x1) phần logo])
+        cho 1 khung."""
+        from . import ocrlogo
+        from .ocr_engine import _crop
+
+        bb = _bbox(box)
+        if self._ignored(bb):
+            return ("logo", "")
+        if not self.logos:
+            return ("text", None)
+        w, h = bb[2] - bb[0], bb[3] - bb[1]
+        touch = False                  # khung chồng lên chỗ logo đứng yên (có thể dính câu) -> phải đọc thử
+        for L in self.logos:
+            if L.static and L.h:
+                x0, y0, x1, y1 = L.static
+                pad = 0.5 * L.h
+                cx, cy = (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
+                if x0 - pad <= cx <= x1 + pad and y0 - pad <= cy <= y1 + pad and w <= 1.5 * (x1 - x0) + pad:
+                    return ("logo", L.text)
+                ix = max(0.0, min(bb[2], x1) - max(bb[0], x0)) * max(0.0, min(bb[3], y1) - max(bb[1], y0))
+                touch = touch or ix >= 0.5 * (x1 - x0) * (y1 - y0)
+        if not touch and self.hmax and (h < 0.6 * self.hmin or h > 2.5 * self.hmax or w < 0.6 * self.wmin):
+            return ("text", None)
+        import time as _time
+
+        t0 = _time.perf_counter()
+        (text, _sc, det), = self.eng.recognize_ex([_crop(img, box)])
+        self.n_rec += 1
+        self.t += _time.perf_counter() - t0
+        if not text.strip():
+            return ("text", None)
+        L = ocrlogo.match(text, self.logos, (w, h))
+        if L is not None:
+            return ("logo", L.text)
+        rest, (a, b), cuts = ocrlogo.strip(text, self.logos)
+        if (not cuts or not rest.strip()) and det and len(det) == len(text):
+            sc = _static_cut(bb, det, self.logos)
+            if sc:
+                (a, b), cuts, rest = sc, ["?"], text[sc[0]:sc[1]]
+        if not cuts or not det or len(det) != len(text) or not rest.strip():
+            return ("text", None)
+        cw = w / max(1, len(text))
+        xa = bb[0] + max(0.0, det[a][2] * w - 0.6 * cw) if a > 0 else bb[0]
+        xb = bb[0] + min(w, det[b - 1][2] * w + 0.6 * cw) if b < len(text) else bb[2]
+        logo = []
+        if a > 0:
+            logo.append((bb[0], max(bb[0], xa - 1)))
+        if b < len(text):
+            logo.append((min(bb[2], xb + 1), bb[2]))
+        return ("split", (xa, xb), logo)
+
+    def split(self, img: np.ndarray, boxes: list, cache: list) -> tuple[list, list, list]:
+        """-> (khung chữ phụ đề, khung logo, cache mới)."""
+        text, logo, new_cache = [], [], []
+        for b in boxes:
+            bb = _bbox(b)
+            res = None
+            for cb, cres in cache:
+                ix = max(0.0, min(bb[2], cb[2]) - max(bb[0], cb[0])) * max(0.0, min(bb[3], cb[3]) - max(bb[1], cb[1]))
+                un = (bb[2] - bb[0]) * (bb[3] - bb[1]) + (cb[2] - cb[0]) * (cb[3] - cb[1]) - ix
+                if un > 0 and ix / un >= 0.85:
+                    res = cres
+                    break
+            if res is None:
+                res = self.classify(img, b)
+            new_cache.append((bb, res))
+            if res[0] == "logo":
+                self.n_logo += 1
+                if res[1]:
+                    self.hid[res[1]] = self.hid.get(res[1], 0) + 1
+                logo.append(b)
+            elif res[0] == "split":
+                self.n_split += 1
+                xa, xb = res[1]
+                text.append(_rect_pts(xa, bb[1], xb, bb[3]))
+                logo += [_rect_pts(x0, bb[1], x1, bb[3]) for x0, x1 in res[2]]
+            else:
+                text.append(b)
+        return text, logo, new_cache
+
+
 class _Reader:
     """Đọc chữ từng câu (_Span) – chỉ bước ĐỌC DÒNG trên các khung chữ bộ theo dõi đã tìm (C: không tìm chữ lại),
-    trên ảnh chữ sạch (F); kém chắc thì đọc thêm khung gốc rồi chọn bản tốt hơn."""
+    trên ảnh chữ sạch (F); kém chắc thì đọc thêm khung gốc rồi chọn bản tốt hơn. 2.1.37: đọc kèm độ chắc từng chữ + chữ
+    ứng viên; câu kém chắc giữ ảnh chữ để bộ đọc lớn đọc lại cuối lần quét (keep_weak)."""
 
-    def __init__(self, eng, clean: bool, min_score: float, low_score: float):
+    def __init__(self, eng, clean: bool, min_score: float, low_score: float, keep_weak: bool = False,
+                 alpha: bool = False):
         self.eng, self.clean, self.min_score, self.low_score = eng, clean, min_score, low_score
+        self.keep_weak, self.alpha = keep_weak, alpha
         self.lock = threading.Lock()
         self.n = {"ocr": 0, "cleaned": 0, "spans": 0}
+        self.weak: list = []         # [(chỉ số câu, [ảnh dòng chữ], khung)]
+        self.t = 0.0
 
     def _keep(self, items: list) -> list:
-        return _reading_order([(pts, t.strip(), s) for pts, t, s in items if s >= self.low_score and (
-            _CJK.search(t) or (s >= NONHAN_MIN and _ALNUM.search(t)))])
+        out = []
+        for it in items:
+            pts, t, s = it
+            if s < self.low_score or not (_CJK.search(t) or (s >= NONHAN_MIN and _ALNUM.search(t))):
+                continue
+            st = t.strip()
+            ch = getattr(it, "ch", None)
+            if ch is not None and len(ch) == len(t) and st != t:
+                lead = len(t) - len(t.lstrip())
+                ch = ch[lead:lead + len(st)]
+            out.append(_mk(pts, st, s, ch if ch is not None and len(ch) == len(st) else None))
+        return _reading_order(out)
 
     def _read(self, img: np.ndarray, boxes: list) -> list:
         from .ocr_engine import _crop
 
         self.n["ocr"] += 1
         with self.lock:
-            recs = self.eng.recognize([_crop(img, b) for b in boxes])
-        return self._keep([(np.asarray(b, np.float32), t, s) for b, (t, s) in zip(boxes, recs)])
+            recs = self.eng.recognize_ex([_crop(img, b) for b in boxes])
+        return self._keep([_mk(np.asarray(b, np.float32), t, s, d) for b, (t, s, d) in zip(boxes, recs)])
 
-    def read(self, sp: _Span) -> list:
+    def read(self, sp: _Span, k: int = -1) -> list:
+        import time as _time
+
+        t0 = _time.perf_counter()
+        try:
+            return self._read_span(sp, k)
+        finally:
+            self.t += _time.perf_counter() - t0
+
+    def _read_span(self, sp: _Span, k: int) -> list:
         self.n["spans"] += 1
         img, raw, dark = _clean_image(sp.frames, self.clean)
         boxes = sp.boxes
@@ -523,20 +753,139 @@ class _Reader:
             if cb and _cover(cb) > 1.15 * _cover(boxes):
                 boxes = cb
                 self.n["redetect"] = self.n.get("redetect", 0) + 1
-        reads = [self._read(img, boxes)]
-        weak = not reads[0] or min(s for _, _, s in reads[0]) < WEAK
+        reads = [(self._read(img, boxes), img)]
+        weak = not reads[0][0] or min(s for _, _, s in reads[0][0]) < WEAK
         if img is not raw and (weak or boxes is not sp.boxes):
-            reads.append(self._read(raw, boxes))         # đọc thêm khung gốc rồi chọn bản tốt hơn
+            reads.append((self._read(raw, boxes), raw))      # đọc thêm khung gốc rồi chọn bản tốt hơn
         elif weak and len(sp.frames) > 2:
-            reads.append(self._read(sp.frames[0], boxes))
+            reads.append((self._read(sp.frames[0], boxes), sp.frames[0]))
 
         def q(items):          # nhiều chữ + chắc chắn (bình phương: 1 bản dài mà kém chắc không thắng bản ngắn mà chắc)
             return sum(len(t) * s * s for _, t, s in items)
-        reads.sort(key=q, reverse=True)
-        best = reads[0]
-        others = [t for r in reads[1:] for _, t, _ in r]
+        reads.sort(key=lambda r: q(r[0]), reverse=True)
+        best, bimg = reads[0]
+        others = [t for r, _ in reads[1:] for _, t, _ in r]
         # chữ kém chắc (< min_score) chỉ giữ khi lần đọc kia ra giống (chữ thật), không thì bỏ (rác thoáng qua)
-        return [it for it in best if it[2] >= self.min_score or any(_similar(it[1], o) >= 0.8 for o in others)]
+        out = [it for it in best if it[2] >= self.min_score or any(_similar(it[1], o) >= 0.8 for o in others)]
+        if self.alpha and len(sp.frames) >= 3:
+            for it in out:
+                it.alpha = _alpha(sp.frames, it[0])
+        if self.keep_weak and k >= 0 and len(self.weak) < BIG_MAX and boxes:
+            low = min((min(c[1] for c in it.ch) if it.ch else it[2]) for it in out) if out else 0.0
+            if low < BIG_BELOW:
+                from .ocr_engine import _crop
+
+                self.weak.append((k, [_crop(bimg, b).copy() for b in boxes], list(boxes)))
+        return out
+
+
+def _alpha(frames: list, pts) -> float | None:
+    """Chữ in mờ (trong suốt) hay chữ đặc: nét chữ của chữ mờ dao động theo nền phía sau, chữ đặc thì đứng yên. Đo độ dao
+    động (theo thời gian) của điểm sáng nhất trong khung chữ so với viền nền quanh khung. None: nền đứng yên (không đo được)."""
+    x0, y0, x1, y1 = (int(v) for v in _bbox(pts))
+    H, W = frames[0].shape
+    x0, y0, x1, y1 = max(0, x0), max(0, y0), min(W, x1 + 1), min(H, y1 + 1)
+    if x1 - x0 < 6 or y1 - y0 < 6:
+        return None
+    pad = max(3, (y1 - y0) // 2)
+    st = np.stack([f[max(0, y0 - pad):min(H, y1 + pad), max(0, x0 - pad):min(W, x1 + pad)] for f in frames[:8]])
+    st = st.astype(np.float32)
+    iy0, ix0 = y0 - max(0, y0 - pad), x0 - max(0, x0 - pad)
+    inner = st[:, iy0:iy0 + (y1 - y0), ix0:ix0 + (x1 - x0)]
+    mid = inner[len(inner) // 2]
+    glyph = mid >= np.percentile(mid, 88)
+    ring = np.ones(st.shape[1:], bool)
+    ring[iy0:iy0 + (y1 - y0), ix0:ix0 + (x1 - x0)] = False
+    sd = st.std(axis=0)
+    sb = float(np.median(sd[ring])) if ring.any() else 0.0
+    if sb < 6.0:
+        return None
+    return round(float(np.median(sd[iy0:iy0 + (y1 - y0), ix0:ix0 + (x1 - x0)][glyph])) / sb, 3)
+
+
+def _logo_prescan(src: str, rect, size, pre: str, wins: list, total: float, eng, ignore: list, cancel=None,
+                  progress=None) -> tuple[list, int]:
+    """C1 (2.1.37): dò logo TRƯỚC khi quét – lấy ~LOGO_SAMPLES khung rải đều (khung khoá gần nhất: nhanh), tìm + đọc
+    mọi chữ trong dải quét -> danh sách lần thấy (ocrlogo.Obs) để ocrlogo.find nhận ra chữ lặp lại suốt video."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from . import ocrlogo
+    from .ocr_engine import _crop
+
+    covered = sum(b - a for a, b in wins)
+    n = int(min(ocrlogo.LOGO_SAMPLES, max(12, covered / 2)))
+    times = []
+    for j in range(n):
+        u = (j + 0.5) / n * covered
+        for a, b in wins:
+            if u <= b - a:
+                times.append(a + u)
+                break
+            u -= b - a
+    x, y, w, h = rect
+    ow, oh = size
+    vf = f"crop={w}:{h}:{x}:{y}" + (f",scale={ow}:{oh}:flags=area" if (ow, oh) != (w, h) else "") + \
+         (f",{pre}" if pre else "") + ",format=gray"
+    if len(wins) == 1 and total < 600:
+        # video ngắn: giải mã 1 lượt lấy đều n khung (nhanh hơn n lần tua – tua chính xác phải giải mã cả nhóm khung)
+        rate = n / max(1e-3, covered)
+        cmd = [ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-i", src, "-an", "-sn", "-dn", "-vf",
+               f"fps={rate:.6f}:start_time={0.5 / rate:.3f}," + vf, "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"]
+        buf = subprocess.run(cmd, capture_output=True, creationflags=_NO_WINDOW).stdout
+        m = len(buf) // (ow * oh)
+        shots = [((j + 0.5) / rate, np.frombuffer(buf[j * ow * oh:(j + 1) * ow * oh], np.uint8).reshape(oh, ow))
+                 for j in range(m)]
+    else:
+        def grab(t: float):   # phim dài: lấy đúng khung khoá gần nhất (không giải mã cả nhóm khung)
+            cmd = [ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-noaccurate_seek", "-ss", f"{t:.3f}", "-i",
+                   src, "-an", "-sn", "-dn", "-vf", vf, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray",
+                   "pipe:1"]
+            buf = subprocess.run(cmd, capture_output=True, creationflags=_NO_WINDOW).stdout
+            return t, (np.frombuffer(buf[:ow * oh], np.uint8).reshape(oh, ow) if len(buf) >= ow * oh else None)
+        with ThreadPoolExecutor(4) as ex:
+            shots = list(ex.map(grab, times))
+    obs: list = []
+    seen: set = set()
+    dt = covered / max(1, n)
+    for k, (t, img) in enumerate(shots):
+        if cancel and cancel():
+            raise Cancelled()
+        if progress:
+            progress(k / max(1, len(shots)), f"Dò logo chữ ({k + 1}/{len(shots)} khung)")
+        if img is None:
+            continue
+        key = hash(img[::3, ::3].tobytes())
+        if key in seen:            # cùng 1 khung khoá (nhóm khung dài) -> không đếm 2 lần
+            continue
+        seen.add(key)
+        boxes = [b for b in eng.detect(img, SCAN_SIDE)
+                 if not any(x0 <= (_bbox(b)[0] + _bbox(b)[2]) / 2 <= x1 and y0 <= (_bbox(b)[1] + _bbox(b)[3]) / 2 <= y1
+                            for x0, y0, x1, y1 in ignore)]
+        if not boxes:
+            continue
+        recs = eng.recognize_ex([_crop(img, b) for b in boxes])
+        items = [(_bbox(b), ocrlogo.norm(tx)) for b, (tx, sc, _d) in zip(boxes, recs) if sc >= 0.5 and tx.strip()]
+        for i, (bb, tx) in enumerate(items):
+            obs.append(ocrlogo.Obs(k, t, t + dt, bb, tx, tuple(o for j, (_, o) in enumerate(items) if j != i)))
+    return obs, n
+
+
+def big_model(settings: dict | None, eng=None) -> str:
+    """B3 (2.1.37): bộ đọc lớn đã tải dùng để đọc lại câu kém chắc ("" = không có / đang dùng sẵn bộ lớn / tắt)."""
+    from .ocr_engine import model_ready
+
+    st = settings or {}
+    if not st.get("ocr_big", True):
+        return ""
+    if eng is not None and (getattr(eng, "kind", "") != "v3" or getattr(eng, "key", "") != "v6_small"):
+        return ""
+    for k in ("v5_server", "v6_medium"):
+        try:
+            if model_ready(k):
+                return k
+        except Exception:  # noqa: BLE001
+            pass
+    return ""
 
 
 def _chunks(total: float) -> int:
@@ -552,7 +901,8 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
                      cancel: Callable[[], bool] | None = None,
                      boxes_out: str | Path | None = None, stats: dict | None = None,
                      low_score: float = 0.45, settings: dict | None = None,
-                     windows: list | None = None) -> list[Segment]:
+                     windows: list | None = None, logos: list | None = None,
+                     ignore: list | None = None) -> list[Segment]:
     """Đọc phụ đề in sẵn trong vùng `region` (2.1.31):
       A giải mã bằng card (NVDEC / D3D11) chỉ lấy dải phụ đề ảnh xám; phim dài chia 2–3 khúc giải mã song song; giải mã
         và đọc chữ chạy ở luồng riêng;
@@ -564,7 +914,12 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
     region có line_y / line_h (dòng phụ đề chính, từ detect_subtitle_region) thì chỉ giữ khối dòng chữ quanh dòng đó;
     region "exact" (khung người dùng kéo) -> quét đúng khung đó, giữ mọi chữ trong khung.
     windows [(giây đầu, giây cuối)] (2.1.35 – tách phụ đề theo đoạn): chỉ quét các đoạn này (mỗi đoạn 1 khúc giải mã,
-    tối đa 2–3 khúc chạy cùng lúc), giờ câu vẫn tính từ đầu video."""
+    tối đa 2–3 khúc chạy cùng lúc), giờ câu vẫn tính từ đầu video.
+    2.1.37: logos = logo đã biết (dict của ocrlogo.Logo, khung chữ theo tỉ lệ chiều cao khung hình – người dùng thêm / lần
+    quét trước; logo tắt không bị tìm lại), ignore = vùng bỏ qua [{x, y, w, h}] (tỉ lệ khung hình). Cài đặt ocr_logo: dò
+    logo trước khi quét (C1) + bỏ logo khỏi việc theo dõi nét (C2) + lọc / cắt logo sau khi đọc (C3); ocr_big: câu kém chắc
+    đọc lại bằng bộ đọc lớn đã tải (B3). Câu có extra ocr_cc (độ chắc từng chữ) / ocr_alt (chữ ứng viên) / ocr_raw (chữ
+    trước khi bỏ logo). stats["t"] = thời gian từng công đoạn (A1), stats["logos"] / ["logo_only"]."""
     import bisect
     import queue
     import time as _time
@@ -607,6 +962,35 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
     todo = list(bounds)
     todo_lock = threading.Lock()
     pre = eq_filter(st)
+    from . import ocrlogo
+
+    tm: dict[str, float] = {}               # A1: thời gian từng công đoạn (giây, cộng các luồng)
+    hk = H * scale                          # tỉ lệ chiều cao khung hình -> điểm ảnh dải quét
+
+    def to_px(r: dict) -> tuple:
+        return ((float(r["x"]) * W - x) * scale, (float(r["y"]) * H - y) * scale,
+                ((float(r["x"]) + float(r["w"])) * W - x) * scale, ((float(r["y"]) + float(r["h"])) * H - y) * scale)
+    ign = [to_px(r) for r in (ignore or []) if all(k in r for k in ("x", "y", "w", "h"))]
+
+    def logo_in(d: dict):
+        L = ocrlogo.Logo.from_dict(d, hk)
+        if d.get("static"):
+            sx0, sy0, sx1, sy1 = (float(v) for v in d["static"])
+            L.static = ((sx0 * W - x) * scale, (sy0 * H - y) * scale, (sx1 * W - x) * scale, (sy1 * H - y) * scale)
+        return L
+    known = [logo_in(d) for d in (logos or []) if d.get("text")]
+    use_logo = bool(st.get("ocr_logo", True))
+    wins_all = [(a / F, (a + c) / F if c else total) for a, c in bounds] if windows else [(0.0, total)]
+    if use_logo:
+        t0 = _time.time()
+        if progress:
+            progress(0.0, "Dò logo chữ quanh phụ đề…")
+        obs0, _n0 = _logo_prescan(src, rect, size, pre, wins_all, total, eng, ign, cancel,
+                                  (lambda f, m: progress(0.04 * f, m)) if progress else None)
+        known = ocrlogo.find(obs0, covered, known)
+        tm["logo"] = _time.time() - t0
+    active = [L for L in known if L.on]
+    guard = _LogoGuard(eng, active, ign) if (active or ign) else None
     # hàng đợi có giới hạn: đọc chữ chậm hơn giải mã (máy chỉ CPU) thì luồng giải mã chờ – mỗi câu giữ ≤ 16 khung mẫu,
     # không giới hạn thì phim dài có thể dồn hàng nghìn câu (vài GB RAM)
     q: queue.Queue = queue.Queue(maxsize=QUEUE_MAX)
@@ -628,7 +1012,10 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
 
     def detect(img: np.ndarray) -> list:
         with det_lock:
-            return eng.detect(img, SCAN_SIDE)
+            t0 = _time.perf_counter()
+            r = eng.detect(img, SCAN_SIDE)
+            tm["detect"] = tm.get("detect", 0.0) + _time.perf_counter() - t0
+            return r
 
     def run():
         try:
@@ -638,10 +1025,10 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
                         return
                     f0, count = todo.pop(0)
                 got, nd = _scan(src, rect, size, F, f0, count, step, hw if used_hw[0] else [], detect, put, stop, seen,
-                                pre)
+                                pre, guard, tm)
                 if got == 0 and used_hw[0] and not stop.is_set():   # card không giải mã được file này -> giải mã CPU
                     used_hw[0] = False
-                    got, nd = _scan(src, rect, size, F, f0, count, step, [], detect, put, stop, seen, pre)
+                    got, nd = _scan(src, rect, size, F, f0, count, step, [], detect, put, stop, seen, pre, guard, tm)
                 n_det[0] += nd
         except Exception as e:  # noqa: BLE001
             errs.append(e)
@@ -650,7 +1037,9 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
     t_start = _time.time()
     for th in threads:
         th.start()
-    reader = _Reader(eng, bool(st.get("ocr_clean", True)), min_score, low_score)
+    big_key = big_model(st, eng)
+    reader = _Reader(eng, bool(st.get("ocr_clean", True)), min_score, low_score, keep_weak=bool(big_key),
+                     alpha=use_logo)
     spans: list[tuple[int, int, list]] = []
     last = 0.0
     try:
@@ -664,7 +1053,7 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
                     break
                 sp = None
             if sp is not None:
-                spans.append((sp.f0, sp.f1, reader.read(sp)))
+                spans.append((sp.f0, sp.f1, reader.read(sp, len(spans))))
             now = _time.time()
             if progress and now - last > 0.5:
                 last = now
@@ -677,10 +1066,91 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
             th.join(timeout=5)
     if errs:
         raise errs[0]
+    tm["read"] = reader.t
+    if guard is not None:
+        tm["logo"] = tm.get("logo", 0.0) + guard.t
+    # B3: câu kém chắc -> bộ đọc lớn đọc lại đúng ảnh chữ đã giữ (quét cả phim bằng bộ nhỏ cho nhanh)
+    big_st = {"key": big_key, "lines": 0, "changed": 0}
+    if big_key and reader.weak:
+        from .ocr_engine import Engine
+
+        t0 = _time.time()
+        if progress:
+            progress(0.995, f"Đọc lại {len(reader.weak)} câu kém chắc bằng bộ đọc lớn…")
+        try:
+            big = Engine(big_key, str(st.get("ocr_device") or "auto"))
+            for k, crops, bxs in reader.weak:
+                if cancel and cancel():
+                    raise Cancelled()
+                recs = big.recognize_ex(crops)
+                items = [it for it in reader._keep([_mk(np.asarray(b, np.float32), t, sc, d)
+                                                     for b, (t, sc, d) in zip(bxs, recs)]) if it[2] >= min_score]
+                f0_, f1_, old = spans[k]
+                big_st["lines"] += 1
+                if not items:
+                    continue
+                mo = float(np.mean([it[2] for it in old])) if old else 0.0
+                if float(np.mean([it[2] for it in items])) >= mo - 0.1:
+                    for it in items:          # độ trong suốt đo trên khung: theo mảnh cũ cùng chỗ
+                        near = [o for o in old if abs(_bbox(o[0])[0] - _bbox(it[0])[0]) < 4]
+                        it.alpha = near[0].alpha if near else None
+                    if "".join(i[1] for i in items) != "".join(o[1] for o in old):
+                        big_st["changed"] += 1
+                    spans[k] = (f0_, f1_, items)
+            del big
+        except Cancelled:
+            raise
+        except Exception as e:  # noqa: BLE001 – bộ đọc lớn lỗi: giữ kết quả bộ nhỏ
+            big_st["error"] = f"{type(e).__name__}: {e}"[:200]
+        tm["big"] = _time.time() - t0
     spans.sort(key=lambda s: s[0])
     times = [((a / F), (b + 1) / F) for a, b, _ in spans]
     reads = [items for _, _, items in spans]
     mids = [(a + b) / 2 for a, b in times]
+
+    # C3: logo – tìm lại trên MỌI lần đọc (logo dò trước bị sót / dính câu), rồi bỏ mảnh chữ là logo, cắt logo dính câu
+    t0 = _time.time()
+    logo_list = list(known)
+    if use_logo or known or ign:
+        if use_logo:
+            obs = []
+            for k, ((a, b), items) in enumerate(zip(times, reads)):
+                nt = [ocrlogo.norm(it[1]) for it in items]
+                for i, it in enumerate(items):
+                    obs.append(ocrlogo.Obs(k, a, b, _bbox(it[0]), nt[i], tuple(o for j, o in enumerate(nt) if j != i),
+                                           it.alpha))
+            logo_list = ocrlogo.find(obs, covered, logo_list)
+        act = [L for L in logo_list if L.on]
+        new_reads = []
+        for items in reads:
+            out = []
+            for it in items:
+                bb = _bbox(it[0])
+                c = ((bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2)
+                if any(x0 <= c[0] <= x1 and y0 <= c[1] <= y1 for x0, y0, x1, y1 in ign):
+                    continue                                   # vùng bỏ qua: không giữ cả để trả lại
+                L = ocrlogo.match(it[1], act, (bb[2] - bb[0], bb[3] - bb[1]), c) if act else None
+                if L is not None:
+                    nit = _mk(it[0], it[1], it[2], it.ch)
+                    nit.logo, nit.alpha = L.text, it.alpha
+                    out.append(nit)
+                    continue
+                if act:
+                    rest, (ra, rb), cuts = ocrlogo.strip(it[1], act)
+                    if cuts and rest.strip():
+                        out.append(_shrink(it, ra, rb))
+                        continue
+                    if it.ch and len(it.ch) == len(it[1]):
+                        sc = _static_cut(bb, it.ch, act)
+                        if sc and it[1][sc[0]:sc[1]].strip():
+                            out.append(_shrink(it, *sc))
+                            continue
+                out.append(it)
+            new_reads.append(out)
+        reads = new_reads
+    tm["logo"] = tm.get("logo", 0.0) + (_time.time() - t0)
+    logo_parts = [[it for it in items if getattr(it, "logo", "")] for items in reads]
+    reads = [[it for it in items if not getattr(it, "logo", "")] for items in reads]
 
     # chữ trong cảnh đang chuyển động (vật có chữ bay ngang qua) lọt vào vùng quét: cùng chữ mà mỗi lần đọc ở 1 chỗ
     # khác -> bỏ; phụ đề đứng yên suốt lúc hiện
@@ -725,17 +1195,32 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
         keep = [it for it in keep if _CJK.search(it[1]) or _stray_ok(it, han, h_sub, band)]
         kept.append(_anchor_block(keep, anchor_y, line_h or h_sub))
 
+    from .ocrfix import line_conf
+
     boxes: list[dict] = []
-    raw: list[tuple[float, float, str, float, float, float]] = []
-    for (a, b), items in zip(times, kept):
+    raw: list[tuple] = []
+    logo_only: list[list] = []
+    for i, ((a, b), items) in enumerate(zip(times, kept)):
         text = "".join(it[1] for it in items)
+        lp = logo_parts[i] if i < len(logo_parts) else []
+        rawt = ""
+        if lp:          # chữ trước khi bỏ logo (để trả lại khi người dùng tắt logo)
+            rawt = "".join(getattr(it, "raw", None) or it[1] for it in _reading_order(list(items) + lp))
+        elif any(getattr(it, "raw", None) is not None for it in items):
+            rawt = "".join(getattr(it, "raw", None) or it[1] for it in items)
+        if not items and lp:
+            logo_only.append([a, b, rawt])
+        chars = None
+        if items and all(getattr(it, "ch", None) is not None and len(it.ch) == len(it[1]) for it in items):
+            chars = [c for it in items for c in it.ch]
         if items:
             bbs = [_bbox(it[0]) for it in items]
             wid = max(bb[2] for bb in bbs) - min(bb[0] for bb in bbs)
             lh = float(np.median([bb[3] - bb[1] for bb in bbs]))
         else:
             wid = lh = 0.0
-        raw.append((a, b, text, float(np.mean([it[2] for it in items])) if items else 0.0, wid, lh))
+        raw.append((a, b, text, float(np.mean([it[2] for it in items])) if items else 0.0, wid, lh, chars,
+                    rawt if rawt and rawt != text else ""))
         if items:
             bxs = []
             for pts, _, _ in items:
@@ -749,27 +1234,49 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
     segs: list[Segment] = []
     shapes: list[tuple[float, float]] = []      # (bề rộng khối chữ, cao dòng) của từng câu – để không gộp nhầm
     cur: list = []
-    for a, b, text, score, wid, lh in raw + [(total + 1, total + 1, "", 0.0, 0.0, 0.0)]:
+    for r in raw + [(total + 1, total + 1, "", 0.0, 0.0, 0.0, None, "")]:
+        a, b, text, score, wid, lh = r[:6]
         if cur:
             ref = max(cur, key=lambda c: (c[1] - c[0]) * c[3])
             if text and _same_line(text, ref[2]) and a - cur[-1][1] <= gap and \
                     not _other_shape(text, ref[2], wid, ref[4], max(lh, ref[5])):
-                cur.append((a, b, text, score, wid, lh))
+                cur.append(r)
                 continue
             if cur[-1][1] - cur[0][0] >= MIN_SEG:
                 votes: dict[str, float] = {}
-                for ca, cb, ct, cs, _w, _h in cur:
-                    votes[ct] = votes.get(ct, 0.0) + (cb - ca) * max(cs, 0.05)
+                for c in cur:
+                    votes[c[2]] = votes.get(c[2], 0.0) + (c[1] - c[0]) * max(c[3], 0.05)
                 best = max(votes, key=votes.get)
-                # độ chắc câu (2.1.36) = độ chắc trung bình (theo thời lượng) của các lần đọc ra đúng chữ đã chọn
-                bd = [(cb - ca, cs) for ca, cb, ct, cs, _w, _h in cur if ct == best]
-                conf = sum(d * c for d, c in bd) / max(1e-6, sum(d for d, _ in bd))
-                segs.append(Segment(round(cur[0][0], 3), round(min(total, cur[-1][1]), 3), best,
-                                    extra={"ocr_conf": round(float(conf), 3)}))
+                bdr = [c for c in cur if c[2] == best]
+                # độ chắc câu (2.1.36) = độ chắc trung bình (theo thời lượng) của các lần đọc ra đúng chữ đã chọn;
+                # 2.1.37: có độ chắc từng chữ -> (trung bình + chữ kém nhất) / 2 (1 chữ đọc rất kém kéo cả câu xuống)
+                conf = sum((c[1] - c[0]) * c[3] for c in bdr) / max(1e-6, sum(c[1] - c[0] for c in bdr))
+                extra: dict = {}
+                chs = [(c[1] - c[0], c[6]) for c in bdr if c[6] and len(c[6]) == len(best)]
+                if chs:
+                    tw = max(1e-6, sum(d for d, _ in chs))
+                    cc = [sum(d * ch[j][1] for d, ch in chs) / tw for j in range(len(best))]
+                    alts = []
+                    for j in range(len(best)):
+                        al: dict[str, float] = {}
+                        for _d, ch in chs:
+                            for ac, ap in ch[j][3]:
+                                al[ac] = max(al.get(ac, 0.0), float(ap))
+                        alts.append([[k, round(v, 3)] for k, v in sorted(al.items(), key=lambda kv: -kv[1])[:3]]
+                                    if cc[j] < 0.97 else [])
+                    conf = line_conf(cc)
+                    extra["ocr_cc"] = [round(float(v), 3) for v in cc]
+                    if any(alts):
+                        extra["ocr_alt"] = alts
+                rawt = next((c[7] for c in bdr if c[7]), "")
+                if rawt:
+                    extra["ocr_raw"] = rawt
+                extra["ocr_conf"] = round(float(conf), 3)
+                segs.append(Segment(round(cur[0][0], 3), round(min(total, cur[-1][1]), 3), best, extra=extra))
                 shapes.append((ref[4], ref[5]))
             cur = []
         if text:
-            cur = [(a, b, text, score, wid, lh)]
+            cur = [r]
     merged: list[Segment] = []
     mshape: list[tuple[float, float]] = []
     for s, shp in zip(segs, shapes):   # gộp câu trùng lặp sát nhau (do nháy chữ)
@@ -778,25 +1285,66 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
             m, da, db = merged[-1], merged[-1].end - merged[-1].start, s.end - s.start
             m.extra["ocr_conf"] = round((m.extra.get("ocr_conf", 1.0) * da + s.extra.get("ocr_conf", 1.0) * db) /
                                         max(1e-6, da + db), 3)
+            if m.text == s.text and m.extra.get("ocr_cc") and s.extra.get("ocr_cc"):
+                m.extra["ocr_cc"] = [round((x1 * da + x2 * db) / max(1e-6, da + db), 3)
+                                     for x1, x2 in zip(m.extra["ocr_cc"], s.extra["ocr_cc"])]
+            if not m.extra.get("ocr_raw") and s.extra.get("ocr_raw"):
+                m.extra["ocr_raw"] = s.extra["ocr_raw"]
             m.end = s.end
         else:
             merged.append(s)
             mshape.append(shp)
+    # câu chỉ có logo: gộp các đoạn liền nhau (giữ lại để trả về khi người dùng tắt logo đó)
+    lo_m: list[list] = []
+    for a, b, t in logo_only:
+        if lo_m and lo_m[-1][2] == t and a - lo_m[-1][1] <= 0.6:
+            lo_m[-1][1] = b
+        else:
+            lo_m.append([a, b, t])
+    lo_m = [[round(a, 3), round(min(total, b), 3), t] for a, b, t in lo_m if b - a >= MIN_SEG]
     try:
         from .asr import to_simplified
 
         for s in merged:
-            s.text = to_simplified(s.text)
+            t2 = to_simplified(s.text)
+            if len(t2) != len(s.text):
+                s.extra.pop("ocr_cc", None)
+                s.extra.pop("ocr_alt", None)
+            s.text = t2
+            if s.extra.get("ocr_raw"):
+                s.extra["ocr_raw"] = to_simplified(s.extra["ocr_raw"])
+        for r in lo_m:
+            r[2] = to_simplified(r[2])
     except Exception:
         pass
+    for L in logo_list:           # số câu đã cắt logo ra / số đoạn chỉ có logo đã bỏ / số lần bỏ ngay lúc quét
+        if not L.on:
+            continue
+        if guard is not None:
+            L.hidden = guard.hid.get(L.text, 0)
+        vs = [v for v in L.texts()[:8] if len(v) >= 2]
+        L.cut = sum(1 for s in merged if s.extra.get("ocr_raw") and
+                    any(v in ocrlogo.norm(s.extra["ocr_raw"]) and v not in ocrlogo.norm(s.text) for v in vs))
+        L.dropped = sum(1 for _a, _b, t in lo_m if ocrlogo.strip_all(t, [L]) == "" or
+                        any(v in ocrlogo.norm(t) for v in vs))
+
+    def logo_out(L) -> dict:
+        d = L.to_dict(1.0 / max(1e-6, hk))
+        if L.static:
+            sx0, sy0, sx1, sy1 = L.static
+            d["static"] = [round((sx0 / scale + x) / W, 4), round((sy0 / scale + y) / H, 4),
+                           round((sx1 / scale + x) / W, 4), round((sy1 / scale + y) / H, 4)]
+        return d
     if boxes_out:
         Path(boxes_out).write_text(json.dumps({"fps": F, "width": W, "height": H, "spans": boxes}), "utf-8")
     if stats is not None:
         stats.update({"frames": seen[0], "ocr_runs": reader.n["ocr"], "lines": len(merged), "fps": F,
                       "spans": reader.n["spans"], "det": n_det[0], "cleaned": reader.n["cleaned"], "engine": eng.label,
                       "engine_warn": eng.warn, "hw": used_hw[0], "chunks": nch, "secs": round(_time.time() - t_start, 1),
-                      "eq": bool(pre),
-                      "text_box": _text_box(boxes, W, H)})
+                      "eq": bool(pre), "t": {k: round(v, 1) for k, v in tm.items()},
+                      "logos": [logo_out(L) for L in logo_list], "logo_only": lo_m,
+                      "logo_rec": guard.n_rec if guard else 0, "logo_hidden": guard.n_logo if guard else 0,
+                      "big": big_st, "text_box": _text_box(boxes, W, H)})
     if progress:
         progress(1.0, f"OCR xong {len(merged)} câu")
     return merged

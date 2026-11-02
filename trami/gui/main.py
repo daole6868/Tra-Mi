@@ -706,6 +706,7 @@ class SettingsPage(QWidget):
         ("ocr_fps", "ocr_fps", "c"), ("ocr_model", "ocr_model", "c"), ("ocr_device", "ocr_device", "c"),
         ("ocr_hwdec", "ocr_hwdec", "b"), ("ocr_clean", "ocr_clean", "b"), ("ocr_timing", "ocr_timing", "c"),
         ("ocr_eq", "ocr_eq", "b"), ("ocr_drop", "ocr_drop_unsure", "b"), ("ocr_conf", "ocr_pick_conf", "f"),
+        ("ocr_logo", "ocr_logo", "b"), ("ocr_fix", "ocr_dict_fix", "b"), ("ocr_big", "ocr_big", "b"),
         ("asr_device", "asr_device", "c"),
         ("asr_max", "asr_max_chars", "i"), ("asr_beam", "asr_beam_size", "i"), ("asr_vad", "asr_vad", "b"),
         ("split_style", "split_style", "c"), ("asr_dual", "asr_dual", "b"), ("asr_ai", "asr_ai", "c"),
@@ -814,6 +815,9 @@ class SettingsPage(QWidget):
         self.ocr_conf.setDecimals(2)
         self.ocr_conf.setMaximumWidth(110)
         f.row("Câu OCR không chắc khi đọc chắc dưới", self.ocr_conf, C.OCR_UNSURE_HELP)
+        self.ocr_logo = f.row("Tự lọc logo chữ khi OCR", Switch(), C.OCR_LOGO_HELP)
+        self.ocr_fix = f.row("Sửa chữ OCR dễ nhầm theo từ điển", Switch(), C.OCR_READ_HELP)
+        self.ocr_big = f.row("Đọc lại câu OCR kém chắc bằng bộ đọc lớn", Switch(), C.OCR_READ_HELP)
         self.split_style = f.row("Kiểu tách câu", combo(C.SPLIT_STYLES), C.SPLIT_HELP)
         self.asr_dual = f.row("Nghe 2 bộ rồi so", Switch(), C.DUAL_HELP)
         from ..pipeline import join_engine_choices as _jec
