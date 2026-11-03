@@ -13341,6 +13341,13 @@ def test_ocr_color_ai_gui_2144(sample_video, monkeypatch):
         st = load_settings()
         assert st["ocr_color"] is True and st["ocr_color_tol"] == "wide" and len(st["ocr_colors"]) == 2
         assert "Chỉ lấy chữ" in pp.a_ocrcolor_lb.text() and "lọc màu" in pp.a_ocreq_hint.text()
+        # 2.1.45: lọc màu bật -> Mẫu / Sáng / Tương phản / Gamma mờ (không có tác dụng), tắt -> dùng lại được
+        assert not pp.a_ocreq_preset.isEnabled() and not pp.a_eq["gamma"].isEnabled()
+        pp.a_ocrcolor.setChecked(False)
+        assert pp.a_ocreq_preset.isEnabled() and pp.a_eq["gamma"].isEnabled()
+        assert load_settings()["ocr_color"] is False
+        pp.a_ocrcolor.setChecked(True)
+        assert not pp.a_ocreq_preset.isEnabled()
         # Hút màu: hộp hút màu trả #FFD800 -> ô màu chữ hàng 2; hàng 2 "Không xét viền"
         monkeypatch.setattr(ocr_color_ui.PickDialog, "exec", lambda self: setattr(self, "color", "#FFD800") or 1)
         row2 = pp.a_ocrcolors.rows[1]

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QFont, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
+from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDoubleSpinBox, QFileDialog, QFrame, QGraphicsOpacityEffect,
                                QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
                                QScrollArea, QSpinBox, QSplitter, QStackedWidget, QTableView, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget, QGridLayout, QSizePolicy)
@@ -390,6 +390,11 @@ class ProjectPage(QWidget):
         self.a_ocreq_preset.currentIndexChanged.connect(self._ocr_eq_preset)
         self.a_eq: dict[str, QDoubleSpinBox] = {}
         eqv = eq_values(s)
+        eq_pre = eq_preset_of(eqv, bool(s.get("ocr_eq", False)))
+        if eq_pre == "off":            # 2.1.45: "Ảnh gốc" thì các ô hiện đúng ảnh gốc (0 / 1 / 1), không hiện số cũ
+            from ..ocr import EQ_NEUTRAL
+
+            eqv = dict(EQ_NEUTRAL)
         eq_row = []
         for k, t, lo, hi in (("brightness", "Sáng", -1.0, 1.0), ("contrast", "Tương phản", 0.0, 3.0),
                              ("gamma", "Gamma", 0.1, 3.0)):
@@ -405,21 +410,23 @@ class ProjectPage(QWidget):
         self.a_eq_sharp = Switch(bool(eqv["sharpen"]))
         self.a_eq_sharp.toggled.connect(self._ocr_eq_edited)
         eq_row.append(hbox(self.a_eq_sharp, label("Làm nét", "muted")))
-        set_combo(self.a_ocreq_preset, eq_preset_of(eqv, bool(s.get("ocr_eq", False))))
+        set_combo(self.a_ocreq_preset, eq_pre)
         self.a_ocreq_hint = label("", "muted", wrap=True)
         self.a_ocreq_box = HfwBox()    # 2.1.39: không để hàng Sáng / Tương phản / Gamma bị cắt nửa dưới
         eb = QVBoxLayout(self.a_ocreq_box)
         eb.setContentsMargins(0, 0, 0, 0)
         eb.setSpacing(6)
-        eb.addWidget(flow(hbox(label("Mẫu", "muted"), self.a_ocreq_preset),
+        self.a_ocreq_ctrl = flow(hbox(label("Mẫu", "muted"), self.a_ocreq_preset),
                           button("Về gốc", "refresh", "Bỏ hết chỉnh: ảnh gốc, không làm rõ chữ", flat=True,
                                  on_click=lambda: set_combo(self.a_ocreq_preset, "off")),
                           button("Lấy từ tab Chỉnh sửa", "image", "Chép độ sáng / tương phản / gamma / làm nét đang đặt ở "
                                  "tab Chỉnh sửa → Màu sắc – nhớ bấm 'Về gốc' ở đó nếu không muốn video xuất bị đổi màu",
                                  flat=True, on_click=self._ocr_eq_from_edit),
                           button("Xem thử", "search", "Xem ảnh vùng quét tại vị trí đang phát: ảnh gốc và ảnh bộ đọc chữ "
-                                 "thấy sau khi làm rõ", flat=True, on_click=self._ocr_eq_preview)))
-        eb.addWidget(flow(*eq_row))
+                                 "thấy sau khi làm rõ", flat=True, on_click=self._ocr_eq_preview))
+        self.a_ocreq_vals = flow(*eq_row)
+        eb.addWidget(self.a_ocreq_ctrl)
+        eb.addWidget(self.a_ocreq_vals)
         eb.addWidget(self.a_ocreq_hint)
         self.a_ocreq_row = f.row("Làm rõ chữ khi quét", self.a_ocreq_box, C.OCR_EQ_HELP)
         # 2.1.44: chỉ lấy chữ đúng màu chữ / viền phụ đề (chữ khác màu trong khung quét bị bỏ ngay lúc quét)
@@ -2219,9 +2226,24 @@ class ProjectPage(QWidget):
         if not hasattr(self, "a_ocreq_hint"):
             return
         off = self.a_ocreq_preset.currentData() == "off"
-        if getattr(self, "a_ocrcolor", None) is not None and self.a_ocrcolor.isChecked():
-            return self.a_ocreq_hint.setText("Đang lọc màu chữ ('Màu chữ phụ đề' bên dưới) – làm rõ chữ không dùng khi "
-                                             "lọc màu")
+        color = getattr(self, "a_ocrcolor", None) is not None and self.a_ocrcolor.isChecked()
+        # 2.1.45: đang lọc màu chữ thì Mẫu / Sáng / Tương phản / Gamma không có tác dụng (cả khi quét lẫn video bên phải)
+        # -> làm mờ hẳn cho khỏi tưởng bấm mà không chạy
+        for w in (self.a_ocreq_ctrl, self.a_ocreq_vals):
+            w.setEnabled(not color)
+            fx = w.graphicsEffect()
+            if not isinstance(fx, QGraphicsOpacityEffect):
+                if not color:
+                    continue
+                fx = QGraphicsOpacityEffect(w)
+                fx.setOpacity(0.38)
+                w.setGraphicsEffect(fx)
+            fx.setEnabled(color)    # bật / tắt hiệu ứng – không gỡ (setGraphicsEffect(None) làm sập PySide6)
+        if color:
+            return self.a_ocreq_hint.setText(
+                "⚠ Đang bật lọc màu chữ ('Màu chữ phụ đề' bên dưới) nên Mẫu làm rõ chữ bị tắt – video bên phải không "
+                "đổi màu: lọc màu cần màu thật của chữ, làm rõ chữ lại đổi ảnh thành xám. Muốn dùng Mẫu -> tắt công tắc "
+                "'Chỉ lấy chữ đúng màu'")
         self.a_ocreq_hint.setText(
             "⚠ Chưa làm rõ chữ: dừng video ở chỗ có phụ đề, chọn 1 Mẫu (video bên phải đổi màu ngay) – chữ trắng nổi rõ "
             "trên nền tối là tốt – rồi mới bấm quét. Phụ đề vốn rõ nét thì để Ảnh gốc" if off else
@@ -2235,6 +2257,7 @@ class ProjectPage(QWidget):
             return
         self.a_ocrcolor_add.setEnabled(len(self.a_ocrcolors.rows) < 3)
         self._ocr_color_hint()
+        self._ocr_eq_hint()
         if self.loading:
             return
         from ..config import save_settings
@@ -3963,10 +3986,15 @@ class ProjectPage(QWidget):
             from ..ocr import eq_preset_of
 
             eqv = eq_values(st)
+            eq_pre = eq_preset_of(eqv, bool(st.get("ocr_eq", False)))
+            if eq_pre == "off":
+                from ..ocr import EQ_NEUTRAL
+
+                eqv = dict(EQ_NEUTRAL)
             for k, sp in self.a_eq.items():
                 sp.setValue(eqv[k])
             self.a_eq_sharp.setChecked(eqv["sharpen"])
-            set_combo(self.a_ocreq_preset, eq_preset_of(eqv, bool(st.get("ocr_eq", False))))
+            set_combo(self.a_ocreq_preset, eq_pre)
             self._ocr_eq_hint()
             self.a_ocrlisten.setChecked(bool(st.get("ocr_listen_unsure", False)))
             self.a_olconf.setValue(float(st.get("ocr_listen_conf", 0.7) or 0.7))

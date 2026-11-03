@@ -607,7 +607,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   nhóm 1 (khi OCR) hàng "Màu chữ phụ đề" `a_ocrcolor_box` (`a_ocrcolor`, `a_ocrtol`, `gui/ocr_color_ui.ColorRows`
   `a_ocrcolors` – mỗi hàng ô màu chữ + Hút + Viền màu / Không xét viền + ô màu viền + Hút + ×, "Thêm màu"; `PickDialog`
   bấm vào ảnh vùng quét phóng to; `preview_dialog`; `_ocr_color_save` / `_ocr_color_pick` / `_ocr_color_guess` /
-  `_ocr_color_preview` / `_ocr_color_hint`), lọc màu bật -> trình phát không hiện ảnh làm rõ + không nhắc làm rõ;
+  `_ocr_color_preview` / `_ocr_color_hint`), lọc màu bật -> trình phát không hiện ảnh làm rõ + không nhắc làm rõ + ô Mẫu / Sáng / Tương phản / Gamma mờ hẳn (`a_ocreq_ctrl` / `a_ocreq_vals` setEnabled + QGraphicsOpacityEffect bật / tắt – KHÔNG `setGraphicsEffect(None)`, 2.1.45); mẫu "Ảnh gốc" thì các ô hiện 0 / 1 / 1;
   "Đọc chữ kỹ" thêm `a_ocrcenter`; Cài đặt → Nhận dạng giọng nói 3 ô; `C.OCR_COLOR_HELP` / `OCR_CENTER_HELP`.
 - Câu OCR không đạt: nghe + AI đọc lại ảnh, 2 trên 3 (2.1.44, `trami/ocrai.py`, mở rộng "Nghe lại câu OCR không chắc"
   2.1.42 – cùng công tắc `ocr_listen_unsure`): câu không đạt = `recheck.ocr_targets` (ocr_conf < `ocr_pick_conf`) + (Cài đặt
@@ -2661,6 +2661,12 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   video vẽ chữ thật (OCR thật), AI giả + bộ nghe giả cho đủ các nhánh (sửa / giữ / xanh / tím / xoá / không AI / AI tắt),
   giao diện offscreen (lưu Cài đặt, Hút, Tự lấy màu, Xem thử, tô màu, Dùng lại bản OCR, Ctrl+Z, nút câu đã tích). Chưa gọi
   AI thật (sandbox chặn Google / OpenAI / Anthropic) – ảnh dải phụ đề AI đọc đúng không cần thử trên video thật.
+- 2.1.45: ảnh tab Tự động: "chọn Mẫu (Làm rõ chữ khi quét) mà video không đổi màu". Do đang bật "Màu chữ phụ đề"
+  (lọc màu, 2.1.44): khi lọc màu, làm rõ chữ không dùng (cả lúc quét lẫn xem trước – lọc màu cần màu thật, làm rõ chữ đổi
+  ảnh thành xám), nhưng ô Mẫu vẫn bấm được + dòng nhắc nhạt -> tưởng hỏng. Sửa: lọc màu bật -> các ô làm rõ chữ mờ hẳn
+  (không bấm được) + nhắc ⚠ "muốn dùng Mẫu -> tắt 'Chỉ lấy chữ đúng màu'"; "Ảnh gốc" hiện 0 / 1 / 1 thay vì số cũ của
+  Cài đặt. Máy thử: PySide6 6.12 + Python 3.11 – gọi `QApplication.processEvents()` giảm đếm tham chiếu của None mỗi lần
+  (vòng lặp chờ dày trong script chụp ảnh làm sập "deallocating None"); tool không gọi processEvents -> không ảnh hưởng.
 ## Vấn đề đang mở
 - 2.1.44: chờ người dùng thử tab Tự động (nguồn OCR): dừng video ở chỗ có phụ đề → "Màu chữ phụ đề" → Tự lấy màu (hoặc
   Hút) → Xem thử (chữ phụ đề xanh lá, chữ khác đỏ) → quét; so số câu dính chữ lạ / tách sai với lúc tắt lọc màu. Bật "Câu
