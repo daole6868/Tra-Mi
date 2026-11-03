@@ -571,7 +571,12 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   hình (`FLOOR` 3e-3); nhận khi chữ mới nằm trong 1 từ có trong từ điển và log xác suất tăng − (log độ chắc cũ − log xác
   suất ứng viên) ≥ `MARGIN` 1; tên riêng `names_of` không đụng; ≤ 2 chữ / câu; `fix_segments` -> `ocr_fix` [[vị trí, cũ,
   mới]], `ocr_before`, chữ đã sửa độ chắc `FIXED_CONF` 0,9; `weak_chars`) – `recognize` sau `extract_hardsubs` khi Cài đặt
-  `ocr_dict_fix`. B3 `_Reader(keep_weak=)` giữ ảnh dòng chữ câu có chữ < `BIG_BELOW` 0,93 (≤ `BIG_MAX` 4000) -> cuối lần quét
+  `ocr_dict_fix`; 2.1.46: chữ số ĐỨNG LẺ giữa chữ Hán (font đậm: "对了父亲" -> "对7父亲") – `_latin_fix`: độ chắc < WEAK
+  (số thật đọc ~1,0), không dính dãy số / chữ Latin (`_NUMLIKE`), không trước lượng từ `MEASURE` / sau `NUM_PREV` 第几…,
+  chữ Hán ứng viên của bộ đọc ≥ `ALT_STRONG` 0,05 hoặc bảng `LATIN_HAN` {7: 了}; chữ Latin chỉ theo bảng ("B计划" giữ);
+  `fix_rows` (trả câu đổi, bỏ `ct` khi số chữ Hán đổi, `ocr_fix` cộng dồn) -> `pipeline.ocr_fix_now` = nút "Sửa chữ đọc
+  nhầm" tab Phụ đề → Lời hát & nghe nhầm → Câu OCR (`_ocr_fix_now`, câu đã tích / cả phim, không quét lại); "Tìm & thay"
+  (`_replace`) chọn Bản dịch / Chữ gốc. B3 `_Reader(keep_weak=)` giữ ảnh dòng chữ câu có chữ < `BIG_BELOW` 0,93 (≤ `BIG_MAX` 4000) -> cuối lần quét
   `big_model(settings, eng)` (Cài đặt `ocr_big`, bộ đang dùng là v6_small, đã tải v5_server / v6_medium) đọc lại, nhận khi
   độ chắc ≥ bản cũ − 0,1; lỗi -> giữ bản nhỏ + stats["big"]["error"]. A1 stats["t"] {decode = thời gian CHỜ giải mã,
   detect, read, big} -> `ocr_note` "(chờ giải mã x s, tìm chữ y s…)" + gợi ý chỗ chậm nhất. GUI tab Tự động nhóm 1 (khi
@@ -768,7 +773,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (305 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
+- `tests/test_core.py` – `python -m pytest -q tests` (307 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2667,6 +2672,11 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (không bấm được) + nhắc ⚠ "muốn dùng Mẫu -> tắt 'Chỉ lấy chữ đúng màu'"; "Ảnh gốc" hiện 0 / 1 / 1 thay vì số cũ của
   Cài đặt. Máy thử: PySide6 6.12 + Python 3.11 – gọi `QApplication.processEvents()` giảm đếm tham chiếu của None mỗi lần
   (vòng lặp chờ dày trong script chụp ảnh làm sập "deallocating None"); tool không gọi processEvents -> không ảnh hưởng.
+- 2.1.46: ảnh phụ đề "对了父亲" hỏi "了 cứ bị quét nhầm thành 7". Chạy bộ đọc của tool trên đúng ảnh: ra "对7父亲", chữ
+  "7" chắc 0,90 (video dựng từ ảnh: 0,58) và bộ đọc nêu "了" làm ứng viên (0,10 / 0,42) – font phụ đề rất đậm, nét "了"
+  giống "7". Bước "Sửa chữ dễ nhầm theo từ điển" (2.1.37) chỉ xét chữ Hán nên bỏ qua; thử font WenQuanYi đậm dần: số "7"
+  thật luôn chắc 1,00, không ứng viên -> dùng độ chắc + ứng viên + ngữ cảnh (lượng từ / 第) để phân biệt (xem Cấu trúc
+  "OCR đọc chữ kỹ"). Dự án đã quét: nút "Sửa chữ đọc nhầm" (không quét lại) + "Tìm & thay" chữ gốc.
 ## Vấn đề đang mở
 - 2.1.44: chờ người dùng thử tab Tự động (nguồn OCR): dừng video ở chỗ có phụ đề → "Màu chữ phụ đề" → Tự lấy màu (hoặc
   Hút) → Xem thử (chữ phụ đề xanh lá, chữ khác đỏ) → quét; so số câu dính chữ lạ / tách sai với lúc tắt lọc màu. Bật "Câu

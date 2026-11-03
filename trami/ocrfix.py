@@ -29,6 +29,17 @@ for _g in CONFUSABLE:
     for _c in _g:
         _MAP.setdefault(_c, set()).update(x for x in _g if x != _c)
 
+# 2.1.46: chữ Hán bị đọc thành chữ số / chữ Latin (font phụ đề đậm: "对了父亲" -> "对7父亲"). Chỉ xét chữ số / chữ Latin
+# ĐỨNG LẺ giữa chữ Hán mà bộ đọc đọc KHÔNG chắc (< WEAK – số thật đọc chắc ~1,0, không có chữ ứng viên) và có chữ Hán ứng
+# viên (bộ đọc tự nêu, hoặc bảng LATIN_HAN); chữ số đứng trước lượng từ / đơn vị ("7天", "7个") hay sau "第 / 几" là số thật.
+LATIN_HAN = {"7": "了"}
+_LATIN = re.compile(r"[0-9A-Za-z０-９Ａ-Ｚａ-ｚ]")
+_NUMLIKE = re.compile(r"[0-9A-Za-z０-９Ａ-Ｚａ-ｚ〇零一二三四五六七八九十百千万亿两.,:%．，：％/·]")
+MEASURE = set("个只条张本次遍回天年月日号点分秒岁块元角毛钱斤米里公克吨层楼集章节页名位人倍成折届期周时代辆台部件双对"
+              "颗粒杯碗瓶首场趟顿把间座片支根份家户声步口度级")
+NUM_PREV = set("第几约共每近")
+ALT_STRONG = 0.05
+
 _dt = None
 
 
@@ -82,10 +93,17 @@ def fix_line(text: str, cc: list | None, alts: list | None, names: list | None =
                 for j in range(k, k + len(nm)):
                     guard[j] = True
                 k = text.find(nm, k + 1)
-    cand = sorted((float(cc[i]), i) for i, ch in enumerate(text)
-                  if _HAN.match(ch) and not guard[i] and float(cc[i]) < WEAK and (alts[i] or ch in _MAP))
     changes: list = []
     cur = text
+    for i, ch in enumerate(text):                   # chữ số / chữ Latin đứng lẻ giữa chữ Hán (了 -> 7)
+        if len(changes) >= MAX_FIX:
+            break
+        a = _latin_fix(cur, i, float(cc[i]), alts[i])
+        if a and not guard[i]:
+            changes.append((i, cur[i], a))
+            cur = cur[:i] + a + cur[i + 1:]
+    cand = sorted((float(cc[i]), i) for i, ch in enumerate(text)
+                  if _HAN.match(ch) and not guard[i] and float(cc[i]) < WEAK and (alts[i] or ch in _MAP))
     for conf, i in cand:
         if len(changes) >= MAX_FIX:
             break
@@ -110,12 +128,43 @@ def fix_line(text: str, cc: list | None, alts: list | None, names: list | None =
     return cur, changes
 
 
-def fix_segments(segs: list, names: list | None = None) -> int:
-    """Áp fix_line cho các câu OCR có độ chắc từng chữ (extra ocr_cc / ocr_alt). Câu đổi: extra["ocr_fix"] =
-    [[vị trí, cũ, mới]…], extra["ocr_before"] = chữ cũ, độ chắc chữ đã sửa nâng lên FIXED_CONF, ocr_conf tính lại.
-    Trả số câu đã sửa."""
-    n = 0
-    for s in segs:
+def _latin_fix(text: str, i: int, conf: float, alts) -> str | None:
+    """Chữ Hán thay cho chữ số / chữ Latin text[i] bị đọc nhầm, None = giữ nguyên (xem LATIN_HAN)."""
+    ch = text[i]
+    if not _LATIN.match(ch) or conf >= WEAK:
+        return None
+    prev = text[i - 1] if i > 0 else ""
+    nxt = text[i + 1] if i + 1 < len(text) else ""
+    if (prev and _NUMLIKE.match(prev)) or (nxt and _NUMLIKE.match(nxt)):
+        return None                                 # thuộc 1 dãy số / chữ Latin (12, 3.5, AI, 7点半…) – giữ
+    if not (_HAN.match(prev or " ") or _HAN.match(nxt or " ")):
+        return None
+    if ch.isdigit() and (nxt in MEASURE or prev in NUM_PREV):
+        return None                                 # "7天", "7个人", "第7" – số thật
+    # chữ Latin thật hay có trong phụ đề ("B计划", "A级", "X光") -> chữ Latin chỉ theo bảng; chữ số ngoài bảng cần bộ đọc
+    # nêu chữ Hán ứng viên đủ mạnh
+    opts = {str(a): float(p) for a, p in (alts or []) if _HAN.match(str(a or "")) and float(p) >= ALT_STRONG} \
+        if ch.isdigit() else {}
+    if ch in LATIN_HAN:
+        opts.setdefault(LATIN_HAN[ch], FLOOR)
+    if not opts:
+        return None
+    if _dict() is None:
+        return max(opts, key=opts.get)
+    best = max(opts, key=lambda a: _best(text[:i] + a + text[i + 1:])[0] + math.log(max(opts[a], FLOOR)))
+    return best
+
+
+def fix_rows(segs: list, names: list | None = None, rows=None) -> list[int]:
+    """Áp fix_line cho các câu OCR có độ chắc từng chữ (extra ocr_cc / ocr_alt) – rows None = mọi câu. Câu đổi:
+    extra["ocr_fix"] = [[vị trí, cũ, mới]…] (cộng dồn khi sửa lại lần nữa), extra["ocr_before"] = chữ OCR đầu tiên, độ
+    chắc chữ đã sửa nâng lên FIXED_CONF, ocr_conf tính lại; số chữ Hán đổi (7 -> 了) thì bỏ mốc từng chữ ct cũ.
+    Trả số thứ tự các câu đã sửa."""
+    out = []
+    for k in (range(len(segs)) if rows is None else rows):
+        if not (0 <= k < len(segs)):
+            continue
+        s = segs[k]
         cc = s.extra.get("ocr_cc")
         if not cc or len(cc) != len(s.text):
             continue
@@ -123,15 +172,22 @@ def fix_segments(segs: list, names: list | None = None) -> int:
         if not ch:
             continue
         s.extra.setdefault("ocr_before", s.text)
-        s.extra["ocr_fix"] = [list(c) for c in ch]
+        s.extra["ocr_fix"] = [list(c) for c in (s.extra.get("ocr_fix") or [])] + [list(c) for c in ch]
         cc = list(cc)
         for i, _o, _w in ch:
             cc[i] = max(float(cc[i]), FIXED_CONF)
         s.extra["ocr_cc"] = [round(float(v), 3) for v in cc]
         s.extra["ocr_conf"] = line_conf(cc)
+        if len(_HAN.findall(new)) != len(_HAN.findall(s.text)):
+            s.extra.pop("ct", None)
         s.text = new
-        n += 1
-    return n
+        out.append(k)
+    return out
+
+
+def fix_segments(segs: list, names: list | None = None) -> int:
+    """fix_rows cho mọi câu (lúc quét OCR). Trả số câu đã sửa."""
+    return len(fix_rows(segs, names))
 
 
 def line_conf(cc: list) -> float:

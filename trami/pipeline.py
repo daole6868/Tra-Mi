@@ -2717,6 +2717,25 @@ def use_alt(p: Project, rows: list[int]) -> list[int]:
     return out
 
 
+def ocr_fix_now(p: Project, settings: dict, rows: list[int] | None = None) -> list[int]:
+    """Sửa chữ OCR đọc nhầm (2.1.46) trên phụ đề ĐANG CÓ – không quét lại: chạy lại bước "Sửa chữ dễ nhầm theo từ điển"
+    (ocrfix: chữ Hán giống hình 己 / 已…, chữ số đứng lẻ giữa chữ Hán do font đậm – "对7父亲" -> "对了父亲") theo độ chắc
+    từng chữ đã lưu lúc quét (ocr_cc / ocr_alt – dự án quét từ 2.1.37). rows None = mọi câu. Trả số thứ tự câu đã sửa."""
+    from . import ocrfix
+    from .names import names_of
+
+    segs = p.segments
+    try:
+        names = names_of(p, settings)
+    except Exception:  # noqa: BLE001
+        names = []
+    out = ocrfix.fix_rows(segs, names, rows)
+    if out:
+        p.segments = segs
+        p.save()
+    return out
+
+
 def use_ocr_text(p: Project, rows: list[int]) -> list[int]:
     """"Dùng lại bản OCR" (2.1.44): câu AI đọc lại đã sửa chữ -> về chữ OCR cũ; chữ AI giữ làm bản khác (chữ xanh,
     'Dùng bản bộ nghe 2' lấy lại được). Trả số thứ tự các câu đã đổi."""

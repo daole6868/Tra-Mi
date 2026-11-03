@@ -13433,3 +13433,89 @@ def test_ocr_color_ai_gui_2144(sample_video, monkeypatch):
         save_settings({**old, **{k: DEFAULT_SETTINGS[k] for k in keys if old.get(k) is None}})
         win.close()
         p.delete()
+
+
+def test_ocr_digit_fix_2146():
+    """2.1.46: font phụ đề đậm làm "了" đọc thành "7" ("对7父亲", chữ "7" chắc 0,58–0,90, bộ đọc nêu "了" làm ứng viên)
+    -> sửa thành "对了父亲"; số thật (đọc chắc ~1,0 / đứng trước lượng từ / sau 第 / trong dãy số) và chữ Latin thật
+    ("B计划") giữ nguyên."""
+    from trami import ocrfix
+    from trami.subtitle import Segment
+
+    assert ocrfix.fix_line("对7父亲", [1, 0.58, 1, 1], [[], [["了", 0.419]], [], []]) == ("对了父亲", [(1, "7", "了")])
+    assert ocrfix.fix_line("对7父亲", [1, 0.95, 1, 1], [[], [], [], []])[0] == "对了父亲"     # bảng 7 -> 了
+    assert ocrfix.fix_line("好7", [1, 0.9], [[], [["了", 0.08]]])[0] == "好了"                # cuối câu
+    assert ocrfix.fix_line("算7吧", [1, 0.92, 1], [[], [], []])[0] == "算了吧"
+    assert ocrfix.fix_line("走7走7", [1, 0.9, 1, 0.9], [[]] * 4)[0] == "走了走了"
+    keep = [("第7集", [1, 0.9, 1]), ("等7天", [1, 0.9, 1]), ("还有7个人", [1, 1, 0.9, 1, 1]), ("我7岁", [1, 0.9, 1]),
+            ("还有7", [1, 1, 1.0]), ("17岁", [0.9, 0.9, 1]), ("7点半", [0.9, 1, 1]), ("我最强AI", [1, 1, 1, 0.9, 0.9])]
+    for t, cc in keep:
+        al = [[["了", 0.1]] if ch == "7" else [] for ch in t]
+        assert ocrfix.fix_line(t, cc, al)[0] == t, t
+    assert ocrfix.fix_line("这是B计划", [1, 1, 0.9, 1, 1], [[], [], [["日", 0.2]], [], []])[0] == "这是B计划"
+    assert ocrfix.fix_line("他3了", [1, 0.9, 1], [[], [["子", 0.02]], []])[0] == "他3了"      # ứng viên yếu
+    # fix_rows: câu đổi số chữ Hán -> bỏ mốc chữ cũ, ghi chữ OCR cũ, độ chắc câu tính lại
+    s = Segment(1, 3, "对7父亲")
+    s.extra.update(ocr_cc=[1, 0.58, 1, 1], ocr_alt=[[], [["了", 0.419]], [], []], ocr_conf=0.738,
+                   ct=[[1.0, 1.4], [1.5, 2.0], [2.1, 2.9]])
+    t = Segment(4, 5, "第7集")
+    t.extra.update(ocr_cc=[1, 1, 1], ocr_alt=[[], [], []])
+    assert ocrfix.fix_rows([s, t], []) == [0]
+    assert s.text == "对了父亲" and s.extra["ocr_before"] == "对7父亲" and "ct" not in s.extra
+    assert s.extra["ocr_fix"] == [[1, "7", "了"]] and s.extra["ocr_conf"] > 0.9 and t.text == "第7集"
+
+
+def test_ocr_fix_now_gui_2146(sample_video, monkeypatch):
+    """2.1.46: tab Phụ đề → Lời hát & nghe nhầm → Câu OCR → "Sửa chữ đọc nhầm" sửa phụ đề đã quét (không quét lại),
+    tích sẵn câu đổi, Ctrl+Z hoàn tác; "Tìm & thay" chọn Chữ gốc thay trong chữ gốc."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QInputDialog
+
+    from trami import pipeline
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    p = Project.create("ocrfix2146")
+    pipeline.attach_source(p, sample_video)
+    a = Segment(0.2, 1.0, "对7父亲", "Đúng 7 cha")
+    a.extra.update(ocr_cc=[1, 0.58, 1, 1], ocr_alt=[[], [["了", 0.419]], [], []], ocr_conf=0.738)
+    b = Segment(1.2, 2.0, "第7集")
+    b.extra.update(ocr_cc=[1, 1, 1], ocr_alt=[[], [], []], ocr_conf=1.0)
+    c = Segment(2.2, 3.0, "我等7")
+    p.segments = [a, b, c]
+    p.save()
+    win = MainWindow()
+    toasts: list = []
+    monkeypatch.setattr(win, "toast", lambda m, *x, **k: toasts.append(m))
+    try:
+        win.show()
+        win.open_project(p.id)
+        pp = win.project_page
+        app.processEvents()
+        pp._ocr_fix_now()
+        segs = pp.model.segs
+        assert [x.text for x in segs] == ["对了父亲", "第7集", "我等7"]
+        assert pp.model.selected == {0} and "Dịch câu đã tích" in toasts[-1] and "对7父亲 → 对了父亲" in toasts[-1]
+        assert Project(p.id).segments[0].text == "对了父亲"
+        pp._ocr_fix_now()                                    # chạy lại: không còn gì để sửa
+        assert "Không thấy chữ nào" in toasts[-1]
+        pp.undo()
+        assert pp.model.segs[0].text == "对7父亲"
+        # Tìm & thay trong chữ gốc (câu không có độ chắc từng chữ – quét bản cũ)
+        monkeypatch.setattr(QInputDialog, "getItem", staticmethod(lambda *x, **k: ("Chữ gốc (chữ nghe / OCR được)", True)))
+        ans = iter([("等7", True), ("等了", True)])
+        monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *x, **k: next(ans)))
+        pp._replace()
+        assert pp.model.segs[2].text == "我等了" and pp.model.segs[2].extra["src_before"] == "我等7"
+        assert pp.model.segs[0].trans == "Đúng 7 cha" and "Đã thay ở 1 câu" in toasts[-1]
+        # Tìm & thay trong bản dịch như cũ
+        monkeypatch.setattr(QInputDialog, "getItem", staticmethod(lambda *x, **k: ("Bản dịch", True)))
+        ans = iter([("Đúng 7", True), ("Đúng rồi,", True)])
+        pp._replace()
+        assert pp.model.segs[0].trans == "Đúng rồi, cha" and pp.model.segs[0].text == "对7父亲"
+    finally:
+        win.close()
+        Project(p.id).delete()

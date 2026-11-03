@@ -843,7 +843,8 @@ class ProjectPage(QWidget):
                         on_click=lambda: self.model.set_picked(range(len(self.model.segs)), False)),
                  button("Dời giờ", "clock", "Dời giờ mọi câu (hoặc các câu đã tích) sớm / muộn đi vài giây",
                         on_click=self._shift),
-                 button("Tìm && thay", "search", on_click=self._replace),
+                 button("Tìm && thay", "search", "Thay 1 cụm chữ ở mọi câu – trong bản dịch hoặc trong chữ gốc (vd OCR "
+                        "đọc '对7' -> thay bằng '对了'). Ctrl+Z hoàn tác", on_click=self._replace),
                  button("Sửa dấu câu", "wand", "Câu đã tích (hoặc cả phim): bỏ dấu phẩy chen giữa 1 cụm từ / tên riêng "
                         "(\"một món, đồ tốt\", \"Thiên Kiếm, Tông\"), thêm dấu câu cuối theo câu gốc (? ! . ,) – bản dịch "
                         "trước 2.1.11 bị bỏ dấu chấm cuối câu. Không gọi AI, Ctrl+Z hoàn tác", on_click=self._fix_punct),
@@ -1030,6 +1031,10 @@ class ProjectPage(QWidget):
                         "chắc dưới mức) -> bộ nghe nghe đúng khúc giờ câu, AI xem ảnh (Gemini / OpenAI / Claude / Ollama) "
                         "đọc lại ảnh dải phụ đề -> chọn theo 2 trên 3 (chữ OCR / chữ AI / lời nghe). Giờ câu giữ nguyên. "
                         "AI chọn ở tab Tự động → 'Câu OCR không đạt'", on_click=self.run_ocr_check),
+                 button("Sửa chữ đọc nhầm", "wand", "Câu đã tích (chưa tích = cả phim): sửa chữ OCR đọc nhầm theo độ "
+                        "chắc từng chữ lúc quét – chữ giống hình (己经 -> 已经), chữ số đứng lẻ giữa chữ Hán do font đậm "
+                        "(对7父亲 -> 对了父亲; số thật như 第7集 / 7天 / 7个 giữ nguyên). Không quét lại, không gọi AI. "
+                        "Dự án quét từ bản 2.1.37. Ctrl+Z hoàn tác", flat=True, on_click=self._ocr_fix_now),
                  button("Tích câu AI sửa / cần xem", "check", "Câu AI đọc lại đã sửa chữ (xanh ngọc), 3 bản không khớp "
                         "(xanh lơ) hoặc không có tiếng nói (tím nhạt) – rê chuột chữ gốc xem chữ OCR / AI / lời nghe",
                         flat=True, on_click=self._pick_ocr_ai),
@@ -5267,20 +5272,40 @@ class ProjectPage(QWidget):
         self._segs_edited()
 
     def _replace(self):
-        a, ok = QInputDialog.getText(self, "Tìm & thay", "Tìm (trong bản dịch tiếng Việt):")
+        where = ["Bản dịch", "Chữ gốc (chữ nghe / OCR được)"]
+        w, ok = QInputDialog.getItem(self, "Tìm & thay", "Tìm trong:", where, 0, False)
+        if not ok:
+            return
+        src = where.index(w) == 1
+        a, ok = QInputDialog.getText(self, "Tìm & thay", "Tìm (trong chữ gốc, vd 对7):" if src else
+                                     "Tìm (trong bản dịch):")
         if not ok or not a:
             return
         b, ok = QInputDialog.getText(self, "Tìm & thay", f"Thay “{a}” bằng:")
         if not ok:
             return
-        n = 0
-        for s in self.model.segs:
-            if a in s.trans:
+        from ..align import CJK
+
+        rows = []
+        for i, s in enumerate(self.model.segs):
+            if src and a in s.text:
+                new = s.text.replace(a, b)
+                if len(CJK.findall(new)) != len(CJK.findall(s.text)):
+                    s.extra.pop("ct", None)       # mốc từng chữ không còn khớp chữ
+                s.extra.setdefault("src_before", s.text)
+                s.text = new
+                rows.append(i)
+            elif not src and a in s.trans:
                 s.trans = s.trans.replace(a, b)
-                n += 1
+                rows.append(i)
         self.model.set_segments(self.model.segs)
         self._segs_edited()
-        self.win.toast(f"Đã thay ở {n} câu", "ok")
+        if src and rows:
+            self.model.set_picked(range(len(self.model.segs)), False)
+            self.model.set_picked(rows)
+        tr = src and any(self.model.segs[i].trans.strip() for i in rows)
+        self.win.toast(f"Đã thay ở {len(rows)} câu" + (" – đã tích sẵn, bấm 'Dịch câu đã tích' để dịch lại" if tr else ""),
+                       "ok")
 
     def _import_subs(self):
         path, _ = QFileDialog.getOpenFileName(self, "Chọn file phụ đề", "", "Phụ đề (*.srt *.ass *.ssa *.vtt)")
@@ -6571,6 +6596,30 @@ class ProjectPage(QWidget):
                 msg += f" · ⚠ {st['error']}"
             return {"message": msg, "pick": st.get("pick", [])}
         self.submit("dual", f"AI đọc lại + nghe {len(rows)} câu OCR", fn)
+
+    def _ocr_fix_now(self):
+        """Sửa chữ OCR đọc nhầm trên phụ đề đang có (2.1.46) – câu đã tích, chưa tích thì cả phim."""
+        if not self.model.segs:
+            return self.win.toast("Chưa có phụ đề", "warn")
+        segs = self.model.segs
+        if not any(x.extra.get("ocr_cc") for x in segs):
+            return self.win.toast("Phụ đề này chưa có độ chắc từng chữ (quét bằng bản trước 2.1.37 / không phải OCR) – "
+                                  "quét lại hoặc dùng 'Tìm & thay' (Chữ gốc)", "warn")
+        rows = [r for r in sorted(self.model.selected) if 0 <= r < len(segs)] or None
+        self.flush()
+        self._undo_mark()
+        before = {i: x.text for i, x in enumerate(segs)}
+        done = pipeline.ocr_fix_now(self.p, self.settings, rows)
+        self.reload()
+        if not done:
+            return self.win.toast("Không thấy chữ nào đọc nhầm cần sửa" + (" trong các câu đã tích" if rows else ""),
+                                  "ok")
+        self.model.set_picked(range(len(self.model.segs)), False)
+        self.model.set_picked(done)
+        ex = " · ".join(f"{before.get(i, '')} → {self.model.segs[i].text}" for i in done[:3] if i < len(self.model.segs))
+        tr = any(self.model.segs[i].trans.strip() for i in done if i < len(self.model.segs))
+        self.win.toast(f"Đã sửa {len(done)} câu ({ex}" + (" …" if len(done) > 3 else "") + ")" +
+                       (" – đã tích sẵn, bấm 'Dịch câu đã tích' để dịch lại" if tr else " – đã tích sẵn"), "ok")
 
     def _pick_ocr_ai(self):
         segs = self.model.segs
