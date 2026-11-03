@@ -591,6 +591,52 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `p.data["ocr_listen"]` -> `recheck.ocr_listen_note` trong `listen_note`. GUI tab Tự động hàng "Nghe lại câu OCR không chắc"
   (`a_ocrlisten`, `a_ocrconf` = `s_ocrconf`, `a_olconf`), Cài đặt → Nhận dạng giọng nói (`ocr_listen`, `ocr_conf`,
   `ocr_lconf`), `C.OCR_LISTEN_HELP`; `autoflow.summary` "(nghe lại câu không chắc)". `drop_unsure` chỉ còn cho bộ nghe.
+- Lọc màu chữ phụ đề khi OCR (2.1.44, `trami/ocrcolor.py`): Cài đặt `ocr_color` (mặc định tắt) + `ocr_colors` [{"fill",
+  "outline" ("" = không xét viền)}] tối đa `MAX_COLORS` 3 + `ocr_color_tol` (`TOLS` tight 20 / mid 28 / wide 36). `ColorFilter`
+  (OpenCV Lab `inRange` hộp L ± `L_K` 1,5 × tol, a / b ± `AB_K` 0,8 × tol; thân chữ phải sát viền (nở 5×5) rồi lan tiếp
+  `GROW` 3 lần trong vùng đúng màu (lõi nét dày), viền phải sát thân chữ; bỏ cụm < `SPECK` 4 điểm và mảng đặc `SOLID`
+  (áo / biển / trời – `_drop_blobs`); ra ảnh xám: giữ xám gốc ở chỗ đúng màu, chỗ khác `BG` 128) -> `ocr._scan(colorf=)` giải mã dải BGR24 (không lọc làm rõ chữ `eq_filter` khi lọc màu), khung chờ của bộ
+  theo dõi là `_LazyFrame` (chỉ lọc khi chia đôi tìm tới – ~1,3 ms / khung), `tm["color"]`, stats["color"] = `describe`.
+  `grab` (khung tại giây t, cắt vùng quét), `pick` (trung vị 5×5), `preview` (ảnh đánh dấu: xanh lá = nét lấy, xanh đậm =
+  viền, đỏ = nét tương phản mạnh sai màu + ảnh bộ đọc thấy), `guess` (Tự lấy màu: 36 khung rải video -> tìm + đọc chữ
+  trong vùng quét -> `_box_colors` thân = điểm sáng sát điểm tối như VideoSubFinder -> gom nhóm Lab < 20 -> nhóm nhiều
+  câu khác nhau nhất = phụ đề; viền lệch > 18 -> không xét viền) + `guess_note`. Tách khối chữ xa cụm giữa
+  (`ocr._center_keep`, Cài đặt `ocr_center` mặc định bật): các dòng cùng hàng, đo bề rộng mực theo tâm từng chữ
+  `_ink_parts` (khung bộ tìm chữ có đệm hay dính nhau -> tách khung gộp ở khe lớn), khe > `CENTER_GAP` 1,5 × (`BOX_PAD`
+  0,75 × cao khung) = cụm riêng; đúng 1 cụm phủ tâm khung xuất -> chỉ giữ cụm đó (stats["center_cut"]). GUI tab Tự động
+  nhóm 1 (khi OCR) hàng "Màu chữ phụ đề" `a_ocrcolor_box` (`a_ocrcolor`, `a_ocrtol`, `gui/ocr_color_ui.ColorRows`
+  `a_ocrcolors` – mỗi hàng ô màu chữ + Hút + Viền màu / Không xét viền + ô màu viền + Hút + ×, "Thêm màu"; `PickDialog`
+  bấm vào ảnh vùng quét phóng to; `preview_dialog`; `_ocr_color_save` / `_ocr_color_pick` / `_ocr_color_guess` /
+  `_ocr_color_preview` / `_ocr_color_hint`), lọc màu bật -> trình phát không hiện ảnh làm rõ + không nhắc làm rõ;
+  "Đọc chữ kỹ" thêm `a_ocrcenter`; Cài đặt → Nhận dạng giọng nói 3 ô; `C.OCR_COLOR_HELP` / `OCR_CENTER_HELP`.
+- Câu OCR không đạt: nghe + AI đọc lại ảnh, 2 trên 3 (2.1.44, `trami/ocrai.py`, mở rộng "Nghe lại câu OCR không chắc"
+  2.1.42 – cùng công tắc `ocr_listen_unsure`): câu không đạt = `recheck.ocr_targets` (ocr_conf < `ocr_pick_conf`) + (Cài đặt
+  `ocr_check_novoice`, chỉ khi giọng ĐÃ TÁCH – `voice_env` kind "vocals") câu có tiếng nói < `NOVOICE_FRAC` 8 % lúc hiện
+  (`voiced_frac`, ngưỡng `voice_floor` = max(−55, p95 − 35 dB)). `pipeline.ocr_listen_unsure`: bộ nghe nghe trước
+  (`recheck.ocr_hear` – khúc giờ câu ± pad như 2.1.42) -> câu lời nghe GIỐNG CHỮ OCR (`char_sim` ≥ `ocr_ai_match` 0,7) và chắc
+  ≥ `ocr_listen_conf` = "same" (xác nhận, không gọi AI); còn lại `ocrai.pick_engine` (Cài đặt `ocr_ai_engine`: auto = công
+  cụ dịch nếu xem được ảnh, không thì AI xem ảnh đầu tiên có key Gemini > OpenAI > Claude / off / tên AI; `VISION` gemini /
+  openai / anthropic / ollama – DeepSeek không xem ảnh) -> `grab_all` (1 khung giữa câu, câu ≥ 2 s 2 khung 35 % / 70 %, JPEG
+  ≤ `MAX_W` 960 – `jpeg_of`) -> `read_lines` (lô `BATCH` 10 câu, `PROMPT` + màu chữ đang lọc, JSON {"N": {"phu_de",
+  "chu", "chac"}}; `LLMClient.chat(images=[(nhãn, jpeg)])` – `_content`: OpenAI-compatible `image_url` data URI, Anthropic
+  khối `image` base64; key sai / model không có -> dừng) -> `decide(ocr, ai, ai_sub, heard, hconf, thr, m)` (`match` = max
+  giống chữ, giống pinyin): lời nghe chắc -> "ai_fix" khi AI khớp lời nghe hơn OCR (cùng khớp theo âm -> bản giống CHỮ lời
+  nghe hơn ≥ 0,1 thắng – "糊字" / "胡子"), "same" khi OCR khớp, không thì "check"; không có tiếng nói + AI không thấy phụ
+  đề = "drop" (XOÁ – 2 nguồn); AI ≈ OCR mà không có tiếng nói = "novoice" (giữ, tím nhạt), có nói = "ai_same"; 3 bản khác
+  = "check" (giữ chữ OCR, `asr_alt` = chữ AI eng "ai" / lời nghe "recheck", chữ xanh lơ). `apply` -> `extra["ocr_ai"]`
+  {kind, eng, ai, heard, hconf, ocr}, ai_fix -> `recheck.ocr_fill` (giữ dấu câu, `src_before`, bỏ ocr_cc / ocr_alt /
+  ocr_fix / ct) + `asr_same`. Không bao giờ xoá theo 1 nguồn; giờ câu luôn giữ theo OCR. Không có AI -> luật 2.1.42 cho
+  câu ocr_conf thấp (câu chỉ "không có tiếng nói" chỉ đánh dấu); AI không trả 1 câu -> luật 2.1.42 cho câu đó; không có
+  bộ nghe -> chỉ AI (không xoá, không sửa – ai_same / check / novoice). stats `p.data["ocr_listen"]` {checked,
+  novoice_rows, same, ai_fix, ai_same, check, novoice, dropped, fixed, ai_eng, ai_calls / sent / failed / error, ai_why,
+  asr_why} -> `ocrai.note` trong `listen_note`. `pipeline.ocr_check_rows` (nút tab Phụ đề, câu đã tích – không xét câu
+  không có tiếng nói) + `use_ocr_text` ("Dùng lại bản OCR": về chữ OCR cũ, chữ AI thành `asr_alt` eng "ai", kind
+  "user_ocr"). GUI tab Tự động hàng "Câu OCR không đạt" (`a_ocrlisten`, `a_ocrconf`, `a_ocrnov`, `a_olconf`, `a_ocrai`,
+  `a_ocrmatch`); tab Phụ đề → Công cụ → Lời hát & nghe nhầm hàng "Câu OCR" ("AI đọc lại + nghe câu đã tích" `run_ocr_check`
+  – chưa tích = câu OCR đọc chắc dưới mức, việc "dual"; "Tích câu AI sửa / cần xem" `_pick_ocr_ai`; "Dùng lại bản OCR"
+  `_use_ocr_text`; "Dùng bản AI" = `_use_alt`); bảng câu `subs_model.AI_FIX_COLOR` #7ED9B0 / `NOVOICE_COLOR` #C9A6FF,
+  `ocr_ai_tip` (3 bản + `KIND_LABEL`), `ENGINE_LABEL["ai"]`; Cài đặt 3 ô; `autoflow.summary` "(lọc màu chữ, AI đọc lại +
+  nghe câu không đạt)"; `C.OCR_LISTEN_HELP` viết lại.
 - Lọc từ (2.1.33, `trami/wordfilter.py`): `parse` (ô cách nhau bằng , ， ; | xuống dòng), `find` (khớp theo NFKC + chữ
   thường, bỏ khoảng trắng – "＠ 纵横" = "@纵横"; cụm dài trước), `strip_words` (bỏ cụm, `_tidy`: khoảng trắng đôi, 2 dấu ngắt
   liền nhau, cụm ở đầu / cuối câu thì bỏ dấu ngắt còn sót), `empty` (không còn chữ / số), `plan` (xem trước, không sửa),
@@ -722,7 +768,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (300 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
+- `tests/test_core.py` – `python -m pytest -q tests` (305 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
@@ -2599,7 +2645,28 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   font"); xuất chép font riêng vào work/render/fonts (`u_<tên file>`, không đè font đi kèm); đo bề rộng chữ bằng Pillow
   nhận font riêng tên file bất kỳ. Thử: font đổi tên đặt tên file "zh-cn.ttf" -> libass vẽ giống hệt font gốc (lệch 0),
   không có font -> font dự phòng; libass vẽ font HYWenHei câu Việt có dấu + chữ Hán đúng; giao diện offscreen.
+- 2.1.44: "xác định màu chữ + màu viền trước khi quét, không đúng màu thì bỏ (chữ trong cảnh cùng khung phụ đề)" + "câu
+  không đạt gửi Gemini (AI khác) lấy lại rồi nghe xác nhận, đánh dấu lại" -> thử nghiệm trước (video phụ đề vàng viền đen +
+  biển chữ trắng cùng hàng + HUD trắng viền đen đúng chỗ phụ đề ở khoảng giữa câu + chữ đỏ chạy + chữ xanh hàng trên): bản
+  cũ 10 câu sai / dính chữ lạ, lọc màu khi giải mã 0 (nhanh hơn); phụ đề trắng crf30: 10 + 1 dính -> 3 (chỉ còn HUD cùng
+  kiểu chữ – không lọc màu nào tách được); biển chữ cùng hàng dính câu -> tách khối xa cụm giữa sửa riêng được; Tự lấy màu
+  đoán đúng cả 2 video (~20–30 s / 36 khung trên CPU). Rà cách các tool khác (VideoSubFinder, video-subtitle-extractor…)
+  lọc phụ đề: màu chữ / viền + vùng giữa khung + nhiều khung – chỉ học cách làm. Làm: lọc màu (tối đa 3 cặp, Hút, Tự lấy
+  màu, Xem thử), tách khối chữ xa giữa khung, câu OCR không đạt = nghe trước rồi AI xem ảnh đọc lại, chọn 2 trên 3 (xem Cấu
+  trúc). Lỗi tìm ra khi thử: lọc màu cả khung 4 ms / khung -> chỉ lọc khung bộ theo dõi cần (~1,3 ms); khung bộ tìm chữ có
+  đệm dính biển chữ vào câu (khe 4 px) -> đo theo tâm từng chữ; chữ to nét dày chỉ giữ phần thân sát viền (lõi nét bị
+  bỏ – thấy khi xem ảnh Xem thử) -> lan mặt nạ thân chữ trong vùng đúng màu; "糊字" / "胡子" cùng âm đọc -> chọn bản giống
+  chữ lời nghe;
+  xác nhận sớm bằng lời nghe phải giống CHỮ (âm đọc giống chưa đủ – OCR hay sai chữ đồng âm). Thử: lọc màu + tách cụm trên
+  video vẽ chữ thật (OCR thật), AI giả + bộ nghe giả cho đủ các nhánh (sửa / giữ / xanh / tím / xoá / không AI / AI tắt),
+  giao diện offscreen (lưu Cài đặt, Hút, Tự lấy màu, Xem thử, tô màu, Dùng lại bản OCR, Ctrl+Z, nút câu đã tích). Chưa gọi
+  AI thật (sandbox chặn Google / OpenAI / Anthropic) – ảnh dải phụ đề AI đọc đúng không cần thử trên video thật.
 ## Vấn đề đang mở
+- 2.1.44: chờ người dùng thử tab Tự động (nguồn OCR): dừng video ở chỗ có phụ đề → "Màu chữ phụ đề" → Tự lấy màu (hoặc
+  Hút) → Xem thử (chữ phụ đề xanh lá, chữ khác đỏ) → quét; so số câu dính chữ lạ / tách sai với lúc tắt lọc màu. Bật "Câu
+  OCR không đạt" (AI đọc lại: Theo công cụ dịch = Gemini có key) → xem thông báo "N câu OCR không đạt: … AI Gemini đọc lại
+  K câu", câu xanh ngọc (AI sửa) có đúng không (sai -> Dùng lại bản OCR), câu bị xoá (Khôi phục câu đã xoá), lỗi AI (gửi
+  dòng ⚠ trong thông báo + data\logs\loi.txt). Độ lệch Vừa chưa đo trên video thật nén nặng (mất nét -> Rộng).
 - Test `test_subtitle_line_fit_and_rounded_box` hỏng khi chạy CẢ bộ test (chạy riêng thì qua): có QApplication thì
   `textfit.width` đo bằng Qt – "Noto Sans CJK JP" đậm cỡ 40 Qt đo 705 px, Pillow 588 px -> câu Nhật không ngắt được sau
   "、" trong khung 700 px. Chưa xác định cách nào khớp libass (chỉ ảnh hưởng xuống dòng phụ đề Nhật / Hàn / Trung).

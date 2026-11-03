@@ -83,7 +83,37 @@ def fit_text(s: Segment) -> str:
 
 
 ENGINE_LABEL = {"firered": "FireRedASR2", "qwen3": "Qwen3-ASR", "recheck": "Nghe lại với khúc rộng hơn",
-                "recheck_o": "Nghe lại trên tiếng gốc", "recheck_s": "Nghe lại riêng câu", "gemini": "Gemini xem video"}
+                "recheck_o": "Nghe lại trên tiếng gốc", "recheck_s": "Nghe lại riêng câu", "gemini": "Gemini xem video",
+                "ai": "AI đọc lại ảnh phụ đề"}
+AI_FIX_COLOR, NOVOICE_COLOR = "#7ED9B0", "#C9A6FF"     # 2.1.44: AI sửa câu OCR (giọng nói xác nhận) / câu không có tiếng nói
+
+
+def ocr_ai_tip(s) -> str:
+    """Chú thích câu OCR đã qua bước kiểm tra câu không đạt (2.1.44): kết quả + 3 bản chữ OCR / AI / lời nghe."""
+    from ..ocrai import KIND_LABEL
+    from ..translate import ENGINE_NAMES
+
+    oa = s.extra.get("ocr_ai") or {}
+    k = oa.get("kind", "")
+    lines = [f"Kiểm tra câu OCR không đạt: {KIND_LABEL.get(k, k)}"]
+    if oa.get("ocr") is not None and oa.get("ocr") != s.text:
+        lines.append(f"Chữ OCR cũ: {oa['ocr']}")
+    elif oa.get("ocr") is not None:
+        lines.append(f"Chữ OCR: {oa['ocr']}")
+    if oa.get("ai") is not None:
+        lines.append(f"AI {ENGINE_NAMES.get(oa.get('eng', ''), oa.get('eng', ''))} đọc ảnh: "
+                     f"{oa['ai'] or '(không thấy phụ đề)'}")
+    if oa.get("heard") is not None:
+        lines.append(f"Bộ nghe nghe được: {oa['heard'] or '(không có tiếng nói)'}"
+                     + (f" (độ chắc {float(oa.get('hconf') or 0):.2f})" if oa.get("heard") else ""))
+    if k == "ai_fix":
+        lines.append("Sai thì tích câu rồi bấm 'Dùng lại bản OCR' (tab Phụ đề → Công cụ → Lời hát & nghe nhầm)")
+    elif k in ("check", "novoice") and s.extra.get("asr_alt") is not None:
+        lines.append("Xem chữ trên hình rồi sửa tay, hoặc tích câu rồi bấm 'Dùng bản bộ nghe 2' để lấy chữ "
+                     + ("AI" if s.extra.get("asr_alt_eng") == "ai" else "nghe được"))
+    elif k == "novoice":
+        lines.append("Có thể là chữ trên hình / lời dẫn không đọc thành tiếng – không phải phụ đề thì Xoá")
+    return "\n".join(lines)
 
 
 def asr_tip(s) -> str:
@@ -93,7 +123,8 @@ def asr_tip(s) -> str:
         eng = str(s.extra.get("asr_alt_eng", ""))
         who = ENGINE_LABEL.get(eng, "Bộ nghe 2")
         alt = s.extra["asr_alt"] or "(không nghe ra chữ nào – có thể là nhạc / tiếng động)"
-        lines.append(f"{who} ra khác: {alt}" if eng.startswith("recheck") else
+        lines.append(f"{who} ra khác: {alt}" if eng.startswith("recheck") else f"AI đọc lại ảnh phụ đề ra: {alt}"
+                     if eng == "ai" else
                      f"Gemini xem video nghe ra: {alt}" + (f" ({s.extra['gem_note']})" if s.extra.get("gem_note") else "")
                      if eng == "gemini" else f"2 bộ nghe ra khác nhau – {who}: {alt}")
         pick = s.extra.get("asr_pick")
@@ -332,10 +363,15 @@ class SubsModel(QAbstractTableModel):
                     return QColor("#B98CFF")       # tím = nghi nhạc / tiếng động bị nghe thành lời
                 if self.ocr_low(s):
                     return QColor("#F08A6E")       # đỏ cam = OCR đọc chữ không chắc (2.1.36)
+                kind = (s.extra.get("ocr_ai") or {}).get("kind")
+                if kind == "novoice":
+                    return QColor(NOVOICE_COLOR)   # tím nhạt = câu OCR không có tiếng nói lúc hiện (2.1.44)
                 if s.extra.get("asr_repeat"):
                     return QColor("#F28FB0")       # hồng = còn 1 cụm lặp liền nhau / 2 câu liền giống nhau
                 if s.extra.get("asr_unsure"):
                     return QColor("#6FC8E8")       # xanh = 2 bộ nghe ra khác nhau, chưa chọn được -> nghe lại
+                if kind == "ai_fix":
+                    return QColor(AI_FIX_COLOR)    # xanh ngọc = AI đọc lại ảnh sửa, giọng nói xác nhận (2.1.44)
                 if s.extra.get("from_asr") or s.extra.get("from_gemini"):
                     return QColor("#E8A87C")       # cam nhạt = câu bộ nghe / Gemini thêm vào (phụ đề không có)
                 return QColor("#E8C26A" if s.extra.get("src_unsure") else "#C3CAD6")   # vàng = AI sửa mà chưa chắc
@@ -364,6 +400,8 @@ class SubsModel(QAbstractTableModel):
                 t = ocr_tip(s, self.ocr_thr, self.ocr_low(s))
                 if t:
                     return t
+            if c == C_ZH and s.extra.get("ocr_ai"):
+                return ocr_ai_tip(s)
             if c == C_ZH and s.extra.get("asr_repeat"):
                 return f"⚠ Nghi bộ nghe lặp lời: \"{s.extra['asr_repeat']}\" lặp liền nhau (hoặc câu bên cạnh gần giống " \
                        "hệt). Nghe lại – nói 1 lần thì sửa chữ / Xoá câu thừa; hoặc tab Phụ đề → Công cụ → Lời hát & " \

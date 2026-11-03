@@ -706,7 +706,9 @@ class SettingsPage(QWidget):
         ("ocr_fps", "ocr_fps", "c"), ("ocr_model", "ocr_model", "c"), ("ocr_device", "ocr_device", "c"),
         ("ocr_hwdec", "ocr_hwdec", "b"), ("ocr_clean", "ocr_clean", "b"), ("ocr_timing", "ocr_timing", "c"),
         ("ocr_eq", "ocr_eq", "b"), ("ocr_listen", "ocr_listen_unsure", "b"), ("ocr_conf", "ocr_pick_conf", "f"),
-        ("ocr_lconf", "ocr_listen_conf", "f"),
+        ("ocr_lconf", "ocr_listen_conf", "f"), ("ocr_color", "ocr_color", "b"), ("ocr_ctol", "ocr_color_tol", "c"),
+        ("ocr_center", "ocr_center", "b"), ("ocr_ai", "ocr_ai_engine", "c"), ("ocr_match", "ocr_ai_match", "f"),
+        ("ocr_novoice", "ocr_check_novoice", "b"),
         ("ocr_fix", "ocr_dict_fix", "b"), ("ocr_big", "ocr_big", "b"),
         ("asr_device", "asr_device", "c"),
         ("asr_max", "asr_max_chars", "i"), ("asr_beam", "asr_beam_size", "i"), ("asr_vad", "asr_vad", "b"),
@@ -809,7 +811,23 @@ class SettingsPage(QWidget):
                                "chuyển động tô đen) rồi mới đọc -> ít đọc sai khi nền rối. Kém chắc thì tự đọc thêm khung "
                                "gốc và chọn bản tốt hơn")
         self.ocr_eq = f.row("Làm rõ chữ trước khi OCR", Switch(), C.OCR_EQ_HELP)
-        self.ocr_listen = f.row("Nghe lại câu OCR không chắc", Switch(), C.OCR_LISTEN_HELP)
+        from .. import ocrai, ocrcolor
+
+        self.ocr_color = f.row("Chỉ lấy chữ đúng màu phụ đề", Switch(), C.OCR_COLOR_HELP + "<br>Chọn màu ở tab Tự động "
+                               "→ 'Màu chữ phụ đề' (Tự lấy màu / Hút)")
+        self.ocr_ctol = f.row("Độ lệch màu cho phép", combo(ocrcolor.TOL_CHOICES), C.OCR_COLOR_HELP)
+        self.ocr_center = f.row("Bỏ khối chữ xa giữa khung quét", Switch(), C.OCR_CENTER_HELP)
+        self.ocr_listen = f.row("Kiểm tra câu OCR không đạt", Switch(), C.OCR_LISTEN_HELP)
+        self.ocr_novoice = f.row("Kiểm tra cả câu không có tiếng nói", Switch(), C.OCR_LISTEN_HELP)
+        self.ocr_ai = f.row("AI đọc lại ảnh câu không đạt", combo(ocrai.engine_choices(load_settings())),
+                            C.OCR_LISTEN_HELP)
+        self.ocr_match = QDoubleSpinBox()
+        self.ocr_match.setRange(0.4, 0.95)
+        self.ocr_match.setSingleStep(0.05)
+        self.ocr_match.setDecimals(2)
+        self.ocr_match.setMaximumWidth(110)
+        f.row("2 bản chữ khớp từ", self.ocr_match, "Chữ OCR / chữ AI / lời nghe giống nhau từ mức này (theo chữ hoặc âm "
+              "đọc) mới coi là cùng 1 câu")
         self.ocr_conf = QDoubleSpinBox()
         self.ocr_conf.setRange(0.3, 0.99)
         self.ocr_conf.setSingleStep(0.05)

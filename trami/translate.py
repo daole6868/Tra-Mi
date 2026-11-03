@@ -584,10 +584,30 @@ class LLMClient:
         # báo trong ~40 s
         return net.session().post(url, headers=headers, json=body, timeout=(15, read))
 
-    def chat(self, system: str, user: str, max_tokens: int = 8000, temperature: float = 0.3) -> str:
+    def _content(self, user: str, images: list | None):
+        """Nội dung lời nhắn người dùng: chữ, hoặc (2.1.44 – AI xem ảnh) chữ + [(nhãn, ảnh JPEG)] xen kẽ."""
+        if not images:
+            return user
+        import base64
+
+        out: list[dict] = [{"type": "text", "text": user}]
+        for lab, data in images:
+            if lab:
+                out.append({"type": "text", "text": lab})
+            b64 = base64.b64encode(data).decode("ascii")
+            if self.engine == "anthropic":
+                out.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}})
+            else:
+                out.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+        return out
+
+    def chat(self, system: str, user: str, max_tokens: int = 8000, temperature: float = 0.3,
+             images: list | None = None) -> str:
         """Gửi 1 lần. max_tokens: độ dài trả lời cần (lô dịch dài xin nhiều hơn – 2.1.23); model có giới hạn thấp hơn (API
-        báo 400) -> tự hạ theo đúng giới hạn đó. Trả lời bị cắt vì hết giới hạn -> `self._tl.cut` = True (theo luồng)."""
+        báo 400) -> tự hạ theo đúng giới hạn đó. Trả lời bị cắt vì hết giới hạn -> `self._tl.cut` = True (theo luồng).
+        images (2.1.44): [(nhãn, ảnh JPEG)] gửi kèm – chỉ AI xem được ảnh (Gemini / OpenAI / Claude / Ollama mô hình ảnh)."""
         last_err = None
+        ucontent = self._content(user, images)
         fails = 0
         waits = 0
         name = ENGINE_NAMES.get(self.engine, self.engine)
@@ -606,7 +626,7 @@ class LLMClient:
                 read = max(300.0, ask / 20 + 120)    # AI viết ~20+ token / giây: lô dài chờ lâu hơn 5 phút
                 if self.engine == "anthropic":
                     body = {"model": self.model, "max_tokens": ask,
-                            "system": system, "messages": [{"role": "user", "content": user}]}
+                            "system": system, "messages": [{"role": "user", "content": ucontent}]}
                     if self._send_temp:
                         body["temperature"] = temperature
                     r = net.call(self._http, "https://api.anthropic.com/v1/messages",
@@ -619,7 +639,7 @@ class LLMClient:
                         return "".join(b.get("text", "") for b in d.get("content", []) if b.get("type") == "text")
                 else:
                     body = {"model": self.model,
-                            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+                            "messages": [{"role": "system", "content": system}, {"role": "user", "content": ucontent}]}
                     body[self._max_key] = ask
                     if self._send_temp:
                         body["temperature"] = temperature

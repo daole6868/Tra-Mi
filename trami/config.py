@@ -103,6 +103,15 @@ DEFAULT_SETTINGS: dict = {
     # 2.1.42 (thay "Xoá câu OCR không chắc"): câu OCR đọc chắc dưới ocr_pick_conf -> bộ nghe nghe lại đúng khúc giờ câu
     # đó; chắc từ ocr_listen_conf: ra đúng chữ thì giữ, ra câu khác thì điền; không chắc thì xoá
     "ocr_listen_unsure": False, "ocr_listen_conf": 0.7,
+    # 2.1.44: câu OCR "không đạt" (đọc chắc dưới mức / không có tiếng nói suốt lúc hiện) -> bộ nghe nghe đúng giờ câu; câu
+    # chưa được giọng nói xác nhận -> AI xem ảnh (ocr_ai_engine: auto = công cụ dịch nếu AI xem được ảnh / off / tên AI)
+    # đọc lại -> chọn theo 2 trên 3 nguồn (chữ OCR, chữ AI, lời nghe được; khớp theo âm đọc ≥ ocr_ai_match). Giờ câu giữ
+    # nguyên theo OCR
+    "ocr_ai_engine": "auto", "ocr_ai_match": 0.7, "ocr_check_novoice": True,
+    # 2.1.44: chỉ lấy chữ đúng màu chữ / viền (ocr_colors: [{"fill": "#RRGGBB", "outline": "#RRGGBB" | ""}], tối đa 3;
+    # outline "" = không xét viền), độ lệch tight / mid / wide; phụ đề căn giữa: bỏ khối chữ cùng hàng nằm xa cụm giữa
+    "ocr_color": False, "ocr_colors": [{"fill": "#FFFFFF", "outline": "#000000"}], "ocr_color_tol": "mid",
+    "ocr_center": True,
     # 2.1.37: sửa chữ dễ nhầm theo từ điển, đọc lại câu kém chắc bằng bộ đọc lớn đã tải (PP-OCRv5 server / v6 medium)
     # (2.1.42: bỏ hẳn chức năng lọc logo chữ – "ocr_logo" / "ocr_logo_known" cũ trong settings.json không còn tác dụng)
     "ocr_dict_fix": True, "ocr_big": True,

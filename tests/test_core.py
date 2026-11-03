@@ -13032,3 +13032,397 @@ def test_user_font_gui_2143(sample_video, tmp_path, monkeypatch):
     finally:
         win.close()
         (USER_FONTS_DIR / "zh-cn.ttf").unlink(missing_ok=True)
+
+
+def _color_video_2144(path, dur=16.0):
+    """Video thử 2.1.44: phụ đề VÀNG viền đen; ở khoảng giữa câu có chữ TRẮNG viền đen đúng chỗ phụ đề (HUD game);
+    biển chữ trắng không viền cùng hàng bên trái."""
+    font = _cjk_font()
+    lines = ["没想到你也有这一天", "今天的天气真不错啊", "我们一起去吃饭好不好", "这件事情你别管了", "明天早上八点见"]
+    subs, t = [], 0.6
+    for k, x in enumerate(lines):
+        d = 1.7 + 0.3 * (k % 3)
+        if t + d > dur - 0.5:
+            break
+        subs.append((round(t, 2), round(t + d, 2), x))
+        t += d + 1.2
+    f = ["noise=alls=26:allf=t"]
+    for a, b, x in subs:
+        f.append(f"drawtext=fontfile='{font}':text='{x}':fontsize=40:fontcolor=0xFFD800:borderw=3:bordercolor=black:"
+                 f"x=(w-tw)/2:y=h-80:enable='between(t,{a},{b})'")
+    gaps = "+".join(f"between(t,{subs[i][1] + 0.05:.2f},{subs[i + 1][0] - 0.05:.2f})" for i in range(len(subs) - 1))
+    f.append(f"drawtext=fontfile='{font}':text='剩余人数九十九':fontsize=40:fontcolor=white:borderw=3:bordercolor=black:"
+             f"x=(w-tw)/2:y=h-80:enable='{gaps}'")
+    f.append(f"drawtext=fontfile='{font}':text='欢迎光临':fontsize=40:fontcolor=white:x=16:y=h-80:enable='between(t,2,12)'")
+    subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", f"color=c=0x507090:s=960x540:r=25:d={dur}",
+                    "-vf", ",".join(f), "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", str(path)],
+                   check=True)
+    return subs
+
+
+def test_ocr_color_filter_2144(tmp_path):
+    """Chỉ lấy chữ đúng màu chữ + màu viền (2.1.44): chữ HUD trắng viền đen ở khoảng giữa câu bị bỏ, câu phụ đề vàng giữ
+    đủ + đúng giờ; biển chữ trắng bên trái không dính vào câu (lọc màu / phụ đề căn giữa); Tự lấy màu đoán ra vàng viền
+    đen; Xem thử ra ảnh; hút màu."""
+    import cv2
+
+    from trami import ocr, ocrcolor
+
+    vid = tmp_path / "c.mp4"
+    subs = _color_video_2144(vid)
+    region = {"x": 0.0, "y": 0.70, "w": 1.0, "h": 0.30, "exact": True}
+    base = {"ocr_model": "v6_small", "ocr_device": "cpu", "ocr_hwdec": False}
+    segs0 = ocr.extract_hardsubs(str(vid), region=region, fps=4.0, settings=base)
+    assert sum(1 for x in segs0 if x.text == "剩余人数九十九") >= 3          # không lọc màu: chữ HUD thành câu
+    assert not any("欢迎光临" in x.text for x in segs0)                       # phụ đề căn giữa: biển không dính câu
+    stc: dict = {}
+    segs = ocr.extract_hardsubs(str(vid), region=region, fps=4.0, stats=stc,
+                                settings={**base, "ocr_color": True,
+                                          "ocr_colors": [{"fill": "#FFD800", "outline": "#000000"}]})
+    assert [x.text for x in segs] == [t for _a, _b, t in subs]
+    for x, (a, b, _t) in zip(segs, subs):
+        assert abs(x.start - a) <= 0.08 and abs(x.end - b) <= 0.08
+    assert "FFD800" in stc["color"] and "color" in stc["t"]
+    # sai màu (chọn trắng viền đen) -> chỉ còn chữ HUD
+    segs_w = ocr.extract_hardsubs(str(vid), region=region, fps=4.0,
+                                  settings={**base, "ocr_color": True,
+                                            "ocr_colors": [{"fill": "#FFFFFF", "outline": "#000000"}]})
+    assert segs_w and all(x.text == "剩余人数九十九" for x in segs_w)
+    # tự lấy màu: nhóm có nhiều câu khác nhau nhất = phụ đề vàng
+    g = ocrcolor.guess(str(vid), region, 16.0, base, n=12)
+    fill = ocrcolor.hex_rgb(g["entries"][0]["fill"])
+    assert fill[0] > 200 and fill[1] > 170 and fill[2] < 90
+    assert max(ocrcolor.hex_rgb(g["entries"][0]["outline"])) < 40
+    assert "câu khác nhau" in ocrcolor.guess_note(g)
+    img = ocrcolor.grab(str(vid), 1.5, region)
+    assert img is not None and img.shape[1] == 960
+    mk, seen = ocrcolor.preview(img, {"ocr_colors": [{"fill": "#FFD800", "outline": "#000000"}]})
+    a = cv2.imdecode(np.frombuffer(mk, np.uint8), cv2.IMREAD_COLOR)
+    b = cv2.imdecode(np.frombuffer(seen, np.uint8), cv2.IMREAD_GRAYSCALE)
+    assert a.shape[:2] == b.shape[:2] == img.shape[:2]
+    green = (a[:, :, 1] > 200) & (a[:, :, 2] < 120)
+    assert green.sum() > 300 and (b != ocrcolor.BG).mean() < 0.2
+    # hút màu: ô có chữ vàng
+    ys, xs = np.nonzero(green)
+    assert ocrcolor.hex_rgb(ocrcolor.pick(img, int(xs[len(xs) // 2]), int(ys[len(ys) // 2]), r=0))[2] < 120
+    assert ocrcolor.entries({"ocr_colors": [{"fill": "ffd800", "outline": "bad"}, {"fill": "x"}]}) == \
+        [{"fill": "#FFD800", "outline": ""}]
+    assert not ocrcolor.enabled({"ocr_color": True, "ocr_colors": []})
+
+
+def test_ocr_center_keep_2144():
+    """Phụ đề căn giữa: khối chữ cùng hàng cách xa cụm giữa bị bỏ; giữa khung là khe (2 người nói) hoặc không cụm nào phủ
+    giữa -> giữ nguyên; hàng khác không đụng."""
+    from trami.ocr import _center_keep, _mk, _rect_pts
+
+    def it(x0, x1, y0=100, t="字"):
+        return _mk(_rect_pts(x0, y0, x1, y0 + 40), t, 0.99)
+    def txt(items):
+        return [x[1] for x in items]
+    sub_, sign = it(300, 660, t="我们一起去吃饭"), it(16, 180, t="欢迎光临")
+    assert txt(_center_keep([sign, sub_], 480)) == ["我们一起去吃饭"]
+    a, b = it(150, 400, t="甲说"), it(560, 800, t="乙说")          # giữa (480) là khe -> giữ cả 2
+    assert txt(_center_keep([a, b], 480)) == ["甲说", "乙说"]
+    left = it(16, 300, t="左边")                                   # không cụm nào phủ giữa -> giữ
+    assert txt(_center_keep([left, it(700, 900, t="右边")], 480)) == ["左边", "右边"]
+    up = it(300, 660, y0=40, t="上一行")                           # 2 dòng phụ đề: cả 2 dòng giữ
+    assert txt(_center_keep([up, sub_, sign], 480)) == ["上一行", "我们一起去吃饭"]
+
+
+def test_ocr_ai_decide_2144():
+    """Luật 2 trên 3 (chữ OCR, chữ AI đọc ảnh, lời bộ nghe – khớp theo chữ hoặc âm đọc); không xoá khi chỉ 1 nguồn."""
+    from trami import ocrai
+
+    d = ocrai.decide
+    assert d("糊字", "胡子", True, "胡子", 0.9, 0.7) == "ai_fix"           # AI ≈ giọng, OCR khác -> câu AI
+    assert d("今天下雨", "今天下雨", True, "今天下雨", 0.9, 0.7) == "same"    # OCR ≈ giọng
+    assert d("今天下雨", "金天下雨", True, "今天下雨", 0.9, 0.7) == "same"
+    assert d("剩余人数", "", False, "", 0.0, 0.7) == "drop"                 # không tiếng nói + AI không thấy phụ đề
+    assert d("旁白文字", "旁白文字", True, "", 0.0, 0.7) == "novoice"         # không tiếng nói, AI đọc ra phụ đề -> giữ
+    assert d("旁白文字", "旁白文学", True, "", 0.0, 0.7) == "novoice"
+    assert d("看不清", "完全不同", True, "别的话呀", 0.9, 0.7) == "check"     # 3 bản khác nhau -> giữ, tô xanh
+    assert d("看不清", "看不清", True, None, 0.0, 0.7) == "ai_same"          # không có bộ nghe: AI = OCR -> xác nhận
+    assert d("看不清", "看得见", True, None, 0.0, 0.7) == "check"            # chỉ AI khác -> không đổi chữ
+    assert d("看不清", "", False, None, 0.0, 0.7) == "check"                 # chỉ AI bảo không phải phụ đề -> không xoá
+    assert d("看不清", "看不清", True, "嗯", 0.3, 0.7) == "ai_same"            # giọng không chắc: AI = OCR
+    assert d("清楚", None, False, "清楚", 0.9, 0.7) == "same" and d("清楚", None, False, "别的", 0.9, 0.7) == ""
+    assert d("糊字", None, False, "胡子", 0.9, 0.7) == ""       # chỉ khớp âm đọc: chưa xác nhận, để AI đọc lại
+    assert ocrai.match("你好吗", "你号吗") > 0.6 and ocrai.match("", "x") == 0.0
+    # gửi ảnh cho AI: OpenAI / Gemini dạng image_url, Claude dạng image base64
+    from trami.translate import LLMClient
+
+    for eng, kind in (("gemini", "image_url"), ("anthropic", "image")):
+        c = LLMClient({f"{eng}_api_keys": ["k"]}, eng)
+        cont = c._content("đọc", [("Câu 1", b"\xff\xd8jpg")])
+        assert cont[0]["text"] == "đọc" and cont[1]["text"] == "Câu 1" and cont[2]["type"] == kind
+        assert c._content("chỉ chữ", None) == "chỉ chữ"
+
+
+def test_ocr_ai_recheck_2144(tmp_path, monkeypatch):
+    """Câu OCR không đạt -> bộ nghe trước (câu khớp lời nói = xong, không gửi AI) -> câu còn lại AI đọc ảnh -> 2 trên 3:
+    AI sửa (giọng xác nhận), xoá (không tiếng nói + AI không thấy phụ đề), giữ + tô (không tiếng nói / 3 bản khác nhau);
+    câu không tiếng nói dù OCR chắc cũng được xét; giờ câu giữ nguyên; AI không trả câu -> luật nghe 2.1.42; nút cho câu
+    đã tích; thông báo."""
+    from trami import asr_qwen, ocr, ocrai, pipeline
+    from trami import translate as tr
+    from trami.config import load_settings
+    from trami.project import Project
+    from trami.subtitle import Segment
+
+    lines = [(1.0, 2.0, "清楚的字", 0.6), (2.5, 3.0, "糊字", 0.6), (3.5, 4.2, "剩余人数", 0.5),
+             (5.0, 6.0, "旁白文字", 0.97), (6.5, 7.5, "看不清", 0.5), (8.0, 9.0, "没回答", 0.5), (9.5, 10.0, "好好", 0.99)]
+    heard = {1.0: ("清楚的字", [0.9] * 4, 0.9), 2.5: ("胡子。", [0.92, 0.9, 0.99], 0.9), 3.5: ("", None, 0.0),
+             5.0: ("", None, 0.0), 6.5: ("别的话呀", [0.9] * 4, 0.9), 8.0: ("没回答", [0.4] * 3, 0.4)}
+    ai = {"胡子": None}
+    calls, asked = [], []
+
+    class W:
+        def call(self, req, progress=None, cancel=None):
+            calls.append(req)
+            out = []
+            for a, b in req["spans"]:
+                k = min(heard, key=lambda x: abs(x - a - 0.3) if a else abs(x - a))
+                t, cp, c = heard[k]
+                out.append({"text": t, "cp": cp, "conf": c})
+            return {"items": out}
+
+    # AI đọc ảnh: mỗi câu 1 ảnh ghi giờ câu -> trả lời theo giờ
+    ai_read = {2.5: {"phu_de": True, "chu": "胡子"}, 3.5: {"phu_de": False, "chu": ""},
+               5.0: {"phu_de": True, "chu": "旁白文字"}, 6.5: {"phu_de": True, "chu": "看不清楚啊"}}
+
+    def fake_jpeg(src, t, region, max_w=960):
+        return f"T{t:.3f}".encode()
+
+    def fake_chat(self, system, user, max_tokens=8000, temperature=0.3, images=None):
+        asked.append((system, [lab for lab, _ in images], [d for _, d in images]))
+        out, n = {}, 0
+        for lab, data in images:
+            if " – ảnh " in lab and not lab.endswith("ảnh 1"):
+                continue
+            n += 1
+            t = float(data.decode()[1:])
+            k = min(ai_read, key=lambda x: abs(x - t)) if ai_read else None
+            if k is not None and abs(k - t) < 0.8:
+                out[str(n)] = ai_read[k]
+        import json as _j
+        return _j.dumps(out, ensure_ascii=False)
+
+    src = tmp_path / "phim.mp4"
+    src.write_bytes(b"x")
+    wav = tmp_path / "a16.wav"
+    wav.write_bytes(b"x" * 2000)
+    p = Project.create("ocrai")
+    p.data["source"] = str(src)
+    p.data["info"] = {"duration": 11.0}
+    p.save()
+    env = np.full(1100, -80.0)
+    for a_, b_, _t, _c in lines:
+        if a_ not in (3.5, 5.0):                     # 2 câu này không có tiếng nói
+            env[int(a_ * 100):int(b_ * 100)] = -20.0
+    monkeypatch.setattr(ocr, "extract_hardsubs", lambda *a, **k: [
+        Segment(a_, b_, t_, extra={"ocr_conf": c_}) for a_, b_, t_, c_ in lines])
+    monkeypatch.setattr(pipeline, "ocr_box", lambda q: {"x": 0, "y": 0.8, "w": 1, "h": 0.2, "exact": True})
+    monkeypatch.setattr(pipeline, "_listen_audio", lambda *a, **k: (src, wav))
+    monkeypatch.setattr(pipeline, "relisten_engine", lambda *a, **k: ("qwen3", "Qwen3-ASR"))
+    monkeypatch.setattr(pipeline, "voice_env", lambda *a, **k: (env, 0.01, "vocals"))
+    monkeypatch.setattr(asr_qwen, "asr_worker", lambda *a, **k: W())
+    monkeypatch.setattr(ocrai, "jpeg_of", fake_jpeg)
+    monkeypatch.setattr(tr.LLMClient, "chat", fake_chat)
+    try:
+        st = {**load_settings(), "diarize": False, "ocr_timing": "sub", "ocr_listen_unsure": True,
+              "ocr_pick_conf": 0.85, "ocr_listen_conf": 0.7, "ocr_ai_engine": "gemini", "gemini_api_keys": ["k"],
+              "ocr_color": True, "ocr_colors": [{"fill": "#FFD800", "outline": "#000000"}]}
+        pipeline.recognize(p, "ocr", "zh", None, 4.0, st)
+        p.reload()
+        by = {x.start: x for x in p.segments}
+        # 没回答: nghe không chắc (0,4) + AI không trả câu này -> luật nghe 2.1.42 -> xoá
+        assert [x.text for x in p.segments] == ["清楚的字", "胡子", "旁白文字", "看不清", "好好"]
+        assert 3.5 not in by                                                       # xoá: không tiếng nói + AI
+        assert by[2.5].extra["ocr_ai"]["kind"] == "ai_fix" and by[2.5].extra["src_before"] == "糊字"
+        assert (by[2.5].start, by[2.5].end) == (2.5, 3.0)                           # giờ câu giữ theo OCR
+        assert by[1.0].extra["ocr_ai"]["kind"] == "same" and by[1.0].extra["asr_same"]
+        assert by[5.0].extra["ocr_ai"]["kind"] == "novoice"                         # OCR chắc nhưng không tiếng nói
+        assert by[6.5].extra["ocr_ai"]["kind"] == "check" and by[6.5].extra["asr_alt"] == "看不清楚啊"
+        assert by[6.5].extra["asr_alt_eng"] == "ai" and by[6.5].extra["asr_unsure"]
+        assert "ocr_ai" not in by[9.5].extra                                        # câu chắc + có tiếng nói: không xét
+        # câu giọng nói đã xác nhận không gửi AI; mỗi câu 1 ảnh (câu < 2 s); màu phụ đề trong lời nhắc
+        sent = [lab for _s, labs, _d in asked for lab in labs]
+        assert len(asked) == 1 and len(sent) == 5 and "#FFD800" in asked[0][0]
+        assert [round(float(d.decode()[1:]), 2) for d in asked[0][2]] == [2.75, 3.85, 5.5, 7.0, 8.5]
+        # câu 8.0: AI không trả lời -> luật nghe 2.1.42 (nghe không chắc -> xoá)? câu này nghe chắc 0,4 < 0,7 -> xoá
+        note = pipeline.listen_note(p)
+        assert "câu OCR không đạt" in note and "AI Gemini đọc lại 5 câu (1 lần gửi)" in note and "xoá" in note
+        ol = p.data["ocr_listen"]
+        assert ol["ai_fix"] == 1 and ol["check"] == 1 and ol["novoice"] == 1 and ol["dropped"] == 2, ol
+        assert len(p.data["unsure_removed"]) == 2
+        # câu đã tích (tab Phụ đề): nút AI đọc lại + nghe – câu chắc vẫn xét
+        asked.clear()
+        ai_read[9.5] = {"phu_de": True, "chu": "好好"}
+        heard[9.5] = ("好好", [0.95, 0.95], 0.95)
+        idx = [i for i, x in enumerate(p.segments) if x.start == 9.5]
+        res = pipeline.ocr_check_rows(p, idx, st)
+        assert res["checked"] == 1 and res.get("same") == 1 and not asked
+        # tắt AI -> cách 2.1.42 (chỉ nghe): câu không tiếng nói mà OCR chắc chỉ đánh dấu, không xoá
+        calls.clear()
+        pipeline.recognize(p, "ocr", "zh", None, 4.0, {**st, "ocr_ai_engine": "off"})
+        p.reload()
+        assert "旁白文字" in [x.text for x in p.segments] and "剩余人数" not in [x.text for x in p.segments]
+        note = pipeline.listen_note(p)
+        assert "nghe lại" in note and "không có tiếng nói" in note
+    finally:
+        p.delete()
+
+
+def test_ocr_color_ai_gui_2144(sample_video, monkeypatch):
+    """Giao diện 2.1.44: tab Tự động hàng "Màu chữ phụ đề" (bật / Hút / Tự lấy màu / Xem thử / thêm màu / độ lệch), "Câu
+    OCR không đạt" (AI đọc lại, khớp từ, câu không có tiếng nói), "Bỏ khối chữ xa giữa khung" lưu đúng Cài đặt và việc
+    "1. Nghe & tách câu" nhận đúng; tab Phụ đề: tô màu câu AI sửa / không có tiếng nói, tích, Dùng lại bản OCR, nút AI
+    đọc lại câu đã tích; Cài đặt nạp được các ô mới."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
+
+    from trami import ocr, ocrai, ocrcolor, pipeline
+    from trami.config import DEFAULT_SETTINGS, load_settings, save_settings
+    from trami.gui import ocr_color_ui, project_page as PPm, theme
+    from trami.gui.main import MainWindow
+    from trami.gui.subs_model import AI_FIX_COLOR, C_ZH, NOVOICE_COLOR
+    from trami.gui.widgets import set_combo
+    from trami.project import Project
+
+    keys = ["ocr_color", "ocr_colors", "ocr_color_tol", "ocr_center", "ocr_ai_engine", "ocr_ai_match",
+            "ocr_check_novoice", "ocr_listen_unsure"]
+    old = {k: load_settings().get(k) for k in keys}
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    p = Project.create("ocrcolor2144")
+    pipeline.attach_source(p, sample_video)
+    p.save()
+    got: list = []
+
+    def fake(src, region=None, fps=4.0, **kw):
+        got.append(dict(kw.get("settings") or {}))
+        return []
+
+    class J:
+        def update(self, *a, **k):
+            pass
+
+        def cancelled(self):
+            return False
+    shown: list = []
+    monkeypatch.setattr(ocr, "extract_hardsubs", fake)
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    monkeypatch.setattr(QDialog, "exec", lambda self: shown.append(type(self).__name__) or 0)
+    monkeypatch.setattr(PPm, "run_async", lambda fn, done=None, err=None: done(fn()))
+    win = MainWindow()
+    win.show()
+    win.open_project(p.id)
+    pp = win.project_page
+    jobs: list = []
+    monkeypatch.setattr(pp, "submit", lambda kind, title, fn, *a, **k: jobs.append((kind, title, fn(J(), Project(p.id)))))
+    toasts: list = []
+    monkeypatch.setattr(win, "toast", lambda m, *a, **k: toasts.append(m))
+    try:
+        app.processEvents()
+        pp.tabs.set_current(0)
+        set_combo(pp.a_method, "ocr")
+        app.processEvents()
+        f = pp._auto_form
+        assert f.isRowVisible(pp.a_ocrcolor_box) and f.isRowVisible(pp.a_ocrlisten_row)
+        set_combo(pp.a_method, "asr")
+        assert not f.isRowVisible(pp.a_ocrcolor_box)
+        set_combo(pp.a_method, "ocr")
+        # bật lọc màu + độ lệch + thêm 1 cặp màu
+        pp.a_ocrcolor.setChecked(True)
+        set_combo(pp.a_ocrtol, "wide")
+        pp.a_ocrcolors.add()
+        st = load_settings()
+        assert st["ocr_color"] is True and st["ocr_color_tol"] == "wide" and len(st["ocr_colors"]) == 2
+        assert "Chỉ lấy chữ" in pp.a_ocrcolor_lb.text() and "lọc màu" in pp.a_ocreq_hint.text()
+        # Hút màu: hộp hút màu trả #FFD800 -> ô màu chữ hàng 2; hàng 2 "Không xét viền"
+        monkeypatch.setattr(ocr_color_ui.PickDialog, "exec", lambda self: setattr(self, "color", "#FFD800") or 1)
+        row2 = pp.a_ocrcolors.rows[1]
+        pp._ocr_color_pick(row2, "fill")
+        set_combo(row2.mode, "none")
+        st = load_settings()
+        assert st["ocr_colors"][1] == {"fill": "#FFD800", "outline": ""}, st["ocr_colors"]
+        pp._ocr_color_pick(row2, "outline")             # hút màu viền -> tự chọn lại "Viền màu"
+        assert load_settings()["ocr_colors"][1] == {"fill": "#FFD800", "outline": "#FFD800"}
+        row2.remove.emit(row2)                          # bỏ hàng 2
+        assert len(load_settings()["ocr_colors"]) == 1
+        # Xem thử: chụp vùng quét thật + hộp xem thử (ảnh đánh dấu + ảnh bộ đọc thấy)
+        pp._ocr_color_preview()
+        assert shown and shown[-1] == "QDialog"
+        # Tự lấy màu
+        monkeypatch.setattr(ocrcolor, "guess", lambda *a, **k: {
+            "entries": [{"fill": "#00FF00", "outline": ""}], "frames": 36,
+            "groups": [{"fill": "#00FF00", "outline": "", "lines": 9, "samples": 20, "examples": ["你好"]}]})
+        pp._ocr_color_guess()
+        assert load_settings()["ocr_colors"] == [{"fill": "#00FF00", "outline": ""}]
+        assert "9 câu khác nhau" in pp.a_ocrcolor_lb.text()
+        # bỏ khối chữ xa giữa khung, AI đọc lại, khớp từ, câu không có tiếng nói
+        pp.a_ocrcenter.setChecked(False)
+        pp.a_ocrlisten.setChecked(True)
+        set_combo(pp.a_ocrai, "off")
+        pp.a_ocrmatch.setValue(0.8)
+        pp.a_ocrnov.setChecked(False)
+        st = load_settings()
+        assert (st["ocr_center"], st["ocr_ai_engine"], st["ocr_ai_match"], st["ocr_check_novoice"],
+                st["ocr_listen_unsure"]) == (False, "off", 0.8, False, True)
+        got.clear()
+        pp.run_recognize()
+        s2 = got[-1]
+        assert s2["ocr_color"] is True and s2["ocr_colors"] == [{"fill": "#00FF00", "outline": ""}]
+        assert s2["ocr_center"] is False and s2["ocr_color_tol"] == "wide"
+        # tab Phụ đề: câu AI sửa (xanh ngọc) / không có tiếng nói (tím nhạt) / 3 bản khác (xanh lơ)
+        segs = [Segment(1.0, 2.0, "胡子", ""), Segment(2.5, 3.5, "第二集预告", ""), Segment(4.0, 5.0, "好好", "")]
+        ocrai.apply(segs[0], "ai_fix", "胡子", "胡子", 0.9, "gemini", "糊字")
+        segs[0].text = "胡子"
+        ocrai.apply(segs[1], "novoice", "第二集预告", "", 0.0, "gemini", "第二集预告")
+        ocrai.apply(segs[2], "check", "妈妈", "爸爸", 0.8, "gemini", "好好")
+        pr = Project(p.id)
+        pr.segments = segs
+        pr.save()
+        pp.reload()
+        m = pp.model
+        fg = [m.data(m.index(i, C_ZH), Qt.ItemDataRole.ForegroundRole) for i in range(3)]
+        assert fg[0] == QColor(AI_FIX_COLOR) and fg[1] == QColor(NOVOICE_COLOR) and fg[2] == QColor("#6FC8E8")
+        tip = m.data(m.index(0, C_ZH), Qt.ItemDataRole.ToolTipRole)
+        assert "Chữ OCR cũ: 糊字" in tip and "Gemini" in tip and "Bộ nghe nghe được: 胡子" in tip
+        assert "AI Gemini đọc ảnh: 妈妈" in m.data(m.index(2, C_ZH), Qt.ItemDataRole.ToolTipRole)
+        pp._pick_ocr_ai()
+        assert sorted(m.selected) == [0, 1, 2]
+        m.set_picked(range(3), False)
+        m.set_picked([0])
+        pp._use_ocr_text()                              # về chữ OCR cũ, chữ AI thành bản khác (xanh lơ)
+        x = Project(p.id).segments[0]
+        assert x.text == "糊字" and x.extra["asr_alt"] == "胡子" and x.extra["ocr_ai"]["kind"] == "user_ocr"
+        m.set_picked(range(3), False)
+        m.set_picked([0])
+        pp._use_alt()                                   # "Dùng bản AI" lấy lại chữ AI
+        assert Project(p.id).segments[0].text == "胡子"
+        pp.undo()                                       # Ctrl+Z
+        assert Project(p.id).segments[0].text == "糊字"
+        # nút AI đọc lại + nghe câu đã tích
+        monkeypatch.setattr(ocrai, "pick_engine", lambda st: ("gemini", "Gemini"))
+        monkeypatch.setattr(pipeline, "ocr_check_rows", lambda pr_, rows, *a, **k: {
+            "checked": len(rows), "ai_eng": "Gemini", "ai_sent": len(rows), "ai_calls": 1, "ai_fix": 1, "pick": [2]})
+        m.set_picked(range(3), False)
+        m.set_picked([2])
+        pp.run_ocr_check()
+        kind, title, res = jobs[-1]
+        assert kind == "dual" and "1 câu OCR" in title and res["pick"] == [2]
+        assert "AI Gemini đọc lại 1 câu" in res["message"]
+        # Cài đặt nạp các ô mới
+        sp = win.settings_page
+        sp.load()
+        assert sp.ocr_color.isChecked() and not sp.ocr_center.isChecked() and sp.ocr_ai.currentData() == "off"
+        assert abs(sp.ocr_match.value() - 0.8) < 1e-9 and sp.ocr_ctol.currentData() == "wide"
+        assert "lọc màu chữ" in __import__("trami.autoflow", fromlist=["x"]).summary(
+            {**load_settings(), "auto_preset": {"method": "ocr"}})
+    finally:
+        save_settings({**old, **{k: DEFAULT_SETTINGS[k] for k in keys if old.get(k) is None}})
+        win.close()
+        p.delete()

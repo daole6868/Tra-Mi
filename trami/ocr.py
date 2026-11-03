@@ -457,28 +457,37 @@ def preview_scan(src: str | Path, t: float, region: dict | None, settings: dict 
 
 
 def _scan(src: str, rect, size, fps: float, f0: int, count: int | None, step: int, hw: list, detect, emit,
-          stop: threading.Event, seen: list, pre: str = "", tm: dict | None = None) -> tuple[int, int]:
+          stop: threading.Event, seen: list, pre: str = "", tm: dict | None = None, colorf=None) -> tuple[int, int]:
     """Giải mã 1 khúc video (từ khung f0, count khung) chỉ lấy dải phụ đề ảnh xám -> các câu (_Span, số khung tính từ
     đầu video). Trả (số khung đã đọc, số lần tìm chữ). pre: lọc ảnh làm rõ chữ (eq_filter) trước khi chuyển xám.
-    tm["decode"] cộng thời gian chờ giải mã."""
+    colorf (2.1.44, ocrcolor.ColorFilter): giải mã ẢNH MÀU, mỗi khung chỉ giữ nét đúng màu chữ / viền đã chọn (còn lại
+    xám đều) rồi mới đưa cho bộ theo dõi nét + bộ đọc. tm["decode"] cộng thời gian chờ giải mã, tm["color"] thời gian lọc."""
     import time as _time
 
     x, y, w, h = rect
     ow, oh = size
     vf = f"fps={fps:.6f},crop={w}:{h}:{x}:{y}" + (f",scale={ow}:{oh}:flags=area" if (ow, oh) != (w, h) else "") + \
-         (f",{pre}" if pre else "") + ",format=gray"
+         (f",{pre}" if pre and colorf is None else "") + (",format=bgr24" if colorf is not None else ",format=gray")
     cmd = [ffmpeg_bin(), "-hide_banner", "-loglevel", "error", *hw]
     if f0:
         cmd += ["-ss", f"{f0 / fps:.4f}"]
     cmd += ["-i", src, "-an", "-sn", "-dn", "-vf", vf]
     if count:
         cmd += ["-frames:v", str(count)]
-    cmd += ["-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"]
+    cmd += ["-f", "rawvideo", "-pix_fmt", "bgr24" if colorf is not None else "gray", "pipe:1"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=_NO_WINDOW)
     tr = _Tracker(detect, emit, f0)
-    nbytes = ow * oh
+    nbytes = ow * oh * (3 if colorf is not None else 1)
     pend, i = [], -1
     wait = 0.0
+    ctime = [0.0]
+
+    def timed(raw):
+        t1 = _time.perf_counter()
+        try:
+            return colorf(raw)
+        finally:
+            ctime[0] += _time.perf_counter() - t1
     try:
         while not stop.is_set():
             t0 = _time.perf_counter()
@@ -487,8 +496,18 @@ def _scan(src: str, rect, size, fps: float, f0: int, count: int | None, step: in
             if len(buf) < nbytes:
                 break
             i += 1
-            img = np.frombuffer(buf, np.uint8).reshape(oh, ow)
-            if i % step:
+            if colorf is not None:
+                raw = np.frombuffer(buf, np.uint8).reshape(oh, ow, 3)
+                if i % step:              # khung chờ: chỉ lọc màu khi bộ theo dõi cần tới (chia đôi tìm giờ hiện / tắt)
+                    pend.append(_LazyFrame(i, raw, timed))
+                    img = None
+                else:
+                    img = timed(raw)
+            else:
+                img = np.frombuffer(buf, np.uint8).reshape(oh, ow)
+            if img is None:
+                pass
+            elif i % step:
                 pend.append((i, img))
             else:
                 tr.check(i, img, pend)
@@ -506,10 +525,37 @@ def _scan(src: str, rect, size, fps: float, f0: int, count: int | None, step: in
         if tm is not None:
             with _TM_LOCK:
                 tm["decode"] = tm.get("decode", 0.0) + wait
+                if colorf is not None:
+                    tm["color"] = tm.get("color", 0.0) + ctime[0]
     return i + 1, tr.n_det
 
 
 _TM_LOCK = threading.Lock()
+
+
+class _LazyFrame:
+    """Khung chờ (giữa 2 mốc kiểm tra) khi lọc màu: chỉ lọc khi bộ theo dõi đọc tới (phần lớn khung không bao giờ cần)
+    – dùng như (số khung, ảnh)."""
+    __slots__ = ("i", "raw", "f", "img")
+
+    def __init__(self, i: int, raw: np.ndarray, f):
+        self.i, self.raw, self.f, self.img = i, raw, f, None
+
+    def __getitem__(self, k: int):
+        if k == 0:
+            return self.i
+        if k != 1:
+            raise IndexError(k)
+        if self.img is None:
+            self.img, self.raw = self.f(self.raw), None
+        return self.img
+
+    def __iter__(self):
+        yield self[0]
+        yield self[1]
+
+    def __len__(self) -> int:
+        return 2
 
 
 def _clean_image(frames: list, clean: bool) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
@@ -718,7 +764,10 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
                   for k in range(nch)]
     todo = list(bounds)
     todo_lock = threading.Lock()
-    pre = eq_filter(st)
+    from . import ocrcolor
+
+    colorf = ocrcolor.get(st)              # 2.1.44: chỉ lấy chữ đúng màu chữ / viền (đo trên màu GỐC – bỏ làm rõ chữ)
+    pre = "" if colorf is not None else eq_filter(st)
     tm: dict[str, float] = {}               # A1: thời gian từng công đoạn (giây, cộng các luồng)
 
     # hàng đợi có giới hạn: đọc chữ chậm hơn giải mã (máy chỉ CPU) thì luồng giải mã chờ – mỗi câu giữ ≤ 16 khung mẫu,
@@ -755,10 +804,10 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
                         return
                     f0, count = todo.pop(0)
                 got, nd = _scan(src, rect, size, F, f0, count, step, hw if used_hw[0] else [], detect, put, stop, seen,
-                                pre, tm)
+                                pre, tm, colorf)
                 if got == 0 and used_hw[0] and not stop.is_set():   # card không giải mã được file này -> giải mã CPU
                     used_hw[0] = False
-                    got, nd = _scan(src, rect, size, F, f0, count, step, [], detect, put, stop, seen, pre, tm)
+                    got, nd = _scan(src, rect, size, F, f0, count, step, [], detect, put, stop, seen, pre, tm, colorf)
                 n_det[0] += nd
         except Exception as e:  # noqa: BLE001
             errs.append(e)
@@ -868,13 +917,23 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
                 h_sub = float(hh)
                 break
     band = _han_band(reads, marks, h_sub, size[0])
+    # 2.1.44: phụ đề căn giữa – khối chữ cùng hàng mà cách xa cụm chữ ở giữa khung hình (biển hiệu ở góc) không gộp vào
+    # câu. Chỉ khi giữa khung hình nằm trong vùng quét (khung kéo lệch hẳn 1 bên -> không xét)
+    cx = (W / 2 - x) * scale
+    center_on = bool(st.get("ocr_center", True)) and 0 < cx < size[0]
+    center_cut = [0]
     kept = []
     for items in reads:
         keep = [it for it in items if not _is_mark(it, marks)
                 and (not h_sub or _bbox(it[0])[3] - _bbox(it[0])[1] >= 0.7 * h_sub)]
         han = [it for it in keep if _CJK.search(it[1])]
         keep = [it for it in keep if _CJK.search(it[1]) or _stray_ok(it, han, h_sub, band)]
-        kept.append(_anchor_block(keep, anchor_y, line_h or h_sub))
+        keep = _anchor_block(keep, anchor_y, line_h or h_sub)
+        if center_on and len(keep) > 1:
+            n0 = len(keep)
+            keep = _center_keep(keep, cx)
+            center_cut[0] += n0 - len(keep)
+        kept.append(keep)
 
     from .ocrfix import line_conf
 
@@ -978,10 +1037,85 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
                       "spans": reader.n["spans"], "det": n_det[0], "cleaned": reader.n["cleaned"], "engine": eng.label,
                       "engine_warn": eng.warn, "hw": used_hw[0], "chunks": nch, "secs": round(_time.time() - t_start, 1),
                       "eq": bool(pre), "t": {k: round(v, 1) for k, v in tm.items()},
+                      "color": ocrcolor.describe(colorf.ents) if colorf is not None else "",
+                      "center_cut": center_cut[0],
                       "big": big_st, "text_box": _text_box(boxes, W, H)})
     if progress:
         progress(1.0, f"OCR xong {len(merged)} câu")
     return merged
+
+
+CENTER_GAP = 1.5         # khoảng trống giữa 2 khối chữ > 1,5 cỡ chữ = khối riêng (biển hiệu / chữ cảnh)
+BOX_PAD = 0.75           # khung bộ tìm chữ có lề: cỡ chữ ≈ 0,75 × cao khung
+
+
+def _ink_parts(it) -> list[tuple[float, float, object]]:
+    """Phần có chữ thật của 1 mảnh chữ: [(x trái, x phải, mảnh)]. Có vị trí từng chữ (ch) -> đo theo tâm chữ đầu / cuối
+    (khung bộ tìm chữ có lề rộng – 2 khối cách xa vẫn có khung sát nhau) và TÁCH mảnh ở khe lớn giữa 2 chữ (bộ tìm chữ gộp
+    biển hiệu với câu phụ đề vào 1 khung)."""
+    x0, y0, x1, y1 = _bbox(it[0])
+    w, h = max(1.0, x1 - x0), max(1.0, (y1 - y0) * BOX_PAD)
+    ch = getattr(it, "ch", None)
+    if not ch or len(ch) != len(it[1]):
+        return [(x0, x1, it)]
+    cs = [x0 + float(c[2]) * w for c in ch]
+    cuts = [k for k in range(1, len(cs)) if cs[k] - cs[k - 1] - h > CENTER_GAP * h]
+    out = []
+    for lo, hi in zip([0] + cuts, cuts + [len(cs)]):
+        a, b = max(x0, cs[lo] - 0.55 * h), min(x1, cs[hi - 1] + 0.55 * h)
+        if len(cuts) == 0:
+            out.append((a, b, it))
+        else:
+            part = _mk(_rect_pts(a, y0, b, y1), it[1][lo:hi], float(np.mean([c[1] for c in ch[lo:hi]])), ch=[
+                (c[0], c[1], (x0 + float(c[2]) * w - a) / max(1.0, b - a), c[3]) for c in ch[lo:hi]])
+            out.append((a, b, part))
+    return out
+
+
+def _center_keep(items: list, cx: float) -> list:
+    """2.1.44: mỗi hàng chữ chia thành các cụm (khoảng trống giữa 2 khối > CENTER_GAP × cỡ chữ, đo theo vị trí từng
+    chữ); có ĐÚNG 1 cụm phủ giữa khung hình (± nửa cỡ chữ) thì chỉ giữ cụm đó – cụm xa ở 2 bên là chữ trong cảnh. Không
+    cụm nào / nhiều cụm phủ giữa (vd 2 người nói "-A   -B" mà giữa là khe) -> giữ nguyên cả hàng."""
+    rows: list[dict] = []
+    for it in sorted(items, key=lambda it: _bbox(it[0])[1]):
+        b = _bbox(it[0])
+        cy, h = (b[1] + b[3]) / 2, b[3] - b[1]
+        for r in rows:
+            if abs(r["cy"] - cy) <= 0.5 * max(h, r["h"]):
+                r["its"].append(it)
+                break
+        else:
+            rows.append({"cy": cy, "h": h, "its": [it]})
+    repl: dict[int, list] = {}            # mảnh -> các phần giữ lại (mảnh bị tách / bỏ)
+    for r in rows:
+        parts = sorted((p for it in r["its"] for p in ((pa, pb, pi, it) for pa, pb, pi in _ink_parts(it))),
+                       key=lambda q: q[0])
+        if len(parts) < 2:
+            continue
+        h = float(np.median([_bbox(it[0])[3] - _bbox(it[0])[1] for it in r["its"]])) * BOX_PAD
+        clusters = [[parts[0]]]
+        for q in parts[1:]:
+            if q[0] - max(o[1] for o in clusters[-1]) > CENTER_GAP * h:
+                clusters.append([q])
+            else:
+                clusters[-1].append(q)
+        if len(clusters) < 2:
+            continue
+        central = [c for c in clusters if min(o[0] for o in c) - 0.5 * h <= cx <= max(o[1] for o in c) + 0.5 * h]
+        if len(central) != 1:
+            continue
+        keep_parts = {id(q[2]) for q in central[0]}
+        for it in r["its"]:
+            mine = [q for q in parts if q[3] is it]
+            kept = [q[2] for q in mine if id(q[2]) in keep_parts]
+            if len(kept) != len(mine):
+                repl[id(it)] = kept
+    if not repl:
+        return items
+    out = []
+    for it in items:
+        out.extend(repl.get(id(it), [it]))
+    return out
 
 
 def _other_shape(a: str, b: str, wa: float, wb: float, lh: float) -> bool:

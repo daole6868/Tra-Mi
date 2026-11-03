@@ -2717,6 +2717,37 @@ def use_alt(p: Project, rows: list[int]) -> list[int]:
     return out
 
 
+def use_ocr_text(p: Project, rows: list[int]) -> list[int]:
+    """"Dùng lại bản OCR" (2.1.44): câu AI đọc lại đã sửa chữ -> về chữ OCR cũ; chữ AI giữ làm bản khác (chữ xanh,
+    'Dùng bản bộ nghe 2' lấy lại được). Trả số thứ tự các câu đã đổi."""
+    from . import dual
+
+    segs = p.segments
+    out = []
+    for i in rows:
+        if not (0 <= i < len(segs)):
+            continue
+        x = segs[i]
+        oa = x.extra.get("ocr_ai") or {}
+        old = oa.get("ocr")
+        if old is None or not dual.differs(x.text, old):
+            continue
+        cur = x.text
+        x.text = old
+        x.extra["asr_alt"], x.extra["asr_alt_eng"], x.extra["asr_unsure"] = cur, "ai", True
+        x.extra.pop("asr_same", None)
+        x.extra.pop("asr_pick", None)
+        x.extra.pop("src_before", None)
+        if _cjk_count(x.text) != _cjk_count(cur):
+            x.extra.pop("ct", None)
+        oa["kind"] = "user_ocr"
+        out.append(i)
+    if out:
+        p.segments = segs
+        p.save()
+    return out
+
+
 def gemini_review(p: Project, segs: list, settings: dict, rows: list[int] | None = None, wav: Path | None = None,
                   language: str = "zh", progress: Prog | None = None, cancel=None) -> tuple[list, dict]:
     """A – Gemini XEM + NGHE video soát phụ đề gốc (2.1.25, trami/vreview.py): cắt phim thành khúc ≤ 5 phút, gửi kèm
@@ -3012,7 +3043,15 @@ def listen_note(p: Project) -> str:
     if p.data.get("asr_repeat"):
         out.append(f"⚠ {p.data['asr_repeat']} câu còn lặp lời / 2 câu liền giống nhau (chữ gốc màu hồng) – nghe lại, "
                    "hoặc tab Phụ đề → Công cụ → Lời hát & nghe nhầm → 'Dọn câu bịa / câu lặp'")
-    if note := ocr_listen_note(p.data.get("ocr_listen")):
+    ol = p.data.get("ocr_listen") or {}
+    if ol.get("ai_eng"):                  # 2.1.44: có AI đọc lại -> thông báo kiểu 2 trên 3
+        from .ocrai import note as ocrai_note
+
+        if note := ocrai_note(ol):
+            out.append(note)
+    elif note := ocr_listen_note(ol):
+        if ol.get("novoice"):
+            note += f" · {ol['novoice']} câu không có tiếng nói lúc hiện (giữ, tô tím nhạt – nên xem lại)"
         out.append(note)
     if note := unsure_note(p.data.get("unsure_dropped")):
         out.append(note)
@@ -3060,43 +3099,173 @@ def drop_unsure(p: Project, segs, settings: dict) -> list:
 
 
 def ocr_listen_unsure(p: Project, segs, settings: dict, language: str = "zh", denoise: bool = False,
-                      progress: Prog | None = None, cancel=None) -> list:
-    """"Nghe lại câu OCR không chắc" (2.1.42, Cài đặt `ocr_listen_unsure`): câu OCR đọc chắc dưới `ocr_pick_conf` ->
-    bộ nghe (Qwen3-ASR / FireRedASR2) nghe đúng khúc giờ câu đó (trên giọng đã tách khi bật "Tách giọng khỏi nhạc
-    trước") -> chắc từ `ocr_listen_conf`: ra đúng chữ thì giữ, ra câu khác thì điền chữ nghe được vào đúng câu; không ra
-    chữ / không đủ chắc thì xoá câu (cất vào "Khôi phục câu đã xoá"). Chưa có bộ nghe -> giữ nguyên + báo. Trả câu còn lại."""
-    from . import recheck
+                      progress: Prog | None = None, cancel=None, rows: list[int] | None = None) -> list:
+    """Kiểm tra câu OCR không đạt (Cài đặt `ocr_listen_unsure`; 2.1.42 "Nghe lại câu OCR không chắc" + 2.1.44 AI đọc
+    lại + 2 trên 3). Câu không đạt = OCR đọc chắc dưới `ocr_pick_conf`, hoặc (`ocr_check_novoice`, cần giọng đã tách)
+    không có tiếng nói suốt lúc câu hiện. rows: chỉ các câu này (nút ở tab Phụ đề – câu đã tích).
+      1. Bộ nghe (Qwen3-ASR / FireRedASR2) nghe đúng khúc giờ từng câu -> câu OCR khớp lời nói = xác nhận, xong.
+      2. Câu còn lại: có AI xem ảnh (`ocr_ai_engine`) -> AI đọc lại ảnh dải phụ đề -> `ocrai.decide` (2 trên 3 nguồn).
+         Không có AI -> cách 2.1.42: nghe chắc + đúng chữ giữ, chắc + câu khác điền, không ra / không chắc xoá (câu chỉ
+         "không có tiếng nói" mà OCR chắc thì chỉ đánh dấu, không xoá).
+    Giờ câu giữ nguyên. Câu xoá cất vào "Khôi phục câu đã xoá". Trả câu còn lại."""
+    from . import ocrai, ocrcolor, recheck
     from .asr_qwen import release
+    from .dual import core
+    from .translate import ENGINE_NAMES
 
     othr = float(settings.get("ocr_pick_conf", OCR_UNSURE) or OCR_UNSURE)
-    rows = recheck.ocr_targets(segs, othr)
-    p.data["ocr_listen"] = {"checked": 0, "ocr_thr": othr}
-    if not rows:
-        return segs
-    engine, why = relisten_engine(p, settings)
-    if engine is None:
-        p.data["ocr_listen"] = {"checked": len(rows), "ocr_thr": othr, "error": why}
-        return segs
-    try:
-        _audio, wav = _listen_audio(p, settings, denoise, _sub(progress, 0.0, 0.3), cancel)
-        _asr_context(p, settings)
-        st = recheck.ocr_listen(segs, rows, wav, engine, language, settings,
-                                p.data.get("info", {}).get("duration", 0), _sub(progress, 0.3, 1.0), cancel)
-    except ff.Cancelled:
-        raise
-    except Exception as e:  # noqa: BLE001 – bộ nghe lỗi: giữ nguyên câu OCR, báo
-        log_error("Nghe lại câu OCR không chắc")
-        p.data["ocr_listen"] = {"checked": len(rows), "ocr_thr": othr, "error": err_text(e)[:160]}
-        return segs
-    finally:
-        release()
-    drop = set(st.pop("drop"))
-    st["engine"], st["ocr_thr"] = engine, othr
-    st["rows_fixed"] = []                     # số thứ tự đổi sau khi xoá – không giữ
+    thr = float(settings.get("ocr_listen_conf", recheck.OCR_LISTEN_CONF) or recheck.OCR_LISTEN_CONF)
+    mthr = float(settings.get("ocr_ai_match", ocrai.MATCH) or ocrai.MATCH)
+    manual = rows is not None
+    targets = sorted(set(i for i in rows if 0 <= i < len(segs))) if manual else recheck.ocr_targets(segs, othr)
+    total = p.data.get("info", {}).get("duration", 0)
+    st: dict = {"checked": 0, "ocr_thr": othr, "thr": thr}
     p.data["ocr_listen"] = st
+    engine, why = relisten_engine(p, settings)
+    ai_eng, ai_why = ocrai.pick_engine(settings)
+    novoice_on = not manual and bool(settings.get("ocr_check_novoice", True))
+    wav = None
+    if engine is not None or (novoice_on and (stems(p) or settings.get("sep_before_asr", True))):
+        try:
+            _audio, wav = _listen_audio(p, settings, denoise, _sub(progress, 0.0, 0.25), cancel)
+        except ff.Cancelled:
+            raise
+        except Exception as e:  # noqa: BLE001 – không chuẩn bị được âm thanh: chỉ còn AI (nếu có)
+            log_error("Kiểm tra câu OCR: chuẩn bị âm thanh")
+            st["asr_why"] = err_text(e)[:160]
+            engine = None
+    novoice: set[int] = set()
+    if novoice_on:
+        try:
+            env, hop, kind = voice_env(p)
+        except ff.Cancelled:
+            raise
+        except Exception:  # noqa: BLE001
+            env, hop, kind = None, 0.01, ""
+        if env is not None and kind == "vocals":       # chỉ trên giọng đã tách (tiếng gốc lẫn nhạc -> không xét)
+            floor = ocrai.voice_floor(env)
+            tset = set(targets)
+            for i, x in enumerate(segs):
+                if i in tset or x.extra.get("song") or not core(x.text) or x.extra.get("asr_same"):
+                    continue
+                if ocrai.voiced_frac(env, hop, x.start, x.end, floor) < ocrai.NOVOICE_FRAC:
+                    novoice.add(i)
+    rows_all = sorted(set(targets) | novoice)
+    st.update({"checked": len(rows_all), "novoice_rows": len(novoice)})
+    if not rows_all:
+        return segs
+    if engine is None and not ai_eng:            # không bộ nghe, không AI -> giữ nguyên + báo (như 2.1.42)
+        st["error"] = why if why else ai_why
+        return segs
+    heard: dict[int, tuple[str, float]] = {}
+    if engine is not None and wav:
+        try:
+            _asr_context(p, settings)
+            hs = recheck.ocr_hear(segs, rows_all, wav, engine, language, settings, total,
+                                  _sub(progress, 0.25, 0.6), cancel)
+            heard = dict(zip(rows_all, hs))
+            st["engine"] = engine
+        except ff.Cancelled:
+            raise
+        except Exception as e:  # noqa: BLE001 – bộ nghe lỗi: chỉ còn AI (nếu có), không thì giữ nguyên
+            log_error("Kiểm tra câu OCR: bộ nghe")
+            st["asr_why"] = err_text(e)[:160]
+            heard = {}
+        finally:
+            release()
+    elif engine is None:
+        st["asr_why"] = why
+    listened = bool(heard)
+    if not ai_eng:
+        if not listened:
+            st["error"] = st.get("asr_why") or why
+            return segs
+        # 2.1.42: chỉ nghe – câu OCR không chắc theo luật cũ; câu chỉ "không có tiếng nói" (OCR chắc) chỉ đánh dấu
+        low = [i for i in rows_all if i in set(targets)]
+        old = recheck.ocr_listen(segs, low, wav, engine, language, settings, total, heard=[heard[i] for i in low])
+        drop = set(old.pop("drop"))
+        st.update({k: old[k] for k in ("same", "fixed", "dropped")})
+        st["checked"] = len(low)
+        st["novoice"] = 0
+        for i in novoice:
+            t, c = heard[i]
+            if not core(t):
+                ocrai.apply(segs[i], "novoice", None, t, c, "", segs[i].text)
+                st["novoice"] += 1
+            elif c >= thr and ocrai.match(segs[i].text, t) >= mthr:
+                ocrai.apply(segs[i], "same", None, t, c, "", segs[i].text)
+        if not st["novoice"]:
+            st.pop("novoice")
+        st["ai_why"] = ai_why
+    else:
+        need = []
+        for i in rows_all:
+            h = heard.get(i)
+            if h and ocrai.decide(segs[i].text, None, False, h[0], h[1], thr, mthr) == "same":
+                ocrai.apply(segs[i], "same", None, h[0], h[1], "", segs[i].text)
+                st["same"] = st.get("same", 0) + 1
+            else:
+                need.append(i)
+        ai_res: dict = {}
+        st["ai_eng"] = ENGINE_NAMES.get(ai_eng, ai_eng)
+        if need:
+            region = ocr_box(p) or p.data.get("ocr_region")
+            try:
+                imgs = ocrai.grab_all(p.source, segs, need, region, _sub(progress, 0.6, 0.7), cancel)
+                cdesc = ocrcolor.describe(ocrcolor.entries(settings)) if ocrcolor.enabled(settings) else ""
+                ai_res, ast = ocrai.read_lines(settings, ai_eng, imgs, cdesc, _sub(progress, 0.7, 1.0), cancel)
+            except ff.Cancelled:
+                raise
+            except Exception as e:  # noqa: BLE001 – AI lỗi hẳn (vd key sai): các câu giữ nguyên chữ OCR
+                log_error("AI đọc lại phụ đề OCR")
+                ast = {"calls": 0, "sent": len(need), "failed": len(need), "error": err_text(e)[:160]}
+            st.update({"ai_calls": ast["calls"], "ai_sent": ast["sent"], "ai_failed": ast["failed"],
+                       "ai_error": ast["error"]})
+        drop = set()
+        for i in need:
+            x, o = segs[i], segs[i].text
+            h = heard.get(i)
+            htxt, hconf = (h[0], h[1]) if h else (None, 0.0)
+            r = ai_res.get(i)
+            if r is None:          # AI không trả câu này: chỉ còn giọng nói -> luật 2.1.42 cho câu OCR không chắc
+                if h is not None and i in set(targets):
+                    k = recheck.ocr_decide(o, htxt, hconf, thr)
+                    if k == "drop":
+                        drop.add(i)
+                    elif k == "fix":
+                        x.extra["asr_conf"], x.extra["asr_same"] = hconf, True
+                        recheck.ocr_fill(x, htxt)
+                        st["fixed"] = st.get("fixed", 0) + 1
+                continue
+            kind = ocrai.decide(o, r[0], r[1], htxt if listened else None, hconf, thr, mthr)
+            if not kind:
+                continue
+            ocrai.apply(x, kind, r[0], htxt if listened else None, hconf, ai_eng, o)
+            if kind == "drop":
+                drop.add(i)
+            st[kind] = st.get(kind, 0) + 1
+        st["dropped"] = len(drop)
+        st.pop("drop", None)
     if drop:
         p.data["unsure_removed"] = list(p.data.get("unsure_removed") or []) + [segs[i].to_dict() for i in sorted(drop)]
-    return [s for i, s in enumerate(segs) if i not in drop]
+    p.data["ocr_listen"] = st
+    return [x for i, x in enumerate(segs) if i not in drop]
+
+
+def ocr_check_rows(p: Project, rows: list[int], settings: dict | None = None, progress: Prog | None = None,
+                   cancel=None) -> dict:
+    """Nút "AI đọc lại + nghe câu đã tích" (tab Phụ đề): chạy kiểm tra câu OCR cho đúng các câu đã tích (đọc chắc mấy
+    cũng xét). Lưu dự án; trả thống kê + "pick" (số thứ tự các câu đã đổi chữ / cần xem lại sau khi xoá)."""
+    settings = settings or load_settings()
+    segs = list(p.segments)
+    keep_ids = {id(x) for x in segs}
+    out = ocr_listen_unsure(p, segs, settings, p.data.get("language") or "zh", False, progress, cancel, rows=rows)
+    st = dict(p.data.get("ocr_listen") or {})
+    p.segments = out
+    p.save()
+    st["pick"] = [i for i, x in enumerate(out) if id(x) in keep_ids and (x.extra.get("ocr_ai") or {}).get("kind") in
+                  ("ai_fix", "check", "novoice")]
+    return st
 
 
 def unsure_note(st: dict | None) -> str:

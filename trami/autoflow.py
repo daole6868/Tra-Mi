@@ -52,8 +52,12 @@ def summary(settings: dict | None = None) -> str:
 
     parts = []
     if o["method"] == "ocr":
+        ai_on = st.get("ocr_listen_unsure") and (st.get("ocr_ai_engine", "auto") or "auto") != "off"
         extra = [x for x, on in (("giờ kết hợp giọng nói", st.get("ocr_timing") == "mix"),
-                                 ("làm rõ chữ", st.get("ocr_eq")), ("nghe lại câu không chắc", st.get("ocr_listen_unsure")))
+                                 ("lọc màu chữ", st.get("ocr_color")),
+                                 ("làm rõ chữ", st.get("ocr_eq") and not st.get("ocr_color")),
+                                 ("AI đọc lại + nghe câu không đạt" if ai_on else "nghe lại câu không đạt",
+                                  st.get("ocr_listen_unsure")))
                  if on]
         parts.append("OCR phụ đề cứng" + (f" ({', '.join(extra)})" if extra else ""))
     elif o["method"] == "hybrid":
