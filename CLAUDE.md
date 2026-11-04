@@ -25,7 +25,10 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - `trami/config.py` – `DATA_DIR` (`data/`; exe: `_frozen_data_dir` = `datadir.txt` cạnh exe -> `data` cạnh exe ->
   `%LOCALAPPDATA%\Subvideo` (còn `%LOCALAPPDATA%\TraMi` cũ thì dùng tiếp)), `DEFAULT_SETTINGS`, settings chỉ lưu phần khác mặc định,
   `installed()` dùng `find_spec` (không import – import funasr mất ~2 phút), `log_error()` ghi `data/logs/loi.txt`,
-  `fix_std_streams()` (gọi đầu tiên khi mở tool: pythonw để sys.stdout/stderr = None -> ghi `data/logs/console.txt`).
+  `fix_std_streams()` (gọi đầu tiên khi mở tool: pythonw để sys.stdout/stderr = None -> ghi `data/logs/console.txt`),
+  `guard_none_refcount()` (2.2.0, `gui.main.run` + `__main__.main`: PySide6 6.12.0 + Python < 3.12 – mọi hàm Qt trả
+  về void làm mất 1 tham chiếu của None -> dùng lâu sập "deallocating None"; đo trên 1 QObject, bị thì cộng 2^60 vào
+  số tham chiếu của None như Python 3.12 – `NONE_GUARD`; requirements `PySide6>=6.6,!=6.12.0`).
 - Âm thanh THEO GIỜ CỦA HÌNH (2.0.92): mọi chỗ giải mã âm thanh của video gốc thêm `ff.audio_sync(src, sr)`
   (`aresample=44101:async=1000:first_pts=0,aresample=<sr>` – qua 44101 Hz vì cùng tần số vào/ra bộ lấy mẫu lại không co
   giãn mềm; file .wav do tool ghi -> ''), `ff.af_args`; `ff.audio_timeline` (ffprobe giờ + số mẫu từng khung, dự phòng
@@ -105,10 +108,31 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `trami/stream.py` – `LivePipeline` (tab Tự động "Vừa tách vừa dịch"); `trami/gpu.py` – trả bộ nhớ card giữa các
   việc (`before_job` / `after_job` trong `jobs._run`, `reap_idle` tắt VieNeu/Omni để không 10 phút); `trami/gui/*` –
   giao diện (QPainter), `common.run_async`,
-  `WheelGuard` (lăn chuột không đổi ô chọn khi chưa bấm vào). Trang dự án bố cục kiểu trình dựng phim (từ 2.0.28):
-  trái `IconTabs` + 10 tab (Chữ+Logo = tab 5 `TAB_LAYERS`, Lồng tiếng 6, Âm thanh 7, Tài liệu 8, `TAB_EXPORT` = 9; tab Tự
-  động chia 4 nhóm bằng `_group` – 1 Nghe & tách câu / 2 Dịch / 3 Lồng tiếng / 4 Phụ đề & video khi xuất, 2.1.11), giữa
-  trình phát, phải `gui/inspector.LineInspector` (câu đang chọn), dưới `gui/timeline.TrackTimeline`.
+  `WheelGuard` (lăn chuột không đổi ô chọn khi chưa bấm vào). Trang dự án bố cục 2.2.0 (người dùng duyệt bản thiết kế
+  trước khi code): thanh đầu = tên + "Đã lưu" (2 dòng) · `widgets.FlowStepper` `flow_steps` (4 bước Nghe & tách câu /
+  Dịch / Lồng tiếng / Xuất: ✓ xong, đang chạy % theo `FLOW_KINDS` – `_flow_jobs` từ `update_job`, `_update_steps`; bấm
+  -> `_flow_clicked` mở đúng thẻ bước ở tab Tự động, bước 4 = tab Xuất) · các nút cũ; thân = `widgets.TabRail` `tabs`
+  (thanh tab DỌC chia nhóm Quy trình [0 Tự động, 1 Phụ đề, 6 Lồng tiếng, 9 Xuất – số 1–4] / Hình ảnh [2, 3, 4, 5] / Khác
+  [7, 8]; ô chọn trượt mượt; cùng API IconTabs – thứ tự trang `stack` + `TAB_*` KHÔNG đổi) | `main_split`: khung nội
+  dung tab `tools_card` (cao hết màn hình, min 560 px: `tab_title` / `tab_desc` theo `TAB_META` + ô "Tìm tuỳ chọn…"
+  `tab_find` -> `_find_option` mở thẻ chứa nhãn / nút đó, cuộn tới, `_flash`) | cột giữa `v_split` = [`top_split`:
+  trình phát + `job_box` | `insp_box` LineInspector] trên `tl_card` TrackTimeline (timeline CHỈ nằm dưới video). Mỗi tab =
+  các thẻ bước `widgets.StepCard` (số / ✓ / đang chạy, tiêu đề, dòng tóm tắt `set_summary`, nhãn `set_status` – `Chip`,
+  bấm tiêu đề mở / gập – mở có hiệu ứng, mũi tên xoay; `.head` / `.lay` / `.add()` như SectionCard; `StepCard.reveal(w)`
+  mở thẻ chứa w – `_goto_voices`) gom bằng `widgets.CardGroup` qua `_accordion(key, cards, pinned=, exclusive=,
+  opened=, manual=)` (đánh số 1, 2…, mỗi lúc mở 1 thẻ, nhớ thẻ mở ở Cài đặt `ui_cards`; tab Phụ đề không độc quyền: 1 Dịch
+  / 2 Công cụ (manual = `subs_tools_open`) / 3 Bảng câu (ghim) / 4 Tách theo đoạn (manual = `span_open`) / 5 Kỹ năng AI).
+  Tab Tự động: thẻ "Chạy trọn gói" + 4 thẻ `a_cards` (form `f1` (`_auto_form`) + "Tuỳ chọn nâng cao" `a_adv_box` (Cài đặt
+  `ui_auto_adv`) / `f2` / `f3` / `f4`), nút bước `step_btns` (GradientButton có số) + `step_status` ở chân thẻ. Tab Kiểu chữ:
+  6 thẻ Mẫu nhanh / Chữ / Vị trí / Xuống dòng / Nền phụ đề / Karaoke (`st_form` = `_Forms` – setRowVisible tìm đúng Form).
+  Nút thao tác có số: `widgets.numbered(b, n)` (icon ghép số + icon cũ; GradientButton `num=`), `number_buttons(root)`
+  đánh số nút thường không phẳng theo thứ tự layout (bỏ qua nút trong Form, nút phẳng, nút chỉ icon) – `_number_actions`
+  cho mọi thẻ trừ tab Tự động, trang Công cụ tab Phụ đề đánh số riêng từng trang, trừ `NO_NUM_CARDS`. `Form` có
+  `WrapLongRows` (ô không đủ chỗ xuống dưới nhãn), `PillTabs` hẹp thì tự xuống hàng. Theme 2.2.0: nền `#0B0E14`, thẻ
+  `#141925`, ô nhập `#1A2030`, viền `BORDER2`, chữ trên màu nhấn tối `ON_ACCENT` (#1A0B08, 6,2:1); hiệu ứng: nút chính
+  sáng lên khi rê chuột (`GradientButton._glow`), thẻ mở mượt, tab dọc trượt, nội dung tab trượt lên khi đổi tab
+  (`_tab_changed`), Toast trượt xuống, Chip "đang chạy" chấm nhấp nháy. Kiểm kê trước / sau khi đổi giao diện: không mất
+  nút / ô nào (997 -> 1000 ô, 0 nút mất hàm nối).
   Khoảng cách khung: `theme.GAP` / `theme.PANEL_PAD`; hàng nhiều nút dùng `widgets.flow()` (tự xuống dòng) thay `hbox`.
   Timeline `_Canvas`: phần đứng yên vẽ vào ảnh đệm (`_paint_static`, `_dirty` – mọi `update()` / `repaint()` / đổi cỡ),
   đổi vị trí phát chỉ `update_playhead` + `_paint_playhead` (2.1.10). Lưu dự án: JSON gọn (bộ mã hoá C), `Segment.to_dict`
@@ -773,11 +797,14 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (307 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei).
+- `tests/test_core.py` – `python -m pytest -q tests` (309 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+  `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
 - Cài torch GPU **trước**, khoá phiên bản (`torch-constraints.txt`) rồi mới `pip install -r requirements-ai.txt -c torch-constraints.txt`,
   nếu không pip sẽ thay torch bằng bản CPU.
+- PySide6 6.12.0 + Python 3.11: tool sập "Fatal Python error: none_dealloc: deallocating None" khi dùng lâu (lỗi
+  của PySide6, 6.11.3 không bị) -> từ 2.2.0 tool tự chặn; nên `pip install "PySide6<6.12"`.
 - `WinError 1114 c10.dll`: do file torch cũ sót lại → gỡ, xoá hẳn thư mục `site-packages\torch*`, cài lại cu128.
 - `libtorchaudio.pyd` lỗi: torch/torchaudio lệch phiên bản.
 - Model tải lần đầu: BS-RoFormer 639 MB, SenseVoice ~1 GB (ModelScope, chậm từ VN), VieNeu, ECAPA, LaMa 206 MB.
@@ -2671,13 +2698,28 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   ảnh thành xám), nhưng ô Mẫu vẫn bấm được + dòng nhắc nhạt -> tưởng hỏng. Sửa: lọc màu bật -> các ô làm rõ chữ mờ hẳn
   (không bấm được) + nhắc ⚠ "muốn dùng Mẫu -> tắt 'Chỉ lấy chữ đúng màu'"; "Ảnh gốc" hiện 0 / 1 / 1 thay vì số cũ của
   Cài đặt. Máy thử: PySide6 6.12 + Python 3.11 – gọi `QApplication.processEvents()` giảm đếm tham chiếu của None mỗi lần
-  (vòng lặp chờ dày trong script chụp ảnh làm sập "deallocating None"); tool không gọi processEvents -> không ảnh hưởng.
+  (vòng lặp chờ dày trong script chụp ảnh làm sập "deallocating None"); 2.2.0 đo lại: MỌI hàm Qt trả về void đều bị (setText, update,
+  QPainter…) -> tool cũng sập khi dùng lâu – sửa bằng `config.guard_none_refcount`.
 - 2.1.46: ảnh phụ đề "对了父亲" hỏi "了 cứ bị quét nhầm thành 7". Chạy bộ đọc của tool trên đúng ảnh: ra "对7父亲", chữ
   "7" chắc 0,90 (video dựng từ ảnh: 0,58) và bộ đọc nêu "了" làm ứng viên (0,10 / 0,42) – font phụ đề rất đậm, nét "了"
   giống "7". Bước "Sửa chữ dễ nhầm theo từ điển" (2.1.37) chỉ xét chữ Hán nên bỏ qua; thử font WenQuanYi đậm dần: số "7"
   thật luôn chắc 1,00, không ứng viên -> dùng độ chắc + ứng viên + ngữ cảnh (lượng từ / 第) để phân biệt (xem Cấu trúc
   "OCR đọc chữ kỹ"). Dự án đã quét: nút "Sửa chữ đọc nhầm" (không quét lại) + "Tìm & thay" chữ gốc.
+- 2.2.0: giao diện mới (người dùng xem + duyệt bản thiết kế trước – artifact "Subvideo – giao diện mới"): "trong 1 tab có
+  quá nhiều phần dính vào nhau, thanh chi tiết phía dưới nằm gọn dưới video để bảng tab rõ hơn, nút gọn và đánh STT, màu
+  đẹp + hiệu ứng" + "đừng sửa giao diện xong mất sạch nút và chức năng". Làm: timeline chỉ nằm dưới khung video, thanh tab
+  dọc chia nhóm có số 1–4, khung nội dung tab cao hết màn hình, mọi tab thành thẻ bước có số mở / gập (tab Tự động 4 thẻ +
+  tuỳ chọn nâng cao, tab Kiểu chữ 35 dòng -> 6 thẻ), thanh 4 bước trên cùng, nút thao tác có số, màu / hiệu ứng mới, ô
+  tìm tuỳ chọn (xem Cấu trúc "Trang dự án bố cục 2.2.0"). Giữ chức năng: TAB_* + mọi tên widget giữ nguyên, kiểm kê bằng
+  script (mọi nút / ô / công tắc / ô chọn + số hàm nối của trang dự án và các trang chính, trước / sau): 0 mất, 0 mất hàm
+  nối, chỉ thêm 3 ô mới; mọi tab đo bề rộng tối thiểu ≤ 510 px khi mở từng thẻ (trước 666 px – cột trái hẹp bị cắt mép).
+  Khi chạy đủ bộ test tìm ra: PySide6 6.12.0 (bản mới nhất trên PyPI) + Python 3.11 – mọi hàm Qt trả về void (setText,
+  update, vẽ QPainter, processEvents…) làm mất 1 tham chiếu của None (đo: 6.11.3 không bị) -> dùng tool đủ lâu Python sập
+  "deallocating None" (bộ test sập ở test thứ 300). `config.guard_none_refcount` khi mở tool + requirements bỏ 6.12.0.
 ## Vấn đề đang mở
+- 2.2.0: chờ người dùng xem giao diện mới trên máy thật (thanh tab dọc, thẻ bước mở / gập, nút có số, timeline dưới
+  video, ô Tìm tuỳ chọn); thiếu nút / chức năng nào -> báo tên nút. Hỏi bản PySide6 (`.venv\Scripts\python -c "import
+  PySide6; print(PySide6.__version__)"`): 6.12.0 -> `pip install "PySide6<6.12"` (tool đã tự chặn lỗi sập).
 - 2.1.44: chờ người dùng thử tab Tự động (nguồn OCR): dừng video ở chỗ có phụ đề → "Màu chữ phụ đề" → Tự lấy màu (hoặc
   Hút) → Xem thử (chữ phụ đề xanh lá, chữ khác đỏ) → quét; so số câu dính chữ lạ / tách sai với lúc tắt lọc màu. Bật "Câu
   OCR không đạt" (AI đọc lại: Theo công cụ dịch = Gemini có key) → xem thông báo "N câu OCR không đạt: … AI Gemini đọc lại

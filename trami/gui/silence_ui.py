@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDoubleSpinBox, QHe
 
 from .. import silence as SL
 from .common import run_async
-from .widgets import (Form, GradientButton, SectionCard, SliderRow, Switch, button, combo, flow, hbox, label,
+from .widgets import (Form, GradientButton, StepCard, SliderRow, Switch, button, combo, flow, hbox, label,
                       set_combo)
 
 
@@ -36,7 +36,7 @@ def _spin(lo: float, hi: float, step: float, val: float, suffix: str = " s", dec
     return sp
 
 
-class SilenceCard(SectionCard):
+class SilenceCard(StepCard):
     itemsChanged = Signal(list)     # danh sách đoạn chờ cắt (timeline vẽ sọc đỏ, phát thử)
     previewToggled = Signal(bool)   # bật / tắt "Phát thử bản đã cắt"
     playJunction = Signal(dict)     # ▶ xem chỗ nối của 1 đoạn

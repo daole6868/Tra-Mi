@@ -26,8 +26,9 @@ from .player import Player, fmt
 from .subs_model import (C_END, C_FIT, C_NODUB, C_SEL, C_SONG, C_SPK, C_START, C_VI, C_VOICE, C_ZH, SpeakerDelegate,
                          WrapDelegate,
                          SubsFilter, SubsModel, VoiceDelegate)
-from .widgets import (Card, ColorButton, Form, GradientButton, HfwBox, IconButton, IconTabs, PillTabs, ProgressBar,
-                      SectionCard, SliderRow, Switch, button, combo, flow, hbox, label, set_combo, wrap)
+from .widgets import (Card, CardGroup, ColorButton, FlowStepper, Form, GradientButton, HfwBox, IconButton, PillTabs,
+                      ProgressBar, SliderRow, StepCard, Switch, TabRail, button, combo, flow, hbox, label,
+                      number_buttons, numbered, set_combo, wrap)
 
 UNDO_TIP = ("Hoàn tác (Ctrl+Z): xoá / gộp / tách / kéo câu, sửa chữ, dịch, tạo giọng, tách / nối câu, căn mép, lọc cảm "
             "thán, cắt video (đầu / cuối, đoạn giữa, Rút khoảng lặng), tách / xoá / chèn đoạn video, tắt tiếng gốc, chữ & logo")
@@ -86,31 +87,6 @@ def ocr_box_from_detect(r: dict) -> dict:
     return {"x": 0.0, "y": round(y0, 4), "w": 1.0, "h": round(y1 - y0, 4)}
 
 
-def _group(text: str, ic: str, first: bool = False) -> QWidget:
-    """Tiêu đề nhóm trong 1 Form dài (tab Tự động – 2.1.11): vạch mảnh phía trên + icon + chữ đậm, chiếm cả 2 cột."""
-    w = QWidget()
-    v = QVBoxLayout(w)
-    v.setContentsMargins(0, 0 if first else 8, 0, 2)
-    v.setSpacing(8)
-    if not first:
-        ln = QFrame()
-        ln.setFrameShape(QFrame.Shape.HLine)
-        ln.setFixedHeight(1)
-        ln.setStyleSheet(f"background: {theme.BORDER}; border: none;")
-        v.addWidget(ln)
-    row = QHBoxLayout()
-    row.setSpacing(8)
-    pic = QLabel()
-    pic.setPixmap(icons.pixmap(ic, theme.ACCENT, 18))
-    row.addWidget(pic)
-    t = QLabel(text)
-    t.setStyleSheet("font-weight: 700; font-size: 11pt;")
-    row.addWidget(t)
-    row.addStretch(1)
-    v.addLayout(row)
-    return w
-
-
 def _vsep() -> QWidget:
     """Vạch dọc mảnh chia các nhóm nút trong 1 hàng."""
     f = QFrame()
@@ -118,6 +94,20 @@ def _vsep() -> QWidget:
     f.setFixedSize(1, 26)
     f.setStyleSheet(f"background: {theme.BORDER}; border: none;")
     return f
+
+class _Forms:
+    """Nhiều Form của cùng 1 tab (2.2.0 – form dài tách thành nhiều thẻ): setRowVisible tìm đúng Form chứa ô đó."""
+
+    def __init__(self, *forms):
+        self.forms = forms
+
+    def setRowVisible(self, w, on: bool):
+        for f in self.forms:
+            r, _role = f.getWidgetPosition(w)
+            if r >= 0:
+                f.setRowVisible(r, on)
+                return
+
 
 _HfwBox = HfwBox    # 2.1.35: khung chứa thẻ có hàng nút tự xuống dòng (dùng chung widgets.HfwBox từ 2.1.39)
 
@@ -185,8 +175,19 @@ class ProjectPage(QWidget):
         self._undo_cur: str | None = None   # ảnh chụp trạng thái hiện tại
         self._undo_t = 0.0
         self._undo_busy = False
-        head = hbox(self.name, self.saved, None, self.relink_btn, self.retime_btn, self.undo_btn, self.redo_btn, self.insp_btn, b_dir,
-                    b_del, export_btn)
+        # 2.2.0: tên + trạng thái lưu xếp 2 dòng, giữa là thanh tiến độ 4 bước (bấm = mở bước đó ở tab Tự động)
+        self.name.setFont(theme.font(12.5, QFont.Weight.Bold))
+        self.saved.setStyleSheet("font-size: 8.4pt;")
+        name_col = QVBoxLayout()
+        name_col.setSpacing(0)
+        name_col.setContentsMargins(0, 0, 0, 0)
+        name_col.addWidget(self.name)
+        name_col.addWidget(self.saved)
+        self.flow_steps = FlowStepper(["Nghe & tách câu", "Dịch", "Lồng tiếng", "Xuất"])
+        self.flow_steps.setToolTip("Tiến độ dự án – bấm 1 bước để mở bước đó ở tab Tự động")
+        self.flow_steps.clicked.connect(self._flow_clicked)
+        head = hbox(name_col, None, self.flow_steps, None, self.relink_btn, self.retime_btn, self.undo_btn, self.redo_btn,
+                    self.insp_btn, b_dir, b_del, export_btn)
         head.setSpacing(8)
 
         # ---------------- giữa: khung xem trước (trình phát) + tiến độ tác vụ
@@ -224,20 +225,41 @@ class ProjectPage(QWidget):
         ccol.addWidget(self.job_box)
 
         # ---------------- trái: thanh công cụ dạng icon + nội dung từng bước
-        self.tabs = IconTabs([("Tự động", "bolt"), ("Phụ đề", "subtitles"), ("Xoá phụ đề", "eraser"),
-                              ("Chỉnh sửa", "scissors"), ("Kiểu chữ", "palette"), ("Chữ+Logo", "text"),
-                              ("Lồng tiếng", "mic"), ("Âm thanh", "volume"), ("Tài liệu", "download"),
-                              ("Xuất", "export")])
+        # 2.2.0: thanh tab DỌC chia nhóm – Quy trình 1 Tự động · 2 Phụ đề · 3 Lồng tiếng · 4 Xuất, Hình ảnh, Khác (thứ tự
+        # trang trong self.stack giữ nguyên như cũ: TAB_* không đổi)
+        self.tabs = TabRail([("Tự động", "bolt"), ("Phụ đề", "subtitles"), ("Xoá phụ đề", "eraser"),
+                             ("Chỉnh sửa", "scissors"), ("Kiểu chữ", "palette"), ("Chữ + Logo", "text"),
+                             ("Lồng tiếng", "mic"), ("Âm thanh", "volume"), ("Tài liệu", "download"),
+                             ("Xuất", "export")],
+                            [("Quy trình", [0, 1, 6, 9]), ("Hình ảnh", [2, 3, 4, 5]), ("Khác", [7, 8])],
+                            {0: 1, 1: 2, 6: 3, 9: 4})
         self.stack = QStackedWidget()
         for build in (self._tab_auto, self._tab_subs, self._tab_hardsub, self._tab_edit, self._tab_style,
                       self._tab_layers, self._tab_dub, self._tab_audio, self._tab_models, self._tab_export):
             self.stack.addWidget(build())
+        self._number_actions()
         self.tabs.changed.connect(self._tab_changed)
+        # khung nội dung tab: tiêu đề + 1 dòng mô tả + ô tìm tuỳ chọn, dưới là các thẻ bước của tab
+        self.tab_title = label("", "h2")
+        self.tab_desc = label("", "muted", wrap=True)
+        self.tab_find = QLineEdit()
+        self.tab_find.setPlaceholderText("Tìm tuỳ chọn…")
+        self.tab_find.setClearButtonEnabled(True)
+        self.tab_find.setMaximumWidth(190)
+        self.tab_find.setToolTip("Gõ tên 1 ô / nút trong tab này rồi Enter: tool mở đúng thẻ chứa nó và cuộn tới "
+                                 "(Enter lần nữa = chỗ tiếp theo)")
+        self.tab_find.returnPressed.connect(self._find_option)
+        th = QVBoxLayout()
+        th.setSpacing(1)
+        th.addWidget(self.tab_title)
+        th.addWidget(self.tab_desc)
         tools = Card(padding=theme.PANEL_PAD)
-        tools.add(self.tabs)
+        tools.add(hbox(th, self.tab_find))
+        tools.lay.itemAt(0).layout().setStretch(0, 1)
         tools.add(self.stack)
         tools.lay.setStretch(1, 1)
-        tools.setMinimumWidth(700)   # kéo vách ngăn không làm nội dung các tab bị cắt (tab rộng nhất ~670 px)
+        tools.setMinimumWidth(560)   # 2.2.0: cột trái cao hết màn hình, rộng vừa nội dung (các hàng nút tự xuống dòng)
+        self.tools_card = tools
 
         # ---------------- phải: thuộc tính câu đang chọn
         from .inspector import LineInspector
@@ -249,16 +271,15 @@ class ProjectPage(QWidget):
         self.inspector.setMinimumWidth(260)
 
         # khe giữa các khung = vách ngăn kéo được, cùng 1 cỡ theo cả 2 chiều (theme.GAP)
+        # 2.2.0: hàng trên của cột giữa = xem trước | câu đang chọn (timeline nằm gọn dưới 2 khung này)
         top = QSplitter(Qt.Orientation.Horizontal)
         top.setHandleWidth(theme.GAP)
-        top.addWidget(tools)
         top.addWidget(wrap(ccol))
         self.insp_box = scroll(self.inspector)
         self.insp_box.setMinimumWidth(270)
         top.addWidget(self.insp_box)
-        top.setStretchFactor(0, 9)
-        top.setStretchFactor(1, 8)
-        top.setStretchFactor(2, 4)
+        top.setStretchFactor(0, 8)
+        top.setStretchFactor(1, 3)
         # ẩn khung bên phải bằng nút trên thanh đầu (ẩn hẳn -> vách ngăn cũng ẩn, mép phải các khung thẳng hàng)
         top.setChildrenCollapsible(False)
         self.top_split = top
@@ -292,13 +313,27 @@ class ProjectPage(QWidget):
         vsplit.setStretchFactor(1, 3)
         vsplit.setChildrenCollapsible(False)
         self.v_split = vsplit
+        # trái: thanh tab dọc + khung nội dung tab (cao hết màn hình) | phải: xem trước, câu đang chọn, timeline
+        main = QSplitter(Qt.Orientation.Horizontal)
+        main.setHandleWidth(theme.GAP)
+        main.addWidget(tools)
+        main.addWidget(vsplit)
+        main.setStretchFactor(0, 4)
+        main.setStretchFactor(1, 9)
+        main.setChildrenCollapsible(False)
+        self.main_split = main
         self._sized = False
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 10, 16, 14)
+        lay.setContentsMargins(12, 8, 14, 12)
         lay.setSpacing(theme.GAP)
         lay.addLayout(head)
-        lay.addWidget(vsplit, 1)
+        body = QHBoxLayout()
+        body.setSpacing(theme.GAP - 2)
+        body.addWidget(self.tabs)
+        body.addWidget(main, 1)
+        lay.addLayout(body, 1)
+        self._tab_meta(0)
 
         QShortcut(QKeySequence("Ctrl+S"), self, activated=lambda: (self._save_segs_now(), self._save_edit_now(),
                                                                    self.win.toast("Đã lưu", "ok")))
@@ -315,14 +350,16 @@ class ProjectPage(QWidget):
             self._sized = True
             W, H = self.width(), self.height()
             need = self.tl_card.minimumSizeHint().height()   # đủ chỗ cho cả 4 dòng timeline, không bị cắt
-            bottom = max(need, int(min(320, H * 0.32)))
+            bottom = max(need, int(min(330, H * 0.33)))
             self.v_split.setSizes([max(300, H - bottom), bottom])
+            left = max(self.tools_card.minimumWidth(), min(700, int(W * 0.32)))
+            self.main_split.setSizes([left, max(400, W - left - TabRail.W)])
             self._show_inspector(W >= 1600)
             self._show_profile(H >= 1300)   # mở đầu ẩn 2 ô hồ sơ phim / tên riêng để bảng câu đủ cao (nút trên thẻ)
 
     def _show_profile(self, on: bool | None):
         """Hiện / ẩn 2 ô Hồ sơ phim + Bảng tên riêng ở tab Phụ đề (None = đảo trạng thái)."""
-        on = (not self.sk_more.isVisible()) if on is None else on
+        on = self.sk_more.isHidden() if on is None else on
         self.sk_more.setVisible(on)
         self.sk_toggle.setText("Ẩn hồ sơ phim / tên riêng" if on else "Hồ sơ phim / tên riêng")
         self._fit_bottom()
@@ -330,29 +367,145 @@ class ProjectPage(QWidget):
     def _fit_bottom(self):
         """Phần dưới bảng câu (Tách phụ đề theo đoạn + Kỹ năng dịch AI) đủ cao cho mọi hàng (không bị vách kéo ép
         chồng chữ) – gọi khi mở / thu gọn 1 khung."""
-        w = self.subs_bottom
-        w.refit()
-        sizes = self.subs_split.sizes()
-        if len(sizes) == 2 and sum(sizes) > 0:
-            card = max(w.sizeHint().height(), w.minimumHeight())
-            self.subs_split.setSizes([max(60, sum(sizes) - card), card])
+        self.subs_bottom.refit()
 
     def _show_inspector(self, on: bool):
         """Hiện / ẩn khung "Câu đang chọn" và chia lại chiều ngang (màn hẹp mở đầu ẩn)."""
         self.insp_box.setVisible(on)
-        W = max(600, self.top_split.width() or self.width())
+        W = max(600, self.top_split.width() or int(self.width() * 0.6))
         if on:
-            self.top_split.setSizes([int(W * 0.44), int(W * 0.38), max(290, int(W * 0.18))])
+            side = max(290, int(W * 0.27))
+            self.top_split.setSizes([W - side, side])
         else:
-            self.top_split.setSizes([int(W * 0.55), int(W * 0.45), 0])
+            self.top_split.setSizes([W, 0])
+
+    # ================================================================== 2.2.0: khung tab, thẻ bước, thanh 4 bước
+    TAB_META = [("Tự động", "Chạy trọn gói, hoặc làm lần lượt từng bước 1 → 4."),
+                ("Phụ đề", "Dịch, sửa và kiểm tra từng câu."),
+                ("Xoá phụ đề", "Khoanh vùng → chọn cách xoá → xem thử rồi chạy."),
+                ("Chỉnh sửa", "Cắt video, rút khoảng lặng, khung hình, màu sắc, hiệu ứng."),
+                ("Kiểu chữ", "Mẫu nhanh, chữ, vị trí, xuống dòng, nền, karaoke – xem ngay trên video."),
+                ("Chữ + Logo", "Lớp chữ / logo phủ lên video – mỗi lớp 1 dòng trên timeline."),
+                ("Lồng tiếng", "Tách giọng → chọn giọng đọc → tạo bản lồng tiếng."),
+                ("Âm thanh", "Nguồn tiếng, âm lượng từng lớp, hiệu ứng, tải âm thanh."),
+                ("Tài liệu", "Mô hình AI trên máy – tải về 1 lần, dùng mãi."),
+                ("Xuất", "Khung hình, chất lượng, xuất video rồi đăng.")]
+
+    def _tab_meta(self, i: int):
+        t, d = self.TAB_META[i] if 0 <= i < len(self.TAB_META) else ("", "")
+        self.tab_title.setText(t)
+        self.tab_desc.setText(d)
+        self.tab_find.clear()
+
+    def _accordion(self, key: str, cards: list, pinned=(), default: int = 0, **kw) -> CardGroup:
+        """Các thẻ bước của 1 tab: đánh số 1, 2, 3…, mỗi lúc mở 1 thẻ (thẻ ghim luôn mở), nhớ thẻ đang mở."""
+        saved = (self.settings.get("ui_cards") or {}).get(key)
+        return CardGroup(key, cards, pinned, default, saved, self._save_card, **kw)
+
+    def _save_card(self, key: str, ck):
+        from ..config import save_settings
+
+        merged = save_settings({"ui_cards": {key: ck}})
+        self.settings["ui_cards"] = merged.get("ui_cards") or {}
+
+    NO_NUM_CARDS = ("Các lớp âm thanh", "Thêm chữ", "Logo của bạn", "Logo mẫu – tên kênh", "Các lớp trên video",
+                    "Lớp đang chọn")
+
+    def _number_actions(self):
+        """2.2.0: nút thao tác chính trong mỗi thẻ bước có số 1, 2, 3… theo thứ tự trên giao diện (tab Tự động: nút bước
+        đã có số; khung Công cụ tab Phụ đề: mỗi trang đánh số riêng; danh sách lớp / lớp âm thanh: không đánh số)."""
+        for i in range(1, self.stack.count()):
+            for c in self.stack.widget(i).findChildren(StepCard):
+                if c.key in self.NO_NUM_CARDS:
+                    continue
+                if c is getattr(self, "s_tools_card", None):
+                    for pg in self.s_tools_pages:
+                        number_buttons(pg)
+                else:
+                    number_buttons(c.lay)
+
+    def _flow_clicked(self, i: int):
+        """Bấm 1 bước trên thanh tiến độ: mở tab Tự động ở đúng thẻ bước đó (bước 4 = tab Xuất)."""
+        if i == 3:
+            return self.tabs.set_current(self.TAB_EXPORT)
+        self.tabs.set_current(0)
+        cards = getattr(self, "a_cards", None)
+        if cards and 0 <= i < len(cards):
+            cards[i].set_open(True, anim=True, user=True)
+            QTimer.singleShot(60, lambda: self._scroll_to(cards[i]))
+
+    def _scroll_to(self, w: QWidget):
+        from PySide6.QtWidgets import QScrollArea
+
+        sa = w.parentWidget()
+        while sa is not None and not isinstance(sa, QScrollArea):
+            sa = sa.parentWidget()
+        if sa is not None:
+            sa.ensureWidgetVisible(w, 0, 40)
+
+    def _find_option(self):
+        """Ô "Tìm tuỳ chọn…" trên khung tab: tìm nhãn / nút có chữ đó trong tab đang mở (không dấu, không phân biệt hoa
+        thường), mở thẻ chứa nó, cuộn tới và nháy sáng; Enter lần nữa = chỗ tiếp theo."""
+        import unicodedata
+
+        from PySide6.QtWidgets import QAbstractButton
+
+        def norm(t: str) -> str:
+            t = unicodedata.normalize("NFD", (t or "").replace("đ", "d").replace("Đ", "D").lower())
+            return "".join(ch for ch in t if not unicodedata.combining(ch)).replace("&&", "&")
+
+        q = norm(self.tab_find.text().strip())
+        if not q:
+            return
+        page = self.stack.currentWidget()
+        bodies = {c.body for c in page.findChildren(StepCard)}
+
+        def shown(w):
+            x = w
+            while x is not None and x is not page:
+                if x.isHidden() and x not in bodies:
+                    return False
+                x = x.parentWidget()
+            return True
+
+        hits = [w for w in page.findChildren(QWidget)
+                if isinstance(w, (QLabel, QAbstractButton)) and q in norm(w.text()) and shown(w)]
+        if not hits:
+            return self.win.toast(f"Không thấy \"{self.tab_find.text().strip()}\" trong tab này", "warn")
+        key = (self.stack.currentIndex(), q)
+        k = (self._find_at[1] + 1) % len(hits) if getattr(self, "_find_at", (None, 0))[0] == key else 0
+        self._find_at = (key, k)
+        w = hits[k]
+        StepCard.reveal(w)
+        QTimer.singleShot(40, lambda: (self._scroll_to(w), self._flash(w)))
+
+    def _flash(self, w: QWidget):
+        """Nháy sáng 1 ô vừa tìm thấy (khung màu nhấn ~1,2 s)."""
+        from PySide6.QtGui import QPainter as _P, QPen as _Pen
+
+        class _Ring(QWidget):
+            def paintEvent(self_, e):
+                p = _P(self_)
+                p.setRenderHint(_P.RenderHint.Antialiasing)
+                p.setPen(_Pen(theme.c(theme.ACCENT2, 230), 2))
+                p.setBrush(theme.c(theme.ACCENT, 36))
+                p.drawRoundedRect(self_.rect().adjusted(1, 1, -1, -1), 8, 8)
+
+        host = w.parentWidget() or w
+        ring = _Ring(host)
+        ring.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        ring.setGeometry(w.geometry().adjusted(-4, -3, 4, 3))
+        ring.show()
+        ring.raise_()
+        QTimer.singleShot(1300, ring.deleteLater)
 
     # ================================================================== TAB: Tự động
     def _tab_auto(self):
         s = self.settings
-        card = SectionCard("Dịch tự động trọn gói", "bolt", "Chọn tuỳ chọn rồi bấm Bắt đầu. Có thể làm từng bước bên dưới.")
+        # 2.2.0: 4 thẻ bước có số (mỗi lúc mở 1 thẻ), nút chạy từng bước ở chân mỗi thẻ; tuỳ chọn ít dùng gom vào
+        # "Tuỳ chọn nâng cao"
         f = Form()
-        # 2.1.11: chia nhóm theo 4 bước (trước 28 dòng liền nhau, khó tìm)
-        f.addRow(_group("1 · Nghe & tách câu", "mic", first=True))
+        f_adv = Form()
         self.a_method = f.row("Nguồn phụ đề", combo(C.METHODS, "asr"))
         self.a_asr = f.row("Bộ nhận dạng", combo(C.ASR_ENGINES, s.get("asr_engine")))
         self.a_ocrfps = f.row("Tốc độ quét phụ đề", combo(C.OCR_SPEEDS, str(s.get("ocr_fps", "4"))), C.OCR_FPS_HELP)
@@ -521,6 +674,7 @@ class ProjectPage(QWidget):
         self.a_ocrread_row = f.row("Đọc chữ kỹ", rw, C.OCR_READ_HELP)
         self._auto_form = f
         self.a_lang = f.row("Ngôn ngữ gốc", combo(C.LANGS, "zh"))
+        f1, f1_adv = f, f_adv
         self.a_sep = f.row("Tách giọng khỏi nhạc trước", Switch(bool(s.get("sep_before_asr", True))),
                            "Nhận dạng chính xác hơn với video có nhạc nền; cũng dùng để lồng tiếng giữ nhạc gốc")
         self.a_spk = f.row("Phân biệt người nói", Switch(bool(s.get("diarize", True))),
@@ -534,6 +688,7 @@ class ProjectPage(QWidget):
         self.a_chunk.setSuffix(" s")
         self.a_chunk.setMaximumWidth(110)
         self.a_chunk.setValue(int(s.get("asr_chunk_sec", 28) or 28))
+        f = f_adv
         f.row("Độ dài khúc nghe", self.a_chunk, C.CHUNK_HELP + ". Cùng 1 giá trị với Cài đặt → Nhận dạng giọng nói")
         self.a_recheck = Switch(bool(s.get("asr_recheck", True)))
         self.a_pad = QDoubleSpinBox()
@@ -546,8 +701,8 @@ class ProjectPage(QWidget):
         self.a_pad.setValue(float(s.get("asr_recheck_pad", 5.0) or 5.0))
         self.a_pad.setToolTip("Khúc nghe lại: câu không chắc nằm giữa, thêm bấy nhiêu giây trước / sau làm ngữ cảnh")
         self.a_recheck.setToolTip(C.RECHECK_HELP)
-        f.row("Nghe lại câu không chắc", hbox(self.a_recheck, label("nghe kèm mỗi bên", "muted"), self.a_pad, None),
-              C.RECHECK_HELP + ". Mức độ chắc / nghe thêm trên tiếng gốc: Cài đặt → Nhận dạng giọng nói")
+        f1.row("Nghe lại câu không chắc", hbox(self.a_recheck, label("nghe kèm mỗi bên", "muted"), self.a_pad, None),
+               C.RECHECK_HELP + ". Mức độ chắc / nghe thêm trên tiếng gốc: Cài đặt → Nhận dạng giọng nói")
         self.a_overlap = f.row("Nghe kỹ (mọi câu nghe 2 lần)", Switch(bool(s.get("asr_overlap", False))), C.OVERLAP_HELP)
         self.a_langchk = f.row("Nghe lại khúc nghi tiếng khác", Switch(bool(s.get("asr_lang_check", True))),
                                C.LANG_CHECK_HELP)
@@ -578,7 +733,7 @@ class ProjectPage(QWidget):
         self.a_conf.valueChanged.connect(self._conf_changed)
         self.a_denoise = f.row("Lọc nhiễu âm thanh", Switch(False))
         self.a_force = f.row("Nhận dạng lại từ đầu", Switch(False))
-        f.addRow(_group("2 · Dịch", "globe"))
+        f = f2 = Form()
         self.a_engine = f.row("Công cụ dịch", combo(C.ENGINES + [(pipeline.NO_TRANSLATE, "Không dịch – chỉ nghe & tách câu, "
                                                                  "xuất SRT gốc (dịch ở phần mềm khác)")],
                                                     s.get("translate_engine")))
@@ -639,7 +794,7 @@ class ProjectPage(QWidget):
                                 "dịch. Nghe xong, câu bị đổi (nghe lại đoạn sót / tách người nói) được dịch / đọc lại. "
                                 "Dịch trên máy (Hy-MT2) và VieNeu / OmniVoice dùng card đồ hoạ nên chạy sau khi nghe xong")
         self.a_parallel.toggled.connect(lambda on: None if self.loading else self._save_setting("auto_parallel", on))
-        f.addRow(_group("3 · Lồng tiếng", "volume"))
+        f = f3 = Form()
         self.a_dub = f.row("Lồng tiếng (đọc bản dịch)", Switch(False))
         self.a_tts = f.row("Bộ đọc lồng tiếng", combo(C.TTS_ENGINES, s.get("tts_engine", "edge")))
         # cùng 1 bộ đọc với tab Lồng tiếng (trước đây bước "3. Lồng tiếng" dùng ô ở tab Lồng tiếng, ô này bị bỏ qua)
@@ -657,7 +812,7 @@ class ProjectPage(QWidget):
         f.row("Giọng lồng", v_row,
               "1 giọng cho MỌI người nói – áp cho mọi nút lồng tiếng (cả '3. Lồng tiếng', 'Tạo bản lồng tiếng') và nhớ làm "
               "mặc định cho video sau. 'Theo giọng từng người nói' = chọn giọng từng người ở tab Lồng tiếng mục 2")
-        f.addRow(_group("4 · Phụ đề & video khi xuất", "export"))
+        f = f4 = Form()
         self.a_hardsub = f.row("Phụ đề Trung cũ", combo(C.HARDSUB, "none"))
         self.a_which = f.row("Ghép phụ đề vào video", combo(C.WHICH, "trans"))
         self.a_method.currentIndexChanged.connect(self._method_rows)
@@ -669,49 +824,81 @@ class ProjectPage(QWidget):
             w.currentIndexChanged.connect(self._preset_changed)
         for w in (self.a_dub, self.a_denoise):
             w.toggled.connect(self._preset_changed)
-        card.add(f)
-        card.add(hbox(label("Cùng 1 bộ thiết lập với 'Tải về & dịch tự động' (Trang chủ) và Xử lý hàng loạt", "muted"),
-                      None))
+        # ---- trên cùng: chạy trọn gói
+        hero = Card(padding=14, accent=True)
+        hero.add(label("Chạy trọn gói", "h3"))
+        hero.add(label("Nghe → Dịch → Lồng tiếng (nếu bật ở bước 3) rồi DỪNG trước bước Xuất để bạn kiểm tra. Cùng 1 bộ "
+                       "thiết lập với 'Tải về & dịch tự động' (Trang chủ) và Xử lý hàng loạt.", "muted", wrap=True))
         go = GradientButton("Bắt đầu dịch tự động", "bolt", big=True)
         go.setToolTip("Tự làm: nghe & tách câu → dịch → lồng tiếng (nếu bật) rồi DỪNG. Kiểm tra xong bấm 'Xuất video' "
                       "(nút trên cùng hoặc tab Xuất) để ghép video")
         go.clicked.connect(self.run_auto)
-        card.add(go)
-        card.add(label("Dừng trước bước xuất – kiểm tra xong bấm 'Xuất video' để ghép video.", "muted"))
-        steps = SectionCard("Làm từng bước", "list",
-                            "Đi lần lượt 4 bước, soát kết quả từng bước trước khi sang bước sau (bước nào xong có dấu ✓).")
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(4)
+        self.a_go = go
+        hero.add(hbox(go, None))
+        # ---- 4 thẻ bước
         step_defs = [
-            ("1. Nghe && tách câu", "mic", self.run_recognize,
+            ("Nghe && tách câu", "mic", self.run_recognize,
              "Nghe lời thoại gốc: ghi mốc lúc nhân vật BẮT ĐẦU nói tới lúc DỨT câu, tách đúng từng câu (và từng người nói)."),
-            ("2. Dịch", "globe", self._step_translate,
+            ("Dịch", "globe", self._step_translate,
              "Dịch từng câu sang ngôn ngữ ở ô 'Dịch sang', độ dài vừa với thời gian nhân vật nói. Đã dịch một phần thì "
              "chỉ dịch các câu còn trống (giữ câu bạn đã sửa)."),
-            ("3. Lồng tiếng", "volume", self._step_dub,
+            ("Lồng tiếng", "volume", self._step_dub,
              "Đọc từng câu tiếng Việt và đặt đúng vào thời điểm nhân vật nói (không chồng câu)."),
-            ("4. Ghép vào video && xuất", "export", self._step_export,
+            ("Ghép vào video && xuất", "export", self._step_export,
              "Ghép giọng lồng + nhạc nền + phụ đề vào video, xuất file MP4."),
         ]
-        self.step_status = []
-        for i, (title, ic, fn, tip) in enumerate(step_defs):
-            b = button(title, ic, tip, on_click=fn)
+        titles = [("Nghe & tách câu", "mic"), ("Dịch", "globe"), ("Lồng tiếng", "volume"),
+                  ("Phụ đề & video khi xuất", "export")]
+        self.step_status, self.step_btns, self.a_cards = [], [], []
+        for i, ((title, ic), form, (bt, bic, fn, tip)) in enumerate(zip(titles, (f1, f2, f3, f4), step_defs)):
+            c = StepCard(title, ic, "", num=i + 1, key=["asr", "tr", "dub", "out"][i])
+            box = QWidget()
+            box.setLayout(form)
+            c.add(box)
+            if i == 0:     # tuỳ chọn ít dùng của bước nghe: ẩn sau 1 nút
+                self.a_adv_box = QWidget()
+                self.a_adv_box.setLayout(f1_adv)
+                self.a_adv_btn = button(f"Tuỳ chọn nâng cao ({f1_adv.rowCount()})", "chev_right",
+                                        "Độ dài khúc nghe, nghe kỹ, sửa đầu / cuối câu, Gemini soát, AI nối câu, xoá câu "
+                                        "không chắc, lọc nhiễu, nhận dạng lại từ đầu", flat=True,
+                                        on_click=lambda: self._auto_adv(self.a_adv_box.isHidden()))
+                c.add(hbox(self.a_adv_btn, None))
+                c.add(self.a_adv_box)
+            b = GradientButton(bt, bic, num=i + 1)
+            b.setToolTip(tip)
+            b.clicked.connect(fn)
             st = label("", "muted", wrap=True)
             st.setToolTip(tip)
-            grid.addWidget(b, 0, i)
-            grid.addWidget(st, 1, i)
-            grid.setColumnStretch(i, 1)
+            line = QFrame()
+            line.setFrameShape(QFrame.Shape.HLine)
+            line.setFixedHeight(1)
+            line.setStyleSheet(f"background: {theme.BORDER}; border: none;")
+            c.add(line)
+            foot = hbox(b, st)
+            foot.setStretch(1, 1)
+            c.add(foot)
             self.step_status.append(st)
-        steps.add(grid)
+            self.step_btns.append(b)
+            self.a_cards.append(c)
+        self._auto_adv(bool(self.settings.get("ui_auto_adv", False)), save=False)
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 2, 0)
         v.setSpacing(theme.GAP)
-        v.addWidget(card)
-        v.addWidget(steps)
+        v.addWidget(hero)
+        v.addWidget(label("HOẶC LÀM TỪNG BƯỚC", "muted"))
+        for c in self.a_cards:
+            v.addWidget(c)
         v.addStretch(1)
+        self._accordion("auto", self.a_cards)
         return scroll(w)
+
+    def _auto_adv(self, on: bool, save: bool = True):
+        """Hiện / ẩn "Tuỳ chọn nâng cao" của bước 1 (tab Tự động)."""
+        self.a_adv_box.setVisible(on)
+        self.a_adv_btn.setIcon(icons.icon("chev_down" if on else "chev_right", theme.TEXT, 18))
+        if save:
+            self._save_setting("ui_auto_adv", bool(on))
 
     # ================================================================== TAB: Phụ đề
     def _tab_subs(self):
@@ -772,15 +959,14 @@ class ProjectPage(QWidget):
         self.s_engine, self.s_target = self._mirror(self.a_engine), self._mirror(self.a_target)
         self.s_style, self.s_skill = self._mirror(self.a_style), self._mirror(self.a_skill)
         # ---- khung "Dịch" (luôn hiện): cách dịch + 3 nút dịch
-        tr_card = SectionCard("Dịch", "globe")
-        tr_card.lay.setContentsMargins(14, 12, 14, 12)
-        b_tr = GradientButton("Dịch câu chưa dịch", "globe")
+        tr_card = StepCard("Dịch", "globe", key="tr")
+        b_tr = GradientButton("Dịch câu chưa dịch", "globe", num=1)
         b_tr.setToolTip("Dịch mọi câu chưa có bản dịch (dịch lần đầu: dịch cả phim)")
         b_tr.clicked.connect(lambda: self.run_translate(True))
-        tr_card.head.addWidget(flow(
-            b_tr, button("Dịch lại tất cả", "refresh", on_click=lambda: self.run_translate(False)),
-            button("Dịch câu đã tích", "sparkle", "Dịch (lại) các câu đã tích ở cột Chọn – đã có bản lồng thì "
-                   "đọc lại giọng đúng các câu đó", on_click=self._translate_picked)))
+        tr_btns = flow(
+            b_tr, numbered(button("Dịch lại tất cả", "refresh", on_click=lambda: self.run_translate(False)), 2),
+            numbered(button("Dịch câu đã tích", "sparkle", "Dịch (lại) các câu đã tích ở cột Chọn – đã có bản lồng thì "
+                            "đọc lại giọng đúng các câu đó", on_click=self._translate_picked), 3))
         g = QGridLayout()   # 2 hàng × 2 ô chọn, giãn đều theo bề rộng khung (không cắt chữ trong ô)
         g.setHorizontalSpacing(10)
         g.setVerticalSpacing(8)
@@ -791,15 +977,19 @@ class ProjectPage(QWidget):
                                     ("Kỹ năng AI", hbox(self.s_skill, button(
                                         "", "wand", "Xem, thêm, sửa kỹ năng dịch AI của bạn", flat=True,
                                         on_click=self._edit_skills))))):
-            g.addWidget(_rowlbl(t), i // 2, (i % 2) * 2)
-            (g.addWidget if isinstance(w, QWidget) else g.addLayout)(w, i // 2, (i % 2) * 2 + 1)
-        for c in (1, 3):
+            cell = QVBoxLayout()           # 2.2.0: nhãn nằm trên ô chọn (khung hẹp không bị cắt)
+            cell.setSpacing(4)
+            cell.addWidget(label(t, "muted"))
+            (cell.addWidget if isinstance(w, QWidget) else cell.addLayout)(w)
+            g.addLayout(cell, i // 2, i % 2)
+        for c in (0, 1):
             g.setColumnStretch(c, 1)
         for cb in (self.s_engine, self.s_target, self.s_style, self.s_skill):
-            cb.setMinimumWidth(150)
+            cb.setMinimumWidth(120)
         self.s_skill.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.s_style.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         tr_card.add(g)
+        tr_card.add(tr_btns)
         self.s_vtrans = Switch(bool(self.settings.get("translate_video", False)))
         self.s_vtrans.setToolTip(C.VIDEO_TRANSLATE_HELP)
         self.s_vtrans.toggled.connect(self._vtrans_changed)
@@ -1125,7 +1315,7 @@ class ProjectPage(QWidget):
         self.glossary.textChanged.connect(lambda: self._save_edit_timer.start())
         spc = self._span_card()
         # 1 thẻ chung: kỹ năng dịch AI + hồ sơ phim + bảng tên riêng (2 ô cạnh nhau) – kéo vách trên để đổi chiều cao
-        sk = SectionCard("Kỹ năng dịch AI", "sparkle")
+        sk = StepCard("Kỹ năng dịch AI · hồ sơ phim", "sparkle", key="skill")
         self.sk_toggle = button("Ẩn hồ sơ phim / tên riêng", "chev_down", "Hiện / ẩn 2 ô Hồ sơ phim và Bảng tên riêng "
                                 "(ẩn để bảng câu cao hơn)", flat=True, on_click=lambda: self._show_profile(None))
         sk.head.addWidget(self.sk_toggle)
@@ -1148,23 +1338,13 @@ class ProjectPage(QWidget):
         self.sk_more.setLayout(more)
         sk.add(self.sk_more)
         tv.setMinimumHeight(460)   # bảng câu luôn đủ cao (~10 câu); màn thấp: cả tab cuộn dọc
-        bottom = _HfwBox()    # dưới bảng câu: Tách phụ đề theo đoạn (2.1.35) + Kỹ năng dịch AI
+        bottom = _HfwBox()    # dưới bảng câu: 4 Tách phụ đề theo đoạn (2.1.35) + 5 Kỹ năng dịch AI
         self.subs_bottom = bottom
         bl = QVBoxLayout(bottom)
         bl.setContentsMargins(0, 0, 0, 0)
         bl.setSpacing(theme.GAP)
         bl.addWidget(spc)
         bl.addWidget(sk)
-        split = QSplitter(Qt.Orientation.Vertical)
-        split.setHandleWidth(theme.GAP)
-        split.addWidget(tv)
-        split.addWidget(bottom)
-        split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 0)
-        split.setCollapsible(0, False)
-        split.setCollapsible(1, False)    # thẻ kỹ năng không bị kéo dẹp tới mức 2 ô chữ chỉ còn 1 dòng
-        split.setSizes([10000, 330])
-        self.subs_split = split
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 0, 0)
@@ -1184,12 +1364,16 @@ class ProjectPage(QWidget):
                         on_click=lambda: self._export_sub("srt", "source")),
                  self.s_srt_trans,
                  button("Xuất SRT song ngữ", "upload", on_click=lambda: self._export_sub("srt", "both")))]
-        tools = Card(padding=12)
+        tools = StepCard("Công cụ", "settings", "Sửa câu · nối / tách câu · lời hát & nghe nhầm · nhập / xuất SRT · giờ "
+                         "hiện – áp cho câu đã tích, chưa tích thì cả phim", key="tools")
         self.s_tools = PillTabs([("Sửa câu", "text"), ("Nối / tách câu", "merge"), ("Lời hát & nghe nhầm", "music"),
                                  ("Nhập / xuất SRT", "upload"), ("Giờ hiện", "clock")])
         self.s_tools_btn = button("Thu gọn", "chev_down", "Ẩn / hiện các nút công cụ (ẩn để bảng câu cao hơn)", flat=True,
-                                  on_click=lambda: self._subs_tools(open_=not self.s_tools_body.isVisible()))
-        tools.add(hbox(self.s_tools, None, self.s_tools_btn))
+                                  on_click=lambda: self._subs_tools(open_=self.s_tools_body.isHidden()))
+        tools.head.addWidget(self.s_tools_btn)
+        self.s_tools_btn.hide()           # 2.2.0: bấm tiêu đề thẻ "Công cụ" để thu gọn / mở
+        tools.toggled.connect(lambda on: None if on != self.s_tools_body.isHidden() else self._subs_tools(open_=on))
+        tools.add(self.s_tools)
         self.s_tools_body = QWidget()
         body = QVBoxLayout(self.s_tools_body)
         body.setContentsMargins(2, 0, 2, 0)
@@ -1218,8 +1402,18 @@ class ProjectPage(QWidget):
         v.setSpacing(theme.GAP)
         v.addWidget(tr_card)
         v.addWidget(tools)
-        v.addLayout(hbox(self.search, self.seg_count, self.s_wf_chip, self.s_del, label("Tự cuộn", "muted"), self.follow))
-        v.addWidget(split, 1)
+        # 3 · bảng câu (luôn mở): tìm kiếm + bảng
+        table_card = StepCard("Bảng câu", "list", key="table")
+        self.search.setMinimumWidth(220)
+        table_card.add(flow(self.search, self.seg_count, self.s_wf_chip, self.s_del,
+                            hbox(label("Tự cuộn", "muted"), self.follow)))
+        table_card.add(tv)
+        table_card.lay.setStretch(table_card.lay.count() - 1, 1)
+        self.s_table_card = table_card
+        v.addWidget(table_card, 1)
+        v.addWidget(bottom)
+        self._accordion("subs", [tr_card, tools, table_card, spc, sk], pinned=(table_card,), exclusive=False,
+                        opened=("tr",), manual=(tools, spc))
         self.subs_scroll = scroll(w)
         return self.subs_scroll
 
@@ -1231,10 +1425,13 @@ class ProjectPage(QWidget):
         from .. import spans as spm
 
         st = self.settings
-        card = SectionCard("Tách phụ đề theo đoạn", "search")
+        card = StepCard("Tách phụ đề theo đoạn", "search", key="span")
         self.sp_toggle = button("Thu gọn", "chev_down", "Hiện / ẩn khung (ẩn để bảng câu cao hơn)", flat=True,
                                 on_click=lambda: self._span_open(None))
         card.head.addWidget(self.sp_toggle)
+        self.sp_toggle.hide()             # 2.2.0: bấm tiêu đề thẻ để thu gọn / mở
+        card.toggled.connect(lambda on: None if on != self.sp_body.isHidden() else self._span_open(on))
+        self.sp_card = card
         self._spans: list[dict] = []
         self.sp_a, self.sp_b = QLineEdit(), QLineEdit()
         for e in (self.sp_a, self.sp_b):
@@ -1321,8 +1518,9 @@ class ProjectPage(QWidget):
         return card
 
     def _span_open(self, on: bool | None, save: bool = True):
-        on = (not self.sp_body.isVisible()) if on is None else on
+        on = self.sp_body.isHidden() if on is None else on
         self.sp_body.setVisible(on)
+        self.sp_card.set_open(on, anim=False)
         self.sp_toggle.setText("Thu gọn" if on else "Mở")
         if save:
             self._save_setting("span_open", on)
@@ -1522,7 +1720,9 @@ class ProjectPage(QWidget):
             self.s_tools.set_current(page, emit=False)
         if open_ is not None:
             self.s_tools_body.setVisible(open_)
+            self.s_tools.setVisible(open_)
             self.s_tools_btn.setText("Thu gọn" if open_ else "Mở công cụ")
+            self.s_tools_card.set_open(open_, anim=False)
         if save:
             d = {}
             if page is not None:
@@ -1565,7 +1765,7 @@ class ProjectPage(QWidget):
     def _tab_hardsub(self):
         sv = lambda *_: (self._save_edit_timer.start(), self._live_timer.start())  # noqa: E731
         # --- bước 1: khoanh vùng
-        area = SectionCard("1. Khoanh vùng chữ cần xoá", "eraser",
+        area = StepCard("1. Khoanh vùng chữ cần xoá", "eraser",
                            "Chọn đang khoanh 'Phụ đề cũ' hay 'Logo cố định' rồi kéo chuột ngay trên VIDEO bên phải "
                            "(hoặc trên ảnh dưới đây) – khoanh nhiều vùng được. Kéo 4 chấm trắng trên 4 cạnh để đổi "
                            "cao / thấp / dài / ngắn, kéo giữa vùng để di chuyển, bấm × để xoá vùng.")
@@ -1583,15 +1783,14 @@ class ProjectPage(QWidget):
         area.add(self.hs_editor)
         auto_btn = GradientButton("Tự dò vùng phụ đề", "wand")
         auto_btn.clicked.connect(self._detect_region)
-        area.add(hbox(auto_btn,
+        area.add(flow(auto_btn,
                       button("Chụp khung đang phát", "image", "Lấy khung hình ở vị trí đang phát để khoanh vùng",
                              on_click=self._grab_frame),
-                      None,
                       button("Xoá hết vùng", "trash", danger=True,
                              on_click=lambda: (self.hs_editor.set_regions([]),
                                                self._hs_lists.__setitem__(self._hs_target, []), sv()))))
         # --- bước 2: cách xoá
-        how = SectionCard("2. Cách xoá", "sparkle")
+        how = StepCard("2. Cách xoá", "sparkle")
         self.hs_pills = PillTabs([(t, ic) for _, t, ic in self.HS_MODES])
         self.hs_pills.changed.connect(self._hs_pill_changed)
         how.add(self.hs_pills)
@@ -1643,7 +1842,7 @@ class ProjectPage(QWidget):
             w.toggledOn.connect(sv)
         how.add(f)
         # --- bước 3: chạy / kiểm tra
-        chk = SectionCard("3. Kiểm tra & chạy", "eye",
+        chk = StepCard("3. Kiểm tra & chạy", "eye",
                           "‘Xem thử 1 khung’ tạo ảnh kết quả THẬT ở khung đang phát (hiện ở ảnh mục 1), "
                           "không đổi video. Video chỉ được xoá thật khi chạy bước dưới hoặc khi Xuất video.")
         chk.add(flow(button("Xem thử 1 khung", "eye", "Tạo ảnh kết quả chính xác ở khung hình đang phát",
@@ -1673,6 +1872,7 @@ class ProjectPage(QWidget):
         v.addWidget(chk)
         v.addStretch(1)
         self._hs_mode_changed()
+        self._accordion("hardsub", [area, how, chk])
         return scroll(w)
 
     LOGO_HELP = ("<b>Gỡ logo cố định</b> – logo / watermark nằm YÊN 1 chỗ suốt video (tên kênh, Douyin…). Khoanh sát "
@@ -1733,7 +1933,7 @@ class ProjectPage(QWidget):
     def _tab_edit(self):
         sv = lambda *_: (self._save_edit_timer.start(), self._live_timer.start())  # noqa: E731
         # --- cắt
-        cut = SectionCard("Cắt video", "scissors", "Phụ đề và lồng tiếng tự khớp lại sau khi cắt.")
+        cut = StepCard("Cắt video", "scissors", "Phụ đề và lồng tiếng tự khớp lại sau khi cắt.")
         self.e_start = QDoubleSpinBox()
         self.e_end = QDoubleSpinBox()
         for sp in (self.e_start, self.e_end):
@@ -1752,9 +1952,9 @@ class ProjectPage(QWidget):
         self.timeline.seekRequested.connect(self.player.seek)
         cut.add(self.timeline)
         self.cut_label = label("Xoá đoạn giữa: đánh dấu điểm đầu rồi điểm cuối", "muted")
-        cut.add(hbox(button("[ Đánh dấu đầu", on_click=lambda: self._mark_cut("a")),
+        cut.add(flow(button("[ Đánh dấu đầu", on_click=lambda: self._mark_cut("a")),
                      button("Đánh dấu cuối ]", on_click=lambda: self._mark_cut("b")),
-                     button("Bỏ hết đoạn cắt", "trash", on_click=self._clear_cuts), None))
+                     button("Bỏ hết đoạn cắt", "trash", on_click=self._clear_cuts)))
         cut.add(self.cut_label)
         self.cuts_list = label("", "muted", wrap=True)
         cut.add(self.cuts_list)
@@ -1774,7 +1974,7 @@ class ProjectPage(QWidget):
         # --- khung hình
         from .aspect_ui import AspectPicker
 
-        frame = SectionCard("Khung hình", "aspect", "Tỉ lệ dọc cho TikTok / Reels / Shorts, ngang cho YouTube – xem ngay "
+        frame = StepCard("Khung hình", "aspect", "Tỉ lệ dọc cho TikTok / Reels / Shorts, ngang cho YouTube – xem ngay "
                             "trên video bên phải. Tab Xuất dùng chung lựa chọn này.")
         self.e_aspect = AspectPicker()
         self.e_aspect.changed.connect(self._aspect_changed)
@@ -1845,7 +2045,7 @@ class ProjectPage(QWidget):
         self.e_acolor.changed.connect(lambda *_: self._frame_live())
         self.e_safe.toggledOn.connect(lambda *_: (sv(), self._update_safe()))
         # --- màu
-        color = SectionCard("Màu sắc & hình ảnh", "palette")
+        color = StepCard("Màu sắc & hình ảnh", "palette")
         color.head.addWidget(button("Về gốc", "refresh", "Trả độ sáng / tương phản / bão hoà / gamma về mặc định, tắt làm nét "
                                     "/ khử nhiễu (màu gốc của video)", flat=True,
                                     on_click=self._color_reset))
@@ -1858,10 +2058,10 @@ class ProjectPage(QWidget):
         self.e_denoise = f3.row("Khử nhiễu hình", Switch())
         color.add(f3)
         # --- logo & chữ: đã chuyển sang tab "Chữ & Logo" (nhiều lớp, mỗi lớp 1 dòng trên timeline)
-        brand = SectionCard("Logo & chữ", "text", "Thêm tiêu đề, ghi chú, chữ chạy, logo (nhiều logo, GIF động) ở tab "
+        brand = StepCard("Logo & chữ", "text", "Thêm tiêu đề, ghi chú, chữ chạy, logo (nhiều logo, GIF động) ở tab "
                             "Chữ+Logo – mỗi chữ / logo 1 dòng riêng trên timeline, kéo để đổi lúc hiện.")
         brand.add(flow(button("Mở tab Chữ+Logo", "text", on_click=lambda: self.tabs.set_current(self.TAB_LAYERS))))  # tab "Chữ+Logo"
-        fx = SectionCard("Hiệu ứng", "sparkle")
+        fx = StepCard("Hiệu ứng", "sparkle")
         f6 = Form()
         self.e_fin = f6.row("Mờ dần đầu (giây)", SliderRow(0, 5, 0.1, 0, 1))
         self.e_fout = f6.row("Mờ dần cuối (giây)", SliderRow(0, 5, 0.1, 0, 1))
@@ -1884,6 +2084,7 @@ class ProjectPage(QWidget):
         for c in (cut, self.sil, frame, color, brand, fx):
             v.addWidget(c)
         v.addStretch(1)
+        self._accordion("edit", [cut, self.sil, frame, color, brand, fx])
         return scroll(w)
 
     # ================================================================== TAB: Âm thanh
@@ -1943,79 +2144,80 @@ class ProjectPage(QWidget):
     # ================================================================== TAB: Kiểu chữ
     def _tab_style(self):
         sv = lambda *_: (self._save_edit_timer.start(), self._live_timer.start())  # noqa: E731
-        card = SectionCard("Kiểu phụ đề ghép vào video", "palette",
-                           "Xem trước trực tiếp trên khung video bên phải – đúng cỡ chữ, chỗ đặt như video xuất ra. "
-                           "Kéo phụ đề trên video để đặt chỗ khác; khi bật nền hộp, kéo 4 chấm trên 4 cạnh nền "
-                           "để đổi chiều cao / độ dài.")
-        f = Form()
-        self.st_burn = f.row("Ghép phụ đề vào video", Switch(True))
-        self.st_which = f.row("Hiển thị", combo(C.WHICH[:3], "trans"))
-        self.st_font = f.row("Font chữ", combo([], None))
+        # 2.2.0: 1 form dài 35 dòng -> 6 thẻ: Mẫu nhanh · Chữ · Vị trí · Xuống dòng · Nền · Karaoke
+        card = StepCard("Chữ", "palette",
+                        "Xem trước trực tiếp trên khung video bên phải – đúng cỡ chữ, chỗ đặt như video xuất ra. "
+                        "Kéo phụ đề trên video để đặt chỗ khác; khi bật nền hộp, kéo 4 chấm trên 4 cạnh nền "
+                        "để đổi chiều cao / độ dài.", key="text")
+        fT, fP, fK, fL, fB = Form(), Form(), Form(), Form(), Form()
+        self.st_burn = fT.row("Ghép phụ đề vào video", Switch(True))
+        self.st_which = fT.row("Hiển thị", combo(C.WHICH[:3], "trans"))
+        self.st_font = fT.row("Font chữ", combo([], None))
         self._fill_sub_fonts("Be Vietnam Pro")
-        f.row("", flow(button("Nạp font riêng…", "upload", "Chọn file font .ttf / .otf trên máy – dùng được cho "
+        fT.row("", flow(button("Nạp font riêng…", "upload", "Chọn file font .ttf / .otf trên máy – dùng được cho "
                               "phụ đề và chữ ở tab Chữ+Logo (chép vào thư mục data\\fonts)",
                               flat=True, on_click=self._add_sub_font)))
-        self.st_size = f.row("Cỡ chữ (0 = tự động)", QSpinBox())
+        self.st_size = fT.row("Cỡ chữ (0 = tự động)", QSpinBox())
         self.st_size.setRange(0, 200)
-        self.st_pos = f.row("Vị trí", combo([("auto", "Tự động – đúng chỗ phụ đề cũ"), ("bottom", "Dưới"),
+        self.st_pos = fP.row("Vị trí", combo([("auto", "Tự động – đúng chỗ phụ đề cũ"), ("bottom", "Dưới"),
                                               ("middle", "Giữa"), ("top", "Trên"),
                                               ("custom", "Tự chọn – kéo trên video")], "auto"))
-        self.st_margin = f.row("Cách mép (px, 0 = tự động)", QSpinBox())
+        self.st_margin = fP.row("Cách mép (px, 0 = tự động)", QSpinBox())
         self.st_margin.setRange(0, 1000)
-        self.st_posx = f.row("Ngang (% từ trái)", SliderRow(0, 100, 0.5, 50, 1),
+        self.st_posx = fP.row("Ngang (% từ trái)", SliderRow(0, 100, 0.5, 50, 1),
                              "Tâm phụ đề tính từ mép trái khung hình (50 = giữa)")
-        self.st_posy = f.row("Dọc (% từ trên)", SliderRow(0, 100, 0.5, 90, 1),
+        self.st_posy = fP.row("Dọc (% từ trên)", SliderRow(0, 100, 0.5, 90, 1),
                              "Chân dòng chữ cuối tính từ mép trên khung hình")
-        self.st_posauto = f.row("", wrap(hbox(button("Về vị trí tự động", "refresh",
+        self.st_posauto = fP.row("", wrap(hbox(button("Về vị trí tự động", "refresh",
                                                      "Đặt lại phụ đề đúng chỗ phụ đề Trung cũ", flat=True,
                                                      on_click=lambda: set_combo(self.st_pos, "auto")), None)))
-        self.st_color = f.row("Màu chữ", ColorButton("#FFFFFF"))
-        self.st_kara = f.row("Karaoke – chữ đổi màu theo lời", Switch(False),
+        self.st_color = fT.row("Màu chữ", ColorButton("#FFFFFF"))
+        self.st_kara = fK.row("Karaoke – chữ đổi màu theo lời", Switch(False),
                              "Từng từ đổi màu đúng lúc được đọc (dùng được với mọi font). Đang dùng bản lồng tiếng thì "
                              "chạy theo giọng Việt, không thì theo thời gian hiện câu")
-        self.st_kcolor = f.row("Màu karaoke", ColorButton(KARA_COLOR))
-        self.st_kmode = f.row("Kiểu karaoke", combo(list(KARA_MODES), "sweep"),
+        self.st_kcolor = fK.row("Màu karaoke", ColorButton(KARA_COLOR))
+        self.st_kmode = fK.row("Kiểu karaoke", combo(list(KARA_MODES), "sweep"),
                               "Quét mượt: màu chạy dần qua từng chữ · Từng từ: cả từ đổi màu khi tới lượt")
-        self.st_klisten = f.row("Theo mốc từng từ của giọng lồng", Switch(True),
+        self.st_klisten = fK.row("Theo mốc từng từ của giọng lồng", Switch(True),
                                 "Từng từ đổi màu đúng lúc giọng lồng đọc từ đó: giọng Edge có sẵn mốc từng từ; giọng "
                                 "VieNeu / OmniVoice được Whisper nghe lại (bấm \"Đo mốc từng từ\" – lần đầu tải Whisper "
                                 "turbo ~1,6 GB; đã có Whisper thì tự đo khi xuất video). Tắt: chia theo đoạn có tiếng")
         self.st_klisten.setChecked(bool(self.settings.get("karaoke_listen", True)))
         self.st_knote = label("", "muted", wrap=True)
-        self.st_kbtn = f.row("", flow(button("Đo mốc từng từ", "mic", "Whisper nghe lại các câu giọng lồng chưa có mốc "
+        self.st_kbtn = fK.row("", flow(button("Đo mốc từng từ", "mic", "Whisper nghe lại các câu giọng lồng chưa có mốc "
                                              "từng từ (không đọc lại giọng nào)", flat=True,
                                              on_click=self._kara_listen), self.st_knote))
-        self.st_ocolor = f.row("Màu viền", ColorButton("#000000"))
-        self.st_outline = f.row("Độ dày viền", SliderRow(0, 8, 0.5, 2.5, 1))
-        self.st_shadow = f.row("Bóng đổ", SliderRow(0, 5, 0.5, 1, 1))
-        self.st_bold = f.row("Chữ đậm", Switch(True))
-        self.st_upper = f.row("VIẾT HOA", Switch(False))
-        self.st_lwidth = f.row("Độ dài tối đa của dòng", SliderRow(40, 100, 1, 90, 0, " %"),
+        self.st_ocolor = fT.row("Màu viền", ColorButton("#000000"))
+        self.st_outline = fT.row("Độ dày viền", SliderRow(0, 8, 0.5, 2.5, 1))
+        self.st_shadow = fT.row("Bóng đổ", SliderRow(0, 5, 0.5, 1, 1))
+        self.st_bold = fT.row("Chữ đậm", Switch(True))
+        self.st_upper = fT.row("VIẾT HOA", Switch(False))
+        self.st_lwidth = fL.row("Độ dài tối đa của dòng", SliderRow(40, 100, 1, 90, 0, " %"),
                                "Dòng chữ dài tối đa bao nhiêu % bề rộng khung hình. Chữ được ĐO bằng font thật: chỉ xuống "
                                "dòng (hoặc thu nhỏ) khi câu thật sự dài hơn chừng này")
-        self.st_maxlines = f.row("Số dòng tối đa", combo([("1", "1 dòng"), ("2", "2 dòng"), ("3", "3 dòng")], "2"))
-        self.st_linefit = f.row("Khi câu dài hơn 1 dòng", combo(
+        self.st_maxlines = fL.row("Số dòng tối đa", combo([("1", "1 dòng"), ("2", "2 dòng"), ("3", "3 dòng")], "2"))
+        self.st_linefit = fL.row("Khi câu dài hơn 1 dòng", combo(
             [("wrap", "Xuống dòng (chia các dòng dài đều nhau)"),
              ("shrink", "Thu nhỏ chữ câu đó cho vừa 1 dòng, nhỏ quá mới xuống dòng")], "wrap"),
             "Câu vẫn dài quá số dòng tối đa thì chữ của riêng câu đó tự nhỏ lại cho vừa")
-        self.st_minscale = f.row("Thu nhỏ tối đa còn", SliderRow(50, 95, 1, 70, 0, " %"),
+        self.st_minscale = fL.row("Thu nhỏ tối đa còn", SliderRow(50, 95, 1, 70, 0, " %"),
                                  "Câu dài được thu nhỏ chữ tới mức này (so với Cỡ chữ); dài hơn nữa thì xuống dòng")
-        self.st_box = f.row("Nền hộp sau chữ", Switch(False))
-        self.st_bfixed = f.row("Kiểu nền", combo([("text", "Ôm theo chữ – từng dòng"),
+        self.st_box = fB.row("Nền hộp sau chữ", Switch(False))
+        self.st_bfixed = fB.row("Kiểu nền", combo([("text", "Ôm theo chữ – từng dòng"),
                                                   ("block", "Ôm theo chữ – 1 khối chung cho các dòng"),
                                                   ("fixed", "Dải cố định (mọi câu cùng cỡ)")], "text"),
                                "Dải cố định hợp để che luôn phụ đề cũ: đặt nền đè lên chỗ chữ Trung")
-        self.st_bradius = f.row("Bo góc nền", SliderRow(0, 50, 1, 0, 0, " %"),
+        self.st_bradius = fB.row("Bo góc nền", SliderRow(0, 50, 1, 0, 0, " %"),
                                 "0 = góc vuông · 50 = tròn hẳn 2 đầu (kiểu viên thuốc). Tính theo chiều cao 1 dòng nền")
-        self.st_bpadx = f.row("Độ dài nền (đệm trái/phải)", SliderRow(0, 4, 0.05, 0.18, 2),
+        self.st_bpadx = fB.row("Độ dài nền (đệm trái/phải)", SliderRow(0, 4, 0.05, 0.18, 2),
                               "Phần nền thừa ra mỗi bên chữ, tính theo cỡ chữ (1 = bằng 1 dòng chữ)")
-        self.st_bpady = f.row("Chiều cao nền (đệm trên/dưới)", SliderRow(0, 3, 0.05, 0.18, 2),
+        self.st_bpady = fB.row("Chiều cao nền (đệm trên/dưới)", SliderRow(0, 3, 0.05, 0.18, 2),
                               "Phần nền thừa ra phía trên và dưới dòng chữ, tính theo cỡ chữ (1 = bằng 1 dòng chữ)")
-        self.st_bw = f.row("Độ dài nền (% chiều ngang)", SliderRow(5, 100, 0.5, 80, 1, " %"))
-        self.st_bh = f.row("Chiều cao nền (% chiều cao)", SliderRow(2, 100, 0.5, 12, 1, " %"))
-        self.st_bcolor = f.row("Màu nền hộp", ColorButton("#000000"))
-        self.st_bop = f.row("Độ đục nền hộp", SliderRow(0.1, 1, 0.05, 0.55))
-        self.st_form = f
+        self.st_bw = fB.row("Độ dài nền (% chiều ngang)", SliderRow(5, 100, 0.5, 80, 1, " %"))
+        self.st_bh = fB.row("Chiều cao nền (% chiều cao)", SliderRow(2, 100, 0.5, 12, 1, " %"))
+        self.st_bcolor = fB.row("Màu nền hộp", ColorButton("#000000"))
+        self.st_bop = fB.row("Độ đục nền hộp", SliderRow(0.1, 1, 0.05, 0.55))
+        self.st_form = _Forms(fT, fP, fK, fL, fB)
         for w in (self.st_which, self.st_font, self.st_pos, self.st_bfixed, self.st_kmode, self.st_maxlines,
                   self.st_linefit):
             w.currentIndexChanged.connect(sv)
@@ -2034,9 +2236,21 @@ class ProjectPage(QWidget):
         self.st_klisten.toggledOn.connect(self._kara_listen_changed)
         for w in (self.st_burn, self.st_bold, self.st_upper, self.st_box, self.st_kara):
             w.toggledOn.connect(sv)
-        card.add(f)
+        card.add(fT)
+        pos_card = StepCard("Vị trí", "aspect", "Tự động = đúng chỗ phụ đề Trung cũ. Tự chọn: kéo phụ đề ngay trên video "
+                            "bên phải.", key="pos")
+        pos_card.add(fP)
+        line_card = StepCard("Xuống dòng", "text", "Chữ được đo bằng font thật: chỉ xuống dòng (hoặc thu nhỏ) khi câu "
+                             "thật sự dài hơn khung.", key="lines")
+        line_card.add(fL)
+        box_card = StepCard("Nền phụ đề", "stack", "Nền hộp sau chữ: ôm theo chữ, 1 khối, hoặc dải cố định để che "
+                            "luôn phụ đề cũ.", key="box")
+        box_card.add(fB)
+        kara_card = StepCard("Karaoke", "sparkle", "Từng từ đổi màu đúng lúc được đọc (dùng được với mọi font).",
+                             key="kara")
+        kara_card.add(fK)
         self._style_rows()
-        presets = SectionCard("Mẫu nhanh", "sparkle")
+        presets = StepCard("Mẫu nhanh", "sparkle", "Bấm 1 mẫu để áp ngay – sửa tiếp ở các thẻ bên dưới.", key="presets")
         presets.add(flow(button("Karaoke vàng", "sparkle", "Font Bangers, chữ trắng viền đen dày, từng từ chuyển vàng "
                                 "theo lời đọc", on_click=lambda: self._style_preset("karaoke")),
                          button("Trắng viền đen", on_click=lambda: self._style_preset("classic")),
@@ -2047,9 +2261,11 @@ class ProjectPage(QWidget):
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 0, 2, 0)
         v.setSpacing(theme.GAP)
-        v.addWidget(card)
-        v.addWidget(presets)
+        cards = [presets, card, pos_card, line_card, box_card, kara_card]
+        for c in cards:
+            v.addWidget(c)
         v.addStretch(1)
+        self._accordion("style", cards, default=1)
         return scroll(w)
 
     def _style_rows(self, *_):
@@ -2531,7 +2747,7 @@ class ProjectPage(QWidget):
 
     # ================================================================== TAB: Lồng tiếng
     def _tab_dub(self):
-        sep = SectionCard("1. Tách giọng nói / nhạc nền", "layers",
+        sep = StepCard("1. Tách giọng nói / nhạc nền", "layers",
                           "Giữ nguyên nhạc nền + hiệu ứng gốc, chỉ thay lời thoại bằng tiếng Việt. Bài hát trong phim được giữ nguyên.")
         from ..separate import SEP_MODELS
 
@@ -2548,11 +2764,11 @@ class ProjectPage(QWidget):
                      button("Nghe nhạc nền", "music", flat=True, on_click=lambda: self._open_stem("instrumental")),
                      button("Tải MP3 nhạc nền", "download", "Lưu nhạc nền + hiệu ứng đã tách thành file MP3", flat=True,
                             on_click=lambda: self._save_stem_mp3("instrumental"))))
-        sep.add(hbox(label("Đã tách ở phần mềm khác (CapCut, UVR…)?", "muted"),
+        sep.add(flow(label("Đã tách ở phần mềm khác (CapCut, UVR…)?", "muted"),
                      button("Nạp file giọng / nhạc nền…", "upload", "Dùng file giọng nói (và nhạc nền nếu có) tách sẵn "
-                            "bằng phần mềm khác thay cho bản tách của tool", flat=True, on_click=self._import_stems), None))
+                            "bằng phần mềm khác thay cho bản tách của tool", flat=True, on_click=self._import_stems)))
 
-        spk = SectionCard("2. Giọng đọc cho từng người nói", "users",
+        spk = StepCard("2. Giọng đọc cho từng người nói", "users",
                           "Mỗi nhân vật (S1, S2…) một giọng. Bảng câu bên dưới: bấm đúp ô Tiếng Việt để sửa lời đọc, "
                           "tích cột Chọn để đổi giọng / tạo lại giọng riêng những câu đó – bản lồng tiếng đang dùng được "
                           "cập nhật ngay, trình phát bên phải nghe được luôn.")
@@ -2571,8 +2787,8 @@ class ProjectPage(QWidget):
         va_row = hbox(label("Giọng cho tất cả", "muted"), self.d_voice_all, va_play)
         va_row.setStretch(1, 1)
         spk.add(va_row)
-        spk.add(hbox(button("Phân biệt người nói", "users", on_click=self.run_diarize),
-                     button("Tự gán giọng khác nhau", "wand", on_click=self._auto_voices), None))
+        spk.add(flow(numbered(button("Phân biệt người nói", "users", on_click=self.run_diarize), 1),
+                     numbered(button("Tự gán giọng khác nhau", "wand", on_click=self._auto_voices), 2)))
         self.spk_table = QTableWidget(0, 4)
         self.spk_table.setHorizontalHeaderLabels(["Người nói", "Số câu", "Giọng lồng", ""])
         self.spk_table.verticalHeader().hide()
@@ -2626,7 +2842,8 @@ class ProjectPage(QWidget):
         self.model.picked.connect(self._update_picked)
         self.model.picked.connect(self._update_count)
         spk.add(label("Các câu lồng tiếng", "h3"))
-        spk.add(hbox(self.dub_search,
+        self.dub_search.setMinimumWidth(200)
+        spk.add(flow(self.dub_search,
                      button("Tích các câu đang lọc", "check", "Tích tất cả câu đang hiện trong bảng",
                             flat=True, on_click=self._pick_visible),
                      button("Tích câu ⚠ quá dài", "info", "Tích các câu ⚠ quá dài và ⚡ phải đọc nhanh hơn ×1,15 so với "
@@ -2742,7 +2959,7 @@ class ProjectPage(QWidget):
                             on_click=lambda: self._translate_rows(sorted(self.model.selected), False)),
                      self.d_engine_lbl))
 
-        mix = SectionCard("3. Tạo bản lồng tiếng", "mic",
+        mix = StepCard("3. Tạo bản lồng tiếng", "mic",
                           "Mỗi câu phụ đề được đọc thành 1 đoạn giọng riêng và ghép đúng lúc nhân vật nói – xem từng đoạn "
                           "ở dòng \"Lồng tiếng\" trên timeline phía dưới: bấm đúp để nghe, kéo sang trái / phải để dời.")
         f = Form()
@@ -2847,7 +3064,7 @@ class ProjectPage(QWidget):
                             "Mọi chỉnh âm thanh (bật / tắt bản lồng, nhạc nền, giọng gốc, nhạc thêm) ở tab Âm thanh",
                             flat=True, on_click=lambda: self.tabs.set_current(self.TAB_AUDIO))))
 
-        hist = SectionCard("4. Các bản lồng tiếng đã tạo", "list",
+        hist = StepCard("4. Các bản lồng tiếng đã tạo", "list",
                            "Mỗi lần bấm 'Tạo bản lồng tiếng' = 1 bản MỚI. 'Tạo lại giọng các câu đã tích' sửa THẲNG vào "
                            "bản đang dùng (dấu ✓), không tạo bản mới. Bản có dấu ✓ được dùng cho trình phát và khi xuất video.")
         self.d_versions_box = QWidget()
@@ -2864,10 +3081,12 @@ class ProjectPage(QWidget):
         self.voice_samples = VoiceSamplesCard(self)
         v.addWidget(sep)
         v.addWidget(spk)
-        v.addWidget(self.voice_samples)
         v.addWidget(mix)
         v.addWidget(hist)
+        v.addWidget(self.voice_samples)       # 2.2.0: thư viện giọng mẫu = mục 5 (cuối tab)
         v.addStretch(1)
+        self.voice_samples.set_num(5)
+        self._accordion("dub", [sep, spk, mix, hist, self.voice_samples], default=1)
         return scroll(w)
 
     # ================================================================== TAB: Tài liệu (mô hình AI)
@@ -2879,7 +3098,7 @@ class ProjectPage(QWidget):
 
     # ================================================================== TAB: Xuất
     def _tab_export(self):
-        card = SectionCard("Xuất video", "film", "Một lần encode duy nhất: giữ chất lượng tốt nhất.")
+        card = StepCard("Xuất video", "film", "Một lần encode duy nhất: giữ chất lượng tốt nhất.")
         f = Form()
         self.x_name = f.row("Tên file", QLineEdit())
         self.x_name.setPlaceholderText("(tự động: tên video + _vietsub)")
@@ -2919,18 +3138,18 @@ class ProjectPage(QWidget):
         from .publish_ui import PublishCard
 
         self.pub = PublishCard(self)
-        subs = SectionCard("Xuất phụ đề", "subtitles")
+        subs = StepCard("Xuất phụ đề", "subtitles")
         self.x_srt_trans = button("SRT tiếng Việt", on_click=lambda: self._export_sub("srt", "trans"))
-        subs.add(hbox(self.x_srt_trans,
+        subs.add(flow(self.x_srt_trans,
                       button("SRT tiếng Trung", on_click=lambda: self._export_sub("srt", "source")),
                       button("SRT song ngữ", on_click=lambda: self._export_sub("srt", "both")), None))
-        subs.add(hbox(button("ASS có kiểu chữ", on_click=lambda: self._export_sub("ass", None)),
+        subs.add(flow(button("ASS có kiểu chữ", on_click=lambda: self._export_sub("ass", None)),
                       button("VTT", on_click=lambda: self._export_sub("vtt", "trans")),
                       button("TXT", on_click=lambda: self._export_sub("txt", "trans")), None))
-        tools = SectionCard("Công cụ khác", "settings")
-        tools.add(hbox(button("Chia thành nhiều phần…", "split", on_click=lambda: self._tool("split_parts")),
+        tools = StepCard("Công cụ khác", "settings")
+        tools.add(flow(button("Chia thành nhiều phần…", "split", on_click=lambda: self._tool("split_parts")),
                        button("Tách MP3", "music", on_click=lambda: self._tool("extract_audio")), None))
-        outs = SectionCard("Kết quả", "check")
+        outs = StepCard("Kết quả", "check")
         self.outs = QTableWidget(0, 3)
         self.outs.setHorizontalHeaderLabels(["File", "", ""])
         self.outs.verticalHeader().hide()
@@ -2948,6 +3167,7 @@ class ProjectPage(QWidget):
         for c in (card, self.pub, subs, tools, outs):
             v.addWidget(c)
         v.addStretch(1)
+        self._accordion("export", [card, self.pub, subs, tools, outs])
         return scroll(w)
 
     # ================================================================== nạp dự án
@@ -3739,6 +3959,7 @@ class ProjectPage(QWidget):
             return
         mine = [j for j in jobs if j["project_id"] == self.p.id and j["status"] in ("queued", "running")]
         self._show_live_draft(next((j for j in mine if j["kind"] == "auto" and j["status"] == "running"), None))
+        self._flow_jobs(mine)
         if not mine:
             self.job_box.hide()
             self._cur_job = None
@@ -3751,6 +3972,33 @@ class ProjectPage(QWidget):
         self.job_title.setText(("Đang chờ: " if j["status"] == "queued" else "") + j["title"] + more)
         self.job_msg.setText(f"{j['message']}  ·  {j['progress'] * 100:.1f}%{eta}")
         self.job_bar.set(j["progress"], busy=j["status"] == "running")
+
+    # việc nền -> bước của quy trình (thanh tiến độ trên cùng + nhãn thẻ bước tab Tự động)
+    FLOW_KINDS = {"recognize": 0, "separate": 0, "diarize": 0, "realign": 0, "snap": 0, "dual": 0, "translate": 1,
+                  "clean": 1, "join": 1, "dub": 2, "redub": 2, "relayout": 2, "render": 3, "inpaint": 3}
+
+    def _flow_jobs(self, mine: list[dict]):
+        run: dict[int, tuple[str, str]] = {}
+        for j in mine:
+            k = j.get("kind")
+            if k == "auto" and j["status"] == "running":
+                msg = (j.get("message") or "").lower()
+                k = "translate" if "dịch" in msg else ("dub" if ("giọng" in msg or "lồng" in msg) else "recognize")
+            i = self.FLOW_KINDS.get(k)
+            if i is None:
+                continue
+            txt = f"{j['progress'] * 100:.0f} %" if j["status"] == "running" else "đang chờ"
+            if i not in run or j["status"] == "running":
+                run[i] = ("run" if j["status"] == "running" else "", txt)
+        prev = getattr(self, "_flow_run", {})
+        self._flow_run = run
+        for i, (state, txt) in run.items():
+            self.flow_steps.set_step(i, "run" if state else "", "đang chạy " + txt if state else txt)
+            cards = getattr(self, "a_cards", [])
+            if i < len(cards):
+                cards[i].set_status(txt, "run" if state else "warn")
+        if set(prev) - set(run):
+            self._update_steps()
 
     def _show_live_draft(self, job: dict | None):
         """Vừa tách vừa dịch: câu đã nghe / đã dịch hiện ngay ở tab Phụ đề (chỉ xem, sửa khi chạy xong)."""
@@ -4589,6 +4837,21 @@ class ProjectPage(QWidget):
         ]
         for lb, t in zip(self.step_status, texts):
             lb.setText(t)
+        # 2.2.0: nhãn trạng thái trên 4 thẻ bước + thanh tiến độ trên cùng (việc đang chạy: update_job ghi đè)
+        done = [bool(n), bool(n) and done_tr == n, bool(d.get("wav") and st), bool(vids)]
+        metas = [f"{n} câu" if n else "chưa có", f"{done_tr}/{n} câu" if n else "chưa dịch",
+                 f"{st.get('placed', 0)} câu" if d.get("wav") and st else "chưa lồng",
+                 f"{len(vids)} video" if vids else "chưa xuất"]
+        run = getattr(self, "_flow_run", {})
+        for i, c in enumerate(getattr(self, "a_cards", [])):
+            if i in run:
+                continue
+            c.set_status(("Xong" if done[i] else ("Một phần" if i == 1 and done_tr else "")),
+                         "ok" if done[i] else ("warn" if i == 1 and done_tr else ""))
+            c.set_summary(texts[i].replace("✓ ", ""))
+        for i in range(4):
+            if i not in run:
+                self.flow_steps.set_step(i, "done" if done[i] else "", metas[i])
 
     def run_render(self):
         name = self.x_name.text().strip() or None
@@ -7523,6 +7786,17 @@ class ProjectPage(QWidget):
     # ================================================================== khác
     def _tab_changed(self, i: int):
         self.stack.setCurrentIndex(i)
+        self._tab_meta(i)
+        pg = self.stack.currentWidget()        # 2.2.0: nội dung tab mới trượt lên nhẹ
+        if pg is not None and self.isVisible():
+            from PySide6.QtCore import QPoint, QPropertyAnimation, QEasingCurve
+
+            a = QPropertyAnimation(pg, b"pos", pg)
+            a.setDuration(200)
+            a.setEasingCurve(QEasingCurve.Type.OutCubic)
+            a.setStartValue(QPoint(0, 14))
+            a.setEndValue(QPoint(0, 0))
+            a.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
         self._live_timer.start()      # vào / ra tab Tự động: bật / tắt xem trước ảnh làm rõ chữ OCR (2.1.36)
         # tab Xoá phụ đề: chuột vẽ / kéo vùng che trên video; tab Tự động (nguồn OCR): kéo khung vùng quét phụ đề;
         # tab khác: chuột kéo phụ đề (tab Kiểu chữ hiện khung)

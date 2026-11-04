@@ -13519,3 +13519,114 @@ def test_ocr_fix_now_gui_2146(sample_video, monkeypatch):
     finally:
         win.close()
         Project(p.id).delete()
+
+
+def test_ui_layout_220(sample_video, monkeypatch):
+    """2.2.0: giao diện mới – timeline nằm dưới khung video (không dưới cột tab), thanh tab dọc giữ đúng trang, thẻ bước
+    có số mở / gập (mỗi lúc 1 thẻ, nhớ thẻ đang mở), thanh 4 bước, ô tìm tuỳ chọn mở đúng thẻ, nút thao tác có số –
+    và các nút / ô cũ vẫn còn, vẫn nối hàm."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import SIGNAL
+    from PySide6.QtWidgets import QApplication
+
+    from trami import pipeline
+    from trami.config import load_settings
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.gui.widgets import StepCard, TabRail
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    p = Project.create("ui220")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [Segment(0.2 + i, 0.9 + i, "对了父亲", "Đúng rồi, cha." if i else "") for i in range(4)]
+    p.save()
+    win = MainWindow()
+    toasts: list = []
+    monkeypatch.setattr(win, "toast", lambda m, *x, **k: toasts.append(m))
+    try:
+        win.resize(1600, 1000)
+        win.show()
+        win.open_project(p.id)
+        pp = win.project_page
+        app.processEvents()
+        # bố cục: timeline + trình phát cùng cột giữa, khung tab bên trái cao hết màn hình
+        assert isinstance(pp.tabs, TabRail) and pp.main_split.widget(0) is pp.tools_card
+        assert pp.v_split.widget(1) is pp.tl_card and pp.main_split.widget(1) is pp.v_split
+        tl = pp.tl_card.mapTo(pp, pp.tl_card.rect().topLeft())
+        tc = pp.tools_card.mapTo(pp, pp.tools_card.rect().topLeft())
+        assert tl.x() > tc.x() + pp.tools_card.width() and pp.tools_card.height() > pp.tl_card.height() * 2
+        # thanh tab dọc: thứ tự hiện khác thứ tự trang nhưng trang mở đúng
+        pp.tabs.set_current(pp.TAB_EXPORT)
+        assert pp.stack.currentIndex() == pp.TAB_EXPORT and pp.tab_title.text() == "Xuất"
+        pp.tabs.set_current(0)
+        # tab Tự động: 4 thẻ bước có số, mỗi lúc mở 1 thẻ, nhớ thẻ đang mở
+        cards = pp.a_cards
+        assert [c.num for c in cards] == [1, 2, 3, 4] and [c.is_open() for c in cards] == [True, False, False, False]
+        cards[2].set_open(True, user=True)
+        assert [c.is_open() for c in cards] == [False, False, True, False]
+        assert load_settings()["ui_cards"]["auto"] == "dub"
+        assert cards[0].chip.text == "Xong" and cards[1].chip.text == "Một phần"
+        assert pp.flow_steps.steps[0]["state"] == "done" and pp.flow_steps.steps[1]["meta"] == "3/4 câu"
+        pp._flow_clicked(1)
+        assert cards[1].is_open() and not cards[2].is_open()
+        pp._flow_clicked(3)
+        assert pp.stack.currentIndex() == pp.TAB_EXPORT
+        pp.tabs.set_current(0)
+        # tuỳ chọn nâng cao + ô tìm tuỳ chọn mở đúng thẻ chứa ô đó
+        assert pp.a_adv_box.isHidden()
+        pp._auto_adv(True)
+        assert not pp.a_adv_box.isHidden() and load_settings()["ui_auto_adv"] is True
+        pp.tab_find.setText("trung cũ")
+        pp._find_option()
+        assert cards[3].is_open() and not cards[1].is_open()
+        pp.tab_find.setText("khong co o nay")
+        pp._find_option()
+        assert "Không thấy" in toasts[-1]
+        # đang chạy việc: thanh 4 bước + nhãn thẻ
+        pp._flow_jobs([{"kind": "translate", "status": "running", "progress": 0.42, "message": ""}])
+        assert pp.flow_steps.steps[1]["state"] == "run" and cards[1].chip.kind == "run" and "42" in cards[1].chip.text
+        pp._flow_jobs([])
+        assert pp.flow_steps.steps[1]["state"] == ""
+        # nút bước có số, nút thao tác các tab có số, ô cũ vẫn nối hàm
+        assert [b.num for b in pp.step_btns] == [1, 2, 3, 4]
+        assert getattr(pp.s_del, "_num", None) == 1
+        for b in pp.step_btns + [pp.s_del]:
+            assert b.receivers(SIGNAL("clicked()")) + b.receivers(SIGNAL("clicked(bool)")) > 0
+        # tab Phụ đề: bảng câu luôn mở; Công cụ thu gọn qua tiêu đề thẻ = cài đặt subs_tools_open cũ
+        pp.tabs.set_current(1)
+        assert not pp.s_table_card.collapsible and pp.s_table_card.is_open()
+        pp.s_tools_card.set_open(True, user=True)
+        assert not pp.s_tools_body.isHidden() and load_settings()["subs_tools_open"] is True
+        pp.s_tools_card.set_open(False, user=True)
+        assert pp.s_tools_body.isHidden() and load_settings()["subs_tools_open"] is False
+        # mọi tab vừa khung trái hẹp (min 560) khi mở bất kỳ thẻ nào
+        from PySide6.QtWidgets import QScrollArea
+
+        for i in range(pp.stack.count()):
+            pg = pp.stack.widget(i)
+            inner = pg.widget() if isinstance(pg, QScrollArea) else pg
+            for c in inner.findChildren(StepCard):
+                c.set_open(True, anim=False)
+            app.processEvents()
+            assert inner.minimumSizeHint().width() <= pp.tools_card.minimumWidth() - 30, (i, inner.minimumSizeHint())
+    finally:
+        win.close()
+
+
+def test_none_guard_220():
+    """2.2.0: PySide6 6.12.0 + Python 3.11 – hàm Qt trả về void làm mất tham chiếu của None -> dùng lâu sập
+    "deallocating None". Lá chắn bật đúng lúc cần, gọi lại không cộng thêm, sau đó gọi Qt bao nhiêu cũng không sập."""
+    from PySide6.QtCore import QObject
+
+    from trami import config
+
+    on = config.guard_none_refcount()
+    assert config.guard_none_refcount() is on
+    if sys.version_info >= (3, 12):
+        assert on is False
+    o = QObject()
+    for _ in range(20000):
+        o.setObjectName("x")
+    assert sys.getrefcount(None) > 1000

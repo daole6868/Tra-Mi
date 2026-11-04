@@ -11,13 +11,13 @@ from PySide6.QtWidgets import QFileDialog, QInputDialog, QLineEdit, QMessageBox,
 
 from .. import voices as vlib
 from .common import run_async
-from .widgets import SectionCard, button, hbox, label
+from .widgets import StepCard, button, flow, hbox, label
 
 AUDIO_FILTER = "Âm thanh / video (*.wav *.mp3 *.m4a *.aac *.flac *.ogg *.opus *.wma *.mp4 *.mkv *.mov *.webm)"
 MAX_REC = 12  # giây
 
 
-class VoiceSamplesCard(SectionCard):
+class VoiceSamplesCard(StepCard):
     def __init__(self, page):
         super().__init__("Giọng mẫu của bạn (VieNeu + OmniVoice)", "mic",
                          "Thêm đoạn ghi âm 3–10 giây của giọng muốn dùng (nói rõ, không nhạc nền) – mỗi mẫu thành 1 giọng "
@@ -31,11 +31,10 @@ class VoiceSamplesCard(SectionCard):
             self.add(label("⚠ Chưa cài VieNeu / OmniVoice: chạy CaiDat_AI_NangCao.bat (hoặc lệnh trong README) rồi mở "
                            "lại tool. Vẫn thêm giọng mẫu trước được.", "", wrap=True))
         self.rec_btn = button("Ghi âm từ micro", "mic", on_click=self.toggle_record)
-        self.add(hbox(button("Thêm file ghi âm…", "upload", on_click=self.add_file),
+        self.add(flow(button("Thêm file ghi âm…", "upload", on_click=self.add_file),
                       self.rec_btn,
                       button("Lấy 8 giây từ video đang phát", "film", "Cắt từ vị trí đang phát (ưu tiên giọng đã tách "
-                             "khỏi nhạc nền)", on_click=self.add_from_video),
-                      None))
+                             "khỏi nhạc nền)", on_click=self.add_from_video)))
         self.rec_label = label("", "muted")
         self.rec_label.hide()
         self.add(self.rec_label)

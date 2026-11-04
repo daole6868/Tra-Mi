@@ -48,9 +48,12 @@ class Card(QFrame):
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         g = QLinearGradient(0, 0, 0, r.height())
         g.setColorAt(0, QColor(theme.CARD))
-        g.setColorAt(1, QColor("#151A25"))
+        g.setColorAt(1, QColor("#121722"))
+        if self.accent:                  # thẻ nổi bật (vd "Chạy trọn gói"): nền ấm nhẹ, viền màu nhấn mờ
+            g.setColorAt(0, QColor("#21181C"))
+            g.setColorAt(1, QColor("#171419"))
         p.setBrush(g)
-        p.setPen(QPen(QColor(theme.ACCENT if self.accent else theme.BORDER), 1))
+        p.setPen(QPen(theme.c(theme.ACCENT, 95) if self.accent else QColor(theme.BORDER), 1))
         p.drawRoundedRect(r, self.radius, self.radius)
 
     def add(self, w):
@@ -105,11 +108,17 @@ class IconBadge(QWidget):
 class GradientButton(QPushButton):
     """Nút chính: nền gradient đỏ-cam, bo tròn, có icon, hiệu ứng hover."""
 
-    def __init__(self, text: str, icon_name: str = "", big: bool = False, parent=None):
+    def __init__(self, text: str, icon_name: str = "", big: bool = False, parent=None, num: int | None = None):
         super().__init__(text, parent)
         self.icon_name = icon_name
         self.big = big
+        self.num = num          # số thứ tự vẽ trước chữ (2.2.0 – nút bước 1, 2, 3…)
         self._hover = 0.0
+        self._glow = QGraphicsDropShadowEffect(self)   # bóng sáng màu nhấn, rê chuột thì sáng lên
+        self._glow.setOffset(0, 5)
+        self._glow.setColor(theme.c(theme.ACCENT, 110))
+        self._glow.setBlurRadius(16)
+        self.setGraphicsEffect(self._glow)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMinimumHeight(48 if big else 38)
         f = theme.font(11.5 if big else 10, QFont.Weight.Bold)
@@ -120,7 +129,7 @@ class GradientButton(QPushButton):
 
     def sizeHint(self):
         fm = self.fontMetrics()
-        w = fm.horizontalAdvance(self.text()) + (60 if self.icon_name else 36)
+        w = fm.horizontalAdvance(self.text().replace("&&", "&")) + (60 if self.icon_name else 36) + (26 if self.num else 0)
         return QSize(max(120, w), 48 if self.big else 38)
 
     def _get_hover(self):
@@ -128,9 +137,18 @@ class GradientButton(QPushButton):
 
     def _set_hover(self, v):
         self._hover = v
+        if self.isEnabled():
+            self._glow.setBlurRadius(16 + 12 * v)
+            self._glow.setOffset(0, 5 + 3 * v)
+            self._glow.setColor(theme.c(theme.ACCENT, int(110 + 80 * v)))
         self.update()
 
     hover = Property(float, _get_hover, _set_hover)
+
+    def changeEvent(self, e):
+        if e.type() == QEvent.Type.EnabledChange:
+            self._glow.setEnabled(self.isEnabled())
+        super().changeEvent(e)
 
     def enterEvent(self, e):
         self._anim.stop()
@@ -159,22 +177,29 @@ class GradientButton(QPushButton):
             p.drawRoundedRect(r, rad, rad)
         # nội dung
         fm = self.fontMetrics()
-        tw = fm.horizontalAdvance(self.text())
+        text = self.text().replace("&&", "&")
+        tw = fm.horizontalAdvance(text)
         isz = 20 if self.big else 17
-        total = tw + (isz + 8 if self.icon_name else 0)
+        nw = 20 if self.num else 0
+        total = tw + (isz + 8 if self.icon_name else 0) + (nw + 8 if nw else 0)
         x = (r.width() - total) / 2 + r.x()
-        col = "#FFFFFF" if self.isEnabled() else theme.MUTED
+        col = theme.ON_ACCENT if self.isEnabled() else theme.MUTED
+        if nw:
+            paint_num(p, QRectF(x, (self.height() - 20) / 2, 20, 20), self.num, primary=self.isEnabled())
+            x += nw + 8
         if self.icon_name:
             icons.paint_icon(p, self.icon_name, QRectF(x, (self.height() - isz) / 2, isz, isz), col, 2.1)
             x += isz + 8
         p.setPen(QColor(col))
         p.setFont(self.font())
-        p.drawText(QRectF(x, 0, tw + 4, self.height()), Qt.AlignmentFlag.AlignVCenter, self.text())
+        p.drawText(QRectF(x, 0, tw + 4, self.height()), Qt.AlignmentFlag.AlignVCenter, text)
 
 
 def button(text: str, icon_name: str = "", tip: str = "", danger: bool = False, flat: bool = False,
            on_click: Callable | None = None) -> QPushButton:
     b = QPushButton(text)
+    b._icon_name = icon_name            # numbered() ghép số thứ tự + icon này
+    b._danger = danger
     if icon_name:
         b.setIcon(icons.icon(icon_name, theme.ERR if danger else theme.TEXT, 18))
         b.setIconSize(QSize(17, 17))
@@ -227,7 +252,7 @@ class IconButton(QAbstractButton):
         p.drawEllipse(r)
         m = r.width() * 0.27
         icons.paint_icon(p, self.icon_name, r.adjusted(m, m, -m, -m),
-                         "#FFFFFF" if self.accent else (theme.TEXT if self.isEnabled() else theme.MUTED), 2.0)
+                         theme.ON_ACCENT if self.accent else (theme.TEXT if self.isEnabled() else theme.MUTED), 2.0)
 
 
 class NavButton(QAbstractButton):
@@ -264,7 +289,7 @@ class NavButton(QAbstractButton):
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(theme.accent_gradient(br.left(), 0, br.right(), 0))
         p.drawRoundedRect(br, 8, 8)
-        p.setPen(QColor("#FFFFFF"))
+        p.setPen(QColor(theme.ON_ACCENT))
         p.setFont(f)
         p.drawText(br, Qt.AlignmentFlag.AlignCenter, t)
 
@@ -363,7 +388,9 @@ class Switch(QAbstractButton):
 # ====================================================================== Thanh tab dạng viên thuốc
 
 class PillTabs(QWidget):
+    """Hàng chọn trang dạng viên thuốc. 2.2.0: hẹp thì tự xuống 2–3 hàng (trước co chữ theo chiều ngang)."""
     changed = Signal(int)
+    ROW = 42
 
     def __init__(self, items: list[tuple[str, str]], parent=None):
         super().__init__(parent)
@@ -371,9 +398,11 @@ class PillTabs(QWidget):
         self.cur = 0
         self._hov = -1
         self.setMouseTracking(True)
-        self.setFixedHeight(46)
-        self.setFont(theme.font(9.8, QFont.Weight.DemiBold))
+        self.setFont(theme.font(9.4, QFont.Weight.DemiBold))
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._rects: list[QRectF] = []
+        self._rows = 1
+        self.setFixedHeight(self.ROW + 4)
 
     def set_current(self, i: int, emit: bool = True):
         if 0 <= i < len(self.items):
@@ -382,21 +411,41 @@ class PillTabs(QWidget):
             if emit:
                 self.changed.emit(i)
 
-    def _layout(self):
+    def _widths(self) -> list[float]:
         fm = self.fontMetrics()
-        x = 4.0
+        return [fm.horizontalAdvance(text) + 44 for text, _ in self.items]
+
+    def _layout(self, width: int | None = None):
+        width = self.width() if width is None else width
+        x, y, rows = 4.0, 4.0, 1
         self._rects = []
-        for text, _ in self.items:
-            w = fm.horizontalAdvance(text) + 46
-            self._rects.append(QRectF(x, 5, w, self.height() - 10))
+        for w in self._widths():
+            if x > 4 and x + w > width - 4:
+                x, y, rows = 4.0, y + self.ROW - 4, rows + 1
+            self._rects.append(QRectF(x, y, w, self.ROW - 8))
             x += w + 4
-        return x
+        self._rows = rows
+        return rows
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, w: int) -> int:
+        n = self._layout(w)
+        self._layout()
+        return 8 + n * (self.ROW - 4)
 
     def sizeHint(self):
-        return QSize(int(self._layout()) + 4, 46)
+        return QSize(int(sum(self._widths()) + 4 * len(self.items) + 8), self.ROW + 4)
 
     def minimumSizeHint(self):
-        return QSize(200, 46)
+        return QSize(int(max(self._widths()) + 12), self.ROW + 4)
+
+    def resizeEvent(self, e):
+        h = self.heightForWidth(self.width())
+        if self.height() != h:
+            self.setFixedHeight(h)
+        super().resizeEvent(e)
 
     def mouseMoveEvent(self, e):
         self._layout()
@@ -421,26 +470,22 @@ class PillTabs(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         bg = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         p.setPen(QPen(QColor(theme.BORDER), 1))
-        p.setBrush(QColor(theme.CARD))
-        p.drawRoundedRect(bg, 14, 14)
+        p.setBrush(QColor(theme.SIDEBAR))
+        p.drawRoundedRect(bg, 12, 12)
         p.setFont(self.font())
-        # thu nhỏ nếu không đủ chỗ
-        total = self._rects[-1].right() + 4 if self._rects else 0
-        sc = min(1.0, (self.width() - 4) / total) if total else 1.0
-        p.scale(sc, 1.0)
         for i, ((text, ic), r) in enumerate(zip(self.items, self._rects)):
             if i == self.cur:
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(theme.accent_gradient(r.left(), 0, r.right(), 0))
-                p.drawRoundedRect(r, 11, 11)
+                p.drawRoundedRect(r, 9, 9)
             elif i == self._hov:
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(theme.CARD2))
-                p.drawRoundedRect(r, 11, 11)
-            col = "#FFFFFF" if i == self.cur else (theme.TEXT if i == self._hov else theme.MUTED)
-            icons.paint_icon(p, ic, QRectF(r.left() + 12, r.center().y() - 8.5, 17, 17), col, 2.0)
+                p.drawRoundedRect(r, 9, 9)
+            col = theme.ON_ACCENT if i == self.cur else (theme.TEXT if i == self._hov else theme.MUTED)
+            icons.paint_icon(p, ic, QRectF(r.left() + 11, r.center().y() - 8, 16, 16), col, 2.0)
             p.setPen(QColor(col))
-            p.drawText(r.adjusted(34, 0, -8, 0), Qt.AlignmentFlag.AlignVCenter, text)
+            p.drawText(r.adjusted(32, 0, -8, 0), Qt.AlignmentFlag.AlignVCenter, text)
 
 
 class IconTabs(QWidget):
@@ -643,6 +688,8 @@ class Form(QFormLayout):
         self.setHorizontalSpacing(14)
         self.setVerticalSpacing(10)
         self.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        # 2.2.0: cột trái hẹp -> ô nào không đủ chỗ cạnh nhãn thì xuống dưới nhãn (không bị cắt mép phải)
+        self.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
 
     def row(self, text: str, w, tip: str = ""):
         lb = label(text, "muted")
@@ -893,10 +940,17 @@ class Toast(QWidget):
         maxw = min(560, parent.width() - 80)
         br = fm.boundingRect(0, 0, maxw - 64, 400, Qt.TextFlag.TextWordWrap, text)
         self.resize(br.width() + 66, max(46, br.height() + 24))
-        self.move((parent.width() - self.width()) // 2, 18)
+        x = (parent.width() - self.width()) // 2
+        self.move(x, -self.height())
         shadow(self, 30, 140, 8)
         self.show()
         self.raise_()
+        self._slide = QPropertyAnimation(self, b"pos", self)      # 2.2.0: trượt xuống từ mép trên
+        self._slide.setDuration(320)
+        self._slide.setEasingCurve(QEasingCurve.Type.OutBack)
+        self._slide.setStartValue(QPoint(x, -self.height()))
+        self._slide.setEndValue(QPoint(x, 18))
+        self._slide.start()
         QTimer.singleShot(ms, self.deleteLater)
 
     def paintEvent(self, e):
@@ -912,3 +966,682 @@ class Toast(QWidget):
         p.setPen(QColor(theme.TEXT))
         p.setFont(self.font())
         p.drawText(r.adjusted(46, 8, -14, -8), Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap, self.text)
+
+
+# ====================================================================== 2.2.0: số thứ tự, thẻ bước, thanh tab dọc
+
+def paint_num(p: QPainter, r: QRectF, n, primary: bool = False):
+    """Vẽ ô số thứ tự bo tròn (nút bước 1, 2, 3…): trên nút màu nhấn nền tối mờ, nút thường nền sáng mờ."""
+    p.save()
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(26, 11, 8, 52) if primary else QColor(255, 255, 255, 30))
+    p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+    p.setPen(QColor(theme.ON_ACCENT if primary else theme.TEXT))
+    p.setFont(theme.font(max(6.5, r.height() * 0.4), QFont.Weight.Bold))
+    p.drawText(r, Qt.AlignmentFlag.AlignCenter, str(n))
+    p.restore()
+
+
+def num_icon(n, icon_name: str = "", color: str = theme.TEXT):
+    """Icon ghép [số thứ tự][icon] cho QPushButton (nút thường không tự vẽ được số)."""
+    from PySide6.QtGui import QIcon, QPixmap
+
+    dpr = 2.0
+    w = 40 if icon_name else 18
+    pm = QPixmap(int(w * dpr), int(18 * dpr))
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    paint_num(p, QRectF(0, 0, 18, 18), n)
+    if icon_name:
+        icons.paint_icon(p, icon_name, QRectF(23, 1, 16, 16), color, 2.0)
+    p.end()
+    return QIcon(pm), QSize(w, 18)
+
+
+def numbered(b, n):
+    """Gắn số thứ tự trước chữ 1 nút (giữ icon cũ nếu có); bỏ "1. " ở đầu chữ nếu có sẵn. Trả lại chính nút đó."""
+    import re
+
+    b.setText(re.sub(r"^\s*\d+\s*[.·)]\s*", "", b.text()))
+    if isinstance(b, GradientButton):
+        b.num = n
+        b.updateGeometry()
+        b.update()
+        return b
+    ic, sz = num_icon(n, getattr(b, "_icon_name", ""), theme.ERR if getattr(b, "_danger", False) else theme.TEXT)
+    b.setIcon(ic)
+    b.setIconSize(sz)
+    b._num = n
+    return b
+
+
+def number_buttons(root, start: int = 1) -> int:
+    """Đánh số 1, 2, 3… cho các nút thao tác (nút thường có chữ, không phải nút phẳng / nút chỉ có icon / nút đã có
+    số) theo đúng thứ tự trên giao diện (duyệt layout). root: widget hoặc layout. Trả số kế tiếp."""
+    from PySide6.QtWidgets import QLayout
+
+    n = start
+
+    def walk(lay):
+        nonlocal n
+        if isinstance(lay, QFormLayout):     # nút nhỏ cạnh ô nhập trong form (Lấy vị trí đang phát…): không đánh số
+            return
+        for k in range(lay.count()):
+            it = lay.itemAt(k)
+            w, sub = it.widget(), it.layout()
+            if sub is not None:
+                walk(sub)
+            elif w is not None:
+                if isinstance(w, QPushButton) and not isinstance(w, GradientButton):
+                    if w.text().strip() and not w.property("flat") and not getattr(w, "_num", None) \
+                            and not getattr(w, "no_num", False):
+                        numbered(w, n)
+                        n += 1
+                elif w.layout() is not None and not isinstance(w, StepCard):
+                    walk(w.layout())
+
+    lay = root if isinstance(root, QLayout) else root.layout()
+    if lay is not None:
+        walk(lay)
+    return n
+
+
+class ElideLabel(QLabel):
+    """Nhãn 1 dòng tự cắt "…" khi hẹp (dòng tóm tắt dưới tiêu đề thẻ bước)."""
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self.setProperty("muted", True)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def minimumSizeHint(self):
+        return QSize(20, super().minimumSizeHint().height())
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setFont(self.font())
+        p.setPen(QColor(theme.MUTED))
+        t = self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight, max(0, self.width()))
+        p.drawText(self.rect(), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, t)
+
+
+class StepBadge(QWidget):
+    """Ô số thứ tự của thẻ bước: chưa làm (số) / đang chạy (vàng) / xong (✓ xanh) / lỗi."""
+
+    def __init__(self, num=None, icon_name: str = "", parent=None):
+        super().__init__(parent)
+        self.num, self.icon_name, self.state = num, icon_name, ""
+        self.setFixedSize(30, 30)
+
+    def set_state(self, state: str):
+        if state != self.state:
+            self.state = state
+            self.update()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        col = {"done": theme.OK, "run": theme.WARN, "err": theme.ERR}.get(self.state)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(theme.c(col, 40) if col else QColor(theme.CARD3))
+        p.drawRoundedRect(r, 10, 10)
+        if self.state == "done":
+            icons.paint_icon(p, "check", r.adjusted(7, 7, -7, -7), theme.OK, 2.4)
+        elif self.num is not None:
+            p.setPen(QColor(col or theme.TEXT))
+            p.setFont(theme.font(10, QFont.Weight.Bold))
+            p.drawText(r, Qt.AlignmentFlag.AlignCenter, str(self.num))
+        elif self.icon_name:
+            icons.paint_icon(p, self.icon_name, r.adjusted(7, 7, -7, -7), col or theme.ACCENT2, 2.0)
+
+
+class Chip(QWidget):
+    """Nhãn trạng thái bo tròn: ok (xanh), warn / run (vàng, chấm nhấp nháy), err (đỏ), info (xanh dương), "" (xám)."""
+    COLORS = {"ok": "#63DD9C", "warn": "#F7C766", "run": "#F7C766", "err": "#FF8D93", "info": "#93BCFF"}
+
+    def __init__(self, text: str = "", kind: str = "", parent=None):
+        super().__init__(parent)
+        self.text, self.kind = text, kind
+        self.setFont(theme.font(8.4, QFont.Weight.DemiBold))
+        self._phase = 0.0
+        self._timer = QTimer(self, interval=60, timeout=self._tick)
+        self.set(text, kind)
+
+    def set(self, text: str, kind: str = ""):
+        self.text, self.kind = text, kind
+        self.setVisible(bool(text))
+        (self._timer.start if kind == "run" and text else self._timer.stop)()
+        self.updateGeometry()
+        self.update()
+
+    def _tick(self):
+        self._phase = (self._phase + 0.035) % 1.0
+        self.update()
+
+    def sizeHint(self):
+        return QSize(self.fontMetrics().horizontalAdvance(self.text) + (30 if self.kind == "run" else 18), 22)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        col = self.COLORS.get(self.kind, theme.TEXT2)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(theme.c(col, 34) if self.kind else QColor(255, 255, 255, 16))
+        p.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        x = 9.0
+        if self.kind == "run":        # chấm nhấp nháy: việc đang chạy
+            import math
+
+            a = 0.5 + 0.5 * math.sin(self._phase * 2 * math.pi)
+            p.setBrush(theme.c(col, int(70 * a)))
+            p.drawEllipse(QRectF(x - 3, r.center().y() - 6.5, 13, 13))
+            p.setBrush(QColor(col))
+            p.drawEllipse(QRectF(x, r.center().y() - 3.5, 7, 7))
+            x += 12
+        p.setPen(QColor(col))
+        p.setFont(self.font())
+        p.drawText(r.adjusted(x, 0, -2, 0), Qt.AlignmentFlag.AlignVCenter, self.text)
+
+
+class Chevron(QWidget):
+    """Mũi tên mở / gập của thẻ bước – xoay mượt 180°."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(18, 18)
+        self._a = 0.0
+        self._anim = QPropertyAnimation(self, b"angle", self)
+        self._anim.setDuration(260)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def _get(self):
+        return self._a
+
+    def _set(self, v):
+        self._a = v
+        self.update()
+
+    angle = Property(float, _get, _set)
+
+    def set_open(self, on: bool, anim: bool = True):
+        self._anim.stop()
+        if anim:
+            self._anim.setEndValue(180.0 if on else 0.0)
+            self._anim.start()
+        else:
+            self._set(180.0 if on else 0.0)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.translate(9, 9)
+        p.rotate(self._a)
+        p.translate(-9, -9)
+        icons.paint_icon(p, "chev_down", QRectF(1, 1, 16, 16), theme.MUTED, 2.0)
+
+
+class _CardHead(QWidget):
+    """Hàng tiêu đề thẻ bước: bấm chỗ trống / chữ = mở / gập (nút trong hàng vẫn bấm riêng)."""
+    clicked = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._press = False
+        self.hover = False
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, e):
+        self._press = e.button() == Qt.MouseButton.LeftButton
+        e.accept()
+
+    def mouseReleaseEvent(self, e):
+        if self._press and self.rect().contains(e.position().toPoint()):
+            self.clicked.emit()
+        self._press = False
+
+    def enterEvent(self, e):
+        self.hover = True
+        self.parentWidget().update()
+
+    def leaveEvent(self, e):
+        self.hover = False
+        self.parentWidget().update()
+
+
+class StepCard(Card):
+    """Thẻ bước có số thứ tự (2.2.0): tiêu đề + dòng tóm tắt + nhãn trạng thái, bấm tiêu đề để mở / gập (mở ra mượt,
+    mũi tên xoay). Cùng cách dùng như SectionCard: .head (hàng tiêu đề – thêm nút), .add() / .lay (thân thẻ)."""
+    toggled = Signal(bool)
+
+    def __init__(self, title: str, icon_name: str = "", subtitle: str = "", parent=None, num=None,
+                 opened: bool = True, collapsible: bool = True, key: str = ""):
+        import re
+
+        super().__init__(parent, padding=0)
+        m = re.match(r"^\s*(\d+)\s*[.·)]\s*(.*)$", title)
+        if m and num is None:
+            num, title = int(m.group(1)), m.group(2)
+        self.num, self.key, self.group = num, key or title, None
+        self.collapsible = collapsible
+        self._open = True
+        self._sc_subtitle = subtitle
+        self._sc_summary = ""
+        outer = self.lay
+        outer.setSpacing(0)
+        self._headw = _CardHead(self)
+        self._headw.clicked.connect(lambda: self.collapsible and self.set_open(not self._open, user=True))
+        hl = QHBoxLayout(self._headw)
+        hl.setContentsMargins(14, 11, 12, 11)
+        hl.setSpacing(12)
+        self.badge = StepBadge(num, icon_name)
+        hl.addWidget(self.badge)
+        tb = QVBoxLayout()
+        tb.setSpacing(1)
+        tb.setContentsMargins(0, 0, 0, 0)
+        self.title_lb = QLabel(title)
+        self.title_lb.setStyleSheet("font-weight: 700; font-size: 10.8pt;")
+        self.sum_lb = ElideLabel("")
+        tb.addWidget(self.title_lb)
+        tb.addWidget(self.sum_lb)
+        hl.addLayout(tb, 1)
+        self.head = QHBoxLayout()           # như SectionCard.head: chỗ thêm nút vào hàng tiêu đề
+        self.head.setSpacing(8)
+        self.head.setContentsMargins(0, 0, 0, 0)
+        hl.addLayout(self.head)
+        self.chip = Chip()
+        hl.addWidget(self.chip)
+        self.chev = Chevron()
+        hl.addWidget(self.chev)
+        outer.addWidget(self._headw)
+        self.body = QWidget()
+        self.lay = QVBoxLayout(self.body)   # .add() / .lay = thân thẻ (như Card)
+        self.lay.setContentsMargins(16, 0, 16, 16)
+        self.lay.setSpacing(10)
+        if subtitle:
+            self._sc_desc = label(subtitle, "muted", wrap=True)
+            self.lay.addWidget(self._sc_desc)
+        outer.addWidget(self.body)
+        self._anim = QPropertyAnimation(self.body, b"maximumHeight", self)
+        self._anim.setDuration(240)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.finished.connect(lambda: self.body.setMaximumHeight(16777215) if self._open else None)
+        self.set_collapsible(collapsible)
+        if not opened:
+            self.set_open(False, anim=False)
+        self._sync_head()
+
+    # ---- tiêu đề / trạng thái
+    def set_title(self, t: str):
+        self.title_lb.setText(t)
+
+    def set_num(self, n):
+        self.num = self.badge.num = n
+        self.badge.update()
+
+    def set_summary(self, t: str):
+        self._sc_summary = t or ""
+        self._sync_head()
+
+    def set_status(self, text: str = "", kind: str = "", state: str | None = None):
+        """Nhãn bên phải tiêu đề + màu ô số (state: done / run / err / "" – mặc định theo kind)."""
+        self.chip.set(text, kind)
+        self.badge.set_state(state if state is not None else {"ok": "done", "run": "run", "err": "err"}.get(kind, ""))
+
+    def _sync_head(self):
+        t = self._sc_summary or ("" if self._open else self._sc_subtitle.split(". ")[0])
+        self.sum_lb.setText(t)
+        self.sum_lb.setVisible(bool(t))
+
+    # ---- mở / gập
+    def set_collapsible(self, on: bool):
+        self.collapsible = on
+        self.chev.setVisible(on)
+        self._headw.setCursor(Qt.CursorShape.PointingHandCursor if on else Qt.CursorShape.ArrowCursor)
+        if not on and not self._open:
+            self.set_open(True, anim=False)
+
+    def is_open(self) -> bool:
+        return self._open
+
+    def set_open(self, on: bool, anim: bool = True, user: bool = False):
+        if not self.collapsible:
+            on = True
+        if on == self._open:
+            return
+        self._open = on
+        self.chev.set_open(on, anim)
+        self._anim.stop()
+        if on:
+            self.body.show()
+            if anim and self.isVisible():
+                lay = self.body.layout()
+                w = max(200, self.body.width() or self.width())
+                h = lay.heightForWidth(w) if lay.hasHeightForWidth() else self.body.sizeHint().height()
+                self._anim.setStartValue(0)
+                self._anim.setEndValue(max(40, h))
+                self.body.setMaximumHeight(0)
+                self._anim.start()
+            else:
+                self.body.setMaximumHeight(16777215)
+        else:
+            self.body.hide()
+        self._sync_head()
+        self.update()
+        self.toggled.emit(on)
+        if self.group is not None and user:
+            self.group.changed(self, on)
+
+    @staticmethod
+    def reveal(w: QWidget):
+        """Mở mọi thẻ bước đang gập chứa widget w (trước khi cuộn tới / đặt con trỏ vào nó)."""
+        x = w
+        while x is not None:
+            if isinstance(x, StepCard) and not x.is_open():
+                x.set_open(True, anim=False, user=True)
+            x = x.parentWidget()
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        g = QLinearGradient(0, 0, 0, r.height())
+        g.setColorAt(0, QColor(theme.CARD))
+        g.setColorAt(1, QColor("#121722"))
+        p.setBrush(g)
+        op = self._open and self.collapsible
+        p.setPen(QPen(theme.c(theme.ACCENT, 92) if op else QColor(theme.BORDER2 if self._headw.hover else theme.BORDER), 1))
+        p.drawRoundedRect(r, self.radius, self.radius)
+        if self._headw.hover and self.collapsible:   # rê chuột lên tiêu đề: sáng nhẹ
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(255, 255, 255, 8))
+            hr = QRectF(self._headw.geometry()).adjusted(1, 1, -1, 0)
+            path = QPainterPath()
+            path.addRoundedRect(hr, self.radius - 1, self.radius - 1)
+            p.drawPath(path)
+
+
+class CardGroup:
+    """Các thẻ bước của 1 tab: đánh số 1, 2, 3… theo thứ tự; exclusive = mỗi lúc chỉ mở 1 thẻ (thẻ "ghim" luôn mở).
+    Nhớ thẻ đang mở theo tab (Cài đặt ui_cards: exclusive -> mã thẻ, không -> {mã thẻ: mở?}). Thẻ trong `manual` tự
+    nhớ trạng thái bằng cài đặt riêng (vd khung Công cụ tab Phụ đề) – không khôi phục / lưu ở đây."""
+
+    def __init__(self, key: str, cards: list, pinned=(), default: int = 0, saved=None, on_save=None,
+                 exclusive: bool = True, opened=(), manual=()):
+        self.key, self.cards, self.on_save, self.exclusive = key, list(cards), on_save, exclusive
+        self.manual = list(manual)
+        for i, c in enumerate(self.cards):
+            if c.num is None:
+                c.set_num(i + 1)
+            c.group = self
+            if c in pinned:
+                c.set_collapsible(False)
+        auto = [c for c in self.cards if c.collapsible and c not in self.manual]
+        if exclusive:
+            keys = [c.key for c in auto]
+            want = saved if (saved in keys or saved == "") else (keys[default] if 0 <= default < len(keys) else None)
+            for c in auto:
+                c.set_open(c.key == want, anim=False)
+        else:
+            saved = saved if isinstance(saved, dict) else {}
+            for c in auto:
+                c.set_open(bool(saved.get(c.key, c.key in opened)), anim=False)
+
+    def changed(self, card, on: bool):
+        if card in self.manual:
+            return
+        if self.exclusive:
+            if on:
+                for c in self.cards:
+                    if c is not card and c.collapsible and c not in self.manual:
+                        c.set_open(False, anim=False)
+            if self.on_save:
+                self.on_save(self.key, card.key if on else "")
+        elif self.on_save:
+            self.on_save(self.key, {card.key: bool(on)})
+
+
+class TabRail(QWidget):
+    """Thanh tab DỌC của trang dự án (2.2.0): chia nhóm (Quy trình / Hình ảnh / Khác), tab quy trình có số 1–4, ô chọn
+    trượt mượt tới tab được bấm. Cùng cách dùng như IconTabs (changed, set_current, cur, items) – thứ tự hiện khác thứ tự
+    trang (groups = danh sách số thứ tự trang)."""
+    changed = Signal(int)
+    W = 92
+
+    def __init__(self, items: list[tuple[str, str]], groups: list[tuple[str, list[int]]], nums: dict | None = None,
+                 parent=None):
+        super().__init__(parent)
+        self.items, self.groups, self.nums = items, groups, nums or {}
+        self.cur = 0
+        self._hov = -1
+        self._sel_y = -1.0
+        self.setMouseTracking(True)
+        self.setFixedWidth(self.W)
+        self.setFont(theme.font(8.4, QFont.Weight.DemiBold))
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        self._anim = QPropertyAnimation(self, b"selY", self)
+        self._anim.setDuration(260)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def _get_y(self):
+        return self._sel_y
+
+    def _set_y(self, v):
+        self._sel_y = v
+        self.update()
+
+    selY = Property(float, _get_y, _set_y)
+
+    def _geom(self):
+        """-> ({trang: QRectF}, [(tiêu đề nhóm, QRectF)]) theo chiều cao hiện có."""
+        n = sum(len(ix) for _, ix in self.groups)
+        gh = 22.0
+        avail = max(100.0, self.height() - 10 - gh * len(self.groups))
+        ih = max(44.0, min(60.0, avail / max(1, n)))
+        y = 6.0
+        rects, heads = {}, []
+        for title, ix in self.groups:
+            heads.append((title, QRectF(4, y, self.W - 8, gh)))
+            y += gh
+            for i in ix:
+                rects[i] = QRectF(6, y, self.W - 12, ih - 4)
+                y += ih
+        return rects, heads
+
+    def sizeHint(self):
+        n = sum(len(ix) for _, ix in self.groups)
+        return QSize(self.W, int(12 + 22 * len(self.groups) + 58 * n))
+
+    def minimumSizeHint(self):
+        n = sum(len(ix) for _, ix in self.groups)
+        return QSize(self.W, int(12 + 22 * len(self.groups) + 44 * n))
+
+    def set_current(self, i: int, emit: bool = True):
+        if 0 <= i < len(self.items):
+            rects, _ = self._geom()
+            if i in rects:
+                self._anim.stop()
+                if self._sel_y < 0 or not self.isVisible():
+                    self._sel_y = rects[i].top()
+                else:
+                    self._anim.setStartValue(self._sel_y)
+                    self._anim.setEndValue(rects[i].top())
+                    self._anim.start()
+            self.cur = i
+            self.update()
+            if emit:
+                self.changed.emit(i)
+
+    def resizeEvent(self, e):
+        rects, _ = self._geom()
+        if self.cur in rects:
+            self._anim.stop()
+            self._sel_y = rects[self.cur].top()
+        super().resizeEvent(e)
+
+    def _hit(self, pos) -> int:
+        rects, _ = self._geom()
+        return next((i for i, r in rects.items() if r.contains(pos)), -1)
+
+    def mouseMoveEvent(self, e):
+        h = self._hit(e.position())
+        if h != self._hov:
+            self._hov = h
+            self.update()
+
+    def leaveEvent(self, e):
+        self._hov = -1
+        self.update()
+
+    def mousePressEvent(self, e):
+        h = self._hit(e.position())
+        if h >= 0:
+            self.set_current(h)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rects, heads = self._geom()
+        p.setFont(theme.font(7.0, QFont.Weight.Bold))
+        p.setPen(QColor(theme.MUTED))
+        for title, r in heads:
+            p.drawText(r.adjusted(0, 6, 0, 0), Qt.AlignmentFlag.AlignCenter, title.upper())
+        if self.cur in rects:                     # ô chọn (trượt tới tab mới)
+            r = QRectF(rects[self.cur])
+            if self._sel_y >= 0:
+                r.moveTop(self._sel_y)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(theme.c(theme.ACCENT, 34))
+            p.drawRoundedRect(r, 12, 12)
+        p.setFont(self.font())
+        fm = p.fontMetrics()
+        for i, r in rects.items():
+            on, hov = i == self.cur, i == self._hov
+            if hov and not on:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(255, 255, 255, 12))
+                p.drawRoundedRect(r, 12, 12)
+            text, ic = self.items[i]
+            small = r.height() < 50
+            ib = QRectF(r.center().x() - 18, r.top() + (4 if small else 6) - (1 if hov or on else 0), 36, 26)
+            if on:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(theme.c(theme.ACCENT, 44))
+                p.drawRoundedRect(ib, 9, 9)
+            col = theme.ACCENT2 if on else (theme.TEXT if hov else theme.MUTED)
+            icons.paint_icon(p, ic, QRectF(ib.center().x() - 9, ib.center().y() - 9, 18, 18), col, 1.9)
+            n = self.nums.get(i)
+            if n:
+                br = QRectF(ib.right() - 8, ib.top() - 4, 15, 15)
+                p.setPen(QPen(QColor(theme.SIDEBAR), 2))
+                p.setBrush(theme.accent_gradient(br.left(), br.top(), br.right(), br.bottom()) if on
+                           else QColor(theme.CARD3))
+                p.drawEllipse(br)
+                p.setPen(QColor(theme.ON_ACCENT if on else theme.TEXT2))
+                p.setFont(theme.font(6.6, QFont.Weight.Bold))
+                p.drawText(br, Qt.AlignmentFlag.AlignCenter, str(n))
+                p.setFont(self.font())
+            p.setPen(QColor(theme.TEXT if on or hov else theme.MUTED))
+            p.drawText(QRectF(r.left() + 1, ib.bottom() + 1, r.width() - 2, r.bottom() - ib.bottom() - 1),
+                       Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                       fm.elidedText(text, Qt.TextElideMode.ElideRight, int(r.width() - 2)))
+
+
+class FlowStepper(QWidget):
+    """Thanh tiến độ 4 bước trên thanh đầu trang dự án (2.2.0): mỗi bước 1 ô (số / ✓ xong / đang chạy %), bấm = mở
+    bước đó ở tab Tự động."""
+    clicked = Signal(int)
+
+    def __init__(self, labels: list[str], parent=None):
+        super().__init__(parent)
+        self.steps = [{"label": t, "state": "", "meta": ""} for t in labels]
+        self._hov = -1
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(42)
+        self._f1 = theme.font(9.0, QFont.Weight.Bold)
+        self._f2 = theme.font(7.6)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+
+    def set_step(self, i: int, state: str, meta: str = ""):
+        if 0 <= i < len(self.steps):
+            st = self.steps[i]
+            if (st["state"], st["meta"]) != (state, meta):
+                st["state"], st["meta"] = state, meta
+                self.updateGeometry()
+                self.update()
+
+    def _rects(self) -> list[QRectF]:
+        from PySide6.QtGui import QFontMetrics
+
+        m1, m2 = QFontMetrics(self._f1), QFontMetrics(self._f2)
+        x, out = 4.0, []
+        for i, st in enumerate(self.steps):
+            w = 6 + 24 + 8 + max(m1.horizontalAdvance(st["label"]), m2.horizontalAdvance(st["meta"])) + 12
+            out.append(QRectF(x, 4, w, self.height() - 8))
+            x += w + 18
+        return out
+
+    def sizeHint(self):
+        rs = self._rects()
+        return QSize(int(rs[-1].right() + 4) if rs else 100, 42)
+
+    def minimumSizeHint(self):
+        return QSize(120, 42)
+
+    def mouseMoveEvent(self, e):
+        h = next((i for i, r in enumerate(self._rects()) if r.contains(e.position())), -1)
+        if h != self._hov:
+            self._hov = h
+            self.update()
+
+    def leaveEvent(self, e):
+        self._hov = -1
+        self.update()
+
+    def mousePressEvent(self, e):
+        h = next((i for i, r in enumerate(self._rects()) if r.contains(e.position())), -1)
+        if h >= 0:
+            self.clicked.emit(h)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rs = self._rects()
+        sc = min(1.0, (self.width() - 4) / (rs[-1].right() + 4)) if rs else 1.0
+        p.scale(sc, 1.0)
+        bg = QRectF(0.5, 0.5, rs[-1].right() + 3.5 if rs else 0, self.height() - 1)
+        p.setPen(QPen(QColor(theme.BORDER), 1))
+        p.setBrush(QColor(theme.BG))
+        p.drawRoundedRect(bg, 12, 12)
+        for i, (st, r) in enumerate(zip(self.steps, rs)):
+            if i == self._hov:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(theme.CARD2))
+                p.drawRoundedRect(r, 9, 9)
+            if i:
+                icons.paint_icon(p, "chev_right", QRectF(r.left() - 15, r.center().y() - 6, 12, 12), "#3C455A", 2.0)
+            b = QRectF(r.left() + 6, r.center().y() - 12, 24, 24)
+            state = st["state"]
+            col = {"done": theme.OK, "run": theme.WARN}.get(state)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(theme.c(col, 42) if col else QColor(theme.CARD3))
+            p.drawRoundedRect(b, 8, 8)
+            if state == "done":
+                icons.paint_icon(p, "check", b.adjusted(5, 5, -5, -5), theme.OK, 2.4)
+            else:
+                p.setPen(QColor(col or theme.TEXT))
+                p.setFont(theme.font(8.4, QFont.Weight.Bold))
+                p.drawText(b, Qt.AlignmentFlag.AlignCenter, str(i + 1))
+            tx = b.right() + 8
+            p.setPen(QColor(theme.TEXT))
+            p.setFont(self._f1)
+            p.drawText(QRectF(tx, r.top() + 2, r.right() - tx, r.height() / 2), Qt.AlignmentFlag.AlignLeft |
+                       Qt.AlignmentFlag.AlignBottom, st["label"])
+            p.setPen(QColor("#F7C766" if state == "run" else theme.MUTED))
+            p.setFont(self._f2)
+            p.drawText(QRectF(tx, r.center().y() + 1, r.right() - tx, r.height() / 2 - 2), Qt.AlignmentFlag.AlignLeft |
+                       Qt.AlignmentFlag.AlignTop, st["meta"])

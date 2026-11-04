@@ -299,6 +299,41 @@ def quiet_dll_errors() -> None:
         pass
 
 
+NONE_GUARD = False   # 2.2.0: đã bật lá chắn lỗi đếm tham chiếu None của PySide6 6.12.0
+
+
+def guard_none_refcount() -> bool:
+    """PySide6 6.12.0 + Python < 3.12: MỌI hàm Qt trả về void gọi từ Python (setText, update, vẽ bằng QPainter,
+    processEvents…) trả về None mà không tăng đếm tham chiếu -> mỗi lần mất 1 tham chiếu của None -> dùng tool đủ lâu
+    None về 0, Python tự sập "Fatal Python error: none_dealloc: deallocating None" (PySide6 6.11.x không bị; Python
+    3.12+ None bất tử nên không sao). Đo thử trên 1 QObject; bị lỗi thì cho None số tham chiếu rất lớn (như Python 3.12
+    làm) -> không bao giờ về 0. Gọi 1 lần trước khi dựng giao diện."""
+    global NONE_GUARD
+    if NONE_GUARD or sys.version_info >= (3, 12) or hasattr(sys, "gettotalrefcount"):
+        return NONE_GUARD
+    try:
+        from PySide6.QtCore import QObject
+    except ImportError:
+        return False
+    try:
+        o = QObject()
+        before = sys.getrefcount(None)
+        for _ in range(64):
+            o.setObjectName("x")
+        lost = before - sys.getrefcount(None)
+        if lost < 48:
+            return False
+        import ctypes
+
+        ctypes.c_ssize_t.from_address(id(None)).value += 1 << 60
+        NONE_GUARD = True
+        print(f"[Subvideo] PySide6 bản này làm mất tham chiếu của None ({lost}/64 lần gọi) – đã bật lá chắn; "
+              'nên cài: python -m pip install "PySide6<6.12"', file=sys.stderr)
+    except Exception:  # noqa: BLE001
+        return False
+    return NONE_GUARD
+
+
 def log_error(where: str = "") -> Path:
     """Ghi traceback của lỗi đang xử lý vào data/logs/loi.txt để gửi đi khi cần hỗ trợ."""
     import time

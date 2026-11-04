@@ -9,7 +9,7 @@ from .. import models
 from ..config import MODELS_DIR, load_settings
 from ..jobs import manager
 from .common import run_async
-from .widgets import Card, GradientButton, IconBadge, ProgressBar, SectionCard, button, hbox, label
+from .widgets import Card, GradientButton, IconBadge, ProgressBar, SectionCard, button, flow, label
 
 
 class ModelRow(Card):
@@ -24,6 +24,7 @@ class ModelRow(Card):
         txt.setSpacing(2)
         self.title = label(f"{info.name}  ·  {info.size}")
         self.title.setStyleSheet("font-weight: 600;")
+        self.title.setWordWrap(True)
         txt.addWidget(self.title)
         txt.addWidget(label(info.use, "muted", wrap=True))
         top.addLayout(txt, 1)
@@ -98,9 +99,9 @@ class ModelsTab(QWidget):
                            "(không tải lại). Mô hình chưa tải sẽ được tự tải khi cần dùng lần đầu.")
         all_btn = GradientButton("Tải tất cả mô hình còn thiếu", "download")
         all_btn.clicked.connect(self.download_missing)
-        card.add(hbox(all_btn, button("Kiểm tra lại", "refresh", on_click=self.refresh),
-                      None, button("Mở thư mục mô hình", "folder",
-                                   on_click=lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(MODELS_DIR))))))
+        card.add(flow(all_btn, button("Kiểm tra lại", "refresh", on_click=self.refresh),
+                      button("Mở thư mục mô hình", "folder",
+                             on_click=lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(MODELS_DIR))))))
         for m in models.MODELS:
             row = ModelRow(m, self.download)
             self.rows[m.key] = row

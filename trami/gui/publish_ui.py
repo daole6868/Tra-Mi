@@ -17,7 +17,7 @@ from .. import browser_post, publish
 from ..config import load_settings, save_settings
 from . import icons, theme
 from .common import run_async
-from .widgets import Form, GradientButton, SectionCard, Switch, button, combo, flow, hbox, label, set_combo
+from .widgets import Form, GradientButton, SectionCard, StepCard, Switch, button, combo, flow, hbox, label, set_combo
 
 ZN_HELP = """<b>Zernio</b> là dịch vụ đăng bài đã được YouTube và Meta duyệt, nên video lên <b>Công khai ngay</b>.<br><br>
 1. Đăng ký tài khoản ở <b>zernio.com</b> → mục <b>API Keys</b> → tạo key → dán vào ô <i>API key</i> → <b>Lưu cài đặt</b>.<br>
@@ -297,7 +297,7 @@ class AccountCards:
 
 
 # ================================================================== tab Xuất → Đăng video
-class PublishCard(SectionCard):
+class PublishCard(StepCard):
     """Mục "Đăng video": video (bản xuất mới nhất / chọn file), YouTube + Facebook (nơi đăng, kiểu), tiêu đề / mô tả /
     hashtag (AI viết), quyền riêng tư, danh mục, hẹn giờ, ảnh bìa, nhãn nội dung AI, nút Đăng, lịch sử đăng."""
 

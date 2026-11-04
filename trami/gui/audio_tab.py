@@ -10,7 +10,7 @@ from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
 from . import theme
-from .widgets import (Form, IconBadge, IconButton, SectionCard, SliderRow, Switch, button, combo, flow, hbox, label,
+from .widgets import (Form, IconBadge, IconButton, StepCard, SliderRow, Switch, button, combo, flow, hbox, label,
                       set_combo)
 
 SOURCES = [("auto", "Tự động – đã tách giọng + có lồng tiếng thì dùng bản tách"),
@@ -102,7 +102,7 @@ class AudioTab(QWidget):
         v.setSpacing(theme.GAP)
 
         # ---- 1. nguồn tiếng gốc
-        src = SectionCard("1. Nguồn tiếng gốc", "film",
+        src = StepCard("1. Nguồn tiếng gốc", "film",
                           "Tiếng gốc của video gồm lời thoại tiếng Trung + nhạc. Sau khi tách (tab Lồng tiếng mục 1) "
                           "có thể chỉnh riêng nhạc nền và giọng nói gốc.")
         self.src = combo(SOURCES, "auto")
@@ -123,7 +123,7 @@ class AudioTab(QWidget):
         v.addWidget(src)
 
         # ---- 2. các lớp
-        lay = SectionCard("2. Các lớp âm thanh", "volume",
+        lay = StepCard("2. Các lớp âm thanh", "volume",
                           "Kéo thanh để chỉnh to / nhỏ (100 % = như bản gốc), bấm hình loa để tắt lớp, \"Nghe riêng\" "
                           "để chỉ nghe 1 lớp. Bấm Phát trên video bên phải – nghe thay đổi NGAY; video xuất ra trộn "
                           "đúng như vậy.")
@@ -163,7 +163,7 @@ class AudioTab(QWidget):
         v.addWidget(lay)
 
         # ---- 3. hiệu ứng giọng gốc
-        fx = SectionCard("3. Hiệu ứng", "sparkle")
+        fx = StepCard("3. Hiệu ứng", "sparkle")
         f = Form()
         self.pitch = f.row("Đổi cao độ giọng gốc", combo(PITCHES, "1.0"),
                            "Áp dụng cho tiếng gốc (hoặc giọng gốc đã tách). Đổi xong cần vài giây chuẩn bị để nghe thử")
@@ -172,7 +172,7 @@ class AudioTab(QWidget):
         v.addWidget(fx)
 
         # ---- 4. tải
-        out = SectionCard("4. Tải âm thanh", "download")
+        out = StepCard("4. Tải âm thanh", "download")
         out.add(flow(button("Tải MP3 bản trộn", "download", "Lưu toàn bộ âm thanh đã trộn (đúng như đang nghe) thành MP3",
                             on_click=lambda: page._save_mix_mp3()),
                      button("Tải MP3 giọng gốc", "download", flat=True, on_click=lambda: page._save_stem_mp3("vocals")),
@@ -180,6 +180,7 @@ class AudioTab(QWidget):
                             on_click=lambda: page._save_stem_mp3("instrumental"))))
         v.addWidget(out)
         v.addStretch(1)
+        self.cards = page._accordion("audio", [src, lay, fx, out], default=1)
 
     # ------------------------------------------------------------ dữ liệu
     def _emit(self, *_):

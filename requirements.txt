@@ -1,5 +1,5 @@
 # ===== Lõi (bắt buộc) =====
-PySide6>=6.6               # giao diện desktop
+PySide6>=6.6,!=6.12.0       # giao diện desktop (6.12.0 lỗi đếm tham chiếu None – sập khi dùng lâu)
 requests>=2.31
 numpy>=1.24
 faster-whisper>=1.0.3       # nhận dạng giọng nói Whisper (GPU/CPU)

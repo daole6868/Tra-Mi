@@ -1952,10 +1952,11 @@ def _crash_log():
 
 
 def run():
-    from ..config import fix_std_streams, quiet_dll_errors
+    from ..config import fix_std_streams, guard_none_refcount, quiet_dll_errors
 
     fix_std_streams()   # python -m trami / exe không cửa sổ đen
     quiet_dll_errors()  # 2.1.40: DLL lỗi (cuDNN lệch bản…) không bật hộp thoại chặn tool
+    guard_none_refcount()  # 2.2.0: PySide6 6.12.0 + Python 3.11 – dùng lâu sập "deallocating None"
     _keep_crash_file = _crash_log()  # noqa: F841
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
     if sys.platform == "win32":

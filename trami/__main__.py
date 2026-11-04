@@ -89,10 +89,11 @@ def cli_translate(args):
 
 
 def main(argv=None):
-    from .config import fix_std_streams, quiet_dll_errors
+    from .config import fix_std_streams, guard_none_refcount, quiet_dll_errors
 
     fix_std_streams()
     quiet_dll_errors()
+    guard_none_refcount()  # lớp phủ chữ / logo khi xuất vẽ bằng Qt
     ap = argparse.ArgumentParser(prog="trami", description="Subvideo - dịch & lồng tiếng video tự động")
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("ui", help="Mở giao diện (mặc định)")

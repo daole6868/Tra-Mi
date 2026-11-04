@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QAbstractButton, QDoubleSpinBox, QFileDialog, QLi
 
 from .. import overlay
 from . import theme
-from .widgets import (ColorButton, Form, SectionCard, SliderRow, Switch, button, combo, flow, hbox, label,
+from .widgets import (ColorButton, Form, StepCard, SliderRow, Switch, button, combo, flow, hbox, label,
                       set_combo)
 
 MIME = "application/x-subvideo-logo"
@@ -138,7 +138,7 @@ class LayersTab(QWidget):
         overlay.register_fonts()
 
         # --- thêm chữ
-        add = SectionCard("Thêm chữ", "text", "Bấm 1 mẫu để thêm vào video, rồi sửa chữ ở mục 'Lớp đang chọn' bên dưới. "
+        add = StepCard("Thêm chữ", "text", "Bấm 1 mẫu để thêm vào video, rồi sửa chữ ở mục 'Lớp đang chọn' bên dưới. "
                           "Kéo chữ trên video để đặt chỗ, kéo 4 góc để phóng to / thu nhỏ.")
         self.when = combo([("all", "Hiện suốt video"), ("here", "Hiện từ đầu phát, 5 giây")], "all")
         add.add(hbox(label("Khi thêm:", "muted"), self.when, None))
@@ -154,7 +154,7 @@ class LayersTab(QWidget):
                             on_click=lambda: self.add_text(None))))
 
         # --- logo của bạn
-        logo = SectionCard("Logo của bạn", "image", "Tải nhiều logo lên 1 lần (PNG, JPG, WebP, SVG, GIF động). Bấm đúp "
+        logo = StepCard("Logo của bạn", "image", "Tải nhiều logo lên 1 lần (PNG, JPG, WebP, SVG, GIF động). Bấm đúp "
                            "hoặc kéo logo thả vào video. Dùng được nhiều logo cùng lúc.")
         self.logo_list = LogoList()
         self.logo_list.itemDoubleClicked.connect(lambda it: self.add_logo_item(it))
@@ -164,7 +164,7 @@ class LayersTab(QWidget):
                       button("Xoá khỏi thư viện", "trash", flat=True, on_click=self._remove_logos)))
 
         # --- logo mẫu (tên kênh)
-        ch = SectionCard("Logo mẫu – tên kênh", "sparkle", "Nhập tên kênh rồi bấm 1 mẫu.")
+        ch = StepCard("Logo mẫu – tên kênh", "sparkle", "Nhập tên kênh rồi bấm 1 mẫu.")
         self.channel = QLineEdit()
         self.channel.setPlaceholderText("Tên kênh của bạn, vd: Phim Hay TV")
         self.channel.setText(str(page.settings.get("channel_name", "") or ""))
@@ -180,7 +180,7 @@ class LayersTab(QWidget):
         ch.add(cw)
 
         # --- các lớp
-        lst = SectionCard("Các lớp trên video", "layers", "Lớp ở trên danh sách nằm trên cùng. Mỗi lớp có 1 dòng trên "
+        lst = StepCard("Các lớp trên video", "layers", "Lớp ở trên danh sách nằm trên cùng. Mỗi lớp có 1 dòng trên "
                           "timeline: kéo thanh để dời lúc hiện, kéo 2 mép để đổi lúc bắt đầu / kết thúc.")
         self.list = QListWidget()
         self.list.setStyleSheet(LIST_QSS)
@@ -200,11 +200,13 @@ class LayersTab(QWidget):
         lst.add(self.empty)
 
         # --- thuộc tính
-        self.props = SectionCard("Lớp đang chọn", "settings")
+        self.props = StepCard("Lớp đang chọn", "settings")
         self._build_props()
         for c in (add, logo, ch, lst, self.props):
             v.addWidget(c)
         v.addStretch(1)
+        # 2.2.0: 3 thẻ thêm chữ / logo mở lần lượt; danh sách lớp + lớp đang chọn luôn mở
+        self.cards = page._accordion("layers", [add, logo, ch, lst, self.props], pinned=(lst, self.props))
         self.fill_library()
         self._refresh_list()
 
@@ -394,8 +396,7 @@ class LayersTab(QWidget):
             self.p_fo.setValue(float(L.get("fade_out") or 0))
             self.p_start.setValue(float(L.get("start") or 0))
             self.p_end.setValue(float(L.get("end") or 0))
-            self.props.head.itemAt(1).layout().itemAt(0).widget().setText("Lớp đang chọn – " +
-                                                                           overlay.text_name(L))
+            self.props.set_title("Lớp đang chọn – " + overlay.text_name(L))
         finally:
             self._loading = False
         self._rows()
