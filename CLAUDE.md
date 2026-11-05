@@ -797,7 +797,66 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `TaoBieuTuong.bat` (biểu tượng Subvideo Desktop + Start menu -> exe nếu đã đóng gói, không thì pythonw TraMi.py; xoá
   TraMi.lnk cũ). Tiến trình phụ (`--vieneu-worker` / `--omni-worker` / `--qwen-asr-worker` / `--firered-worker` / `--hymt-worker` /
   `--hf-download`) khi đóng gói gọi chính Subvideo.exe; `TraMi.py` gọi `multiprocessing.freeze_support()`.
-- `tests/test_core.py` – `python -m pytest -q tests` (309 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- Điều khiển từ xa bằng điện thoại (2.3.0, `trami/remote/`; người dùng duyệt bản thiết kế 7 màn – artifact "Subvideo
+  từ xa"): `server.py` máy chủ aiohttp chạy TRONG tool (luồng "remote-server" + vòng sự kiện riêng, việc nặng ở
+  ThreadPoolExecutor 4), cổng Cài đặt `remote_port` 8765 trên 0.0.0.0; https chứng chỉ tự ký EC 10 năm
+  (`ensure_cert` -> data/remote/cert.pem + key.pem, cần gói `cryptography`; thiếu / hỏng – lõi Rust báo PanicException –
+  thì http) – vân tay SHA-256 (`SERVER.fp`) nằm trong mã QR để app ghim. Đăng nhập: mã ghép 6 số `PAIRING` (1 lần, 10
+  phút) hoặc mật khẩu `remote_pw_secret` ("pbkdf2$muối$băm", 200k vòng; `set_password` ≥ 6 ký tự) -> thẻ thiết bị
+  (`Devices`, data/remote/devices.json chỉ lưu sha256 thẻ) trong cookie `sv_t` HttpOnly SameSite=Lax hoặc Authorization
+  Bearer; `/api/session` đổi thẻ -> cookie cho địa chỉ khác (mạng nhà <-> VPS); POST phải có tiêu đề `X-SV: 1` (chống
+  CSRF); `Limiter` 8 lần sai / 10 phút / địa chỉ, 30 tất cả; `SEC_HEADERS` (CSP 'self'). `PUBLIC` ping / login / pair /
+  session; `/static/<file>` chỉ file trong web/, `/font/` chỉ Be Vietnam Pro. `apply_settings` (mở tool – `main.
+  _remote_start` ở nền nếu `remote_on`; lưu thẻ Cài đặt) bật / tắt / khởi động lại máy chủ + đường hầm, `status`,
+  `pair_link` (`subvideo://pair?c=&pc=&lan=&lfp=&vps=&vfp=`), `parse_vps` (`subvideo-vps://<máy>[:cổng]?k=<mã>&fp=` ->
+  `remote_vps_url` / `_secret` / `_fp`), `vps_installer` (cai_vps.sh + relay.py base64 cuối file), giữ máy thức
+  `SetThreadExecutionState` (`remote_awake`). `api.py` hàm thuần (test gọi thẳng): ĐỌC dự án đọc file, GHI luôn qua hàng
+  việc kind "remote" (`jobs.LIGHT_KINDS`) / "relayout" -> `edit()` chờ ≤ 8 s trả trạng thái việc; giao diện máy tính tự nạp
+  lại (`project_page.job_finished`). Có: state (việc + dự án + nhãn `badge` + `autoflow.summary`), events (việc xong sau
+  mốc – app hỏi nền), options (lựa chọn + `SETTING_KEYS` – không bao giờ có key / mật khẩu), set_settings (chỉ
+  `SETTING_KEYS`), queue_links, detail, run_step (recognize = như nút "1. Nghe & tách câu" với `project_page.
+  recognize_message` dùng chung; translate / dub / render / auto dừng trước xuất), set_target, frame (ảnh khung
+  data/remote/cache), detect_region (`ocr_box_from_detect`), read_region (ảnh bộ đọc thấy – làm rõ chữ / lọc màu như lúc
+  quét – + `ocr_engine.ocr`: chữ sát mép = bị cắt, nhiều cụm = dính chữ cảnh), seek_text (câu trước / sau: dò `Engine.detect`
+  mỗi 1,5 s ≤ 90 s, dấu khối chữ khác câu đang xem), pick_color / use_color (`ocr_color` + `ocr_colors`), save_region
+  (`p.data["ocr_box"]`), lines (lọc all / empty / unsure / long / fast / ok + tìm), edit_line (`trans_user`; chữ gốc đổi trên
+  máy -> 409), delete_lines (đã lồng -> relayout), translate (auto / empty / all / rows – đã lồng thì redub câu đổi),
+  dub_info / set_voices (`pipeline._auto_voices`) / preview_voice / cat_action (loại câu Vừa / Dài / Rất dài: AI rút gọn,
+  đổi tốc độ exact, tạo lại giọng), dub_audio / line_audio, export_info / export_settings (xoá chữ Trung chưa khoanh vùng
+  xoá -> dùng vùng quét), output_file, make_srt, video_file (preview.mp4 hơn video gốc). Chỉ trả file thuộc dự án.
+  `tunnel.py` – tool TỰ NỐI RA trạm VPS bằng 1 WebSocket `/_sv_tunnel` (Bearer mã kết nối; tên miền -> chứng chỉ thật, IP ->
+  `aiohttp.Fingerprint` ghim vân tay), khung nhị phân 4 byte mã luồng + 1 byte loại (REQ_HEAD/BODY/END, RESP_HEAD/BODY/END,
+  CANCEL, WINDOW – mỗi luồng ≤ `WINDOW_SIZE` 1 MB chưa xác nhận), hỏi lại máy chủ trên chính máy (`X-SV-Relay` = `RELAY_TOKEN`
+  ngẫu nhiên mỗi lần mở -> máy chủ tin `X-SV-Client`, thiết bị ghi "vps"); nối lại 2 -> 60 s; mã 4401 sai mã, 4409. `vps/relay.py`
+  trạm (chỉ Python 3.8+ + aiohttp ≥ 3.8 – Ubuntu 22.04 apt python3-aiohttp; không lưu gì; tool chưa nối -> 503 JSON
+  `offline` / trang báo; 1 tool, nối mới thay cũ; `HEAD_TIMEOUT` 600 s; điện thoại bỏ dở -> CANCEL) + `vps/cai_vps.sh`
+  (`sudo bash cai_vps.sh [tên-miền]`: apt python3-aiohttp, user hệ thống subvideo, systemd `subvideo-relay` (ProtectSystem,
+  MemoryMax 300M); tên miền trỏ đúng + cổng 80/443 trống -> Caddy (chứng chỉ thật, `/etc/caddy/subvideo.caddy` + import,
+  relay 127.0.0.1:8770 trust_proxy), không thì chứng chỉ tự ký cổng 8443 (`SUBVIDEO_PORT`); ufw; giữ mã cũ khi chạy lại; in
+  `subvideo-vps://…`; `--go` gỡ). `web/` trang điện thoại (index.html + app.css + app.js, không thư viện ngoài, chữ gắn bằng
+  textContent – test đếm `.innerHTML =` = 1): đăng nhập (mã 6 số / mật khẩu, `#pair=` / `#tok=` từ app), Trang chủ (link –
+  `svShared` nhận link chia sẻ, việc + Huỷ, dự án + nhãn, chuông, Thiết lập dịch tự động), Dự án (4 bước + chạy trọn gói,
+  vùng phụ đề), Vùng phụ đề (khung kéo / 8 tay nắm / vẽ mới, ↔ hết chiều ngang, mẫu Tự dò / dải 1 dòng / 2 dòng / giữa video
+  dọc, ▲▼◀▶ từng mép 1 % giữ để lặp, thanh thời gian + Câu trước / sau, hút màu chữ -> chỉ lấy chữ màu này, Đọc thử tự chạy
+  0,65 s sau khi đổi), Dịch (4 ô + 3 công tắc + 3 nút, bảng câu tìm / lọc / tích / sửa / dịch lại / nghe / xoá, Xem thêm 60),
+  Lồng tiếng (bộ đọc, giọng cho tất cả / từng người + nghe thử, cách xếp / tăng tốc / tốc độ đọc, 2 công tắc, tạo bản lồng,
+  nghe bản lồng, 3 loại độ vừa + AI rút gọn / tạo lại giọng / ×0,85–1,20 / về gốc), Xuất (xem trước khung theo tỉ lệ + phụ đề
+  mẫu, ghép phụ đề, xoá chữ Trung, dùng bản lồng, thêm 9:16, tỉ lệ, độ phân giải, chất lượng, Xuất, bản đã xuất Xem / Tải,
+  SRT, Đăng video = tải về + chia sẻ), hỏi `/api/state` mỗi 2,5 s (ẩn 10 s), việc xong -> thông báo. GUI `gui/remote_ui.
+  RemoteCard` (Cài đặt, trên "Đăng video"; tự lưu): công tắc, mã QR (`link_login.qr_pixmap`) + mã 6 số còn mm:ss + Mã QR mới,
+  địa chỉ mạng nhà (Chép) / VPS + trạng thái đường hầm, ô chuỗi kết nối VPS (Lưu / Bỏ / Lưu file cài VPS… ghi "\n" /
+  Hướng dẫn), mật khẩu, cổng, 3 công tắc (báo việc `remote_notify`, giữ máy thức, tự mở tool khi bật máy – HKCU Run
+  "Subvideo" `autostart_cmd`), điện thoại đã ghép (🟢 trong 90 s, Ngắt / Ngắt tất cả). App Android `android/` (Kotlin,
+  minSdk 24, `vn.subvideo.remote`, ký bằng `app/subvideo-release.p12` đi kèm (mật khẩu subvideo-app) để bản mới cài đè; dựng
+  bằng GitHub Actions `.github/workflows/android.yml` -> artifact + Releases "android-latest"; sandbox không dựng được – chặn
+  dl.google.com): `MainActivity` WebView (cầu nối `SubvideoApp`: notify / seen / setToken / scanQr / openSettings / retry /
+  manual / download), quét QR zxing-android-embedded (+ mở thẳng `subvideo://pair` từ camera thường), `onReceivedSslError` chỉ
+  proceed khi SHA-256 chứng chỉ = vân tay đã ghép cho đúng máy (`Store.pinFor`), nhận link chia sẻ (ACTION_SEND), tải file tự
+  làm (`Pin.open` ghim vân tay + Bearer -> MediaStore Download/Subvideo, thông báo tiến độ, chia sẻ), video toàn màn hình;
+  `Store` (SharedPreferences), `Pin.pickBase` (tự chọn: mạng nhà trả lời ping 2,5 s -> mạng nhà, không thì VPS; hoặc cố
+  định), `Notify` (kênh jobs / files, `PollWorker` WorkManager 15 phút hỏi /api/events, `lastEvent` theo giờ máy tính, trang
+  báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
+- `tests/test_core.py` – `python -m pytest -q tests` (312 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -2716,7 +2775,23 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Khi chạy đủ bộ test tìm ra: PySide6 6.12.0 (bản mới nhất trên PyPI) + Python 3.11 – mọi hàm Qt trả về void (setText,
   update, vẽ QPainter, processEvents…) làm mất 1 tham chiếu của None (đo: 6.11.3 không bị) -> dùng tool đủ lâu Python sập
   "deallocating None" (bộ test sập ở test thứ 300). `config.guard_none_refcount` khi mở tool + requirements bỏ 6.12.0.
+- 2.3.0: "điều khiển tool từ xa qua mạng, tool để trên máy tính đã bật" -> người dùng chọn "cách 2" (app APK điều khiển
+  thẳng, mở app là dùng được) + VPS riêng (Ubuntu 22.04, 2 GB RAM, có tên miền – hỏi dùng IP được không: được, chứng chỉ tự
+  ký + ghim vân tay) + duyệt bản thiết kế 7 màn (chọn vùng phụ đề trên điện thoại là phần khó nhất: khung kéo 2 chiều, ↔ hết
+  chiều ngang, nút từng mép, mẫu nhanh, câu trước / sau, hút màu, đọc thử ngay). Làm: máy chủ trong tool + trang điện thoại +
+  đường hầm + trạm VPS + file cài VPS + thẻ Cài đặt + app Android (xem Cấu trúc "Điều khiển từ xa"). Thử trên máy: máy chủ +
+  đường hầm + trạm VPS (tiến trình riêng, cả https tự ký ghim vân tay): đăng nhập, ghép mã 1 lần, sửa câu qua VPS (giao diện
+  ghi đúng), tải file 5 MB 0,17 s + tua Range, thiếu X-SV -> 403, tool tắt -> 503; trang điện thoại bằng Chromium giả lập
+  Pixel 7 trên video vẽ chữ Hán thật (OCR thật): kéo khung -> "✓ Đọc được: 这条路我走过很多次 · chắc 1.00", Câu sau nhảy
+  8,0 -> 9,5 s đúng lúc câu mới hiện, Tự dò, lưu khung, sửa câu, tích câu, loại câu lồng tiếng, xuất 9:16; file cài VPS
+  `bash -n` + giải ra đúng relay.py. Sandbox có gói cryptography hỏng (lõi Rust PanicException) -> bắt BaseException, chạy
+  http. Chưa chạy: app Android trên điện thoại thật, VPS thật (Caddy / chứng chỉ thật), Windows (giữ máy thức, tự mở tool).
 ## Vấn đề đang mở
+- 2.3.0: chờ người dùng (1) `.venv\Scripts\python -m pip install -U aiohttp cryptography`, mở tool → Cài đặt → Điều
+  khiển từ xa → bật (Windows hỏi tường lửa: cho phép mạng riêng); (2) cài APK (Releases "android-latest" hoặc tab Actions →
+  Artifacts) → Quét mã QR → thử cùng Wi-Fi: Trang chủ, chọn vùng phụ đề (Đọc thử), chạy bước 1, sửa câu; (3) VPS: Lưu file
+  cài VPS… → chép lên VPS → `sudo bash cai_vps_subvideo.sh tên-miền` → dán dòng subvideo-vps:// → quét lại QR → tắt Wi-Fi
+  điện thoại thử qua 4G. Lỗi -> gửi dòng trạng thái ở thẻ Điều khiển từ xa / dòng cuối của file cài VPS.
 - 2.2.0: chờ người dùng xem giao diện mới trên máy thật (thanh tab dọc, thẻ bước mở / gập, nút có số, timeline dưới
   video, ô Tìm tuỳ chọn); thiếu nút / chức năng nào -> báo tên nút. Hỏi bản PySide6 (`.venv\Scripts\python -c "import
   PySide6; print(PySide6.__version__)"`): 6.12.0 -> `pip install "PySide6<6.12"` (tool đã tự chặn lỗi sập).

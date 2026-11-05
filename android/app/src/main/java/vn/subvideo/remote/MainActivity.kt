@@ -219,10 +219,24 @@ small{color:#8E98AC}</style></head><body><div class="l">S</div><h1>Subvideo – 
     inner class Client : WebViewClient() {
         @SuppressLint("WebViewClientOnReceivedSslError")
         override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError) {
-            val want = Store.pinFor(error.url ?: "")
+            val url = error.url ?: ""
+            val want = Store.pinFor(url)
             val got = certSha(error.certificate)
             if (!want.isNullOrEmpty() && got == want) handler.proceed()
-            else {
+            else if (want == "" && got != null) {
+                // địa chỉ nhập tay (chưa có vân tay từ mã QR): hỏi 1 lần, đồng ý thì nhớ vân tay này
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Tin máy tính này?")
+                    .setMessage("Máy tính dùng chứng chỉ tự ký.\nVân tay: ${got.take(16)}…\n" +
+                        "So với dòng vân tay ở Cài đặt → Điều khiển từ xa trên máy tính (hoặc quét mã QR cho chắc).")
+                    .setPositiveButton("Tin") { _, _ ->
+                        Store.setPin(url, got)
+                        handler.proceed()
+                    }
+                    .setNegativeButton("Không") { _, _ -> handler.cancel() }
+                    .setOnCancelListener { handler.cancel() }
+                    .show()
+            } else {
                 handler.cancel()
                 toast("Chứng chỉ máy chủ không khớp mã đã ghép – quét lại mã QR trên máy tính")
             }
@@ -299,29 +313,37 @@ ${if (alt.isNotEmpty()) "<button onclick=\"SubvideoApp.retry('alt')\">Thử đư
         }
 
         @JavascriptInterface
-        fun scanQr() = runOnUiThread { startScan() }
-
-        @JavascriptInterface
-        fun openSettings() = runOnUiThread { openSettings() }
-
-        @JavascriptInterface
-        fun retry(which: String) = runOnUiThread {
-            if (which == "alt") Store.mode = if (base == Store.lan.trimEnd('/')) "vps" else "lan"
-            connect()
+        fun scanQr() {
+            runOnUiThread { startScan() }
         }
 
         @JavascriptInterface
-        fun manual(url: String) = runOnUiThread {
+        fun openSettings() {
+            runOnUiThread { this@MainActivity.openSettings() }
+        }
+
+        @JavascriptInterface
+        fun retry(which: String) {
+            runOnUiThread {
+                if (which == "alt") Store.mode = if (base == Store.lan.trimEnd('/')) "vps" else "lan"
+                connect()
+            }
+        }
+
+        @JavascriptInterface
+        fun manual(url: String) {
             var u = url.trim().trimEnd('/')
-            if (u.isEmpty()) return@runOnUiThread
+            if (u.isEmpty()) return
             if (!u.startsWith("http")) u = "https://$u"
-            Store.lan = u
-            Store.lfp = ""
-            Store.vps = ""
-            Store.vfp = ""
-            Store.pc = Uri.parse(u).host ?: ""
-            base = u
-            web.loadUrl("$u/")
+            runOnUiThread {
+                Store.lan = u
+                Store.lfp = ""
+                Store.vps = ""
+                Store.vfp = ""
+                Store.pc = Uri.parse(u).host ?: ""
+                base = u
+                web.loadUrl("$u/")
+            }
         }
 
         @JavascriptInterface

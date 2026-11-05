@@ -210,7 +210,7 @@ class RemoteCard(SectionCard):
         elif s["error"]:
             self.state.setText("⚠ " + s["error"])
         elif s["running"]:
-            self.state.setText(f"✓ Đang chạy · cổng {s['port']} · " + ("https (chứng chỉ tự ký – app ghim vân tay)"
+            self.state.setText(f"✓ Đang chạy · cổng {s['port']} · " + (f"https (chứng chỉ tự ký, vân tay {s['fp'][:16]}… – app ghim)"
                                if s["https"] else "http (thiếu gói cryptography – nên cài: pip install cryptography)"))
         for w in (self.qr, self.code, self.newqr):
             w.setEnabled(bool(s["running"]))

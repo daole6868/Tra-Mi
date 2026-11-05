@@ -60,6 +60,12 @@ object Store {
         return null
     }
 
+    fun setPin(url: String, fp: String) {
+        val host = hostPort(url) ?: return
+        if (lan.isNotEmpty() && hostPort(lan) == host) lfp = fp
+        else if (vps.isNotEmpty() && hostPort(vps) == host) vfp = fp
+    }
+
     private fun hostPort(url: String): String? = try {
         val u = Uri.parse(url)
         val port = if (u.port > 0) u.port else if (u.scheme == "https") 443 else 80

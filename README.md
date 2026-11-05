@@ -169,6 +169,14 @@ lại đúng tiếng và dịch đúng.
 - **Paraformer**: có dấu câu và tự phân biệt người nói ngay trong lúc nhận dạng.
 - **Whisper large-v3**: đa ngôn ngữ, dùng cho tiếng Anh, Nhật, Hàn.
 
+- **Điều khiển từ xa bằng điện thoại** (Cài đặt → *Điều khiển từ xa*): bật công tắc → cài app **Subvideo** trên Android
+  (file APK ở trang Releases của kho mã, mục *android-latest*) → bấm *Quét mã QR*. Cùng Wi-Fi là dùng được ngay: dán link,
+  chọn vùng phụ đề (kéo khung trên khung hình, *Đọc thử*), chạy 4 bước, sửa bản dịch, đổi giọng, xuất và tải video về điện
+  thoại. Ở ngoài (4G): bấm *Lưu file cài VPS…*, chép lên VPS Ubuntu, chạy `sudo bash cai_vps_subvideo.sh tên-miền` (không có
+  tên miền thì bỏ phần đó), dán dòng `subvideo-vps://…` vào ô *Chuỗi kết nối VPS* → Lưu → quét lại mã QR. Cần gói
+  `aiohttp` + `cryptography` (`.venv\Scripts\python -m pip install -U aiohttp cryptography`). Điện thoại chỉ làm được
+  các việc trong tool – không xem thư mục máy, không thấy API key / cookie / mật khẩu tài khoản.
+
 ---
 
 ## 4. Gợi ý để có bản dịch chuẩn nhất
