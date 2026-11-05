@@ -13907,3 +13907,94 @@ def test_torchenv_broken_torchvision_guard(tmp_path):
                                                                 TRAMI_DATA=str(tmp_path / "data")),
                        cwd=str(tmp_path), timeout=120)
     assert r.returncode == 0 and r.stdout.strip() == "''", r.stdout + r.stderr
+
+
+def test_hf_local_first_and_hidden_bars(tmp_path):
+    """2.3.3: "Đang nạp VieNeu-TTS 0/7207223 … 0/415319040" tăng mãi – kho VieNeu trên HuggingFace có bản mới nên thư viện
+    tự tải lại (mạng chặn -> 0 byte mãi), và thanh tải của huggingface_hub bị tắt khi không có cửa sổ đen nên tool chỉ thấy
+    tổng tăng, đã tải luôn 0. Giờ: nạp bản đã có trên máy (không mạng) trước; refs/main bị lần tải dở đổi sang bản chưa có
+    file -> trỏ lại bản cũ; thanh tải bị tắt vẫn báo đúng MB; tải đứng im -> báo."""
+    pytest.importorskip("huggingface_hub")
+    import tqdm as tq
+
+    from trami import hfoffline as hfo
+    from trami import progress_hook as ph
+
+    # --- thanh tqdm bị tắt (disable=True như huggingface_hub khi không có TTY) vẫn ra MB đúng
+    msgs = []
+    with ph.tqdm_progress(lambda x, m: msgs.append(m), 0.0, 1.0, "Đang nạp VieNeu-TTS", download="Đang tải VieNeu-TTS"):
+        bar = tq.tqdm(total=400_000_000, unit="B", unit_scale=True, desc="model.safetensors", disable=True)
+        assert ph.download_state()["bars"] == 0
+        bar.update(0)
+        import time as _t
+        _t.sleep(0.45)                                          # báo tiến độ tối đa ~2 lần / giây
+        bar.update(100_000_000)
+        st = ph.download_state()
+        assert st["bars"] == 1 and st["bytes"] == 100_000_000 and st["total"] == 400_000_000
+        bar.close()
+    assert any("Đang tải VieNeu-TTS (model.safetensors)" in m and "25% · 100 MB / 400 MB" in m for m in msgs), msgs
+    assert not any("/400000000" in m for m in msgs)
+    assert ph.download_state()["bars"] == 0          # hết khối -> xoá trạng thái tải
+
+    # --- kho HF giả: bản cũ đủ file, refs/main trỏ bản mới tải dở (chỉ có config)
+    cache = tmp_path / "hub"
+    repo = cache / "models--pnnbao-ump--VieNeu-TTS-v3-Turbo"
+    old, new = "a" * 40, "b" * 40
+    (repo / "snapshots" / old / "update").mkdir(parents=True)
+    (repo / "snapshots" / old / "update" / "model.safetensors").write_bytes(b"\0" * 1_200_000)
+    (repo / "snapshots" / old / "update" / "config.json").write_text("{}", "utf-8")
+    (repo / "snapshots" / new / "update").mkdir(parents=True)
+    (repo / "snapshots" / new / "update" / "config.json").write_text("{}", "utf-8")
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text(new, "utf-8")
+    other = cache / "models--someone--Other"                    # kho không liên quan: không đụng
+    (other / "snapshots" / old).mkdir(parents=True)
+    (other / "snapshots" / old / "w.bin").write_bytes(b"\0" * 1_200_000)
+    (other / "refs").mkdir()
+    (other / "refs" / "main").write_text(new, "utf-8")
+    fixed = hfo.repair_refs(("vieneu",), cache)
+    assert len(fixed) == 1 and "VieNeu" in fixed[0]
+    assert (repo / "refs" / "main").read_text("utf-8") == old
+    assert (other / "refs" / "main").read_text("utf-8") == new
+    assert hfo.repair_refs(("vieneu",), cache) == []           # đã đủ file -> không đổi nữa
+
+    # --- nạp không mạng trước; thiếu file -> có mạng; lỗi khác -> không thử mạng
+    import huggingface_hub.constants as hc
+
+    seen = []
+
+    def ok():
+        seen.append(hc.HF_HUB_OFFLINE)
+        return "model"
+    assert hfo.load_local_first(ok, ("zzz",), "VieNeu") == "model" and seen == [True]
+    assert hc.HF_HUB_OFFLINE is False
+
+    class LocalEntryNotFoundError(Exception):
+        pass
+    seen.clear()
+
+    def need_net():
+        seen.append(hc.HF_HUB_OFFLINE)
+        if hc.HF_HUB_OFFLINE:
+            raise LocalEntryNotFoundError("Cannot find the requested files in the local cache")
+        return "downloaded"
+    assert hfo.load_local_first(need_net, ("zzz",), "VieNeu") == "downloaded" and seen == [True, False]
+    seen.clear()
+
+    def broken():
+        seen.append(hc.HF_HUB_OFFLINE)
+        raise RuntimeError("CUDA error: out of memory")
+    with pytest.raises(RuntimeError):
+        hfo.load_local_first(broken, ("zzz",), "VieNeu")
+    assert seen == [True] and hc.HF_HUB_OFFLINE is False
+
+    # --- tải đứng im -> on_stall
+    hit = []
+    with ph.tqdm_progress(lambda *a: None, 0.0, 1.0, "x"):
+        bar = tq.tqdm(total=50_000_000, unit="B", unit_scale=True, disable=True)
+        bar.update(0)
+        w = hfo._Watch(None, lambda st, idle: hit.append(st["total"]), "Đang tải", stall=0.0)
+        w._stop.wait = lambda t: bool(hit)                      # không chờ 5 s
+        w._run()
+        bar.close()
+    assert hit == [50_000_000]

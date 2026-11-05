@@ -13,6 +13,7 @@ Dòng đầu tiên sau khi nạp mô hình: @@TRAMI@@{"ready": true}
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 MARK = "@@TRAMI@@"
@@ -132,8 +133,6 @@ def main(mode: str = "v3turbo") -> None:
     # stdout dành cho giao thức: chuyển mọi print/log của thư viện sang stderr (hiện trong cửa sổ đen)
     proto = sys.stdout
     if sys.stderr is None:
-        import os
-
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
     sys.stdout = sys.stderr
     try:
@@ -153,8 +152,19 @@ def main(mode: str = "v3turbo") -> None:
         def prog(x: float, msg: str):
             _reply(proto, {"progress": round(x, 4), "msg": msg})
 
+        from .hfoffline import load_local_first
+
+        def stalled(st, idle):   # tải từ HuggingFace đứng im: báo lỗi rõ rồi tắt tiến trình (luồng tải kẹt không huỷ được)
+            _reply(proto, {"error": f"Không tải được VieNeu-TTS từ HuggingFace: {idle / 60:.0f} phút không nhận thêm dữ "
+                                    f"liệu (đã tải {st['bytes'] / 1e6:.0f}/{st['total'] / 1e6:.0f} MB) – mạng đang chặn "
+                                    "máy chủ tải file lớn của HuggingFace. Thử mạng khác / VPN rồi bấm lại."})
+            os._exit(3)
+
+        # 2.3.3: nạp bản ĐÃ CÓ trên máy trước (không hỏi HuggingFace) – kho VieNeu có bản mới thì thư viện tự tải lại
+        # ~400 MB mỗi lần mở, mạng chặn -> đứng "0/415319040" mãi
         with tqdm_progress(prog, 0.0, 1.0, "Đang nạp VieNeu-TTS", download="Đang tải VieNeu-TTS"):
-            tts = Vieneu(mode=mode)
+            tts = load_local_first(lambda: Vieneu(mode=mode), ("vieneu", "moss-audio", "neucodec"), "VieNeu-TTS",
+                                   report=prog, on_stall=stalled)
         sr = int(getattr(tts, "sample_rate", 48000))
     except Exception as e:  # noqa: BLE001
         _reply(proto, {"error": load_error("VieNeu", e)})

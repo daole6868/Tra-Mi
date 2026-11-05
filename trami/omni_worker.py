@@ -71,8 +71,17 @@ def main(repo: str = "k2-fsa/OmniVoice") -> None:
             kw = {"device_map": "cuda:0", "dtype": torch.float16}
         else:
             kw = {"device_map": "cpu", "dtype": torch.float32}
+        from .hfoffline import load_local_first
+
+        def stalled(st, idle):
+            _reply(proto, {"error": f"Không tải được OmniVoice từ HuggingFace: {idle / 60:.0f} phút không nhận thêm dữ "
+                                    f"liệu (đã tải {st['bytes'] / 1e6:.0f}/{st['total'] / 1e6:.0f} MB) – mạng đang chặn "
+                                    "máy chủ tải file lớn của HuggingFace. Thử mạng khác / VPN rồi bấm lại."})
+            os._exit(3)
+
         with tqdm_progress(prog, 0.0, 1.0, "Đang nạp OmniVoice", download="Đang tải OmniVoice"):
-            model = OmniVoice.from_pretrained(repo, **kw)
+            model = load_local_first(lambda: OmniVoice.from_pretrained(repo, **kw),
+                                     (repo.split("/")[-1], "omnivoice"), "OmniVoice", report=prog, on_stall=stalled)
         sr = int(getattr(model, "sampling_rate", None) or 24000)
         fix_short_duration(model)
     except Exception as e:  # noqa: BLE001
