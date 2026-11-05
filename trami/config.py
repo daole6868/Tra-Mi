@@ -269,6 +269,15 @@ DEFAULT_SETTINGS: dict = {
     "video_preset": "medium",
     "audio_bitrate": "192k",
     "export_chunks": True,           # phim ≥ 10 phút xuất theo từng đoạn 60 s, nhớ đoạn đã xuất -> sửa ít câu xuất lại nhanh
+    # Điều khiển từ xa bằng điện thoại (2.3.0, trami/remote)
+    "remote_on": False,              # bật máy chủ điều khiển trong tool
+    "remote_port": 8765,             # cổng trong mạng nhà (Wi-Fi)
+    "remote_pw_secret": "",          # mật khẩu đăng nhập (chỉ lưu dạng băm "pbkdf2$muối$băm")
+    "remote_vps_url": "",            # trạm VPS (https://tên-miền hoặc https://IP:cổng) – tool tự nối ra, không mở cổng modem
+    "remote_vps_secret": "",         # mã kết nối VPS (file cài VPS in ra)
+    "remote_vps_fp": "",             # vân tay chứng chỉ tự ký của VPS (khi dùng IP, không tên miền)
+    "remote_notify": True,           # báo lên điện thoại khi việc xong / lỗi
+    "remote_awake": True,            # giữ máy không ngủ khi đang bật điều khiển từ xa
 }
 
 _lock = threading.Lock()

@@ -14,3 +14,5 @@ edge-tts>=7.3.1             # giọng đọc Microsoft (bản cũ bị Microsoft
 yt-dlp>=2026.8.19           # tải video Douyin/Bilibili/YouTube… (cũ thì Bilibili báo 412)
 imageio-ffmpeg>=0.5.1       # FFmpeg dự phòng
 playwright>=1.49            # "Mở Chrome & điền sẵn" khi đăng video (dùng Chrome / Edge có sẵn, không tải trình duyệt)
+cryptography>=41            # chứng chỉ tự ký cho điều khiển từ xa bằng điện thoại (https trong mạng nhà)
+aiohttp>=3.9                # máy chủ điều khiển từ xa + đường hầm VPS (edge-tts cũng dùng)

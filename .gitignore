@@ -8,3 +8,7 @@ dist/
 *.log
 .pytest_cache/
 torch-constraints.txt
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties

@@ -6,7 +6,8 @@ import importlib.util
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
-datas = [("fonts", "fonts"), ("assets", "assets"), ("trami/firered/LICENSE", "trami/firered")]   # giấy phép mã FireRedASR2
+datas = [("fonts", "fonts"), ("assets", "assets"), ("trami/firered/LICENSE", "trami/firered"),   # giấy phép mã FireRedASR2
+         ("trami/remote/web", "trami/remote/web"), ("vps", "vps")]   # trang điện thoại + file cài VPS (2.3.0)
 binaries = []
 hiddenimports = collect_submodules("trami") + ["PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets", "PySide6.QtSvg"]
 

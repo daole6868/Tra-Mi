@@ -25,6 +25,17 @@ from .storage_page import StoragePage
 from .widgets import (DropZone, Form, GradientButton, IconBadge, IconButton, NavButton, ProgressBar, SectionCard,
                       Switch, Toast, button, combo, flow, hbox, label, set_combo, shadow)
 
+def _remote_start():
+    try:
+        from ..remote import apply_settings
+
+        apply_settings()
+    except Exception:  # noqa: BLE001
+        from ..config import log_error
+
+        log_error("Điều khiển từ xa: mở khi bật tool")
+
+
 def _startup_clean():
     Project.purge_deleted()
     try:
@@ -1045,6 +1056,12 @@ class SettingsPage(QWidget):
         self.pub = AccountCards(self)
         for attr, _k in AccountCards.KEYS:
             setattr(self, attr, getattr(self.pub, attr))
+        # --- điều khiển từ xa bằng điện thoại (2.3.0)
+        from .remote_ui import RemoteCard
+
+        v.addWidget(label("Điều khiển từ xa", "h2"))
+        self.remote = RemoteCard(self.win)
+        v.addWidget(self.remote)
         v.addWidget(label("Đăng video", "h2"))
         pg = QGridLayout()
         pg.setSpacing(16)
@@ -1739,6 +1756,8 @@ class MainWindow(QMainWindow):
         self._sysinfo()
         # dự án đã xoá lần trước mà còn file bị giữ (Windows) -> dọn nốt + file tạm cũ (tự dọn, 2.1.29) ở nền
         threading.Thread(target=_startup_clean, daemon=True, name="trami-purge").start()
+        if load_settings().get("remote_on"):   # điều khiển từ xa bằng điện thoại (2.3.0) – mở máy chủ ở nền
+            threading.Thread(target=_remote_start, daemon=True, name="trami-remote-start").start()
 
     # ------------------------------------------------------------ điều hướng
     def show_page(self, key: str):
@@ -1914,6 +1933,12 @@ class MainWindow(QMainWindow):
             return
         for j in running:
             manager.cancel(j["id"])
+        try:
+            from ..remote import server
+
+            server.SERVER.stop()
+        except Exception:  # noqa: BLE001
+            pass
         e.accept()
 
 

@@ -80,7 +80,7 @@ GPU_KINDS = {"auto", "recognize", "separate", "diarize", "inpaint", "dub", "redu
 READONLY_KINDS = {"preview", "tool", "publish"}   # publish chỉ ghi posts.json riêng
 # việc rất nhẹ (vài giây, không dùng card): xếp lại bản lồng sau khi xoá / kéo / gộp câu -> không phải chờ việc dài của
 # dự án khác dù đang chạy lần lượt (vẫn chờ việc khác của CÙNG dự án vì cùng ghi project.json)
-LIGHT_KINDS = {"relayout"}
+LIGHT_KINDS = {"relayout", "remote"}   # remote: sửa nhỏ từ điện thoại (lưu vùng phụ đề, sửa câu…)
 # việc chỉ dùng mạng (đăng video): không chờ việc dài khác, không chặn việc khác dù đang chạy lần lượt
 NET_KINDS = {"publish"}
 # tải video từ link: chỉ dùng mạng + ổ đĩa -> tải TRƯỚC video kế tiếp trong lúc video trước đang dịch / lồng tiếng (không

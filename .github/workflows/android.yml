@@ -1,0 +1,52 @@
+# Dựng app Android "Subvideo" (điều khiển tool từ xa – android/) thành APK mỗi khi mã app đổi.
+# APK: tab Actions → lần chạy mới nhất → Artifacts, hoặc trang Releases → "android-latest".
+name: Android APK
+
+on:
+  push:
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Dựng APK
+        working-directory: android
+        run: gradle --no-daemon --stacktrace assembleRelease
+
+      - name: Đặt tên file
+        run: cp android/app/build/outputs/apk/release/app-release.apk Subvideo-dieu-khien.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Subvideo-dieu-khien-apk
+          path: Subvideo-dieu-khien.apk
+
+      - name: Đăng lên Releases (android-latest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete android-latest --yes --cleanup-tag || true
+          gh release create android-latest Subvideo-dieu-khien.apk --prerelease \
+            --target "${{ github.sha }}" --title "Subvideo – app điều khiển (Android)" \
+            --notes "App điều khiển tool Subvideo từ điện thoại. Tải file APK về điện thoại rồi cài (cho phép cài từ nguồn này). Dựng từ ${{ github.sha }}."

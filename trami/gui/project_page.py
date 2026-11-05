@@ -77,6 +77,54 @@ def _rowlbl(text: str) -> QWidget:
     return lb
 
 
+def recognize_message(p, n: int, method: str, separate: bool, st: dict) -> str:
+    """Thông báo sau "1. Nghe & tách câu" (dùng chung cho nút trên máy và điều khiển từ xa – 2.3.0)."""
+    o = {"method": method, "separate": separate}
+    r = p.data.get("asr_rescued", 0)
+    msg = f"Đã lấy {n} câu phụ đề" + (f" (nghe lại được thêm {r} câu bị sót)" if r else "")
+    rl = p.data.get("asr_relisten") or {}
+    if o["method"] != "ocr" and rl.get("cuts"):
+        msg += f" · nghe lại {rl['cuts']} chỗ cắt khúc giữa lúc nói" + \
+            (f", nối {rl['merged']} câu bị chặt đôi" if rl.get("merged") else "") + \
+            (f", sửa {rl['fixed']} chữ" if rl.get("fixed") else "")
+    if o["method"] != "ocr" and p.data.get("asr_joined"):
+        msg += f" · nối lại {p.data['asr_joined']} câu bị cắt ngang"
+    if o["method"] != "ocr" and p.data.get("ai_joined"):
+        msg += f" · AI nối thêm {p.data['ai_joined']} câu theo nghĩa"
+    if o["method"] != "ocr" and p.data.get("ai_join_note"):
+        msg += " · ⚠ " + p.data["ai_join_note"]
+    if o["method"] != "ocr" and p.data.get("songs_found"):
+        msg += f" · {p.data['songs_found']} câu là lời bài hát – đã đánh dấu 🎵 (không lồng tiếng)"
+    if o["method"] != "ocr" and p.data.get("noise_found"):
+        msg += (f" · ⚠ {p.data['noise_found']} câu nghi là nhạc / tiếng động bị nghe thành lời – tab Phụ đề "
+                "bấm 'Tích câu nghi nghe nhầm', nghe lại rồi Xoá")
+    if pipeline.listen_note(p):
+        msg += " · " + pipeline.listen_note(p)
+    if p.data.get("snap_stats"):
+        msg += " · " + pipeline.snap_note(p.data["snap_stats"])
+    if o["method"] == "asr":
+        msg += " · kiểu tách: " + dict(C.SPLIT_STYLES).get(st.get("split_style", "dub"), "").split(" –")[0]
+    used = {"qwen3": "Qwen3-ASR", "firered": "FireRedASR2", "sensevoice": "SenseVoice",
+            "paraformer": "Paraformer", "whisper": "Whisper"}.get(p.data.get("asr_engine_used", ""), "")
+    if o["method"] == "asr" and used:
+        msg += f" · nghe bằng {used}"
+    if o["method"] != "ocr" and p.data.get("asr_warning"):
+        msg += "  ⚠ " + p.data["asr_warning"]
+    if o["method"] != "ocr" and p.data.get("sep_warning"):
+        msg += "  ⚠ " + p.data["sep_warning"]
+    elif o["method"] != "ocr" and o["separate"] and pipeline.stems(p):
+        msg += f" · đã tách giọng / nhạc nền bằng {pipeline.sep_model_name(p)} (dùng được ở tab Âm thanh)"
+    if o["method"] != "ocr":
+        msg += " · " + pipeline.speaker_note(p, st)
+    if o["method"] in ("ocr", "hybrid"):
+        note = pipeline.ocr_note(p)
+        if note:
+            msg += " · " + note
+        if p.data.get("ocr_warning"):
+            msg = "⚠ " + p.data["ocr_warning"]
+    return msg
+
+
 def ocr_box_from_detect(r: dict) -> dict:
     """Kết quả "Tự dò" -> khung quét: hết chiều ngang, từ ~1,3 dòng trên dòng phụ đề đầu tiên (câu 2 dòng) tới sát
     dưới chân chữ."""
@@ -4120,49 +4168,7 @@ class ProjectPage(QWidget):
         def fn(j, p):
             n = pipeline.recognize(p, o["method"], o["language"], region, o["ocr_fps"], st, j.update, j.cancelled,
                                    o["denoise"])
-            r = p.data.get("asr_rescued", 0)
-            msg = f"Đã lấy {n} câu phụ đề" + (f" (nghe lại được thêm {r} câu bị sót)" if r else "")
-            rl = p.data.get("asr_relisten") or {}
-            if o["method"] != "ocr" and rl.get("cuts"):
-                msg += f" · nghe lại {rl['cuts']} chỗ cắt khúc giữa lúc nói" + \
-                    (f", nối {rl['merged']} câu bị chặt đôi" if rl.get("merged") else "") + \
-                    (f", sửa {rl['fixed']} chữ" if rl.get("fixed") else "")
-            if o["method"] != "ocr" and p.data.get("asr_joined"):
-                msg += f" · nối lại {p.data['asr_joined']} câu bị cắt ngang"
-            if o["method"] != "ocr" and p.data.get("ai_joined"):
-                msg += f" · AI nối thêm {p.data['ai_joined']} câu theo nghĩa"
-            if o["method"] != "ocr" and p.data.get("ai_join_note"):
-                msg += " · ⚠ " + p.data["ai_join_note"]
-            if o["method"] != "ocr" and p.data.get("songs_found"):
-                msg += f" · {p.data['songs_found']} câu là lời bài hát – đã đánh dấu 🎵 (không lồng tiếng)"
-            if o["method"] != "ocr" and p.data.get("noise_found"):
-                msg += (f" · ⚠ {p.data['noise_found']} câu nghi là nhạc / tiếng động bị nghe thành lời – tab Phụ đề "
-                        "bấm 'Tích câu nghi nghe nhầm', nghe lại rồi Xoá")
-            if pipeline.listen_note(p):
-                msg += " · " + pipeline.listen_note(p)
-            if p.data.get("snap_stats"):
-                msg += " · " + pipeline.snap_note(p.data["snap_stats"])
-            if o["method"] == "asr":
-                msg += " · kiểu tách: " + dict(C.SPLIT_STYLES).get(st.get("split_style", "dub"), "").split(" –")[0]
-            used = {"qwen3": "Qwen3-ASR", "firered": "FireRedASR2", "sensevoice": "SenseVoice",
-                    "paraformer": "Paraformer", "whisper": "Whisper"}.get(p.data.get("asr_engine_used", ""), "")
-            if o["method"] == "asr" and used:
-                msg += f" · nghe bằng {used}"
-            if o["method"] != "ocr" and p.data.get("asr_warning"):
-                msg += "  ⚠ " + p.data["asr_warning"]
-            if o["method"] != "ocr" and p.data.get("sep_warning"):
-                msg += "  ⚠ " + p.data["sep_warning"]
-            elif o["method"] != "ocr" and o["separate"] and pipeline.stems(p):
-                msg += f" · đã tách giọng / nhạc nền bằng {pipeline.sep_model_name(p)} (dùng được ở tab Âm thanh)"
-            if o["method"] != "ocr":
-                msg += " · " + pipeline.speaker_note(p, st)
-            if o["method"] in ("ocr", "hybrid"):
-                note = pipeline.ocr_note(p)
-                if note:
-                    msg += " · " + note
-                if p.data.get("ocr_warning"):
-                    msg = "⚠ " + p.data["ocr_warning"]
-            return {"message": msg}
+            return {"message": recognize_message(p, n, o["method"], o["separate"], st)}
         self.submit("recognize", "Lấy phụ đề", fn)
 
     def sync_engine(self):
