@@ -50,6 +50,9 @@ def _encoder():
     if _enc is None:
         import torch
 
+        from .torchenv import guard_torchvision
+
+        guard_torchvision()
         try:
             from speechbrain.inference.speaker import EncoderClassifier
         except ImportError:  # speechbrain < 1.0

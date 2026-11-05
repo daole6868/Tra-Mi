@@ -14,6 +14,7 @@ DIR=/opt/subvideo-relay
 SVC=subvideo-relay
 IP_PORT="${SUBVIDEO_PORT:-8443}"
 LOCAL_PORT=8770
+RELAY_SRC="${SUBVIDEO_RELAY_SRC:-https://raw.githubusercontent.com/daole6868/Tra-Mi}"
 
 say() { printf '\n\033[1;33m== %s\033[0m\n' "$*"; }
 die() { printf '\n\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
@@ -46,7 +47,18 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 if [ -f "$HERE/relay.py" ]; then
   cp "$HERE/relay.py" "$DIR/relay.py"
 else   # bản 1 file (tool tạo bằng nút "Lưu file cài VPS…"): chương trình trạm nằm ở cuối file này
-  sed -n '/^#__RELAY_BEGIN__$/,/^#__RELAY_END__$/p' "$0" | sed '1d;$d' | sed 's/^#//' | base64 -d > "$DIR/relay.py" || true
+  sed -n '/^#__RELAY_BEGIN__$/,/^#__RELAY_END__$/p' "$0" 2>/dev/null | sed '1d;$d' | sed 's/^#//' | base64 -d > "$DIR/relay.py" 2>/dev/null || true
+fi
+if [ ! -s "$DIR/relay.py" ]; then   # chỉ tải mỗi file này về -> lấy chương trình trạm thẳng từ GitHub của tool
+  for REF in claude/auto-video-translation-tool-c4cr0q main; do
+    if curl -fsSL --max-time 60 "$RELAY_SRC/$REF/vps/relay.py" -o "$DIR/relay.py.tmp" && \
+       python3 -m py_compile "$DIR/relay.py.tmp" 2>/dev/null; then
+      mv "$DIR/relay.py.tmp" "$DIR/relay.py"
+      echo "Đã tải relay.py từ GitHub ($REF)"
+      break
+    fi
+    rm -f "$DIR/relay.py.tmp"
+  done
 fi
 [ -s "$DIR/relay.py" ] || die "Thiếu relay.py – đặt relay.py cùng thư mục với file này (hoặc dùng file cài 1 file do tool tạo)"
 id subvideo >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin subvideo

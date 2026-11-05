@@ -13826,3 +13826,68 @@ def test_remote_server_tunnel_relay_e2e(tmp_path):
         rs.SERVER.stop()
         relay.terminate()
         relay.wait(10)
+
+
+def test_torchenv_broken_torchvision_guard(tmp_path):
+    """2.3.1: torchvision lệch PyTorch -> transformers báo "Could not import module 'PreTrainedModel'" (lỗi gốc
+    "operator torchvision::nms does not exist") -> VieNeu / OmniVoice / Qwen3-ASR / Hy-MT2 không nạp được. Tiến trình AI
+    giấu torchvision hỏng (tool không cần nó) + thông báo có lỗi gốc và lệnh sửa."""
+    from trami import torchenv as te
+
+    # bản PyTorch dựng kèm theo thông tin gói (Requires-Dist: torch==…)
+    assert te.mismatch({"torch": "2.11.0+cu128", "torchvision": "0.26.0+cu128", "torchaudio": "2.11.0+cu128"},
+                       {"torchvision": "2.11.0", "torchaudio": "2.11.0"}) == []
+    bad = te.mismatch({"torch": "2.12.0+cu128", "torchvision": "0.26.0+cu128"}, {"torchvision": "2.11.0"})
+    assert len(bad) == 1 and "torchvision 0.26.0+cu128" in bad[0] and "2.11.0" in bad[0]
+    # không có thông tin gói: quy luật 2.N <-> 0.(N+15)
+    assert te.mismatch({"torch": "2.11.0+cu128", "torchvision": "0.26.1"}, {}) == []
+    assert te.mismatch({"torch": "2.11.0+cu128", "torchvision": "0.22.0"}, {})
+    # PyTorch bị thay bằng bản CPU, torchvision / torchaudio vẫn bản card
+    assert any("bản CPU" in b for b in te.mismatch({"torch": "2.12.0", "torchaudio": "2.11.0+cu128"},
+                                                   {"torchaudio": "2.11.0"}))
+    cmd = te.fix_cmd({"torch": "2.11.0+cu128", "torchvision": "0.22.0", "torchaudio": "2.7.0"})
+    assert '"torchvision==0.26.*"' in cmd and '"torchaudio==2.11.*"' in cmd and "whl/cu128" in cmd
+    assert "CaiDat_AI_NangCao" in te.fix_cmd({"torch": "2.12.0", "torchvision": "0.26.0+cu128"})
+
+    # chuỗi lỗi kiểu transformers: lỗi gốc + cách sửa
+    try:
+        try:
+            raise RuntimeError("operator torchvision::nms does not exist")
+        except RuntimeError as e:
+            raise ModuleNotFoundError("Could not import module 'PreTrainedModel'. Are this object's requirements "
+                                      "defined correctly?") from e
+    except ModuleNotFoundError as e:
+        assert "torchvision::nms" in str(te.root_error(e))
+        msg = te.load_error("VieNeu", e)
+    assert msg.startswith("Không nạp được VieNeu: transformers không nạp được PreTrainedModel")
+    assert "lỗi gốc: RuntimeError: operator torchvision::nms does not exist" in msg
+    assert "pip install" in msg or "CaiDat_AI_NangCao" in msg   # máy test không có PyTorch -> cài lại cả bộ
+    try:
+        raise ModuleNotFoundError("No module named 'sea_g2p'")
+    except ModuleNotFoundError as e:
+        assert "pip install sea_g2p" in te.hint(e)
+
+    # torchvision hỏng thật (import ra RuntimeError) -> tiến trình giấu nó, thư viện khác coi như chưa cài
+    pkg = tmp_path / "fake" / "torchvision"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text('raise RuntimeError("operator torchvision::nms does not exist")\n', "utf-8")
+    code = ("import importlib.util, sys\n"
+            "from trami import torchenv as te\n"
+            "r = te.guard_torchvision()\n"
+            "assert 'torchvision::nms' in r, r\n"
+            "assert importlib.util.find_spec('torchvision') is None\n"
+            "try:\n    import torchvision\nexcept ImportError:\n    pass\nelse:\n    raise SystemExit('chưa giấu')\n"
+            "assert te.guard_torchvision() == r\n"
+            "print('OK')\n")
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(tmp_path / "fake"), str(ROOT)]),
+               TRAMI_DATA=str(tmp_path / "data"))
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, cwd=str(tmp_path),
+                       timeout=120)
+    assert r.returncode == 0 and "OK" in r.stdout, r.stdout + r.stderr
+    assert "bỏ qua torchvision" in r.stderr
+    # torchvision lành / chưa cài: không đụng gì
+    r = subprocess.run([sys.executable, "-c", "from trami import torchenv as te; print(repr(te.guard_torchvision()))"],
+                       capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=str(ROOT),
+                                                                TRAMI_DATA=str(tmp_path / "data")),
+                       cwd=str(tmp_path), timeout=120)
+    assert r.returncode == 0 and r.stdout.strip() == "''", r.stdout + r.stderr

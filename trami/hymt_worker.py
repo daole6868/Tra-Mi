@@ -52,6 +52,9 @@ def main(repo: str = REPO) -> None:
     def prog(x: float, msg: str):
         _reply(proto, {"progress": round(x, 4), "msg": msg})
 
+    from .torchenv import guard_torchvision, load_error
+
+    guard_torchvision()
     try:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -71,7 +74,7 @@ def main(repo: str = REPO) -> None:
         if tok.pad_token is None:
             tok.pad_token = tok.eos_token
     except Exception as e:  # noqa: BLE001
-        _reply(proto, {"error": f"Không nạp được Hy-MT2: {type(e).__name__}: {e}"})
+        _reply(proto, {"error": load_error("Hy-MT2", e)})
         return
     _reply(proto, {"ready": True, "sr": 0})
     batch = 8 if dev != "cpu" else 2

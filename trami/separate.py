@@ -409,6 +409,9 @@ def _find(outs: list, tmp: Path) -> tuple[Path, Path]:
 
 def _separate_whole(mix: Path, tmp: Path, model: str, progress, cancel) -> tuple[Path, Path, str]:
     """Phim ngắn (≤ ~13 phút): tách cả bài 1 lần (kết hợp nhiều mô hình do thư viện làm)."""
+    from .torchenv import guard_torchvision
+
+    guard_torchvision()
     from audio_separator.separator import Separator
 
     from .progress_hook import tqdm_progress
@@ -439,6 +442,9 @@ def _separate_chunked(mix: Path, tmp: Path, model: str, chunks: list[tuple[int, 
                       cancel) -> tuple[Path, Path, str]:
     """Phim dài: mỗi mô hình nạp 1 lần, tách lần lượt từng đoạn ~10 phút, ghi nối dần ra file -> RAM thấp; kết hợp
     nhiều mô hình = trung bình các bản tách (như "avg_wave" của thư viện, đọc / ghi từng khối)."""
+    from .torchenv import guard_torchvision
+
+    guard_torchvision()
     from audio_separator.separator import Separator
 
     from .progress_hook import tqdm_progress

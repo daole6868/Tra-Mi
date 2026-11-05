@@ -139,6 +139,9 @@ def main(repo: str = "Qwen/Qwen3-ASR-1.7B-hf") -> None:
     def prog(x: float, msg: str):
         _reply(proto, {"progress": round(x, 4), "msg": msg})
 
+    from .torchenv import guard_torchvision, load_error
+
+    guard_torchvision()
     try:
         import torch
         from transformers import (AutoProcessor, LogitsProcessor, LogitsProcessorList, Qwen3ASRForConditionalGeneration,
@@ -159,7 +162,7 @@ def main(repo: str = "Qwen/Qwen3-ASR-1.7B-hf") -> None:
         proc = _load(AutoProcessor, repo)
         state = {"model": load_asr()}
     except Exception as e:  # noqa: BLE001
-        _reply(proto, {"error": f"Không nạp được Qwen3-ASR: {type(e).__name__}: {e}"})
+        _reply(proto, {"error": load_error("Qwen3-ASR", e)})
         return
     if dev == "cpu":
         budget, one_model = 56.0, False

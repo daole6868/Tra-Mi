@@ -57,6 +57,9 @@ def main(repo: str = "k2-fsa/OmniVoice") -> None:
     def prog(x: float, msg: str):
         _reply(proto, {"progress": round(x, 4), "msg": msg})
 
+    from .torchenv import guard_torchvision, load_error
+
+    guard_torchvision()
     try:
         import torch
         from omnivoice import OmniVoice
@@ -73,7 +76,7 @@ def main(repo: str = "k2-fsa/OmniVoice") -> None:
         sr = int(getattr(model, "sampling_rate", None) or 24000)
         fix_short_duration(model)
     except Exception as e:  # noqa: BLE001
-        _reply(proto, {"error": f"Không nạp được OmniVoice: {type(e).__name__}: {e}"})
+        _reply(proto, {"error": load_error("OmniVoice", e)})
         return
     _reply(proto, {"ready": True, "sr": sr})
 

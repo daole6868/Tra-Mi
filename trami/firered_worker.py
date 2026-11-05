@@ -45,6 +45,9 @@ def main(repo: str = "FireRedTeam/FireRedASR2-AED") -> None:
     def prog(x: float, msg: str):
         _reply(proto, {"progress": round(x, 4), "msg": msg})
 
+    from .torchenv import guard_torchvision, load_error
+
+    guard_torchvision()
     try:
         import torch
 
@@ -66,7 +69,7 @@ def main(repo: str = "FireRedTeam/FireRedASR2-AED") -> None:
             prog(0.5, "Đang nạp bộ đặt dấu câu FireRedPunc")
             punc = Punctuator(punc_dir, dev)
     except Exception as e:  # noqa: BLE001
-        _reply(proto, {"error": f"Không nạp được FireRedASR2: {type(e).__name__}: {e}"})
+        _reply(proto, {"error": load_error("FireRedASR2", e)})
         return
     budget = 56.0 if dev == "cpu" else vram_plan(total)[0]
     _reply(proto, {"ready": True, "sr": SR, "punc": punc is not None})

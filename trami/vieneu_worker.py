@@ -141,6 +141,9 @@ def main(mode: str = "v3turbo") -> None:
         sys.stdin.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
     except Exception:
         pass
+    from .torchenv import guard_torchvision, load_error
+
+    guard_torchvision()   # torchvision lệch PyTorch -> transformers không nạp được PreTrainedModel (2.3.1)
     try:
         from vieneu import Vieneu
 
@@ -154,7 +157,7 @@ def main(mode: str = "v3turbo") -> None:
             tts = Vieneu(mode=mode)
         sr = int(getattr(tts, "sample_rate", 48000))
     except Exception as e:  # noqa: BLE001
-        _reply(proto, {"error": f"Không nạp được VieNeu: {type(e).__name__}: {e}"})
+        _reply(proto, {"error": load_error("VieNeu", e)})
         return
     if mode != "v3nano" and short_caps():
         print("[Subvideo] VieNeu: câu ≤ 4 tiếng dùng trần số khung thấp (chống đọc lặp lời)", file=sys.stderr, flush=True)

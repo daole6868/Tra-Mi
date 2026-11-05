@@ -44,6 +44,9 @@ def _device(pref: str = "auto") -> str:
 
 
 def _model(key: str, **kw):
+    from .torchenv import guard_torchvision
+
+    guard_torchvision()
     from funasr import AutoModel
 
     os.environ.setdefault("MODELSCOPE_CACHE", str(MODELS_DIR / "funasr"))

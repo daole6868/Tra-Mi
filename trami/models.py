@@ -382,6 +382,9 @@ def download(key: str, progress: Prog | None = None, cancel=None, settings: dict
         progress(0.0, f"{label}: đang kết nối…")
 
     if key in SEP_KEYS:
+        from .torchenv import guard_torchvision
+
+        guard_torchvision()
         from audio_separator.separator import Separator
 
         from .separate import SEP_DIR

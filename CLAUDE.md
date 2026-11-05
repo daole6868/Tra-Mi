@@ -830,7 +830,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   ngẫu nhiên mỗi lần mở -> máy chủ tin `X-SV-Client`, thiết bị ghi "vps"); nối lại 2 -> 60 s; mã 4401 sai mã, 4409. `vps/relay.py`
   trạm (chỉ Python 3.8+ + aiohttp ≥ 3.8 – Ubuntu 22.04 apt python3-aiohttp; không lưu gì; tool chưa nối -> 503 JSON
   `offline` / trang báo; 1 tool, nối mới thay cũ; `HEAD_TIMEOUT` 600 s; điện thoại bỏ dở -> CANCEL) + `vps/cai_vps.sh`
-  (`sudo bash cai_vps.sh [tên-miền]`: apt python3-aiohttp, user hệ thống subvideo, systemd `subvideo-relay` (ProtectSystem,
+  (`sudo bash cai_vps.sh [tên-miền]`; thiếu relay.py cạnh file / trong file -> tự tải từ GitHub `RELAY_SRC` nhánh claude/… rồi main (2.3.1): apt python3-aiohttp, user hệ thống subvideo, systemd `subvideo-relay` (ProtectSystem,
   MemoryMax 300M); tên miền trỏ đúng + cổng 80/443 trống -> Caddy (chứng chỉ thật, `/etc/caddy/subvideo.caddy` + import,
   relay 127.0.0.1:8770 trust_proxy), không thì chứng chỉ tự ký cổng 8443 (`SUBVIDEO_PORT`); ufw; giữ mã cũ khi chạy lại; in
   `subvideo-vps://…`; `--go` gỡ). `web/` trang điện thoại (index.html + app.css + app.js, không thư viện ngoài, chữ gắn bằng
@@ -856,7 +856,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `Store` (SharedPreferences), `Pin.pickBase` (tự chọn: mạng nhà trả lời ping 2,5 s -> mạng nhà, không thì VPS; hoặc cố
   định), `Notify` (kênh jobs / files, `PollWorker` WorkManager 15 phút hỏi /api/events, `lastEvent` theo giờ máy tính, trang
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
-- `tests/test_core.py` – `python -m pytest -q tests` (312 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử; hỏng -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch.
+- `tests/test_core.py` – `python -m pytest -q tests` (313 test; 3 test cần gói AI / PyTorch; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -2786,7 +2787,9 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   8,0 -> 9,5 s đúng lúc câu mới hiện, Tự dò, lưu khung, sửa câu, tích câu, loại câu lồng tiếng, xuất 9:16; file cài VPS
   `bash -n` + giải ra đúng relay.py. Sandbox có gói cryptography hỏng (lõi Rust PanicException) -> bắt BaseException, chạy
   http. Chưa chạy: app Android trên điện thoại thật, VPS thật (Caddy / chứng chỉ thật), Windows (giữ máy thức, tự mở tool).
+- 2.3.1: ảnh lỗi "Lồng tiếng / Tạo lại giọng 6743 câu: RuntimeError: Không nạp được VieNeu: ModuleNotFoundError: Could not import module 'PreTrainedModel'…". Đọc mã transformers 5.22: lỗi này là bộ nạp lười che lỗi thật (ModuleNotFoundError / RuntimeError / AttributeError khi import transformers.modeling_utils); chuỗi import đó kéo transformers.image_utils -> có Pillow + torchvision thì `import torchvision`. Tái hiện đúng y thông báo: torch 2.14 + Pillow + torchvision 0.22.1 (dựng cho torch 2.7.1) -> lỗi gốc "operator torchvision::nms does not exist" (torchvision lệch PyTorch – 1 gói khác nâng / thay torch). Mã tool không đổi gì ở đường này (rà diff 2.2.0 → 2.3.0, môi trường tiến trình). Sửa: `trami/torchenv.py` – 5 tiến trình AI + tách giọng / phân người nói / FunASR giấu torchvision hỏng (tool không cần) -> VieNeu nạp được (thử bằng VieNeu giả import PreTrainedModel như bản thật: trước lỗi, sau ready); thông báo lỗi nạp có lỗi gốc + lệnh sửa; Cài đặt báo bộ PyTorch lệch. VPS: người dùng bỏ tên miền, lấy file từ GitHub (kho công khai) -> cai_vps.sh tự tải relay.py; lệnh: curl -fsSLO …/vps/cai_vps.sh && sudo bash cai_vps.sh.
 ## Vấn đề đang mở
+- 2.3.1: chờ người dùng chép 13 file, mở lại tool, bấm lại Tạo lại giọng – VieNeu phải chạy; Cài đặt dòng PyTorch có ⚠ lệch bản -> chạy lệnh sửa ghi ở đó (tắt tool trước). Còn lỗi -> gửi nguyên thông báo (giờ có "lỗi gốc").
 - 2.3.0: chờ người dùng (1) `.venv\Scripts\python -m pip install -U aiohttp cryptography`, mở tool → Cài đặt → Điều
   khiển từ xa → bật (Windows hỏi tường lửa: cho phép mạng riêng); (2) cài APK (Releases "android-latest" hoặc tab Actions →
   Artifacts) → Quét mã QR → thử cùng Wi-Fi: Trang chủ, chọn vùng phụ đề (Đọc thử), chạy bước 1, sửa câu; (3) VPS: Lưu file

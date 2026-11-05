@@ -1126,6 +1126,11 @@ class SettingsPage(QWidget):
                     torch_info = f"GPU ✓ ({card})" + (f" · PyTorch {ver}" if ver else "")
                 else:
                     torch_info = "CPU (không thấy card NVIDIA)" + (f" · PyTorch {ver}" if ver else "")
+                from ..torchenv import fix_cmd, mismatch
+
+                bad = mismatch()   # torchvision / torchaudio lệch PyTorch (2.3.1: VieNeu báo "PreTrainedModel")
+                if bad:
+                    torch_info += f"\n⚠ {'; '.join(bad)} – sửa: tắt tool, chạy {fix_cmd()}"
             return (detect_device()[0], separate.available(), asr_funasr.available(), diarize.available(),
                     tts.vieneu_available(), lama.available(), torch_info)
 
