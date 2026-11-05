@@ -13630,3 +13630,199 @@ def test_none_guard_220():
     for _ in range(20000):
         o.setObjectName("x")
     assert sys.getrefcount(None) > 1000
+
+
+# ------------------------------------------------------------------ điều khiển từ xa bằng điện thoại (2.3.0)
+
+def _free_port() -> int:
+    import socket
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _http(base, path, data=None, tok=None, headers=None, sv=True):
+    import urllib.error
+    import urllib.request
+
+    h = {"Content-Type": "application/json"}
+    if sv:
+        h["X-SV"] = "1"
+    if tok:
+        h["Authorization"] = "Bearer " + tok
+    h.update(headers or {})
+    r = urllib.request.Request(base + path, data=json.dumps(data).encode() if data is not None else None, headers=h)
+    try:
+        with urllib.request.urlopen(r, timeout=30) as f:
+            return f.status, f.read(), dict(f.headers)
+    except urllib.error.HTTPError as e:
+        return e.code, e.read(), dict(e.headers)
+
+
+def test_remote_auth_pair_vps_installer(tmp_path):
+    """Mật khẩu chỉ lưu băm, thẻ thiết bị chỉ lưu băm, mã ghép dùng 1 lần, chặn đoán mò; chuỗi kết nối VPS; file cài
+    VPS 1 file giải ra đúng chương trình trạm."""
+    import base64
+
+    from trami.remote import server as rs
+
+    h = rs.hash_pw("matkhau1")
+    assert h.startswith("pbkdf2$") and "matkhau1" not in h
+    assert rs.check_pw("matkhau1", h) and not rs.check_pw("sai", h) and not rs.check_pw("x", "")
+    with pytest.raises(ValueError):
+        rs.set_password("123")
+    d = rs.Devices(tmp_path / "dev.json")
+    tok, dev = d.add("Điện thoại", "1.2.3.4", "lan")
+    assert d.check(tok)["id"] == dev["id"] and d.check("sai") is None and d.check("") is None
+    assert tok not in (tmp_path / "dev.json").read_text() and "hash" not in d.list()[0]
+    assert d.list()[0]["online"] is True
+    assert d.revoke(dev["id"]) == 1 and d.check(tok) is None
+    p = rs.Pairing()
+    c = p.new()
+    assert len(c) == 6 and c.isdigit() and not p.take("abc") and p.take(c) and not p.take(c)
+    lim = rs.Limiter()
+    for _ in range(rs.FAIL_IP):
+        lim.fail("9.9.9.9")
+    assert lim.blocked("9.9.9.9") and not lim.blocked("8.8.8.8")
+    assert rs.parse_vps("subvideo-vps://sv.tenmien.vn?k=" + "a" * 48) == {
+        "remote_vps_url": "https://sv.tenmien.vn", "remote_vps_secret": "a" * 48, "remote_vps_fp": ""}
+    v = rs.parse_vps(" subvideo-vps://1.2.3.4:8443?k=" + "b" * 48 + "&fp=AB:CD ")
+    assert v["remote_vps_url"] == "https://1.2.3.4:8443" and v["remote_vps_fp"] == "abcd"
+    for bad in ("https://1.2.3.4", "subvideo-vps://1.2.3.4?k=ngan"):
+        with pytest.raises(ValueError):
+            rs.parse_vps(bad)
+    sh = rs.vps_installer()
+    assert sh.startswith("#!/usr/bin/env bash") and "\r" not in sh
+    blk = sh.split("#__RELAY_BEGIN__\n")[-1].split("#__RELAY_END__")[0]
+    assert base64.b64decode("".join(ln[1:] for ln in blk.splitlines())) == (ROOT / "vps" / "relay.py").read_bytes()
+    if shutil.which("bash"):
+        f = tmp_path / "cai.sh"
+        f.write_text(sh, encoding="utf-8")
+        assert subprocess.run(["bash", "-n", str(f)]).returncode == 0
+    # trang điện thoại: chữ từ máy tính không bao giờ gắn bằng innerHTML (chỉ hằng số icon trong file)
+    js = (ROOT / "trami" / "remote" / "web" / "app.js").read_text("utf-8")
+    assert js.count(".innerHTML =") == 1 and "eval(" not in js
+    if shutil.which("node"):
+        assert subprocess.run(["node", "--check", str(ROOT / "trami" / "remote" / "web" / "app.js")]).returncode == 0
+
+
+def test_remote_api_ops():
+    """Thao tác của điện thoại: bảng câu (lọc / tìm), sửa câu qua hàng việc (câu đã đổi trên máy -> từ chối), lưu vùng
+    phụ đề, cách xuất (xoá chữ Trung dùng vùng quét khi chưa khoanh vùng xoá), trạng thái dự án."""
+    from trami.project import Project
+    from trami.remote import api
+
+    p = Project.create("Thử điều khiển")
+    p.segments = [Segment(start=1, end=2, text="你好", trans="Xin chào", speaker="S1"),
+                  Segment(start=3, end=4.5, text="谢谢", trans="", speaker="S2"),
+                  Segment(start=5, end=6, text="再见", trans="Tạm biệt", speaker="S1")]
+    p.save()
+    d = api.lines(p.id)
+    assert d["total"] == 3 and d["empty"] == 1 and [r["i"] for r in d["rows"]] == [0, 1, 2]
+    assert [r["i"] for r in api.lines(p.id, flt="empty")["rows"]] == [1]
+    assert [r["i"] for r in api.lines(p.id, q="tạm")["rows"]] == [2]
+    j = api.edit_line(p.id, 1, "谢谢", "Cảm ơn")
+    assert j["status"] == "done", j
+    assert Project(p.id).segments[1].trans == "Cảm ơn" and Project(p.id).segments[1].extra.get("trans_user")
+    j = api.edit_line(p.id, 1, "câu khác", "X")
+    assert j["status"] == "error" and Project(p.id).segments[1].trans == "Cảm ơn"
+    with pytest.raises(api.ApiError):
+        api._box({"x": 0, "y": 0.5, "w": 0.01, "h": 0.2})
+    j = api.save_region(p.id, {"x": 0, "y": 0.7, "w": 1.2, "h": 0.2})
+    assert j["status"] == "done" and Project(p.id).data["ocr_box"] == {"x": 0.0, "y": 0.7, "w": 1.0, "h": 0.2}
+    j = api.export_settings(p.id, {"which": "both", "hardsub": "blur", "aspect": "9:16", "extra916": True, "crf": "23"})
+    e = Project(p.id).edit
+    assert j["status"] == "done" and e["subtitles"]["which"] == "both" and e["subtitles"]["burn"] is True
+    assert e["hardsub"]["mode"] == "blur" and e["hardsub"]["regions"] == [{"x": 0.0, "y": 0.7, "w": 1.0, "h": 0.2}]
+    assert e["aspect"] == "9:16" and "9:16" not in e["extra_ratios"] and e["crf"] == 23
+    api.export_settings(p.id, {"which": "none"})
+    assert Project(p.id).edit["subtitles"]["burn"] is False
+    j = api.delete_lines(p.id, [0], ["你好"])
+    assert j["status"] == "done" and [s.text for s in Project(p.id).segments] == ["谢谢", "再见"]
+    st = api.state()
+    me = next(x for x in st["projects"] if x["id"] == p.id)
+    assert me["n"] == 2 and me["bk"] in ("check", "heard")
+    det = api.detail(p.id)
+    assert det["n"] == 2 and det["box"]["y"] == 0.7 and det["box"]["w"] == 1.0 and not det["has_video"]
+    with pytest.raises(api.ApiError):
+        api.project("../../etc")
+    with pytest.raises(api.ApiError):
+        api.run_step(p.id, "recognize")           # chưa có video
+    assert api.set_settings({"translate_engine": "google", "gemini_api_key": "lộ key"})["saved"] == ["translate_engine"]
+
+
+def test_remote_server_tunnel_relay_e2e(tmp_path):
+    """Máy chủ trong tool + đường hầm + trạm VPS (tiến trình riêng) chạy thật trên máy: đăng nhập, sửa câu qua VPS,
+    tải file lớn + tua (Range) qua đường hầm, chặn yêu cầu thiếu X-SV, tool tắt -> trạm báo máy tính chưa kết nối."""
+    pytest.importorskip("aiohttp")
+    import socket
+    import time
+
+    from trami.project import Project
+    from trami.remote import server as rs
+
+    p = Project.create("Thử qua VPS")
+    p.segments = [Segment(start=1, end=2, text="你好", trans="", speaker="S1")]
+    big = tmp_path / "out.mp4"
+    big.write_bytes(os.urandom(3 * 1024 * 1024 + 123))
+    p.data["outputs"] = [{"path": str(big), "name": "out.mp4", "kind": "video", "time": 1}]
+    p.save()
+    rport, sport = _free_port(), _free_port()
+    key = "k" * 40
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"secret": key, "listen": "127.0.0.1", "port": rport}))
+    relay = subprocess.Popen([sys.executable, str(ROOT / "vps" / "relay.py"), "--config", str(cfg)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(100):
+            try:
+                socket.create_connection(("127.0.0.1", rport), 0.2).close()
+                break
+            except OSError:
+                time.sleep(0.1)
+        vps = f"http://127.0.0.1:{rport}"
+        st, body, _ = _http(vps, "/api/state")
+        assert st == 503 and json.loads(body)["offline"] is True
+        rs.set_password("matkhau123")
+        assert rs.SERVER.start(sport, https=False)
+        lan = f"http://127.0.0.1:{sport}"
+        assert _http(lan, "/api/ping")[0] == 200 and _http(lan, "/api/state")[0] == 401
+        assert _http(lan, "/api/login", {"password": "sai"})[0] == 401
+        st, body, hd = _http(lan, "/api/login", {"password": "matkhau123", "name": "Thử"})
+        tok = json.loads(body)["token"]
+        assert st == 200 and "HttpOnly" in hd.get("Set-Cookie", "")
+        rs.SERVER.set_tunnel(vps, "sai" * 10, "")
+        for _ in range(100):
+            if rs.SERVER.tunnel.state == "error":
+                break
+            time.sleep(0.05)
+        assert "từ chối" in rs.SERVER.tunnel.message
+        rs.SERVER.set_tunnel(vps, key, "")
+        for _ in range(100):
+            if rs.SERVER.tunnel.state == "on":
+                break
+            time.sleep(0.05)
+        assert rs.SERVER.tunnel.state == "on"
+        st, body, _ = _http(vps, "/api/me", tok=tok)
+        assert st == 200 and json.loads(body)["via"] == "vps"
+        st, body, _ = _http(vps, f"/api/p/{p.id}/lines/edit", {"i": 0, "text": "你好", "trans": "Xin chào"}, tok=tok)
+        assert st == 200 and json.loads(body)["status"] == "done" and Project(p.id).segments[0].trans == "Xin chào"
+        assert _http(vps, f"/api/p/{p.id}/lines/edit", {"i": 0, "trans": "x"}, tok=tok, sv=False)[0] == 403
+        st, body, hd = _http(vps, f"/api/p/{p.id}/out/0?dl=1", tok=tok)
+        assert st == 200 and body == big.read_bytes() and "attachment" in hd.get("Content-Disposition", "")
+        st, body, _ = _http(vps, f"/api/p/{p.id}/out/0", tok=tok, headers={"Range": "bytes=1000-1999"})
+        assert st == 206 and body == big.read_bytes()[1000:2000]
+        assert _http(vps, f"/api/p/{p.id}/out/7", tok=tok)[0] == 404
+        assert _http(vps, "/static/..%2F..%2Fconfig.py")[0] == 404
+        assert rs.DEVICES.list()[-1]["via"] == "vps"
+        rs.SERVER.stop()
+        time.sleep(0.3)
+        st, body, _ = _http(vps, "/api/state", tok=tok)
+        assert st == 503 and json.loads(body)["offline"] is True
+    finally:
+        rs.SERVER.stop()
+        relay.terminate()
+        relay.wait(10)
