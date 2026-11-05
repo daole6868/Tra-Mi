@@ -98,6 +98,34 @@ def _constraints() -> dict:
         return {}
 
 
+def _py() -> str:
+    """Python để chạy lệnh pip trong cửa sổ đen (pythonw.exe không hiện gì)."""
+    from pathlib import Path
+
+    exe = Path(sys.executable)
+    if exe.name.lower() == "pythonw.exe" and (exe.parent / "python.exe").exists():
+        exe = exe.parent / "python.exe"
+    return str(exe)
+
+
+def leftover() -> str:
+    """torchvision chỉ còn thư mục sót lại (gỡ / cài dở – Windows giữ file .pyd đang dùng) -> Python coi là "gói rỗng",
+    import được mà không có mã -> transformers tưởng có torchvision rồi lỗi "No module named 'torchvision.io'".
+    Trả đường dẫn thư mục đó ("" = không sao). Không import."""
+    import importlib.util
+
+    try:
+        if isinstance(sys.modules.get("torchvision", 0), type(None)):
+            return ""
+        spec = importlib.util.find_spec("torchvision")
+    except (ImportError, ValueError):
+        return ""
+    if spec is None or spec.origin not in (None, "namespace"):
+        return ""
+    locs = list(spec.submodule_search_locations or [])
+    return locs[0] if locs else "torchvision"
+
+
 def fix_cmd(vers: dict | None = None) -> str:
     """Lệnh cài lại cho khớp: còn file torch-constraints.txt (bộ đã cài lúc đầu) mà torch đã bị đổi -> cài lại đúng bộ
     đó; không thì cài torchvision / torchaudio đúng bản của torch đang có (cùng kho cu128 / cu126… của torch)."""
@@ -106,7 +134,7 @@ def fix_cmd(vers: dict | None = None) -> str:
     if FROZEN:
         return "bản exe: đóng gói lại trên máy (DongGoi_EXE.bat) sau khi sửa thư viện của bản Python"
     vers = versions() if vers is None else vers
-    py = f'"{sys.executable}" -m pip install --force-reinstall --no-deps'
+    py = f'"{_py()}" -m pip install --force-reinstall --no-deps'
     cons = _constraints()
     if cons.get("torch") and cons["torch"] != vers.get("torch"):
         tag = _tag(cons["torch"])
@@ -139,14 +167,20 @@ def guard_torchvision() -> str:
             return ""
     except (ImportError, ValueError):
         return ""
+    from .config import err_text
+
     try:
-        import torchvision  # noqa: F401
-        return ""
-    except BaseException as e:  # noqa: BLE001 – RuntimeError "operator torchvision::nms…", OSError DLL…
+        import torchvision
+
+        if getattr(torchvision, "__file__", None) is None:   # thư mục sót lại, không có mã (gỡ / cài dở)
+            TV_BROKEN = f"torchvision cài dở – chỉ còn thư mục {leftover() or 'torchvision'} (không có mã)"
+        else:
+            import torchvision.io  # noqa: F401  – transformers dùng 2 phần này; thiếu file -> lỗi khi nạp mô hình
+            import torchvision.transforms  # noqa: F401
+            return ""
+    except BaseException as e:  # noqa: BLE001 – RuntimeError "operator torchvision::nms…", OSError DLL, thiếu file…
         if isinstance(e, (KeyboardInterrupt, SystemExit)):
             raise
-        from .config import err_text
-
         TV_BROKEN = err_text(e)
     for k in [k for k in sys.modules if k == "torchvision" or k.startswith("torchvision.")]:
         sys.modules.pop(k, None)
@@ -179,7 +213,9 @@ def hint(e: BaseException) -> str:
     low = txt.lower()
     bad = mismatch()
     if "torchvision" in low or "torchaudio" in low:
-        why = "; ".join(bad) or "torchvision / torchaudio không khớp bản PyTorch"
+        lo = leftover() if "torchvision" in low else ""
+        why = (f"torchvision cài dở (chỉ còn thư mục {lo})" if lo else
+               "; ".join(bad) or "torchvision / torchaudio không khớp bản PyTorch")
         return f"{why} – sửa: tắt tool, chạy {fix_cmd()} rồi mở lại tool"
     m = re.search(r"No module named '([\w.]+)'", txt)
     if m:
@@ -193,10 +229,10 @@ def hint(e: BaseException) -> str:
             except Exception:  # noqa: BLE001
                 pin = ""
             return (f"thư viện transformers bị cài dở / thiếu file ({mod}) – sửa: tắt tool, chạy "
-                    f'"{sys.executable}" -m pip install --force-reinstall --no-deps "transformers{pin}"')
+                    f'"{_py()}" -m pip install --force-reinstall --no-deps "transformers{pin}"')
         if top == "torch":
             return f"thư viện PyTorch bị cài dở ({mod}) – chạy lại CaiDat_AI_NangCao.bat"
-        return f'thiếu gói {top} – sửa: tắt tool, chạy "{sys.executable}" -m pip install {_PKG.get(top, top)}'
+        return f'thiếu gói {top} – sửa: tắt tool, chạy "{_py()}" -m pip install {_PKG.get(top, top)}'
     if any(k in low for k in ("c10.dll", "winerror 1114", "winerror 126", "dll load failed", "torch_cpu.dll")):
         return "thư viện PyTorch hỏng (DLL) – chạy lại CaiDat_AI_NangCao.bat"
     if bad:

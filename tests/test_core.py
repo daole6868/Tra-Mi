@@ -13885,6 +13885,22 @@ def test_torchenv_broken_torchvision_guard(tmp_path):
                        timeout=120)
     assert r.returncode == 0 and "OK" in r.stdout, r.stdout + r.stderr
     assert "bỏ qua torchvision" in r.stderr
+    # torchvision gỡ / cài dở: chỉ còn thư mục không có mã (Python coi là gói rỗng, transformers tưởng có rồi lỗi
+    # "No module named 'torchvision.io'") -> cũng giấu
+    left = tmp_path / "left" / "torchvision"
+    left.mkdir(parents=True)
+    (left / "_C.pyd").write_bytes(b"")
+    code2 = ("import importlib.util\n"
+             "from trami import torchenv as te\n"
+             "assert te.leftover().endswith('torchvision'), te.leftover()\n"
+             "r = te.guard_torchvision()\n"
+             "assert 'cài dở' in r, r\n"
+             "assert importlib.util.find_spec('torchvision') is None and te.leftover() == ''\n"
+             "print('OK')\n")
+    env2 = dict(env, PYTHONPATH=os.pathsep.join([str(tmp_path / "left"), str(ROOT)]))
+    r = subprocess.run([sys.executable, "-c", code2], capture_output=True, text=True, env=env2, cwd=str(tmp_path),
+                       timeout=120)
+    assert r.returncode == 0 and "OK" in r.stdout, r.stdout + r.stderr
     # torchvision lành / chưa cài: không đụng gì
     r = subprocess.run([sys.executable, "-c", "from trami import torchenv as te; print(repr(te.guard_torchvision()))"],
                        capture_output=True, text=True, env=dict(os.environ, PYTHONPATH=str(ROOT),

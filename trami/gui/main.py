@@ -779,6 +779,7 @@ class SettingsPage(QWidget):
         v.setSpacing(16)
         v.addWidget(label("Cài đặt", "h1"))
         self.status = label("", "muted", wrap=True)
+        self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)   # chép được lệnh sửa
         v.addWidget(self.status)
         grid = QGridLayout()
         grid.setSpacing(16)
@@ -1126,9 +1127,12 @@ class SettingsPage(QWidget):
                     torch_info = f"GPU ✓ ({card})" + (f" · PyTorch {ver}" if ver else "")
                 else:
                     torch_info = "CPU (không thấy card NVIDIA)" + (f" · PyTorch {ver}" if ver else "")
-                from ..torchenv import fix_cmd, mismatch
+                from ..torchenv import fix_cmd, leftover, mismatch
 
                 bad = mismatch()   # torchvision / torchaudio lệch PyTorch (2.3.1: VieNeu báo "PreTrainedModel")
+                lo = leftover()    # torchvision chỉ còn thư mục sót (gỡ / cài dở)
+                if lo:
+                    bad.insert(0, f"torchvision cài dở (chỉ còn thư mục {lo}, tool tự bỏ qua)")
                 if bad:
                     torch_info += f"\n⚠ {'; '.join(bad)} – sửa: tắt tool, chạy {fix_cmd()}"
             return (detect_device()[0], separate.available(), asr_funasr.available(), diarize.available(),
