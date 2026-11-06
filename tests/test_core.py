@@ -8377,6 +8377,55 @@ def test_dub_by_clause_joins_parts_on_original_timing(tmp_path, monkeypatch):
     assert tab == st5["placed_tab"]
 
 
+def test_address_follows_source_234():
+    """2.3.4: xưng hô theo đúng đại từ / cách gọi của dòng gốc ở MỌI lời nhắc dịch (他 không thành cô ta, 哥 không thành
+    em); form thể loại / kỹ năng / hồ sơ phim / hình video chỉ là gợi ý cho dòng không ghi rõ, câu nhắc gắn cuối."""
+    from trami import skills
+    from trami import translate as tr
+
+    vi = tr.system_prompt("vi")
+    assert "XƯNG HÔ THEO ĐÚNG DÒNG GỐC" in vi and "KHÔNG thành cô ta" in vi and "KHÔNG thành em / chị" in vi
+    assert "KHÔNG coi là nghe nhầm" in vi
+    for tg in ("en", "th", "ja", "ko"):
+        sp = tr.system_prompt(tg)
+        assert "FOLLOW THE SOURCE LINE" in sp and "never she" in sp and "NOT treated as recognition errors" in sp
+    assert "chỉ dùng cho dòng gốc KHÔNG ghi rõ" in tr.system_prompt("vi", genre="- x")
+    assert "only for lines without an explicit pronoun" in tr.system_prompt("en", genre="x")
+    # câu nhắc ở CUỐI lời nhắc (sau form thể loại + kỹ năng của người dùng)
+    t = tr.Translator({"openai_api_key": "x", "translate_style": "tu_tien"}, "openai", target="vi",
+                      skill="- Luôn xưng ta – ngươi")
+    assert t.system().endswith(tr.ADDRESS_TAIL_VI) and "Trúc Cơ" in t.system()
+    te = tr.Translator({"openai_api_key": "x"}, "openai", target="en")
+    assert te.system().endswith(tr.ADDRESS_TAIL_EN)
+    # kỹ năng không được đè luật xưng hô; kỹ năng / form có sẵn ghi rõ
+    assert "xưng hô theo đúng đại từ" in skills.with_skill("SYS", "- abc")
+    assert "XƯNG HÔ THEO ĐÚNG DÒNG GỐC" in skills.STD_SKILL["text"]
+    assert all("giữ đúng nam / nữ" in x["text"] for x in skills.BUILTIN if x["id"] in ("meme", "co_trang_kn"))
+    # rút gọn / sửa vế / kiểm tra / dịch có nhìn hình / hồ sơ phim
+    assert "không đổi nam / nữ" in tr.SHORTEN_PROMPT and "không đổi nam / nữ" in tr.CLAUSE_PROMPT
+    assert "never change he / she" in tr.SHORTEN_PROMPT_EN and "never switch he / she" in tr.CLAUSE_PROMPT_EN
+    rv = skills.REVIEW_PROMPT.format(src="tiếng Trung", lang="tiếng Việt")
+    assert "XƯNG HÔ SAI VAI" in rv and "他 thành cô ta" in rv and "KHÔNG đổi xưng hô mà câu gốc đã ghi rõ" in rv
+    assert "vẫn theo\ndòng gốc dù hình cho thấy khác" in tr.VIDEO_RULE_VI and "still wins" in tr.VIDEO_RULE_EN
+    assert "他 / 她 = nam / nữ" in skills.PROFILE_PROMPT.format(lang="tiếng Việt")
+    # rút gọn / sửa vế gửi kèm câu nhắc; kiểm tra bản dịch cũng vậy
+    seen = []
+
+    class LLM:
+        def chat(self, sysp, user, **k):
+            seen.append(sysp)
+            return '{"1": "Anh đi."}'
+
+    t.llm = LLM()
+    t.shorten([("哥，你走吧。", "Anh à, anh đi đi nhé.", 3)])
+    t.match_clauses([(["哥", "你走吧"], "Anh đi đi.")])
+    assert len(seen) == 2 and all(x.endswith(tr.ADDRESS_TAIL_VI) for x in seen)
+    seen.clear()
+    skills.review_lines(LLM(), [(0, "他来了。", "Cô ta tới rồi.", 6)], "", "", "tiếng Trung", "tiếng Việt", "tiếng",
+                        genre="- x")
+    assert seen and seen[0].endswith(tr.ADDRESS_TAIL_VI) and "chỉ dùng cho dòng gốc KHÔNG ghi rõ" in seen[0]
+
+
 def test_translate_forms_2113(monkeypatch):
     """2.1.13: luật chung (đúng số dòng, đọc 2 dòng trước / sau, không thêm từ), form thể loại phim (sửa được), AI trả
     "dau" -> phát hiện dòng bị lệch rồi hỏi lại kèm các dòng ngay trước / sau; kiểm tra bản dịch kèm ngữ cảnh ±2."""

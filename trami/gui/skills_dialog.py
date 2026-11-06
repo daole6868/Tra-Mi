@@ -14,7 +14,8 @@ from .widgets import button, hbox, label
 
 HINT = ("Viết luật cho AI như dặn một người dịch: thể loại, cách xưng hô, tên riêng / meme dịch thế nào, độ dài câu… "
         "Mỗi ý 1 dòng. Kỹ năng được gắn vào lời nhắc của MỌI công cụ dịch AI (DeepSeek, Claude, GPT, Gemini, Ollama, API "
-        "tương thích OpenAI) khi dịch, sửa lỗi nghe và kiểm tra bản dịch.")
+        "tương thích OpenAI) khi dịch, sửa lỗi nghe và kiểm tra bản dịch. Xưng hô theo đúng phụ đề gốc (他 / 她, 哥 / 姐… "
+        "không đổi nam nữ, vai vế) luôn được giữ – cách xưng hô trong kỹ năng chỉ dùng cho câu gốc không ghi rõ.")
 
 
 class SkillsDialog(QDialog):

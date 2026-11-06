@@ -11,7 +11,8 @@ from .widgets import button, hbox, label
 
 HINT = ("Form của thể loại được gắn vào lời nhắc của AI mỗi lần dịch (và khi AI kiểm tra bản dịch): xưng hô, thuật ngữ "
         "(chữ gốc -> cách dịch), giọng văn. Mỗi ý 1 dòng. Luật chung luôn áp dụng: đúng số dòng, đọc 2 câu trước / sau, "
-        "không thêm bớt ý. Sửa xong bấm Lưu; 'Về mặc định' lấy lại nội dung gốc.")
+        "không thêm bớt ý, xưng hô theo đúng phụ đề gốc (他 / 她, 哥 / 姐… không đổi nam nữ, vai vế) – cặp xưng hô trong "
+        "form chỉ dùng cho câu gốc không ghi rõ. Sửa xong bấm Lưu; 'Về mặc định' lấy lại nội dung gốc.")
 
 
 class GenresDialog(QDialog):

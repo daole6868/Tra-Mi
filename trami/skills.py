@@ -31,7 +31,8 @@ BUILTIN = [
         "- Tên công nghệ / AI viết đúng tên quốc tế: D神 = DeepSeek (nhân vật cá voi, gọi 'Thần D'), 小克 = Claude, GPT, "
         "Gemini, Kimi, 豆包 = Doubao, 通义 = Qwen; AGI, API, code giữ nguyên.\n"
         "- Tiếng cảm thán: 嗯 -> Ừm; 啊 -> Á / À / Ơ; 哦 -> Ờ; 嘎 -> Quác; 哈哈 -> Haha.\n"
-        "- Bạn bè ngang hàng xưng tớ – cậu (hoặc tao – mày nếu cãi nhau), con – bố với người tạo ra / bố mẹ.")},
+        "- Bạn bè ngang hàng xưng tớ – cậu (hoặc tao – mày nếu cãi nhau), con – bố với người tạo ra / bố mẹ – chỉ khi dòng "
+        "gốc không ghi rõ đại từ / cách gọi; ghi rõ (他 / 她, 哥 / 姐…) thì giữ đúng nam / nữ, vai vế.")},
     {"id": "dub_short", "name": "Lồng tiếng – vừa thời gian, dễ đọc", "builtin": True, "text": (
         "- Bản dịch để LỒNG TIẾNG: câu nói tự nhiên, độ dài theo ký hiệu ⟪…⟫ của từng dòng. Dài hơn mức tối đa -> chọn "
         "từ / cách nói ngắn hơn mà vẫn đủ ý (không bỏ ý); câu ngắn thì để ngắn – KHÔNG thêm từ đệm, tiếng cảm thán hay ý "
@@ -39,7 +40,8 @@ BUILTIN = [
         "- Tránh chuỗi số dài, ký hiệu, viết tắt khó đọc; số nhỏ viết bằng chữ.\n"
         "- Không thêm dấu ngoặc / chú thích trong câu; giữ dấu câu cuối (? ! .) để giọng đọc lên / xuống đúng.")},
     {"id": "co_trang_kn", "name": "Cổ trang – tiên hiệp (chuẩn truyện convert)", "builtin": True, "text": (
-        "- Xưng hô cổ trang: ta – ngươi, huynh – đệ, tỷ – muội, sư phụ – đồ nhi, bổn tọa, lão phu, tại hạ, các hạ.\n"
+        "- Xưng hô cổ trang: ta – ngươi, huynh – đệ, tỷ – muội, sư phụ – đồ nhi, bổn tọa, lão phu, tại hạ, các hạ "
+        "(dòng gốc ghi rõ 他 / 她 / 师兄 / 师姐 / 师弟 / 师妹… thì giữ đúng nam / nữ, vai vế đó).\n"
         "- Cảnh giới tu luyện, công pháp, pháp bảo, môn phái: Hán Việt (筑基 -> Trúc Cơ, 金丹 -> Kim Đan, 元婴 -> Nguyên Anh).\n"
         "- Giữ không khí cổ trang, tránh từ hiện đại (OK, xịn, đỉnh).")},
 ]
@@ -58,7 +60,9 @@ STD_SKILL = {"id": STD_ID, "name": "Dịch chuẩn – giữ đúng số câu, t
     "An, 日本 -> Nhật Bản), không thì Hán Việt. Tên thương hiệu / công nghệ / người nước ngoài: đúng tên quốc tế (微信 -> "
     "WeChat, 抖音 -> Douyin, 马斯克 -> Musk).\n"
     "- Một tên dịch MỘT cách trong cả phim; theo đúng bảng thuật ngữ và hồ sơ phim nếu có.\n"
-    "- Xưng hô theo quan hệ, tuổi tác, địa vị và giữ nhất quán.\n"
+    "- XƯNG HÔ THEO ĐÚNG DÒNG GỐC: đại từ / cách gọi trong dòng gốc đã rõ (他 = nam, 她 = nữ, 哥 = anh, 姐 = chị, 弟 / 妹 "
+    "= em…) thì giữ đúng giới tính, vai vế, ngôi – ngữ cảnh chỉ để chọn sắc thái (anh ấy / anh ta / hắn), KHÔNG đổi anh "
+    "thành em, anh ta thành cô ta. Dòng gốc không ghi rõ mới chọn theo quan hệ, tuổi tác, địa vị và giữ nhất quán.\n"
     "- Dịch SÁT NGHĨA: không thêm từ, tiếng cảm thán, từ đệm, chú thích, ngoặc, giải thích; không bỏ ý; không thêm ý.")}
 
 FILTER_RULES = """LỌC CHỮ KHÔNG PHẢI LỜI THOẠI – máy nghe chép cả nhạc nền, tiếng hát, tiếng động thành chữ. Chỉ dựa vào NỘI DUNG
@@ -120,7 +124,7 @@ PROFILE_PROMPT = """Bạn là biên tập viên phim Trung Quốc. Đọc kịch
 Việt cho người dịch sang {lang}. Chỉ trả về JSON:
 {{"the_loai": "thể loại + giọng điệu (VD: hoạt hình hài chế meme về AI)",
  "nhan_vat": ["tên gốc -> tên dùng khi dịch – vai trò / là ai", ...],
- "xung_ho": ["A với B: … – …", ...],
+ "xung_ho": ["A với B: … – … (theo đúng cách 2 người gọi nhau trong kịch bản: 他 / 她 = nam / nữ, 哥 / 姐 = người lớn hơn)", ...],
  "thuat_ngu": {{"tên riêng / meme / từ lóng gốc": "cách dịch", ...}},
  "nghe_nham": ["chữ máy nghe có thể sai -> chữ đúng (nếu thấy)", ...],
  "ghi_chu": "những điều người dịch cần biết để dịch đúng ngữ cảnh (câu đùa, bối cảnh, ẩn ý)"}}"""
@@ -132,7 +136,11 @@ câu nào. Kiểm tra và CHỈ sửa câu có lỗi thật – câu đã đúng
 từng câu, không gộp / chuyển ý sang câu khác:
 1. Dịch sai nghĩa, sót ý, không khớp nghĩa với câu trước / sau; TỰ THÊM từ, tiếng cảm thán, từ đệm hay ý không có trong
    câu gốc -> bỏ phần thêm; câu vắt qua 2 dòng đọc không liền mạch.
-2. Xưng hô, tên riêng, thuật ngữ không thống nhất với HỒ SƠ PHIM / các câu khác.
+2. XƯNG HÔ SAI VAI: bản dịch đổi giới tính / vai vế / ngôi so với đại từ, cách gọi ghi trong câu gốc (他 thành cô ta,
+   她 thành anh ta, 哥 thành em, 姐 thành anh, câu nói VỀ người khác thành câu nói VỚI người nghe…) -> sửa về đúng câu gốc.
+   Câu gốc không ghi rõ đại từ / cách gọi thì xưng hô phải thống nhất với HỒ SƠ PHIM / các câu khác giữa đúng 2 người đó.
+   KHÔNG đổi xưng hô mà câu gốc đã ghi rõ chỉ để khớp hồ sơ phim / thể loại. Tên riêng, thuật ngữ không thống nhất với
+   HỒ SƠ PHIM / các câu khác -> sửa.
 3. Độ dài: đếm số tiếng (âm tiết; số đếm theo cách đọc). Dài hơn N -> rút gọn, giữ ý (bỏ từ thừa, dùng từ ngắn hơn).
    Ngắn hơn M -> có thể dùng câu đủ thành phần (chủ ngữ, xưng hô, từ nối) – KHÔNG thêm từ đệm, tiếng cảm thán, ý mới,
    tên / thông tin. Câu chỉ có "≤N": ngắn thì để nguyên. Dư / thiếu 1–2 tiếng thì để nguyên.
@@ -165,7 +173,7 @@ def with_skill(system: str, skill: str) -> str:
     if not (skill or "").strip():
         return system
     return (system + "\n\nKỸ NĂNG DỊCH CỦA NGƯỜI DÙNG (làm theo; nếu trái với luật trên thì theo kỹ năng này, NGOẠI TRỪ "
-            "luật về định dạng JSON và số dòng):\n" + skill.strip())
+            "luật về định dạng JSON, số dòng và xưng hô theo đúng đại từ / cách gọi của dòng gốc):\n" + skill.strip())
 
 
 def _json(txt: str) -> dict:
@@ -404,12 +412,12 @@ def review_lines(llm, items: list[tuple[int, str, str, int | str]], profile: str
     parallel: gửi tất cả các lô cùng lúc ("Gửi tất cả cùng lúc" của công cụ dịch, 2.1.23). Trả về {chỉ số: (bản dịch mới,
     lý do)}."""
     from .ffmpeg import Cancelled
-    from .translate import punct_fix, run_parallel
+    from .translate import ADDRESS_TAIL_VI, GENRE_HEAD_VI, punct_fix, run_parallel
 
     out: dict[int, tuple[str, str]] = {}
     sysp = REVIEW_PROMPT.format(src=src_name, lang=target_name)
     if (genre or "").strip():
-        sysp += "\n\nTHỂ LOẠI PHIM (xưng hô, thuật ngữ, giọng văn):\n" + genre.strip()
+        sysp += f"\n\n{GENRE_HEAD_VI}:\n" + genre.strip()
 
     def one(a: int) -> dict[int, tuple[str, str]]:
         chunk = items[a:a + REVIEW_CHUNK]
@@ -427,7 +435,7 @@ def review_lines(llm, items: list[tuple[int, str, str, int | str]], profile: str
                      + "\n".join(f"{j + 1}: {ctx[j][0]} => {ctx[j][1]}" for j in near) + "\n\n")
         user += "KIỂM TRA CÁC CÂU SAU:\n" + json.dumps(payload, ensure_ascii=False, indent=0)
         try:
-            d = _json(llm.chat(with_skill(sysp, skill), user, max_tokens=8000, temperature=0.2))
+            d = _json(llm.chat(with_skill(sysp, skill) + ADDRESS_TAIL_VI, user, max_tokens=8000, temperature=0.2))
         except ValueError:
             d = {}
         got: dict[int, tuple[str, str]] = {}

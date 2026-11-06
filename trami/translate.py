@@ -53,11 +53,29 @@ Luật bắt buộc:
    tiếng Việt bắt buộc phải có cho đúng ngữ pháp và ý đó đã ngầm có trong câu gốc. Không dịch word-by-word: câu tự nhiên
    như người Việt nói, đúng sắc thái của câu gốc (lịch sự, mỉa mai, giận dữ, đùa…).
 4. Thành ngữ, tiếng lóng, từ mạng: dùng cách nói tiếng Việt tương đương, cùng nghĩa, cùng sắc thái.
-5. Xưng hô đúng quan hệ, tuổi tác, địa vị, tình huống; nhất quán cả phim (theo THỂ LOẠI PHIM và THÔNG TIN PHIM).
+5. XƯNG HÔ THEO ĐÚNG DÒNG GỐC – KHÔNG ĐỔI VAI VẾ:
+   a) Dòng gốc đã ghi rõ đại từ / cách gọi thì bản dịch giữ ĐÚNG giới tính, vai vế trên – dưới, ngôi và số ít / nhiều
+      đó: 他 (nam) -> anh ấy / anh ta / hắn / cậu ta / ông ấy, KHÔNG thành cô ta / bà ấy; 她 (nữ) -> cô ấy / cô ta / chị
+      ấy / bà ấy / nàng, KHÔNG thành anh ta / hắn; 它 -> nó; 哥 / 哥哥 / 大哥 / 师兄 / 学长 -> anh / huynh / sư huynh /
+      đàn anh, KHÔNG thành em / chị; 姐 / 姐姐 / 师姐 / 学姐 -> chị / tỷ / sư tỷ / đàn chị, KHÔNG thành em / anh; 弟弟 /
+      师弟 -> em (trai) / đệ / sư đệ; 妹妹 / 师妹 -> em (gái) / muội / sư muội; 爸 / 妈 / 爷爷 / 奶奶 / 叔 / 阿姨 / 老公 /
+      老婆 -> bố / mẹ / ông / bà / chú / cô (dì) / chồng / vợ; 您 -> cách gọi kính trọng; 我 / 我们 / 咱们 (ngôi 1), 你 /
+      你们 (ngôi 2), 他 / 她 / 他们 (ngôi 3) giữ đúng ngôi và số – không đổi câu nói VỀ người khác thành câu nói VỚI người
+      nghe, không đổi "chúng ta" thành "tôi".
+   b) Ngữ cảnh (luật 2) chỉ dùng để chọn SẮC THÁI trong đúng vai vế đó (他: anh ấy khi thân, hắn khi ghét, ông ấy khi là
+      người già; 你: anh / chị / cậu / ngươi / mày theo quan hệ) – KHÔNG dùng ngữ cảnh để đổi nam ↔ nữ, trên ↔ dưới,
+      anh ↔ em, ngôi 1 ↔ 2 ↔ 3 mà dòng gốc đã ghi.
+   c) Chỉ khi dòng gốc KHÔNG có đại từ / cách gọi (tiếng Trung hay bỏ chủ ngữ) hoặc chỉ có 我 / 你 (không rõ nam nữ, trên
+      dưới) mới chọn xưng hô theo ngữ cảnh, quan hệ, tuổi tác, địa vị (THỂ LOẠI PHIM, THÔNG TIN PHIM) – giữ ĐÚNG cặp xưng
+      hô các dòng trước đã dùng giữa đúng 2 người đó, nhất quán cả phim; tự xưng và gọi người nghe trong cùng 1 câu phải
+      cùng 1 cặp (哥，你去哪？ -> Anh, anh đi đâu? – không phải "Anh, em đi đâu?").
+   d) THỂ LOẠI PHIM, THÔNG TIN PHIM, KỸ NĂNG, hình ảnh video chỉ là gợi ý cho trường hợp c); trái với đại từ / cách gọi
+      ghi trong dòng gốc thì theo dòng gốc.
 6. Tên người, địa danh, tổ chức, chiêu thức: phiên âm Hán Việt chuẩn (李逍遥 -> Lý Tiêu Dao); địa danh có tên tiếng Việt quen
    dùng thì dùng tên đó (北京 -> Bắc Kinh); thương hiệu / người nước ngoài: tên quốc tế (微信 -> WeChat). Một tên chỉ một cách
    dịch. Tuân thủ tuyệt đối BẢNG THUẬT NGỮ. Thuật ngữ trong THỂ LOẠI PHIM chỉ dùng khi dòng gốc có đúng chữ đó.
-7. Dòng gốc do máy nghe có thể sai vài chữ đồng âm: hiểu theo ngữ cảnh (luật 2) và dịch đúng ý.
+7. Dòng gốc do máy nghe có thể sai vài chữ đồng âm: hiểu theo ngữ cảnh (luật 2) và dịch đúng ý. Đại từ 他 / 她 / 它 và
+   cách gọi (哥, 姐, 弟, 妹…) KHÔNG coi là nghe nhầm – dịch đúng chữ đang ghi (luật 5).
 8. ĐỘ DÀI: ký hiệu ⟪≤N tiếng⟫ cuối dòng là giới hạn để giọng LỒNG TIẾNG vừa thời gian nhân vật nói: bản dịch KHÔNG vượt N
    tiếng (âm tiết). Dài quá thì chọn từ / cách nói ngắn hơn mà VẪN ĐỦ Ý – không bỏ ý để cho ngắn. Câu dịch ngắn thì để
    ngắn, KHÔNG thêm từ cho dài ra.{fill}
@@ -101,6 +119,32 @@ SRC_NAMES = {"zh": ("tiếng Trung", "Chinese"), "yue": ("tiếng Quảng Đông
              "ja": ("tiếng Nhật", "Japanese"), "ko": ("tiếng Hàn", "Korean"), "auto": ("tiếng gốc", "the source language")}
 
 
+# 2.3.4: người dùng – "phụ đề nghĩa anh thì không được dịch thành em, anh ta không được thành cô ta; xưng hô đúng ngữ
+# cảnh là tốt nhưng không đổi vai vế phụ đề đã đúng – áp cho mọi form dịch". Luật 5 viết lại; form thể loại / kỹ năng /
+# hồ sơ phim / hình video gắn SAU luật chung nên mỗi lời nhắc kết thúc bằng câu nhắc lại (AI hay theo phần cuối).
+GENRE_HEAD_VI = ("THỂ LOẠI PHIM (xưng hô, thuật ngữ, giọng văn – cặp xưng hô ở đây chỉ dùng cho dòng gốc KHÔNG ghi rõ đại "
+                 "từ / cách gọi, xem luật 5)")
+GENRE_HEAD_EN = ("FILM GENRE (forms of address – only for lines without an explicit pronoun / kinship term, see rule 5 –, "
+                 "terminology, tone)")
+ADDRESS_TAIL_VI = """
+
+NHẮC LẠI – XƯNG HÔ THEO DÒNG GỐC (ưu tiên hơn THỂ LOẠI PHIM, THÔNG TIN PHIM, HỒ SƠ PHIM, KỸ NĂNG và hình ảnh): dòng gốc đã
+ghi rõ đại từ / cách gọi (他 / 她 / 它, 哥 / 姐 / 弟 / 妹, 爸 / 妈, 您…) thì bản dịch giữ đúng giới tính, vai vế trên – dưới,
+ngôi và số ít / nhiều đó; ngữ cảnh chỉ để chọn sắc thái (anh ấy / anh ta / hắn), KHÔNG đổi anh ↔ em, anh ta ↔ cô ta,
+chị ↔ em. Dòng gốc không ghi rõ mới chọn theo ngữ cảnh và giữ nhất quán."""
+ADDRESS_TAIL_EN = """
+
+REMINDER – FORMS OF ADDRESS FOLLOW THE SOURCE LINE (this outranks FILM GENRE, FILM NOTES, SKILL and the video): when the
+source line states a pronoun / kinship or rank term (他 / 她 / 它, 哥 / 姐 / 弟 / 妹, 爸 / 妈, 您…), keep exactly its gender,
+seniority, person and number; context only picks the tone, never switch he ↔ she, older ↔ younger brother / sister.
+Only lines without such a word get their form of address from context, consistently."""
+
+
+def address_tail(target: str) -> str:
+    """Câu nhắc luật xưng hô theo dòng gốc – gắn CUỐI mọi lời nhắc dịch / sửa bản dịch (sau form thể loại, kỹ năng)."""
+    return ADDRESS_TAIL_VI if langs.norm(target) == "vi" else ADDRESS_TAIL_EN
+
+
 def system_prompt(target: str, source: str = "zh", fill: bool = False, genre: str = "") -> str:
     """Lời nhắc hệ thống cho AI theo ngôn ngữ đích. fill: có ký hiệu ⟪M–N⟫ (Cài đặt "Câu ngắn nói đầy đủ hơn…"); genre:
     form thể loại phim (genres.form) gắn cuối."""
@@ -108,7 +152,7 @@ def system_prompt(target: str, source: str = "zh", fill: bool = False, genre: st
     src_vi, src_en = SRC_NAMES.get(source, SRC_NAMES["zh"])
     if target == "vi":
         sp = SYSTEM_PROMPT.replace("từ tiếng Trung sang", f"từ {src_vi} sang", 1).replace("{fill}", FILL_RULE_VI if fill else "")
-        return sp + (f"\n\nTHỂ LOẠI PHIM (xưng hô, thuật ngữ, giọng văn):\n{genre.strip()}" if (genre or "").strip() else "")
+        return sp + (f"\n\n{GENRE_HEAD_VI}:\n{genre.strip()}" if (genre or "").strip() else "")
     L = langs.INFO[target]
     fill_en = FILL_RULE_EN.format(unit=L["unit_ai"]) if fill else ""
     sp = f"""You are an expert film subtitle translator with 15+ years of experience, translating {src_en} dialogue into {L['english']}.
@@ -127,11 +171,24 @@ Mandatory rules:
    connective when {L['english']} grammar requires it and it is implied by the source. Not word-by-word: natural speech
    with the same tone as the source (polite, sarcastic, angry, joking…).
 4. Render idioms, slang and internet expressions with natural {L['english']} equivalents of the same meaning and tone.
-5. Keep forms of address consistent with the characters' relationships, age and status for the whole film{_ADDRESS[target]}
-   (follow the FILM GENRE and FILM NOTES).
+5. FORMS OF ADDRESS FOLLOW THE SOURCE LINE – NEVER CHANGE WHO IS WHO:
+   a) When the source line states a pronoun / kinship or rank term, keep exactly its gender, seniority (older / younger,
+      higher / lower), person and number: 他 = he (male) – never she; 她 = she (female) – never he; 它 = it; 哥 / 哥哥 /
+      大哥 / 师兄 = older brother / senior (male, older) – never younger or female; 姐 / 姐姐 / 师姐 = older sister /
+      senior (female); 弟弟 / 师弟 = younger brother / junior; 妹妹 / 师妹 = younger sister / junior; 爸 / 妈 / 叔 / 阿姨
+      = father / mother / uncle / auntie; 您 = respectful "you"; 我 / 我们 first person, 你 / 你们 second person, 他 / 她 /
+      他们 third person – never turn a line ABOUT someone into a line TO the listener; keep singular / plural.
+   b) Context (rule 2) only picks the tone within that same role{_ADDRESS[target]} – never use it to switch male ↔
+      female, older ↔ younger, senior ↔ junior or 1st ↔ 2nd ↔ 3rd person that the source states.
+   c) Only when the source line has no pronoun / term (Chinese often drops the subject) or only 我 / 你 (no gender or
+      rank) choose the form of address from context, relationship, age and status (FILM GENRE, FILM NOTES), keeping the
+      same pair the earlier lines used between the same two people, consistently for the whole film.
+   d) FILM GENRE, FILM NOTES, the user's SKILL and the video are only hints for case c); if they contradict a pronoun /
+      term written in the source line, follow the source line.
 6. Names of people, places, organizations and techniques: use {_NAMES[target]}. One name, one rendering. ALWAYS follow
    the GLOSSARY. Terms listed in the FILM GENRE apply only when the source line contains that exact term.
 7. Source lines may contain speech-recognition errors (homophones): use the context (rule 2) to get the intended meaning.
+   Pronouns 他 / 她 / 它 and kinship / rank terms are NOT treated as recognition errors – translate what is written (rule 5).
 8. LENGTH: a line ending with ⟪≤N {L['unit_ai']}⟫ is a limit so the DUBBED voice fits the character's speaking time: the
    translation must NOT exceed N {L['unit_ai']}. If too long, choose shorter wording that STILL keeps all the meaning –
    never drop meaning to save length. A short translation stays short – never add words to make it longer.{fill_en}
@@ -156,7 +213,7 @@ Mandatory rules:
 13. Return ONLY valid JSON, no explanation: {{"1": {{"head": "…", "text": "translation"}}, "2": {{"head": "…", "text": "…"}}, …}}
    with EVERY requested line number. "head" = copy exactly the first 3 characters of that source line (without
    punctuation or spaces) – used to check that each translation sits on the right line."""
-    return sp + (f"\n\nFILM GENRE (forms of address, terminology, tone):\n{genre.strip()}" if (genre or "").strip() else "")
+    return sp + (f"\n\n{GENRE_HEAD_EN}:\n{genre.strip()}" if (genre or "").strip() else "")
 
 
 SYL_PER_SEC = 4.6      # tiếng Việt lồng tiếng tự nhiên ~4–5 tiếng/giây (tiếng khác: langs.INFO[...]["rate"])
@@ -165,12 +222,14 @@ HAN_RE = re.compile(r"[㐀-鿿]")
 
 SHORTEN_PROMPT = """Bạn là biên tập viên lồng tiếng phim. Mỗi mục gồm câu gốc tiếng Trung, bản dịch tiếng Việt hiện tại và
 số tiếng (âm tiết) tối đa. Hãy viết lại bản dịch NGẮN HƠN, không vượt số tiếng tối đa, vẫn tự nhiên, giữ đúng ý chính,
-giữ nguyên xưng hô và tên riêng. Chỉ trả về JSON {"1": "câu mới", ...} không kèm giải thích."""
+giữ nguyên xưng hô (đại từ, cách gọi – không đổi nam / nữ, anh / em, ngôi) và tên riêng. Chỉ trả về JSON {"1": "câu
+mới", ...} không kèm giải thích."""
 
 
 SHORTEN_PROMPT_EN = """You are a film dubbing script editor. Each item has the source line, the current {lang} translation and
 the maximum length in {unit}. Rewrite the translation SHORTER, within the maximum length, still natural, keeping the core
-meaning, names and forms of address. Return ONLY JSON {{"1": "new line", ...}} with no explanation."""
+meaning, names and forms of address (never change he / she, older / younger, or the grammatical person). Return ONLY
+JSON {{"1": "new line", ...}} with no explanation."""
 
 
 CLAUSE_PROMPT = """Bạn là biên tập viên lồng tiếng phim. Mỗi mục có câu gốc đã chia thành các VẾ theo chỗ nhân vật ngắt hơi
@@ -178,7 +237,8 @@ CLAUSE_PROMPT = """Bạn là biên tập viên lồng tiếng phim. Mỗi mục 
 dấu phẩy (hoặc ? ! nếu vế gốc là câu hỏi / cảm thán), vế thứ i dịch nghĩa vế gốc thứ i, đúng thứ tự – để giọng lồng ngắt
 nghỉ đúng lúc nhân vật ngắt hơi. Mỗi vế phải là 1 cụm TRỌN NGHĨA đọc lên tự nhiên: không chen dấu phẩy giữa lượng từ và
 danh từ, danh từ và tính từ, động từ và tân ngữ, giữa các tiếng của tên riêng / thành ngữ – không làm được thì giữ nguyên
-bản dịch cũ. Giữ nguyên ý, xưng hô, tên riêng, dấu câu cuối, độ dài gần như cũ; chỉ đổi trật tự / cách nói khi cần.
+bản dịch cũ. Giữ nguyên ý, xưng hô (không đổi nam / nữ, anh / em, ngôi), tên riêng, dấu câu cuối, độ dài gần như cũ;
+chỉ đổi trật tự / cách nói khi cần.
 Chỉ trả về JSON {"1": "bản dịch mới", ...} không kèm giải thích."""
 
 CLAUSE_PROMPT_EN = """You are a film dubbing script editor. Each item has the source line split into CLAUSES where the
@@ -187,7 +247,8 @@ so it has EXACTLY the same number of clauses: join them with commas (or ? ! when
 exclamation), clause i translates source clause i, in order – so the dubbed voice pauses with the character. Each clause
 must be a COMPLETE, natural phrase: never put a comma between a determiner / numeral and its noun, a noun and its modifier,
 a verb and its object, or inside a name / idiom – if that is impossible, return the current translation unchanged. Keep the
-meaning, forms of address, names, final punctuation and about the same length; only reorder / rephrase when needed.
+meaning, forms of address (never switch he / she, older / younger, person), names, final punctuation and about the
+same length; only reorder / rephrase when needed.
 Return ONLY JSON {{"1": "new line", ...}} with no explanation."""
 
 
@@ -1082,15 +1143,19 @@ VIDEO_RULE_VI = """
 
 VIDEO GỬI KÈM: bạn được XEM + NGHE khúc video chứa các dòng cần dịch (giờ từng dòng – giây tính từ đầu khúc – và người
 nói ở mục THỜI ĐIỂM TRONG VIDEO). Dùng hình + giọng để: biết ai đang nói với ai (nam / nữ, già / trẻ, vai vế, thân / sơ)
-mà chọn xưng hô đúng; hiểu câu ngắn theo hành động trên hình; đọc chữ trên màn hình (tin nhắn, biển hiệu, tên nhân vật)
-làm ngữ cảnh. Vẫn dịch đúng CHỮ của từng dòng (tai nghe khác chữ dòng thì vẫn theo chữ dòng), giữ đủ mọi luật trên.
+mà chọn xưng hô cho dòng KHÔNG ghi rõ đại từ / cách gọi (luật 5c) – dòng gốc đã ghi rõ (他 / 她, 哥 / 姐…) thì vẫn theo
+dòng gốc dù hình cho thấy khác; hiểu câu ngắn theo hành động trên hình; đọc chữ trên màn hình (tin nhắn, biển hiệu, tên
+nhân vật) làm ngữ cảnh. Vẫn dịch đúng CHỮ của từng dòng (tai nghe khác chữ dòng thì vẫn theo chữ dòng), giữ đủ mọi luật
+trên.
 Thêm 1 khoá "_nguoi_noi" vào JSON: {"S1": {"gioi": "nam" | "nu", "ten": "<tên nhân vật nếu biết>"}} cho người nói có
 trong lô – chỉ ghi khi thấy rõ người đó trên hình."""
 VIDEO_RULE_EN = """
 
 ATTACHED VIDEO: you can WATCH + HEAR the video clip containing these lines (each line's time – seconds from the start of
 the clip – and speaker are in VIDEO TIMES). Use picture + voice to know who is talking to whom (male / female, age,
-rank, closeness) and choose the right forms of address; understand short lines from the action on screen; read on-screen
+rank, closeness) and choose the form of address for lines WITHOUT an explicit pronoun / kinship term (rule 5c) – a
+pronoun / term written in the line (他 / 她, 哥 / 姐…) still wins over what the picture suggests; understand short lines
+from the action on screen; read on-screen
 text (messages, signs, character names) as context. Still translate the TEXT of each line (if what you hear differs from
 the line, follow the line) and keep every rule above. Add one key "_speakers" to the JSON: {"S1": {"gender": "male" |
 "female", "name": "<character name if known>"}} for speakers in this batch – only when clearly seen."""
@@ -1223,7 +1288,7 @@ class Translator:
             sysp = SHORTEN_PROMPT_EN.format(lang=L["english"], unit=L["unit_ai"])
             user = "SHORTEN THESE TRANSLATIONS:\n" + json.dumps(payload, ensure_ascii=False, indent=0)
         try:
-            d = _extract_json(self.llm.chat(with_skill(sysp, self.skill), user))
+            d = _extract_json(self.llm.chat(with_skill(sysp, self.skill) + address_tail(self.target), user))
         except (Cancelled, net.NetworkDown):
             raise
         except Exception:  # noqa: BLE001
@@ -1251,7 +1316,7 @@ class Translator:
             sysp = CLAUSE_PROMPT_EN.format(lang=L["english"])
             user = "FIX THE CLAUSES OF THESE TRANSLATIONS:\n" + json.dumps(payload, ensure_ascii=False, indent=0)
         try:
-            d = _extract_json(self.llm.chat(with_skill(sysp, self.skill), user))
+            d = _extract_json(self.llm.chat(with_skill(sysp, self.skill) + address_tail(self.target), user))
         except (Cancelled, net.NetworkDown):
             raise
         except Exception:  # noqa: BLE001
@@ -1377,7 +1442,8 @@ class Translator:
                     '"genre": thể loại phim (cổ trang/tiên hiệp/hiện đại/review/...)\n'
                     '"terms": object ánh xạ TÊN RIÊNG tiếng Trung (tên người, biệt danh, địa danh, môn phái, tổ chức, '
                     "chiêu thức, bảo vật) -> phiên âm Hán Việt chuẩn. Chỉ lấy tên riêng thực sự, không lấy từ thông thường.\n"
-                    '"relations": mô tả ngắn quan hệ giữa các nhân vật chính và cách xưng hô tiếng Việt phù hợp.\n\n'
+                    '"relations": mô tả ngắn quan hệ giữa các nhân vật chính (nam / nữ, ai lớn hơn – theo đúng đại từ '
+                    "他 / 她 và cách gọi 哥 / 姐 / 弟 / 妹… trong kịch bản) và cách xưng hô tiếng Việt phù hợp.\n\n"
                     "KỊCH BẢN:\n" + ch)
             else:
                 sysp = f"You are an expert translator of Chinese films into {L['english']}. Return JSON only."
@@ -1387,7 +1453,8 @@ class Translator:
                     f'"terms": object mapping PROPER NAMES in the source (people, nicknames, places, sects, '
                     f"organizations, techniques, treasures) -> their standard {L['english']} rendering "
                     f"({_NAMES.get(self.target, '')}). Only real proper names, no common words.\n"
-                    f'"relations": short description of the main characters\' relationships and suitable forms of '
+                    f'"relations": short description of the main characters\' relationships (gender and who is older, '
+                    f"exactly as the script's 他 / 她 and kinship terms 哥 / 姐 / 弟 / 妹 say) and suitable forms of "
                     f"address in {L['english']}.\n\nSCRIPT:\n" + ch)
             try:
                 d = _extract_json(self.llm.chat(sysp, prompt, max_tokens=4000, temperature=0.1))
@@ -1414,7 +1481,7 @@ class Translator:
     def system(self) -> str:
         """Lời nhắc hệ thống khi dịch: luật chung + form thể loại phim + kỹ năng của bạn."""
         return with_skill(system_prompt(self.target, self.source, self.fit_dub and self.fill_short, self.genre),
-                          self.skill)
+                          self.skill) + address_tail(self.target)
 
     def _llm_batch(self, lines: list[str], ctx_before, ctx_after, summary: str, depth: int = 0,
                    vt: list[tuple[float, float, str]] | None = None, win: tuple[float, float] | None = None) -> list[str]:
