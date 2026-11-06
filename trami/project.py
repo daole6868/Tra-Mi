@@ -109,7 +109,8 @@ class Project:
                         "updated": j.get("updated"), "info": j.get("info", {}),
                         "n_segments": len(j.get("segments", [])),
                         "n_translated": sum(1 for s in j.get("segments", []) if s.get("trans")),
-                        "outputs": j.get("outputs", [])[-3:], "status": j.get("status", {})}
+                        "outputs": j.get("outputs", [])[-3:], "status": j.get("status", {}),
+                        "dl_partial": bool(j.get("dl_partial")) and not j.get("source")}
             except Exception:
                 continue
             _SUMMARY[d.name] = (sig, item)

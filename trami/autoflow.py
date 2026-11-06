@@ -164,7 +164,18 @@ def _download(pid: str, url: str):
         pr = Project(pid)
         notes: list[str] = []
         meta: dict = {}
-        path = pipeline.download_video(url, pr.dir / "source", j.update, j.cancelled, notes=notes, meta=meta)
+        try:
+            path = pipeline.download_video(url, pr.dir / "source", j.update, j.cancelled, notes=notes, meta=meta)
+        except Exception as e:  # noqa: BLE001
+            # tải dở (máy chủ từ chối giữa chừng, Huỷ, mất mạng quá lâu): phần đã tải giữ trong source/ -> dự án KHÔNG
+            # bị xoá, Tải tiếp làm nốt
+            if isinstance(e, pipeline.PartialDownload) or has_partial(pid):
+                pr = Project(pid)
+                pr.data["dl_partial"] = True
+                pr.save()
+            raise
+        pr = Project(pid)
+        pr.data.pop("dl_partial", None)
         pipeline.attach_source(pr, path)
         pr.data["video_meta"] = meta   # tiêu đề / mô tả: gợi ý tên riêng cho bộ nghe
         pr.data["name"] = video_name(path)
@@ -233,7 +244,7 @@ def queue_links(urls: list[str], auto: bool = True, settings: dict | None = None
             if not _has_video(p.data.get("source")) and not p.segments:
                 # lần trước tải không xong (lỗi mạng, tắt tool khi đang tải / đang chờ lượt tải) -> trước đây báo "đã
                 # tải trước đó" mãi mà không bao giờ tải lại
-                p.data["url"] = url
+                p.data["url"], p.data["dl_auto"] = url, bool(auto)
                 p.save()
                 manager.submit("download", f"Tải video: {url[:50]}", _download(old, url), old)
                 if auto:
@@ -247,7 +258,7 @@ def queue_links(urls: list[str], auto: bool = True, settings: dict | None = None
             out.append({**r, "state": "have"})
             continue
         p = Project.create("Video từ link")
-        p.data["url"], p.data["link_key"] = url, key
+        p.data["url"], p.data["link_key"], p.data["dl_auto"] = url, key, bool(auto)
         if aspect and aspect != "original":
             e = p.edit
             e["aspect"] = aspect
@@ -272,7 +283,7 @@ def queue_message(res: list[dict], auto: bool = True, render: bool = False) -> s
     if by["new"]:
         parts.append(f"Đã xếp hàng {what} {len(by['new'])} video")
     if by["retry"]:
-        parts.append(f"tải lại {len(by['retry'])} video lần trước chưa tải xong")
+        parts.append(f"tải tiếp {len(by['retry'])} video lần trước chưa tải xong (phần đã tải được giữ lại)")
     if by["busy"]:
         parts.append(f"{len(by['busy'])} link đang tải / đang làm – xem 'Việc đang làm'")
     if by["again"]:
@@ -282,6 +293,35 @@ def queue_message(res: list[dict], auto: bool = True, render: bool = False) -> s
     if auto and not render and (by["new"] or by["retry"] or by["again"]):
         parts.append("dừng trước bước xuất – kiểm tra rồi bấm 'Xuất video'")
     return " · ".join(parts)
+
+
+def resume_download(pid: str) -> list[dict]:
+    """Nút 'Tải tiếp' (việc tải video bị lỗi): xếp lại việc tải vào CHÍNH dự án đó – fastdl tải tiếp đúng khúc còn thiếu
+    (file .svpart + bảng khúc trong source/) – kèm dịch tự động nếu lần đầu có. [] nếu dự án đã có video / không có link."""
+    from .project import Project
+
+    if not (PROJECTS_DIR / pid / "project.json").is_file():
+        return []
+    p = Project(pid)
+    url = p.data.get("url") or ""
+    if not url or _has_video(p.data.get("source")):
+        return []
+    if not p.data.get("link_key"):
+        p.data["link_key"] = link_key(url)
+        p.save()
+    return queue_links([url], auto=bool(p.data.get("dl_auto", True)))
+
+
+def has_partial(pid: str) -> bool:
+    """Dự án có phần video tải dở (giữ lại để Tải tiếp – không xoá dự án trống khi việc tải lỗi)."""
+    from .fastdl import PART
+
+    d = PROJECTS_DIR / pid / "source"
+    try:
+        return any(f.is_file() and f.stat().st_size >= 1_000_000 and (f.name.endswith((PART, ".part")) or ".f" in f.name)
+                   for f in d.iterdir()) if d.is_dir() else False
+    except OSError:
+        return False
 
 
 def _busy(pid: str) -> bool:

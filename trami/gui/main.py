@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QFileDialog, QFrame, 
                                QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QSpinBox,
                                QStackedWidget, QVBoxLayout, QWidget)
 
-from .. import APP_NAME, APP_TAGLINE, __version__, pipeline, sitelogin, storage
+from .. import APP_NAME, APP_TAGLINE, __version__, autoflow, pipeline, sitelogin, storage
 from ..config import load_settings, public_settings, save_settings
 from ..jobs import manager
 from ..project import Project
@@ -218,6 +218,21 @@ class RecentItem(QWidget):
 
 # ====================================================================== Trang chủ
 
+def _can_resume(pid: str) -> bool:
+    """Việc tải lỗi / huỷ mà dự án còn (chưa có video, có link) -> hiện nút Tải tiếp."""
+    from ..config import PROJECTS_DIR
+
+    f = PROJECTS_DIR / pid / "project.json"
+    if not f.is_file():
+        return False
+    try:
+        d = Project(pid).data
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(d.get("url")) and not d.get("source") and not any(
+        j["project_id"] == pid and j["status"] in ("queued", "running") for j in manager.list())
+
+
 def project_badge(pr: dict, jobs: list[dict]) -> tuple[str, str]:
     """Trạng thái dự án trên thẻ Trang chủ: (chữ, màu)."""
     mine = [j for j in jobs if j["project_id"] == pr["id"]]
@@ -226,6 +241,8 @@ def project_badge(pr: dict, jobs: list[dict]) -> tuple[str, str]:
         return ("Đang tải…" if j["kind"] == "download" else "Đang làm…"), theme.ACCENT2
     if any(j["status"] == "queued" for j in mine):
         return "Đang chờ", theme.MUTED
+    if pr.get("dl_partial") and not pr.get("info"):
+        return "⚠ Tải dở – Tải tiếp", theme.WARN
     done = sorted((j for j in mine if j.get("finished")), key=lambda j: j["finished"])
     if done and done[-1]["status"] == "error":
         return "⚠ Lỗi", theme.ERR
@@ -1604,10 +1621,14 @@ class JobRow(QFrame):
         self.open_b = button("Mở dự án", "film", flat=True, on_click=self._open)
         self.open_b.setVisible(bool(self.pid))
         self.cancel_b = button("Huỷ", "x", flat=True, on_click=lambda: manager.cancel(self.jid))
+        self.resume_b = button("Tải tiếp", "download", flat=True, on_click=self._resume)
+        self.resume_b.setToolTip("Tải nốt phần còn thiếu – phần đã tải được giữ lại, không tải lại từ đầu")
+        self.resume_b.hide()
         lay.addWidget(self.icon)
         lay.addLayout(tb, 1)
         lay.addWidget(self.bar)
         lay.addWidget(self.pct)
+        lay.addWidget(self.resume_b)
         lay.addWidget(self.open_b)
         lay.addWidget(self.cancel_b)
         self.set(job)
@@ -1615,6 +1636,16 @@ class JobRow(QFrame):
     def _open(self):
         if self.pid and Project(self.pid).exists:
             self.win.open_project(self.pid)
+
+    def _resume(self):
+        res = autoflow.resume_download(self.pid) if self.pid else []
+        if not res:
+            return self.win.toast("Không tải tiếp được: dự án đã có video hoặc đã bị xoá – dán lại link ở Trang chủ",
+                                  "warn")
+        self.resume_b.hide()
+        self.win.jobs_changed()
+        self.win.refresh_projects()
+        self.win.toast(autoflow.queue_message(res, bool(Project(self.pid).data.get("dl_auto", True))), "ok")
 
     def set(self, j: dict):
         st = j["status"]
@@ -1640,6 +1671,8 @@ class JobRow(QFrame):
             self.pct.setText({"done": "Xong", "error": "Lỗi", "cancelled": "Đã huỷ"}.get(st, ""))
         self.bar.setVisible(st != "queued")
         self.cancel_b.setVisible(st in ("running", "queued"))
+        self.resume_b.setVisible(st in ("error", "cancelled") and j.get("kind") == "download" and bool(self.pid)
+                                 and _can_resume(self.pid))
         self.icon.update()
 
 
@@ -1905,6 +1938,8 @@ class MainWindow(QMainWindow):
             return
         if pr.data.get("source") or pr.data.get("segments"):
             return
+        if pr.data.get("dl_partial") or autoflow.has_partial(pid):
+            return     # tải dở: giữ phần đã tải để Tải tiếp (2.3.5 – trước đây xoá luôn, lần sau tải lại từ đầu)
         pp = self.project_page
         if pp.p and pp.p.id == pid:
             pp.flush()

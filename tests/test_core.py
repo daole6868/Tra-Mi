@@ -6348,7 +6348,7 @@ def test_autoflow_bili_parts_and_unfinished_download(sample_video, monkeypatch):
     res2 = autoflow.queue_links(links, auto=True)
     assert [r["state"] for r in res2] == ["retry"] * 3 and [r["pid"] for r in res2] == pids
     assert [k for k, _, _ in subs] == ["download", "auto"] * 3 and [p for _, _, p in subs][::2] == pids
-    assert "tải lại 3 video" in autoflow.queue_message(res2)
+    assert "tải tiếp 3 video" in autoflow.queue_message(res2)
     # đang chờ tải -> không xếp thêm việc
     subs.clear()
     busy[:] = pids
@@ -11106,6 +11106,24 @@ def _range_server_2130(data: bytes, rate: float = 4e6, ranges: bool = True, stat
 
         def do_GET(self):
             srv = self.server
+            with srv.lock:
+                srv.active += 1
+            try:
+                busy = srv.busy is not None and srv.busy(srv)
+                if busy:
+                    with srv.lock:
+                        srv.busy_sent += 1
+                    self.send_response(567)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self._serve()
+            finally:
+                with srv.lock:
+                    srv.active -= 1
+
+        def _serve(self):
+            srv = self.server
             if srv.status:
                 self.send_response(srv.status)
                 self.send_header("Content-Length", "0")
@@ -11146,6 +11164,7 @@ def _range_server_2130(data: bytes, rate: float = 4e6, ranges: bool = True, stat
     srv.daemon_threads = True
     srv.data, srv.rate, srv.ranges, srv.status, srv.drop_every = data, rate, ranges, status, drop_every
     srv.lock, srv.reqs, srv.sent = threading.Lock(), 0, 0
+    srv.active, srv.busy, srv.busy_sent = 0, None, 0
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     srv.url = f"http://127.0.0.1:{srv.server_address[1]}/v.m4s"
     return srv
@@ -11178,8 +11197,8 @@ def test_fastdl_parallel_resume_race_2130(tmp_path, monkeypatch):
         fastdl.fetch([srv.url], {"Referer": "x"}, None, out, 8, lambda n, tot: seen.append(tot))
         eight = _t.time() - t0
         assert out.read_bytes() == data and one / eight > 3 and seen[-1] == len(data)
-        assert not out.with_name(out.name + ".part").exists() and not out.with_name(out.name + ".part.json").exists()
-        # Huỷ giữa chừng -> .part + .part.json giữ các khúc đã xong -> lần sau chỉ tải phần còn thiếu
+        assert not out.with_name(out.name + ".svpart").exists() and not out.with_name(out.name + ".svpart.json").exists()
+        # Huỷ giữa chừng -> .svpart + .svpart.json giữ các khúc đã xong -> lần sau chỉ tải phần còn thiếu
         out2 = tmp_path / "b.m4s"
         got = [0]
 
@@ -11187,7 +11206,7 @@ def test_fastdl_parallel_resume_race_2130(tmp_path, monkeypatch):
             got[0] += n
         with pytest.raises(ff.Cancelled):
             fastdl.fetch([srv.url], {}, None, out2, 4, count, cancel=lambda: got[0] >= 4.5e6)
-        state = json.loads(out2.with_name(out2.name + ".part.json").read_text())
+        state = json.loads(out2.with_name(out2.name + ".svpart.json").read_text())
         assert 0 < len(state["done"]) < -(-len(data) // state["chunk"])
         srv.sent = 0
         fastdl.fetch([srv.url], {}, None, out2, 4)
@@ -11212,6 +11231,96 @@ def test_fastdl_parallel_resume_race_2130(tmp_path, monkeypatch):
     finally:
         for s in (srv, slow, norange, bad, flaky):
             s.shutdown()
+
+
+def test_fastdl_busy_567_resume_235(tmp_path, monkeypatch):
+    """2.3.5: Bilibili trả HTTP 567 giữa chừng -> giảm số luồng + chờ rồi tải tiếp (đúng từng byte); từ chối mãi -> Busy,
+    phần đã tải GIỮ lại (.svpart – không trùng ".part" của yt-dlp) -> lần sau / link mới chỉ tải phần còn thiếu (cả file
+    tải dở của bản cũ ".part.json"); _fast_fetch: lấy link mới rồi tải tiếp, hết lượt -> PartialDownload (không để yt-dlp
+    tải lại từ đầu), từ chối ngay từ đầu -> None (yt-dlp); dự án tải dở không bị xoá, nút Tải tiếp xếp lại đúng dự án."""
+    from trami import autoflow, fastdl, pipeline
+    from trami.gui import main as gm
+
+    for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(fastdl, "BUSY_WAIT", (0.05,) * 6)
+    monkeypatch.setattr(fastdl, "BUSY_CUT_SEC", 0.0)
+    data = os.urandom(6 << 20)
+    srv = _range_server_2130(data, rate=8e6)
+    hot = _range_server_2130(data, rate=8e6)
+    bad = _range_server_2130(data, status=403)
+    try:
+        # 1) > 2 kết nối cùng lúc -> 567: tự giảm luồng, vẫn tải đủ
+        hot.busy = lambda s: s.active > 2
+        notes = []
+        out = tmp_path / "a.m4s"
+        fastdl.fetch([hot.url], {}, None, out, 8, report=notes.append)
+        assert out.read_bytes() == data and hot.busy_sent > 0 and any("giảm còn" in n for n in notes)
+        # 2) từ 2 MB trở đi luôn 567 -> Busy, phần đã tải giữ lại
+        hot.busy, hot.sent, hot.busy_sent = (lambda s: s.sent > 2e6), 0, 0
+        out2 = tmp_path / "b.m4s"
+        with pytest.raises(fastdl.Busy):
+            fastdl.fetch([hot.url], {}, None, out2, 4)
+        assert out2.with_name("b.m4s.svpart").exists() and not out2.with_name("b.m4s.part").exists()
+        have, size = fastdl.partial_bytes(out2)
+        assert 1e6 < have < len(data) and size == len(data)
+        # file tải dở của bản cũ (.part + .part.json) -> nhận lại, tải tiếp từ link khác
+        out2.with_name("b.m4s.svpart").rename(out2.with_name("b.m4s.part"))
+        out2.with_name("b.m4s.svpart.json").rename(out2.with_name("b.m4s.part.json"))
+        srv.sent = 0
+        fastdl.fetch([srv.url], {}, None, out2, 4)
+        assert out2.read_bytes() == data and srv.sent <= len(data) - have + (1 << 20)
+        assert not out2.with_name("b.m4s.part.json").exists() and not out2.with_name("b.m4s.svpart.json").exists()
+        # 3) _fast_fetch: link cũ bị từ chối giữa chừng -> chờ, lấy link mới, tải tiếp
+        monkeypatch.setattr(pipeline, "REFRESH_WAIT", (0.1,))
+        hot.sent = 0
+        d = tmp_path / "dl"
+        d.mkdir()
+
+        class FakeYDL:
+            cookiejar = None
+
+            def prepare_filename(self, info):
+                return str(d / "Phim [BV1x].mp4")
+        fmt = {"protocol": "http", "ext": "mp4", "vcodec": "avc1", "format_id": "80", "http_headers": {}}
+        info = {"duration": 6, "requested_formats": [dict(fmt, url=hot.url)]}
+        msgs = []
+        got = pipeline._fast_fetch(FakeYDL(), info, 4, lambda x, m: msgs.append(m), None,
+                                   refresh=lambda: {"requested_formats": [dict(fmt, url=srv.url)]})
+        assert got.read_bytes() == data and any("lấy link mới" in m for m in msgs)
+        assert sorted(x.name for x in d.iterdir()) == ["Phim [BV1x].mp4"]
+        got.unlink()
+        # không lấy được link mới -> PartialDownload, phần đã tải giữ lại; link bị từ chối ngay -> None (yt-dlp)
+        hot.sent = 0
+        with pytest.raises(pipeline.PartialDownload, match="Tải dở"):
+            pipeline._fast_fetch(FakeYDL(), info, 4, None, None)
+        assert (d / "Phim [BV1x].f80.mp4.svpart").exists()
+        assert pipeline._fast_fetch(FakeYDL(), {"requested_formats": [dict(fmt, url=bad.url, format_id="81")]}, 4, None,
+                                    None) is None
+        assert not list(d.glob("*.f81.*"))
+    finally:
+        for s in (srv, hot, bad):
+            s.shutdown()
+    assert "Tải tiếp" in pipeline._dl_error(Exception("ERROR: [download] Got error: HTTP Error 567: Unknown Status"),
+                                             "https://www.bilibili.com/video/BV1x", True)
+    assert "Cập nhật trình tải" not in pipeline._dl_error(Exception("HTTP Error 567: x"), "u", True)
+    # dự án tải dở: không xoá, thẻ "Tải dở", Tải tiếp xếp lại đúng dự án (kèm dịch tự động như lần đầu)
+    from trami.project import Project
+
+    pr = Project.create("Video từ link")
+    pr.data.update(url="https://www.bilibili.com/video/BV1mFJ26tEHC", dl_auto=True, dl_partial=True)
+    pr.save()
+    (pr.dir / "source").mkdir(parents=True, exist_ok=True)
+    (pr.dir / "source" / "Phim [BV1m].f80.mp4.svpart").write_bytes(b"\0" * 1_200_000)
+    assert autoflow.has_partial(pr.id)
+    called = []
+    monkeypatch.setattr(autoflow, "queue_links", lambda urls, auto=True, **k: called.append((urls, auto)) or
+                        [{"url": urls[0], "pid": pr.id, "state": "retry", "queued": True, "new": False, "name": ""}])
+    assert autoflow.resume_download(pr.id)[0]["state"] == "retry"
+    assert called == [(["https://www.bilibili.com/video/BV1mFJ26tEHC"], True)]
+    summ = next(x for x in Project.list_all() if x["id"] == pr.id)
+    assert summ["dl_partial"] and gm.project_badge(summ, [])[0].startswith("⚠ Tải dở")
+    assert "tải tiếp 1 video" in autoflow.queue_message([{"state": "retry"}])
 
 
 def test_download_video_fast_merge_2130(tmp_path, monkeypatch):

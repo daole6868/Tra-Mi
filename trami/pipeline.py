@@ -1,6 +1,7 @@
 """Các bước xử lý (dùng chung cho giao diện web và dòng lệnh)."""
 from __future__ import annotations
 
+import re
 import threading
 import time
 from pathlib import Path
@@ -66,6 +67,12 @@ def _dl_error(e: BaseException, url: str, used_cookies: bool) -> str:
     msg = str(e)
     low = msg.lower()
     upd = "bấm 'Cập nhật trình tải' ở khung Tải video từ link (Trang chủ) rồi mở lại tool"
+    code = re.search(r"http error (429|5\d\d)", low)
+    if code:
+        # Bilibili trả 567 khi tải quá nhiều kết nối / quá nhanh; 429 / 503: máy chủ bận – không phải lỗi trình tải
+        return (f"Máy chủ video tạm từ chối (HTTP {code.group(1)}) – thường do tải nhiều luồng / tải nhiều video liền "
+                "nhau. Chờ vài phút rồi bấm 'Tải tiếp' ở Việc đang làm (hoặc dán lại link) – phần đã tải được giữ lại; "
+                f"bị lại thì giảm 'Số luồng tải' ở Trang chủ xuống 4.\n({msg[:200]})")
     if "412" in msg or "precondition failed" in low:
         return f"Bilibili chặn bản trình tải đang cài (HTTP 412) – {upd}.\n({msg[:200]})"
     if "fresh cookies" in low:
@@ -196,7 +203,8 @@ def download_video(url: str, dest_dir: Path, progress: Prog | None = None, cance
         with yt_dlp.YoutubeDL({**opts, **extra}) as ydl:
             if conns > 1:   # yt-dlp lấy link + chọn chất lượng, tool tải file nhiều luồng; không được -> yt-dlp tải như cũ
                 info = ydl.extract_info(url, download=False)
-                path = _fast_fetch(ydl, info, conns, progress, cancel)
+                path = _fast_fetch(ydl, info, conns, progress, cancel,
+                                   refresh=lambda: ydl.extract_info(url, download=False))
                 if path is not None:
                     return info, path
             info = ydl.extract_info(url, download=True)
@@ -253,13 +261,24 @@ def download_video(url: str, dest_dir: Path, progress: Prog | None = None, cance
     return path
 
 
-def _fast_fetch(ydl, info: dict, conns: int, progress: Prog | None, cancel) -> Path | None:
+class PartialDownload(RuntimeError):
+    """Tải dở (máy chủ tạm từ chối / link hỏng giữa chừng): phần đã tải được GIỮ trên máy – Tải tiếp làm nốt phần thiếu."""
+
+
+REFRESH_WAIT = (20, 45, 90)   # máy chủ tạm từ chối mãi (Bilibili 567): chờ rồi lấy link mới, tải tiếp đúng chỗ dở
+
+
+def _fast_fetch(ydl, info: dict, conns: int, progress: Prog | None, cancel,
+                refresh: Callable[[], dict] | None = None) -> Path | None:
     """Tải các dòng hình / tiếng yt-dlp đã chọn bằng `fastdl` (nhiều luồng, hình + tiếng cùng lúc, Bilibili chọn máy chủ
-    nhanh nhất) rồi ghép bằng FFmpeg. None = không tải được kiểu này (nguồn chia mảnh / link hết hạn / máy chủ không cho
-    tải theo khúc giữa chừng) -> người gọi để yt-dlp tải."""
+    nhanh nhất) rồi ghép bằng FFmpeg. None = không tải được kiểu này (nguồn chia mảnh / máy chủ không cho tải theo khúc /
+    link bị từ chối ngay từ đầu) -> người gọi để yt-dlp tải.
+    2.3.5: máy chủ từ chối GIỮA CHỪNG (HTTP 567 / 429 / 5xx, link hết hạn) -> giữ phần đã tải, chờ rồi `refresh()` lấy
+    link mới (yt-dlp đọc lại trang) và tải tiếp đúng khúc còn thiếu (tối đa len(REFRESH_WAIT) lần); vẫn không được ->
+    `PartialDownload` (phần đã tải giữ trên máy, Tải tiếp / dán lại link là làm nốt) – không để yt-dlp tải lại từ đầu."""
     from . import fastdl
 
-    fmts = info.get("requested_formats") or [info]
+    fmts = [dict(f) for f in (info.get("requested_formats") or [info])]
     if not fmts or any((f.get("protocol") or "") not in ("http", "https") or not f.get("url") for f in fmts):
         return None
     cancel = cancel or (lambda: False)
@@ -269,7 +288,7 @@ def _fast_fetch(ydl, info: dict, conns: int, progress: Prog | None, cancel) -> P
     got = [0] * len(fmts)
     size = [int(f.get("filesize") or f.get("filesize_approx") or 0) for f in fmts]
     hist: list[tuple[float, int]] = []
-    note = {"msg": "", "t": 0.0}     # dòng báo của bộ tải (chọn máy chủ / mất mạng) – hiện 3,5 s
+    note = {"msg": "", "t": 0.0}     # dòng báo của bộ tải (chọn máy chủ / mất mạng / máy chủ từ chối) – hiện 3,5 s
 
     def counter(i: int):
         def cb(n: int, total: int):
@@ -298,35 +317,101 @@ def _fast_fetch(ydl, info: dict, conns: int, progress: Prog | None, cancel) -> P
     def report(m: str):
         note["msg"], note["t"] = m, time.time()
 
+    def tmp_of(i: int, f: dict) -> Path:
+        return base.with_name(f"{base.stem}.f{f.get('format_id') or i}.{f.get('ext') or 'bin'}")
+
     files: dict[int, Path] = {}
     errors: list[BaseException] = []
 
     def one(i: int, f: dict):
         try:
-            tmp = base.with_name(f"{base.stem}.f{f.get('format_id') or i}.{f.get('ext') or 'bin'}")
             urls = [f["url"]] + fastdl.BACKUPS.pop(f["url"], [])
             video = (f.get("vcodec") or "none") != "none" or len(fmts) == 1
-            files[i] = fastdl.fetch(urls, f.get("http_headers") or {}, ydl.cookiejar, tmp,
+            files[i] = fastdl.fetch(urls, f.get("http_headers") or {}, ydl.cookiejar, tmp_of(i, f),
                                     conns if video else max(2, conns // 2), counter(i), cancel, report)
         except BaseException as e:  # noqa: BLE001
             errors.append(e)
-    ts = [threading.Thread(target=one, args=(i, f), daemon=True, name="trami-dl-file") for i, f in enumerate(fmts)]
-    for t in ts:
-        t.start()
-    while any(t.is_alive() for t in ts):
+
+    def pending() -> tuple[int, int]:
+        """(byte đã có trên máy, cỡ) của mọi dòng – kể cả phần tải dở giữ lại."""
+        have = tot = 0
+        for i, f in enumerate(fmts):
+            t = tmp_of(i, f)
+            if i in files or t.exists():
+                n = t.stat().st_size if t.exists() else 0
+                have, tot = have + n, tot + n
+                continue
+            d, z = fastdl.partial_bytes(t)
+            have, tot = have + d, tot + (z or size[i])
+        return have, tot
+
+    for i, f in enumerate(fmts):     # dòng đã tải xong ở lần trước (lần đó lỗi ở dòng khác) -> không tải lại
+        t = tmp_of(i, f)
+        if t.exists() and t.stat().st_size > 0 and not fastdl.part_files(t)[1].exists():
+            files[i] = t
+            got[i] = size[i] = t.stat().st_size
+    rnd = 0
+    while True:
+        errors.clear()
+        with lock:
+            for i in range(len(fmts)):
+                if i not in files:
+                    got[i] = 0        # dòng đang dở: fetch báo lại phần đã có
+        todo = [(i, f) for i, f in enumerate(fmts) if i not in files]
+        ts = [threading.Thread(target=one, args=(i, f), daemon=True, name="trami-dl-file") for i, f in todo]
         for t in ts:
-            t.join(0.4)
-        show()
-    for e in errors:
-        if isinstance(e, (ff.Cancelled, net.NetworkDown)):
-            raise e
-    if cancel():
-        raise ff.Cancelled()
-    if errors:
-        log_error(f"Tải nhiều luồng không được, để yt-dlp tải: {err_text(errors[0])[:200]}")
-        for p_ in files.values():
-            p_.unlink(missing_ok=True)
-        return None
+            t.start()
+        while any(t.is_alive() for t in ts):
+            for t in ts:
+                t.join(0.4)
+            show()
+        for e in errors:
+            if isinstance(e, (ff.Cancelled, net.NetworkDown)):
+                raise e
+        if cancel():
+            raise ff.Cancelled()
+        if not errors:
+            break
+        have, tot = pending()
+        why = err_text(errors[0])[:160]
+        busy = any(isinstance(e, fastdl.Busy) for e in errors)
+        if not have and not busy:
+            # chưa tải được gì (máy chủ không cho tải theo khúc, link bị từ chối ngay) -> yt-dlp tải như cũ
+            log_error(f"Tải nhiều luồng không được, để yt-dlp tải: {why}")
+            for i, f in enumerate(fmts):
+                for q in (tmp_of(i, f), *fastdl.part_files(tmp_of(i, f))):
+                    q.unlink(missing_ok=True)
+            return None
+        pct = int(have * 100 / tot) if tot else 0
+        if refresh is None or rnd >= len(REFRESH_WAIT):
+            log_error(f"Tải dở {pct}%: {why}")
+            raise PartialDownload(
+                f"Tải dở {pct}% ({have / 1e6:.0f}/{tot / 1e6:.0f} MB) – máy chủ video từ chối ({why}). Phần đã tải được "
+                "GIỮ trên máy: bấm 'Tải tiếp' (Việc đang làm) hoặc dán lại link ở Trang chủ để tải nốt phần còn thiếu, "
+                "không phải tải lại từ đầu. Bị chặn nhiều lần: chờ vài phút, giảm 'Số luồng tải' ở Trang chủ xuống 4.")
+        w = REFRESH_WAIT[rnd]
+        rnd += 1
+        msg = (f"Máy chủ video từ chối ({why}) – đã tải {pct}%, giữ phần đã tải; chờ {w} s rồi lấy link mới, tải tiếp "
+               f"(lần {rnd}/{len(REFRESH_WAIT)})")
+        end = time.time() + w
+        while time.time() < end:
+            if cancel():
+                raise ff.Cancelled()
+            if progress:
+                progress(min(0.94, (have / tot if tot else 0) * 0.94), f"{msg} · còn {int(end - time.time())} s")
+            time.sleep(0.5)
+        try:
+            new = refresh()
+        except (ff.Cancelled, net.NetworkDown):
+            raise
+        except Exception as e:  # noqa: BLE001 – đọc lại trang lỗi -> lượt sau thử lại với link cũ
+            log_error(f"Lấy link mới để tải tiếp không được: {err_text(e)[:200]}")
+            continue
+        nf = {str(f.get("format_id")): f for f in (new.get("requested_formats") or [new])}
+        for i, f in enumerate(fmts):
+            g = nf.get(str(f.get("format_id")))
+            if g and g.get("url"):
+                f["url"], f["http_headers"] = g["url"], g.get("http_headers") or f.get("http_headers")
     dur = float(info.get("duration") or 0)
     parts = [files[i] for i in range(len(fmts))]
     try:

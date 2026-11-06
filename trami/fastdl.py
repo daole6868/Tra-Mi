@@ -4,7 +4,13 @@ hạn tốc độ MỖI kết nối và mạng xa (Việt Nam ↔ máy chủ Tru
 nối cùng lúc nhanh hơn nhiều lần. Bilibili còn có link dự phòng ở máy chủ khác: thử 1 MB đầu ở mỗi máy chủ, chọn máy chủ
 nhanh nhất (như trình phát trên trang tự chọn). yt-dlp vẫn lấy link + chọn chất lượng; máy chủ không cho tải theo khúc ->
 1 luồng; link hết hạn / bị từ chối -> `Expired` (người gọi để yt-dlp tải như cũ). Mất mạng -> chờ có mạng rồi tải tiếp
-đúng khúc dở (file .part + .part.json ghi các khúc đã xong)."""
+đúng khúc dở (file .svpart + .svpart.json ghi các khúc đã xong).
+
+2.3.5: "đang tải gần xong thì lỗi HTTP Error 567" (Bilibili trả 567 khi tải quá nhiều kết nối / quá nhanh). Trước đây 1
+khúc bị từ chối 6 lần là bỏ CẢ lần tải nhiều luồng, xoá file đã xong, để yt-dlp tải lại từ đầu – mà file tạm của yt-dlp
+trùng tên ".part" với file dựng sẵn đủ cỡ của tool (khúc chưa tải = số 0) -> yt-dlp có thể coi là tải xong (video hỏng)
+hoặc lại bị 567. Giờ: 429 / 5xx = `Busy` (máy chủ tạm từ chối) -> giảm số luồng, chờ lâu dần rồi tải tiếp; vẫn không
+được thì giữ nguyên phần đã tải (tên riêng ".svpart") để lấy link mới / bấm Tải tiếp."""
 from __future__ import annotations
 
 import json
@@ -24,6 +30,9 @@ MIN_SPLIT = 3 << 20          # file nhỏ hơn: 1 luồng
 RACE_BYTES = 1 << 20         # thử tốc độ mỗi máy chủ bằng 1 MB đầu
 RACE_SEC = 6.0
 RETRIES = 6                  # mỗi khúc thử lại tối đa (lỗi mạng khi đã mất mạng hẳn không tính – chờ có mạng)
+BUSY_WAIT = (3, 6, 12, 20, 30, 45, 60, 60)   # máy chủ tạm từ chối (429 / 5xx): chờ lâu dần, hết lượt -> Busy
+BUSY_CUT_SEC = 5.0           # giảm số luồng tối đa 1 lần / 5 s (các luồng cùng bị từ chối 1 lúc chỉ tính 1 lần)
+PART = ".svpart"             # file đang tải (tên riêng – yt-dlp dùng ".part", không lẫn file dựng sẵn của tool)
 READ = 1 << 18
 TIMEOUT = (10, 20)           # nối / không nhận thêm dữ liệu 20 s -> thử lại khúc đó
 # Bilibili: máy chủ P2P (PCDN) của người dùng khác – hay chậm / chập chờn khi tải từ nước ngoài -> xếp sau link upos
@@ -32,6 +41,65 @@ _PCDN = re.compile(r"mcdn\.bilivideo|szbdyd\.com|:\d{4,5}/v1/resource|\.mountain
 
 class Expired(Exception):
     """Link hết hạn / bị từ chối / máy chủ bỏ qua Range giữa chừng -> để yt-dlp tải như cũ."""
+
+
+class Busy(Expired):
+    """Máy chủ tạm từ chối (HTTP 429 / 5xx – Bilibili 567): phần đã tải giữ nguyên, lấy link mới rồi tải tiếp."""
+
+    def __init__(self, msg: str = "", status: int = 0):
+        super().__init__(msg or f"HTTP {status}")
+        self.status = status
+
+
+def check_status(r) -> None:
+    """401 / 403 / 404 / 410 -> Expired (link chết); 429 / 5xx (567…) -> Busy (thử lại sau); lỗi khác -> HTTPError."""
+    if r.status_code in (401, 403, 404, 410):
+        raise Expired(f"HTTP {r.status_code}")
+    if r.status_code == 429 or r.status_code >= 500:
+        raise Busy(f"HTTP {r.status_code}", r.status_code)
+    r.raise_for_status()
+
+
+def part_files(out: str | Path) -> tuple[Path, Path]:
+    """(file đang tải, bảng khúc đã xong). File của bản 2.1.30–2.3.4 (".part" + ".part.json") -> đổi sang tên mới."""
+    out = Path(out)
+    part, meta = out.with_name(out.name + PART), out.with_name(out.name + PART + ".json")
+    old, old_meta = out.with_name(out.name + ".part"), out.with_name(out.name + ".part.json")
+    if old_meta.exists() and not meta.exists():   # có bảng khúc = file của tool (yt-dlp không ghi .part.json)
+        try:
+            if old.exists() and not part.exists():
+                old.replace(part)
+            old_meta.replace(meta)
+        except OSError:
+            pass
+    return part, meta
+
+
+def partial_bytes(out: str | Path) -> tuple[int, int]:
+    """(số byte đã tải, cỡ file) của 1 file đang tải dở ((0, 0) nếu không có)."""
+    out = Path(out)
+    part, meta = part_files(out)
+    try:
+        m = json.loads(meta.read_text("utf-8"))
+        size, chunk = int(m["size"]), int(m["chunk"])
+        done = sum(min(size, (int(i) + 1) * chunk) - int(i) * chunk for i in m.get("done", []))
+        return done, size
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+    try:
+        return (part.stat().st_size, 0) if part.exists() else (0, 0)
+    except OSError:
+        return 0, 0
+
+
+def _wait(sec: float, cancel, stop: threading.Event | None = None) -> bool:
+    """Chờ sec giây; False = bị Huỷ / dừng."""
+    end = time.time() + sec
+    while time.time() < end:
+        if cancel() or (stop is not None and stop.is_set()):
+            return False
+        time.sleep(0.2)
+    return True
 
 
 def _get(url: str, headers: dict, cookies, rng: tuple[int, int] | None = None, timeout=TIMEOUT):
@@ -47,9 +115,7 @@ def probe(url: str, headers: dict, cookies=None) -> tuple[int | None, bool, str]
     """(cỡ file, máy chủ có cho tải theo khúc không, link sau chuyển hướng)."""
     r = _get(url, headers, cookies, (0, 0))
     try:
-        if r.status_code in (401, 403, 404, 410):
-            raise Expired(f"HTTP {r.status_code}")
-        r.raise_for_status()
+        check_status(r)
         if r.status_code == 206:
             m = re.search(r"/(\d+)\s*$", r.headers.get("Content-Range", ""))
             size = int(m.group(1)) if m else None
@@ -128,34 +194,48 @@ def fetch(urls: list[str], headers: dict, cookies, out: str | Path, conns: int =
     out = Path(out)
     cancel = cancel or (lambda: False)
     nt = _Net(cancel, report)
+    part, meta = part_files(out)
     if len(urls) > 1:
         if report:
             report("Đang chọn máy chủ nhanh nhất…")
         urls = race(urls, headers, cookies, cancel)
     last: Exception | None = None
+    busy: Busy | None = None
     for url in urls:
         try:
             size, ranges, url = _retry(lambda u=url: probe(u, headers, cookies), nt, cancel)
-            part = out.with_name(out.name + ".part")
             if not ranges or not size or size < MIN_SPLIT or conns <= 1:
                 _single(url, headers, cookies, part, size, ranges, on_bytes, cancel, nt)
             else:
                 _multi(url, headers, cookies, part, size, conns, on_bytes, cancel, nt)
             part.replace(out)
-            out.with_name(out.name + ".part.json").unlink(missing_ok=True)
+            meta.unlink(missing_ok=True)
             return out
         except (Cancelled, net.NetworkDown):
             raise
-        except Exception as e:  # noqa: BLE001 – máy chủ này hỏng -> thử link dự phòng
+        except Exception as e:  # noqa: BLE001 – máy chủ này hỏng -> thử link dự phòng (file đang tải giữ nguyên)
             last = e
+            if isinstance(e, Busy):
+                busy = e
+    if busy is not None:     # có máy chủ tạm từ chối -> người gọi lấy link mới rồi tải tiếp phần còn thiếu
+        raise busy
     raise last if isinstance(last, Expired) else Expired(str(last or "không tải được"))
 
 
 def _retry(fn, nt: _Net, cancel):
-    tries = 0
+    tries = busy = 0
     while True:
         try:
             return fn()
+        except Busy as e:
+            if busy >= len(BUSY_WAIT):
+                raise
+            w = BUSY_WAIT[busy]
+            busy += 1
+            if nt.report:
+                nt.report(f"Máy chủ video tạm từ chối ({e}) – chờ {w} s rồi thử lại")
+            if not _wait(w, cancel):
+                raise Cancelled() from None
         except Expired:
             raise
         except Exception as e:  # noqa: BLE001
@@ -170,8 +250,8 @@ def _retry(fn, nt: _Net, cancel):
 
 
 def _single(url, headers, cookies, part: Path, size, ranges: bool, on_bytes, cancel, nt: _Net) -> None:
-    """1 luồng: nối tiếp file .part khi máy chủ cho Range, không thì tải lại từ đầu."""
-    tries = 0
+    """1 luồng: nối tiếp file đang tải khi máy chủ cho Range, không thì tải lại từ đầu."""
+    tries = busy = 0
     while True:
         have = part.stat().st_size if (ranges and part.exists()) else 0
         if size and have >= size:
@@ -181,9 +261,7 @@ def _single(url, headers, cookies, part: Path, size, ranges: bool, on_bytes, can
         try:
             r = _get(url, headers, cookies, (have, (size or 0) - 1) if (have and size) else None)
             with r:
-                if r.status_code in (401, 403, 404, 410):
-                    raise Expired(f"HTTP {r.status_code}")
-                r.raise_for_status()
+                check_status(r)
                 if have and r.status_code != 206:
                     have = 0
                 with open(part, "ab" if have else "wb") as f:
@@ -196,6 +274,18 @@ def _single(url, headers, cookies, part: Path, size, ranges: bool, on_bytes, can
             if not size or part.stat().st_size >= size:
                 return
             raise OSError("máy chủ ngắt giữa chừng")
+        except Busy as e:
+            if on_bytes and have:
+                on_bytes(-have, size or 0)
+            if busy >= len(BUSY_WAIT):
+                raise
+            w = BUSY_WAIT[busy]
+            busy += 1
+            if nt.report:
+                nt.report(f"Máy chủ video tạm từ chối ({e}) – chờ {w} s rồi tải tiếp")
+            if not _wait(w, cancel):
+                raise Cancelled() from None
+            continue
         except (Expired, Cancelled):
             raise
         except Exception as e:  # noqa: BLE001
@@ -211,16 +301,17 @@ def _single(url, headers, cookies, part: Path, size, ranges: bool, on_bytes, can
 
 
 def _multi(url, headers, cookies, part: Path, size: int, conns: int, on_bytes, cancel, nt: _Net) -> None:
-    chunk = chunk_size(size, conns)
-    n = -(-size // chunk)
     meta = part.with_name(part.name + ".json")
+    chunk = chunk_size(size, conns)
     done: set[int] = set()
     try:
         m = json.loads(meta.read_text("utf-8"))
-        if m.get("size") == size and m.get("chunk") == chunk and part.exists() and part.stat().st_size == size:
-            done = {int(i) for i in m.get("done", []) if 0 <= int(i) < n}
+        if m.get("size") == size and int(m.get("chunk") or 0) > 0 and part.exists() and part.stat().st_size == size:
+            chunk = int(m["chunk"])   # tải tiếp: giữ cỡ khúc cũ – đổi số luồng cũng không mất phần đã tải (2.3.5)
+            done = {int(i) for i in m.get("done", []) if 0 <= int(i) < -(-size // chunk)}
     except (OSError, ValueError, TypeError):
         pass
+    n = -(-size // chunk)
     if not (part.exists() and part.stat().st_size == size):
         done = set()
         with open(part, "wb") as f:
@@ -228,7 +319,9 @@ def _multi(url, headers, cookies, part: Path, size: int, conns: int, on_bytes, c
     q = deque(i for i in range(n) if i not in done)
     lock = threading.Lock()
     stop = threading.Event()
+    halted = threading.Event()     # 1 luồng thấy Huỷ (nút Huỷ của người gọi có thể không giữ trạng thái)
     errors: list[Exception] = []
+    lim = {"n": max(1, min(conns, len(q))), "cut": 0.0}   # số luồng được chạy – máy chủ tạm từ chối thì giảm
     if on_bytes and done:
         on_bytes(sum(min(size, (i + 1) * chunk) - i * chunk for i in done), size)
 
@@ -240,30 +333,52 @@ def _multi(url, headers, cookies, part: Path, size: int, conns: int, on_bytes, c
         except OSError:
             pass
 
-    def worker():
+    def slow_down(e: Busy, btries: int) -> int:
+        """Máy chủ tạm từ chối (Bilibili 567…): giảm một nửa số luồng (tối đa 1 lần / 5 s), chờ lâu dần."""
+        with lock:
+            if time.time() - lim["cut"] > BUSY_CUT_SEC and lim["n"] > 1:
+                lim["n"] = max(1, lim["n"] // 2)
+                lim["cut"] = time.time()
+            k = lim["n"]
+        w = BUSY_WAIT[min(btries, len(BUSY_WAIT) - 1)]
+        if nt.report:
+            nt.report(f"Máy chủ video tạm từ chối ({e}) – giảm còn {k} luồng, chờ {w} s rồi tải tiếp")
+        return w
+
+    def worker(idx: int):
         with open(part, "r+b") as f:
             while not stop.is_set():
+                if idx >= lim["n"]:       # đã giảm số luồng -> luồng này nghỉ
+                    return
                 with lock:
                     if not q:
                         return
                     i = q.popleft()
                 a, b = i * chunk, min(size, (i + 1) * chunk) - 1
-                tries = 0
+                tries = btries = 0
                 while True:
                     if cancel() or stop.is_set():
+                        if not stop.is_set():
+                            halted.set()
+                        with lock:
+                            q.appendleft(i)
                         return
                     got = 0
                     try:
                         r = _get(url, headers, cookies, (a, b))
                         with r:
-                            if r.status_code in (401, 403, 404, 410):
-                                raise Expired(f"HTTP {r.status_code}")
+                            check_status(r)
                             if r.status_code != 206:
-                                r.raise_for_status()
                                 raise Expired("máy chủ không trả đúng khúc")
                             f.seek(a)
                             for c in r.iter_content(READ):
                                 if cancel() or stop.is_set():
+                                    if not stop.is_set():
+                                        halted.set()
+                                    if on_bytes and got:
+                                        on_bytes(-got, size)
+                                    with lock:
+                                        q.appendleft(i)
                                     return
                                 c = c[:b - a + 1 - got]
                                 f.write(c)
@@ -277,6 +392,25 @@ def _multi(url, headers, cookies, part: Path, size: int, conns: int, on_bytes, c
                         with lock:
                             done.add(i)
                         break
+                    except Busy as e:
+                        if on_bytes and got:
+                            on_bytes(-got, size)
+                        if btries >= len(BUSY_WAIT):
+                            errors.append(e)
+                            stop.set()
+                            return
+                        w = slow_down(e, btries)
+                        btries += 1
+                        if idx >= lim["n"]:          # luồng này bị cắt -> trả khúc cho luồng còn chạy
+                            with lock:
+                                q.appendleft(i)
+                            return
+                        if not _wait(w, cancel, stop):
+                            if not stop.is_set():
+                                halted.set()
+                            with lock:
+                                q.appendleft(i)
+                            return
                     except Expired as e:
                         errors.append(e)
                         stop.set()
@@ -297,17 +431,16 @@ def _multi(url, headers, cookies, part: Path, size: int, conns: int, on_bytes, c
                             errors.append(e)
                             stop.set()
                             return
-                        busy = any(k in str(e) for k in ("429", "503"))   # máy chủ bảo chậm lại
-                        time.sleep(min(10.0, (2.0 if busy else 0.5) * 2 ** tries))
+                        time.sleep(min(10.0, 0.5 * 2 ** tries))
 
-    ts = [threading.Thread(target=worker, daemon=True, name="trami-dl") for _ in range(min(conns, len(q)))]
+    ts = [threading.Thread(target=worker, args=(k,), daemon=True, name="trami-dl") for k in range(lim["n"])]
     for t in ts:
         t.start()
     last = time.time()
     while any(t.is_alive() for t in ts):
         for t in ts:
             t.join(0.25)
-        if cancel():
+        if cancel() or halted.is_set():
             stop.set()
             for t in ts:
                 t.join(5)
@@ -317,6 +450,8 @@ def _multi(url, headers, cookies, part: Path, size: int, conns: int, on_bytes, c
             last = time.time()
             save()
     save()
+    if cancel() or halted.is_set():   # các luồng thấy Huỷ và dừng trước khi vòng chờ kịp xét
+        raise Cancelled()
     if errors:
         e = errors[0]
         if isinstance(e, (Cancelled, net.NetworkDown, Expired)):
