@@ -39,7 +39,8 @@ class AutoSettingsDialog(QDialog):
         self.skill = f.row("Kỹ năng dịch AI", combo([("", "Không dùng")] + [
             (x["id"], ("🔒 " if x.get("builtin") else "✎ ") + x["name"]) for x in skills.all_skills(s)],
             s.get("translate_skill", "")))
-        self.clean = f.row("AI sửa lỗi nghe & nối câu trước khi dịch", Switch(bool(s.get("ai_clean_before_translate", True))))
+        self.clean = f.row("AI sửa lỗi nghe trước khi dịch", Switch(bool(s.get("ai_clean_before_translate", False))))
+        self.join = f.row("AI nối câu trước khi dịch", Switch(pipeline.pre_translate_ai(s)[1]))
         self.songai = f.row("AI lọc lời bài hát trước khi dịch", Switch(bool(s.get("ai_song_filter", True))))
         self.review = f.row("AI kiểm tra lại bản dịch", Switch(bool(s.get("ai_review_after_translate", False))))
         self.fill = f.row("Câu ngắn nói đầy đủ hơn cho vừa thời gian", Switch(bool(s.get("translate_fill", False))))
@@ -88,7 +89,8 @@ class AutoSettingsDialog(QDialog):
                 "split_style": self.split.currentData(), "ai_join_engine": self.joinai.currentData(),
                 "translate_engine": self.engine.currentData(), "target_lang": self.target.currentData(),
                 "translate_style": self.style.currentData(), "translate_skill": self.skill.currentData() or "",
-                "ai_clean_before_translate": self.clean.isChecked(), "ai_song_filter": self.songai.isChecked(),
+                "ai_clean_before_translate": self.clean.isChecked(), "ai_join_before_translate": self.join.isChecked(),
+                "ai_song_filter": self.songai.isChecked(),
                 "ai_review_after_translate": self.review.isChecked(), "translate_fill": self.fill.isChecked(),
                 "split_long_trans": self.split_long.isChecked(), "tts_engine": self.tts.currentData(),
                 "dub_voice_all": self.voice.currentData() or "", "auto_parallel": self.parallel.isChecked(),

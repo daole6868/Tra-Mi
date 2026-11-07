@@ -349,6 +349,14 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `gui/genres_dialog.GenresDialog` (nút "Sửa form…" cạnh ô "Thể loại phim" tab Tự động + ✎ tab Phụ đề). Kiểm tra bản dịch
   `skills.review_lines(ctx=, genre=)`: khoá = số thứ tự câu trong phim, câu ±`REVIEW_CTX` 2 ngoài lô -> mục NGỮ CẢNH;
   REVIEW_PROMPT: không sửa câu đúng chỉ vì muốn hay hơn, bỏ phần AI tự thêm.
+- AI trước khi dịch cả phim lần đầu – 2 công tắc riêng (2.3.9): "AI sửa lỗi nghe" `ai_clean_before_translate` (chữ nghe
+  nhầm + lọc lời hát / chữ không phải thoại, KHÔNG nối – `skills.FIX_PROMPT`, `clean_lines(mode="fix")`, `apply_cleanup`
+  bỏ qua merge) + "AI nối câu" `ai_join_before_translate` (None = theo công tắc sửa lỗi nghe như trước 2.3.9 –
+  `pipeline.pre_translate_ai`; mode "join" = JOIN_PROMPT); bật cả 2 = 1 lượt "full" như cũ; chỉ nối câu -> lượt "join" rồi
+  lượt "filter" (lọc lời hát) riêng. `translate` chạy `passes`, `ai_cleanup(keep_backup=)` giữ bản Hoàn tác của lượt đầu;
+  cờ `asr_cleaned` (fix / full) + `ai_join_done` (join / full; dự án cũ chưa có -> theo asr_cleaned), `recognize` /
+  `undo_cleanup` xoá. GUI tab Tự động `a_clean` + `a_join` (`_ai_switch_changed`, `sync_engine`, mờ khi Google / Hy-MT2),
+  hộp Thiết lập tự động `clean` + `join`, `autoflow.summary` "AI sửa lỗi nghe, nối câu…".
 - Chọn model AI (2.1.14): `translate.list_models(settings, engine, hidden=)` lấy ĐỦ mọi trang (Claude `limit` 1000 +
   `after_id` – mặc định API chỉ trả 20; Gemini `pageSize` 1000 + `nextPageToken`, key ở header `x-goog-api-key` không ở
   link), mới nhất trước (OpenAI-compatible theo `created`, Claude theo thứ tự API, Gemini tên giảm dần), ẩn model không
@@ -929,7 +937,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (327 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (328 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -2889,7 +2897,13 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   dài bị bộ xếp "Tự động" kéo cùng tốc độ chung bị tính là câu nhanh -> chỉ tính câu tự nó dài hơn chỗ. Thử: Edge giả 7
   câu 1,7 s / chỗ 1,3 s -> giãn cả đoạn, xếp lại không đọc lại câu nào, tốc độ đọc giảm, dub_at vẫn giây gốc; SRT với cắt /
   ×2 / giãn / chèn video đúng giờ; giao diện offscreen (Tìm 2 đoạn, bỏ tích 1, Áp dụng, Ctrl+Z / Ctrl+Y, Bỏ giãn).
+- 2.3.9: ảnh công tắc "AI sửa lỗi nghe & nối câu trước khi dịch" + "tách giúp tôi thành 2 nút riêng" -> 2 công tắc "AI sửa
+  lỗi nghe trước khi dịch" / "AI nối câu trước khi dịch" (tab Tự động + hộp Thiết lập…), bật riêng / cùng lúc (xem Cấu trúc
+  "AI trước khi dịch"). Cài đặt cũ đang bật vẫn bật cả 2. Thử với AI giả: chỉ sửa -> sửa chữ không gộp dòng; chỉ nối -> gộp
+  rồi lọc lời hát riêng, Hoàn tác về trước cả 2; cả 2 -> 1 lượt như cũ.
 ## Vấn đề đang mở
+- 2.3.9: chờ người dùng chép file, tab Tự động → bước 2 Dịch: bật / tắt riêng "AI sửa lỗi nghe" / "AI nối câu" rồi dịch cả
+  phim lần đầu – thông báo có "AI sửa N câu" / "nối N câu bị cắt"; nối sai -> tab Phụ đề → Hoàn tác sửa.
 - 2.3.8: chờ người dùng chép file, mở phim đã lồng có đoạn nói dồn: tab Lồng tiếng → mục 3 → khối "Giãn video ở đoạn nói
   nhanh" → Tìm đoạn (nên tách giọng trước để đo chỗ nghỉ theo giọng thật) → Xem từng đoạn → Áp dụng: hình chậm có lộ không
   (nghỉ chậm nhất 0,4× / cả đoạn ≥ 0,75×), giọng có hết đọc vội không; câu ⚠ còn nhanh -> Tích câu vẫn còn nhanh → AI rút gọn.

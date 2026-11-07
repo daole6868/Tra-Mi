@@ -97,6 +97,18 @@ Chỉ trả về JSON: {"fix": {"<số dòng>": "chữ mới"}, "merge": [[<số
 "song": {"<số dòng>": "lý do"}, "noise": {"<số dòng>": "lý do"}}. Lý do viết ngắn bằng tiếng Việt.
 Dòng không sửa thì KHÔNG ghi. Không có gì thì trả {"fix": {}, "merge": [], "unsure": {}, "song": {}, "noise": {}}."""
 
+FIX_PROMPT = """Bạn là biên tập viên phụ đề tiếng Trung. Các dòng dưới đây do máy nghe (ASR) tạo ra: có thể nghe nhầm chữ
+đồng âm / gần âm và chép cả lời bài hát / tiếng động thành chữ. Đọc HẾT các dòng để nắm nội dung, nhân vật, mạch chuyện, rồi:
+1. Sửa chữ nghe nhầm theo ngữ cảnh (VD 升↔生, 咬↔摇, 胃袋↔尾带, D神↔地神, 北极熊↔北京雄, 得↔的). CHỈ sửa khi ngữ cảnh rõ
+   ràng; không viết lại câu, không thêm ý, không dịch.
+2. Bỏ chữ lặp do máy (的的). Giữ tiếng cảm thán (嗯, 啊, 嘎).
+3. KHÔNG nối / gộp dòng, KHÔNG chuyển chữ sang dòng bên cạnh – mỗi dòng sửa trong chính dòng đó.
+4. Chỗ sửa mà chưa chắc: ghi vào "unsure" kèm lý do ngắn bằng tiếng Việt.
+5. """ + FILTER_RULES + """
+Chỉ trả về JSON: {"fix": {"<số dòng>": "chữ mới"}, "unsure": {"<số dòng>": "lý do"}, "song": {"<số dòng>": "lý do"},
+"noise": {"<số dòng>": "lý do"}}. Lý do viết ngắn bằng tiếng Việt. Dòng không sửa thì KHÔNG ghi. Không có gì thì trả
+{"fix": {}, "unsure": {}, "song": {}, "noise": {}}."""
+
 FILTER_PROMPT = """Bạn là biên tập viên phụ đề tiếng Trung. Các dòng dưới đây do máy nghe (ASR) tạo ra. Đọc HẾT các dòng để
 nắm nội dung, nhân vật, mạch chuyện, rồi CHỈ làm 1 việc:
 """ + FILTER_RULES + """
@@ -195,10 +207,11 @@ CLEAN_CHUNK = 80
 def clean_lines(llm, segs: list[Segment], profile: str = "", skill: str = "", progress=None, cancel=None,
                 mode: str = "full") -> dict:
     """Hỏi AI theo từng phần (80 dòng, kèm 4 dòng sau làm ngữ cảnh). Trả về {"fix", "merge", "unsure", "song", "noise"}
-    theo số dòng 1-based của CẢ danh sách. mode "filter": chỉ lọc lời bài hát / chữ không phải thoại."""
+    theo số dòng 1-based của CẢ danh sách. mode "filter": chỉ lọc lời bài hát / chữ không phải thoại; "fix": sửa chữ nghe
+    nhầm + lọc, không nối câu; "join": chỉ nối câu theo nghĩa; "full": cả sửa lẫn nối."""
     from .ffmpeg import Cancelled
 
-    prompt = {"filter": FILTER_PROMPT, "join": JOIN_PROMPT}.get(mode, CLEAN_PROMPT)
+    prompt = {"filter": FILTER_PROMPT, "join": JOIN_PROMPT, "fix": FIX_PROMPT}.get(mode, CLEAN_PROMPT)
     out = {"fix": {}, "merge": [], "unsure": {}, "song": {}, "noise": {}, "mode": mode}
     n = len(segs)
     for a in range(0, n, CLEAN_CHUNK):
@@ -239,7 +252,8 @@ def clean_lines(llm, segs: list[Segment], profile: str = "", skill: str = "", pr
                     out[key][int(k)] = str(v)[:200]
         if progress:
             progress(b / max(1, n), {"filter": f"AI đang lọc lời bài hát / chữ không phải thoại {b}/{n}",
-                                     "join": f"AI đang nối câu theo nghĩa {b}/{n}"}.get(
+                                     "join": f"AI đang nối câu theo nghĩa {b}/{n}",
+                                     "fix": f"AI đang sửa lỗi nghe {b}/{n}"}.get(
                                          mode, f"AI đang sửa lỗi nghe & nối câu {b}/{n}"))
     return out
 
@@ -293,7 +307,8 @@ def apply_cleanup(segs: list[Segment], res: dict) -> tuple[list[Segment], dict]:
             if 1 <= k <= n and k not in noise and not segs[k - 1].extra.get("not_song")}
     groups: list[list[int]] = []
     used: set[int] = set()
-    for g in sorted([] if trim_only else (res.get("merge") or []), key=lambda x: x[0]):
+    fix_only = res.get("mode") == "fix"     # AI sửa lỗi nghe (2.3.9): không gộp dòng
+    for g in sorted([] if trim_only or fix_only else (res.get("merge") or []), key=lambda x: x[0]):
         g = [x for x in g if 1 <= x <= n]
         if len(g) < 2 or len(g) > (3 if join_only else 4) or g != list(range(g[0], g[0] + len(g))) or used & set(g):
             continue

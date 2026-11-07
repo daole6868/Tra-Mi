@@ -194,7 +194,8 @@ DEFAULT_SETTINGS: dict = {
     "translate_skill": "chuan",               # kỹ năng đang dùng ("" = không; "chuan" = Dịch chuẩn – giữ đúng số câu)
     "translate_skills": [],                   # kỹ năng của bạn: [{"id", "name", "text"}]
     "genre_forms": [],                        # form thể loại phim bạn đã sửa: [{"id", "text"}] (trami/genres.py)
-    "ai_clean_before_translate": False,       # AI sửa lỗi nghe & nối câu bị cắt trước khi dịch cả phim lần đầu
+    "ai_clean_before_translate": False,       # AI sửa lỗi nghe (chữ nghe nhầm) trước khi dịch cả phim lần đầu
+    "ai_join_before_translate": None,         # AI nối câu bị cắt trước khi dịch (None = theo công tắc sửa lỗi nghe – 2.3.9)
     "ai_review_after_translate": False,       # AI kiểm tra lại bản dịch sau khi dịch cả phim (tốn thêm ~1 lần gọi AI)
     "ai_song_filter": True,                   # trước khi dịch cả phim lần đầu: AI lọc lời bài hát (🎵) + chữ không phải thoại
     "ai_join_engine": "auto",                 # AI nối câu theo nghĩa sau khi tách câu: auto (công cụ dịch nếu là AI) / off / tên AI

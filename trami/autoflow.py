@@ -75,11 +75,14 @@ def summary(settings: dict | None = None) -> str:
         from .translate import LOCAL_ENGINES
 
         if o["engine"] not in LOCAL_ENGINES:   # các bước AI chỉ chạy với công cụ dịch AI (không với Google / Hy-MT2)
-            ai = [t for k, t, d in (("ai_clean_before_translate", "sửa lỗi nghe", False),
-                                    ("ai_song_filter", "lọc lời hát", True),
-                                    ("ai_review_after_translate", "kiểm tra bản dịch", False)) if st.get(k, d)]
-            if st.get("ai_clean_before_translate", False) and "lọc lời hát" in ai:
-                ai.remove("lọc lời hát")      # sửa lỗi nghe đã gồm lọc lời bài hát
+            from .pipeline import pre_translate_ai
+
+            fix_on, join_on = pre_translate_ai(st)
+            ai = (["sửa lỗi nghe"] if fix_on else []) + (["nối câu"] if join_on else [])
+            if st.get("ai_song_filter", True) and not fix_on:     # sửa lỗi nghe đã gồm lọc lời bài hát
+                ai.append("lọc lời hát")
+            if st.get("ai_review_after_translate", False):
+                ai.append("kiểm tra bản dịch")
             if ai:
                 parts.append("AI " + ", ".join(ai))
         if st.get("split_long_trans", True):

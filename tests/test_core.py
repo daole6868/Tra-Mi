@@ -6500,7 +6500,7 @@ def test_ai_steps_run_with_live_drafts(monkeypatch):
     rev = [pl for k, pl in calls if k == "review"]
     assert len(rev) == 1 and len(rev[0]) == 1                               # chỉ câu vừa dịch
     sm = autoflow.summary(st_)
-    assert "AI sửa lỗi nghe, kiểm tra bản dịch" in sm and "lọc lời hát" not in sm
+    assert "AI sửa lỗi nghe, nối câu, kiểm tra bản dịch" in sm and "lọc lời hát" not in sm
     sm = autoflow.summary({**st_, "ai_clean_before_translate": False})
     assert "AI lọc lời hát, kiểm tra bản dịch" in sm
     assert "AI " not in autoflow.summary({**st_, "translate_engine": "google"})
@@ -14794,3 +14794,62 @@ def test_dense_gui_238(monkeypatch):
         save_settings({k: v for k, v in __import__("trami.dense", fromlist=["x"]).DEFAULTS.items()})
         win.timer.stop()
         p.delete()
+
+
+def test_pre_translate_fix_join_split_239(monkeypatch):
+    """2 công tắc riêng: 'AI sửa lỗi nghe' (chỉ sửa chữ + lọc, không nối) / 'AI nối câu' (chỉ nối, rồi lọc lời hát riêng);
+    bật cả 2 = 1 lượt như cũ; ô nối câu chưa đặt -> theo công tắc sửa lỗi nghe (cài đặt cũ); Hoàn tác về trước cả 2 bước."""
+    from trami import autoflow, pipeline
+    from trami import translate as tr
+    from trami.config import load_settings
+    from trami.project import Project
+
+    prompts = []
+
+    def fake_chat(self, system, user, max_tokens=8000, temperature=0.3):
+        if "biên tập viên phụ đề tiếng Trung" in system:
+            mode = ("join" if "thực ra là MỘT câu" in system else
+                    "filter" if "Không sửa chữ nghe nhầm, không nối câu" in system else
+                    "fix" if "KHÔNG nối / gộp dòng" in system else "full")
+            prompts.append(mode)
+            return json.dumps({"fix": {"1": "真的假的", "2": "真的假的你好"}, "merge": [[1, 2]], "unsure": {}},
+                              ensure_ascii=False)
+        if 'lập "HỒ SƠ PHIM"' in system:
+            return json.dumps({"the_loai": "hài"}, ensure_ascii=False)
+        payload = json.loads(user[user.index("{"):]) if "{" in user else {}
+        return json.dumps({k: f"Câu {k}" for k in payload}, ensure_ascii=False)
+
+    monkeypatch.setattr(tr.LLMClient, "chat", fake_chat)
+    base = {**load_settings(), "translate_engine": "openai", "openai_api_key": "x", "translate_skill": "",
+            "openai_base_url": "https://api.example.com/v1", "ai_review_after_translate": False,
+            "split_long_trans": False, "ai_song_filter": True, "ai_join_before_translate": None}
+    assert pipeline.pre_translate_ai({**base, "ai_clean_before_translate": True}) == (True, True)     # cài đặt cũ
+    assert pipeline.pre_translate_ai({**base, "ai_clean_before_translate": True,
+                                      "ai_join_before_translate": False}) == (True, False)
+    assert pipeline.pre_translate_ai({**base, "ai_clean_before_translate": False,
+                                      "ai_join_before_translate": True}) == (False, True)
+
+    def run(fix, join):
+        prompts.clear()
+        p = Project.create("fixjoin")
+        p.segments = [Segment(0, 1.0, "真的加的", ""), Segment(1.2, 2.0, "你好", ""), Segment(4, 5, "走吧", "")]
+        p.save()
+        pipeline.translate(p, "openai", "auto", False,
+                           {**base, "ai_clean_before_translate": fix, "ai_join_before_translate": join}, split=False)
+        return p
+
+    p = run(True, False)                                   # chỉ sửa lỗi nghe: sửa chữ, không gộp dòng
+    assert prompts == ["fix"] and len(p.segments) == 3 and p.segments[0].text == "真的假的"
+    assert p.data.get("asr_cleaned") and not p.data.get("ai_join_done") and p.data.get("ai_filtered")
+    p.delete()
+    p = run(False, True)                                   # chỉ nối câu: gộp, rồi lọc lời bài hát riêng
+    assert prompts == ["join", "filter"] and len(p.segments) == 2
+    assert p.data.get("ai_join_done") and not p.data.get("asr_cleaned") and "AI nối câu" not in p.data.get(
+        "skill_warning", "")
+    assert pipeline.undo_cleanup(p) == 3                   # Hoàn tác về trước cả 2 bước
+    p.delete()
+    p = run(True, True)                                    # bật cả 2: 1 lượt như trước 2.3.9
+    assert prompts == ["full"] and len(p.segments) == 2 and p.segments[0].extra["src_before"] == "真的加的 | 你好"
+    p.delete()
+    sm = autoflow.summary({**base, "ai_clean_before_translate": False, "ai_join_before_translate": True})
+    assert "AI nối câu, lọc lời hát" in sm

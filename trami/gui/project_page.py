@@ -819,9 +819,13 @@ class ProjectPage(QWidget):
         f.row("Kỹ năng dịch AI", sk_row,
               "Luật riêng gắn vào lời nhắc của MỌI công cụ dịch AI (DeepSeek / Claude / GPT / Gemini / Ollama / API "
               "tương thích OpenAI). Không dùng với Google / Hy-MT2")
-        self.a_clean = f.row("AI sửa lỗi nghe & nối câu trước khi dịch", Switch(bool(s.get("ai_clean_before_translate", True))),
-                             "Trước khi dịch cả phim lần đầu: AI sửa chữ máy nghe nhầm (đồng âm) và nối câu bị cắt sai "
-                             "chỗ. Có nút Hoàn tác ở tab Phụ đề")
+        self.a_clean = f.row("AI sửa lỗi nghe trước khi dịch", Switch(bool(s.get("ai_clean_before_translate", False))),
+                             "Trước khi dịch cả phim lần đầu: AI sửa chữ máy nghe nhầm (đồng âm / gần âm) theo ngữ cảnh, "
+                             "lọc lời bài hát / chữ không phải lời thoại. Không nối câu. Có nút Hoàn tác sửa ở tab Phụ đề")
+        self.a_join = f.row("AI nối câu trước khi dịch", Switch(pipeline.pre_translate_ai(s)[1]),
+                            "Trước khi dịch cả phim lần đầu: AI đọc cả kịch bản, nối 2–3 dòng liền nhau thực ra là 1 câu "
+                            "bị cắt ngang (cùng người nói, chỉ đổi dấu câu ở chỗ nối, không sửa chữ). Bật cả 2 công tắc "
+                            "thì AI làm 1 lượt. Có nút Hoàn tác sửa ở tab Phụ đề")
         self.a_songai = f.row("AI lọc lời bài hát trước khi dịch", Switch(bool(s.get("ai_song_filter", True))),
                               "Trước khi dịch cả phim lần đầu (khi không bật sửa lỗi nghe ở trên – bước đó đã gồm việc "
                               "này): AI đọc cả kịch bản, câu là lời bài hát (văn vần, điệp khúc, không ăn nhập lời thoại) "
@@ -848,6 +852,7 @@ class ProjectPage(QWidget):
                               C.VIDEO_TRANSLATE_HELP)
         self.a_vtrans.toggled.connect(self._vtrans_changed)
         self.a_clean.toggled.connect(self._ai_switch_changed)
+        self.a_join.toggled.connect(self._ai_switch_changed)
         self.a_review.toggled.connect(self._ai_switch_changed)
         self.a_songai.toggled.connect(self._ai_switch_changed)
         self.a_fill.toggled.connect(self._ai_switch_changed)
@@ -4350,7 +4355,8 @@ class ProjectPage(QWidget):
                 self.a_joinai.addItem(text, val)
             set_combo(self.a_joinai, st.get("ai_join_engine", "auto"))
             self._fill_skills(st)
-            self.a_clean.setChecked(bool(st.get("ai_clean_before_translate", True)))
+            self.a_clean.setChecked(bool(st.get("ai_clean_before_translate", False)))
+            self.a_join.setChecked(pipeline.pre_translate_ai(st)[1])
             self.a_review.setChecked(bool(st.get("ai_review_after_translate", False)))
             self.a_songai.setChecked(bool(st.get("ai_song_filter", True)))
             self.a_fill.setChecked(bool(st.get("translate_fill", False)))
@@ -4502,6 +4508,7 @@ class ProjectPage(QWidget):
         from ..config import save_settings
 
         self.settings = save_settings({"ai_clean_before_translate": self.a_clean.isChecked(),
+                                       "ai_join_before_translate": self.a_join.isChecked(),
                                        "ai_review_after_translate": self.a_review.isChecked(),
                                        "ai_song_filter": self.a_songai.isChecked(),
                                        "translate_fill": self.a_fill.isChecked()})
@@ -4837,7 +4844,7 @@ class ProjectPage(QWidget):
 
         eng = self.a_engine.currentData()
         ai = eng not in LOCAL_ENGINES and eng != pipeline.NO_TRANSLATE
-        for name in ("a_skill", "a_clean", "a_songai", "a_review", "a_fill", "s_skill"):
+        for name in ("a_skill", "a_clean", "a_join", "a_songai", "a_review", "a_fill", "s_skill"):
             w = getattr(self, name, None)
             if w is not None:
                 w.setEnabled(ai)
