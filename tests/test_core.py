@@ -13685,7 +13685,7 @@ def test_ui_layout_220(sample_video, monkeypatch):
     và các nút / ô cũ vẫn còn, vẫn nối hàm."""
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtCore import SIGNAL
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QPushButton
 
     from trami import pipeline
     from trami.config import load_settings
@@ -13747,9 +13747,10 @@ def test_ui_layout_220(sample_video, monkeypatch):
         assert pp.flow_steps.steps[1]["state"] == "run" and cards[1].chip.kind == "run" and "42" in cards[1].chip.text
         pp._flow_jobs([])
         assert pp.flow_steps.steps[1]["state"] == ""
-        # nút bước có số, nút thao tác các tab có số, ô cũ vẫn nối hàm
-        assert [b.num for b in pp.step_btns] == [1, 2, 3, 4]
-        assert getattr(pp.s_del, "_num", None) == 1
+        # 2.3.7: số chỉ ở tiêu đề thẻ bước / thanh tab – nút KHÔNG có số; ô cũ vẫn nối hàm
+        assert [b.num for b in pp.step_btns] == [None] * 4
+        assert getattr(pp.s_del, "_num", None) is None
+        assert not [b.text() for b in pp.findChildren(QPushButton) if re.match(r"\s*\d+\s*[.·)]\s", b.text())]
         for b in pp.step_btns + [pp.s_del]:
             assert b.receivers(SIGNAL("clicked()")) + b.receivers(SIGNAL("clicked(bool)")) > 0
         # tab Phụ đề: bảng câu luôn mở; Công cụ thu gọn qua tiêu đề thẻ = cài đặt subs_tools_open cũ
@@ -14384,3 +14385,167 @@ def test_shorten_gui_236(monkeypatch):
         save_settings({"shorten_rounds": 3, "shorten_fallback": "both", "translate_engine": "google"})
         win.timer.stop()
         p.delete()
+
+
+def test_gui_click_every_button_237(sample_video, monkeypatch):
+    """2.3.7: bấm thử MỌI nút / công tắc của mọi tab trang dự án (cả từng trang Công cụ tab Phụ đề, lớp chữ đang chọn)
+    + Trang chủ / Cài đặt / Hàng loạt / Việc đang làm / Dung lượng, rồi đổi mọi ô chọn qua từng mục: không nút nào ném
+    lỗi. Hộp thoại trả "Không / Huỷ", việc nền chỉ ghi lại (không chạy). Tìm ra: nút nối hàm có tham số mặc định nhận
+    clicked(bool) = False ("Thêm kỹ năng mới" lưu tên kỹ năng = False làm hỏng danh sách kỹ năng; "Nghe câu" phát câu 0)."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    import traceback
+
+    from PySide6.QtGui import QColor, QDesktopServices
+    from PySide6.QtWidgets import (QAbstractButton, QApplication, QColorDialog, QComboBox, QDialog, QFileDialog,
+                                   QInputDialog, QMenu, QMessageBox)
+
+    from trami import config, jobs, pipeline
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.gui.remote_ui import RemoteCard
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    saved = config.SETTINGS_FILE.read_text("utf-8") if config.SETTINGS_FILE.exists() else None
+    errors, cur = [], [""]
+    monkeypatch.setattr(sys, "excepthook", lambda t, v, tb: errors.append(
+        (cur[0], "".join(traceback.format_exception(t, v, tb))[-1500:])))
+    for name, val in (("getOpenFileName", ("", "")), ("getOpenFileNames", ([], "")), ("getSaveFileName", ("", "")),
+                      ("getExistingDirectory", "")):
+        monkeypatch.setattr(QFileDialog, name, staticmethod(lambda *a, _v=val, **k: _v))
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: QMessageBox.StandardButton.No))
+    for name in ("information", "warning", "critical"):
+        monkeypatch.setattr(QMessageBox, name, staticmethod(lambda *a, **k: QMessageBox.StandardButton.Ok))
+    monkeypatch.setattr(QMessageBox, "exec", lambda self, *a: 0)
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("", False)))
+    monkeypatch.setattr(QInputDialog, "getItem", staticmethod(lambda *a, **k: ("", False)))
+    monkeypatch.setattr(QInputDialog, "getDouble", staticmethod(lambda *a, **k: (0.0, False)))
+    monkeypatch.setattr(QInputDialog, "getInt", staticmethod(lambda *a, **k: (0, False)))
+    monkeypatch.setattr(QDialog, "exec", lambda self, *a: 0)
+    import webbrowser
+    monkeypatch.setattr(webbrowser, "open", lambda *a, **k: True)
+    monkeypatch.setattr(QColorDialog, "getColor", staticmethod(lambda *a, **k: QColor()))
+    monkeypatch.setattr(QMenu, "exec", lambda self, *a, **k: None)
+    monkeypatch.setattr(QDesktopServices, "openUrl", staticmethod(lambda *a, **k: True))
+    subs = []
+    monkeypatch.setattr(jobs.manager, "submit", lambda kind, title, fn, project_id="", gpu=None: (
+        subs.append(kind), jobs.Job(id=f"t{len(subs)}", kind=kind, title=title, project_id=project_id, _fn=fn))[1])
+    import importlib
+
+    for m in ("link_login", "main", "models_tab", "project_page", "publish_ui", "remote_ui", "silence_ui",
+              "storage_page", "voice_samples", "common"):
+        monkeypatch.setattr(importlib.import_module("trami.gui." + m), "run_async", lambda *a, **k: None)
+    p = Project.create("click237")
+    pipeline.attach_source(p, sample_video)
+    p.segments = [Segment(0.3 + i * 0.7, 0.9 + i * 0.7, "对了父亲", "Đúng rồi, cha.", f"S{1 + i % 2}",
+                          {"fit": "ok", "fit_need": 0.5, "fit_have": 0.6}) for i in range(7)]
+    p.save()
+    win = MainWindow()
+    win.resize(1600, 1000)
+    win.show()
+    seen: set = set()
+
+    def pump(n=2):
+        for _ in range(n):
+            app.processEvents()
+
+    def click_all(root, where) -> int:
+        n = 0
+        for b in root.findChildren(QAbstractButton):
+            try:
+                if id(b) in seen or not b.isEnabled():
+                    continue
+                skip = b.text() == "Xoá dự án" or any(isinstance(x, RemoteCard) for x in _parents(b))
+                txt = b.text() or b.toolTip()[:40] or type(b).__name__
+            except RuntimeError:          # nút đã bị xoá khi vẽ lại
+                continue
+            seen.add(id(b))
+            if skip:
+                continue
+            cur[0] = f"{where} · {txt}"
+            try:
+                b.click()
+            except Exception:  # noqa: BLE001
+                errors.append((cur[0], traceback.format_exc()[-1500:]))
+            pump()
+            n += 1
+        return n
+
+    def _parents(w):
+        x = w.parentWidget()
+        while x is not None:
+            yield x
+            x = x.parentWidget()
+
+    try:
+        win.open_project(p.id)
+        pump(6)
+        pp = win.project_page
+        n = 0
+        for i in range(pp.stack.count()):
+            pp.tabs.set_current(i)
+            pump(3)
+            if i == 1:
+                for k in range(len(pp.s_tools_pages)):
+                    pp._subs_tools(page=k, open_=True, save=False)
+                    pp.model.set_picked([0, 1], True)
+                    n += click_all(pp.s_tools_pages[k], f"Phụ đề / Công cụ {k}")
+            if i == pp.TAB_LAYERS:
+                pp.layers_tab.add_text(None)
+                pump(3)
+            pp.model.set_picked([0, 1], True)
+            n += click_all(pp.stack.widget(i), f"tab {i}")
+        for i in range(pp.stack.count()):       # đổi mọi ô chọn qua từng mục rồi về lại
+            pp.tabs.set_current(i)
+            pump(2)
+            for cb in pp.stack.widget(i).findChildren(QComboBox):
+                try:
+                    if not cb.isEnabled() or not cb.count():
+                        continue
+                    old = cb.currentIndex()
+                    cur[0] = f"ô chọn tab {i} · {cb.itemText(0)[:30]}"
+                    for k in range(min(cb.count(), 12)):
+                        cb.setCurrentIndex(k)
+                        cb.activated.emit(k)
+                        pump(1)
+                    cb.setCurrentIndex(old)
+                except RuntimeError:
+                    continue
+        n += click_all(pp, "trang dự án")
+        for name in ("home", "settings_page", "batch", "jobs_page", "storage_page"):
+            if getattr(win, name, None) is not None:
+                n += click_all(getattr(win, name), name)
+        pump(6)
+        assert n > 400, n
+        assert not errors, "\n".join(f"{w}\n{t}" for w, t in errors[:5])
+    finally:
+        win.timer.stop()
+        p.delete()
+        if saved is None:
+            config.SETTINGS_FILE.unlink(missing_ok=True)
+        else:
+            config.SETTINGS_FILE.write_text(saved, "utf-8")
+
+
+def test_skill_names_robust_237(monkeypatch):
+    """2.3.7: kỹ năng tên hỏng (bản cũ lưu tên = False khi bấm 'Thêm kỹ năng mới') không làm hỏng danh sách kỹ năng;
+    nút gọi hàm không kèm clicked(bool)."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from trami import skills
+    from trami.gui.widgets import button
+
+    QApplication.instance() or QApplication([])
+    st = {"translate_skills": [{"id": "u1", "name": False, "text": "- luật"}, {"id": 5, "name": "", "text": "- b"},
+                               {"id": "u3", "name": "Ok", "text": 3}]}
+    own = [x for x in skills.all_skills(st) if not x.get("builtin") and x["id"] != skills.STD_ID]
+    assert [(x["id"], x["name"]) for x in own] == [("u1", "Kỹ năng mới"), ("5", "Kỹ năng mới")]
+    got = []
+
+    def handler(name: str = "mặc định"):
+        got.append(name)
+    b = button("Thử", on_click=handler)
+    b.click()
+    assert got == ["mặc định"]

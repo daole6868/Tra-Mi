@@ -107,6 +107,8 @@ class SkillsDialog(QDialog):
         self._fill(select)
 
     def _new(self, name: str = "Kỹ năng mới", text: str = ""):
+        if not isinstance(name, str) or not name.strip():
+            name = "Kỹ năng mới"
         sid = "u" + str(int(time.time() * 1000))
         own = self._own() + [{"id": sid, "name": name, "text": text or "- "}]
         self._write(own, sid)

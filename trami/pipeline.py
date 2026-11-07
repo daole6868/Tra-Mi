@@ -6164,7 +6164,7 @@ def dub_summary(p: Project) -> str:
     miss = int(st.get("total", 0)) - int(st.get("placed", 0)) - sum(
         int(st.get(k, 0) or 0) for k in ("songs", "empty", "nodub"))
     if miss > 0:
-        extra.append(f"{miss} câu chưa có giọng – bấm 'Tích câu chưa lồng' rồi 'Tạo lại giọng các câu đã tích'")
+        extra.append(f"{miss} câu chưa có giọng – bấm Tích nhanh → 'Câu chưa lồng' (tab Lồng tiếng) rồi 'Tạo lại giọng các câu đã tích'")
     used = st.get("voices_used") or {}
     if used:   # giọng THẬT đã đọc từng người nói
         parts = []

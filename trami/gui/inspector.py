@@ -10,7 +10,7 @@ from . import theme
 from .player import fmt
 from .subs_model import (C_END, C_NODUB, C_SPK, C_START, C_VI, C_VOICE, C_ZH, FIT_TEXT, VOICE_DEFAULT, SubsModel,
                          fit_tip, spk_color)
-from .widgets import Card, GradientButton, IconButton, Switch, button, hbox, label, numbered
+from .widgets import Card, GradientButton, IconButton, Switch, button, hbox, label
 
 
 class _TextBox(QPlainTextEdit):
@@ -100,11 +100,10 @@ class LineInspector(Card):
                 button("AI rút gọn", "sparkle", "AI viết lại ngắn hơn cho vừa thời gian nói",
                        on_click=lambda: self._act("shorten")))
         for k, b in enumerate(btns):
-            numbered(b, k + 1)                      # 2.2.0: nút thao tác có số thứ tự
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             grid.addWidget(b, k // 2, k % 2, 1, 2 if k == 2 else 1)
         v.addLayout(grid)
-        regen = GradientButton("Tạo lại giọng câu này", "refresh", num=4)
+        regen = GradientButton("Tạo lại giọng câu này", "refresh")
         regen.clicked.connect(lambda: self._act("redub"))
         v.addWidget(regen)
         self.add(self.body)

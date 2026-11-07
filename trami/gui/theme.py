@@ -71,6 +71,7 @@ QLabel[muted="true"] {{ color: {MUTED}; }}
 QLabel[h1="true"] {{ font-size: 18pt; font-weight: 800; }}
 QLabel[h2="true"] {{ font-size: 12.5pt; font-weight: 700; }}
 QLabel[h3="true"] {{ font-size: 10.5pt; font-weight: 700; color: {TEXT}; }}
+QLabel[h4="true"] {{ font-size: 10pt; font-weight: 700; color: {TEXT}; }}
 QToolTip {{ background: {CARD3}; color: {TEXT}; border: 1px solid {BORDER}; padding: 6px 8px; border-radius: 6px; }}
 
 QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox, QTimeEdit, QDateTimeEdit {{

@@ -17,7 +17,7 @@ from .. import browser_post, publish
 from ..config import load_settings, save_settings
 from . import icons, theme
 from .common import run_async
-from .widgets import Form, GradientButton, SectionCard, StepCard, Switch, button, combo, flow, hbox, label, set_combo
+from .widgets import Form, GradientButton, Group, SectionCard, StepCard, Switch, button, combo, flow, hbox, label, set_combo
 
 ZN_HELP = """<b>Zernio</b> là dịch vụ đăng bài đã được YouTube và Meta duyệt, nên video lên <b>Công khai ngay</b>.<br><br>
 1. Đăng ký tài khoản ở <b>zernio.com</b> → mục <b>API Keys</b> → tạo key → dán vào ô <i>API key</i> → <b>Lưu cài đặt</b>.<br>
@@ -309,11 +309,15 @@ class PublishCard(StepCard):
         self.thumb = ""
         self._loading = False
         s = load_settings()
-        f = Form()
+        # 2.3.7: chia khối Video / Đăng lên / Nội dung / Tuỳ chọn – nhãn mỗi khối thẳng cột riêng
+        gv = Group("Video", "film")
         self.v_name = label("", "muted", wrap=True)
-        f.row("Video", flow(self.v_name,
-                            button("Bản xuất mới nhất", "refresh", flat=True, on_click=self._use_latest),
-                            button("Chọn file…", "folder", flat=True, on_click=self._pick_file)))
+        gv.add(self.v_name)
+        gv.actions(button("Bản xuất mới nhất", "refresh", "Dùng file vừa xuất ở mục 1", flat=True,
+                          on_click=self._use_latest),
+                   button("Chọn file…", "folder", "Đăng 1 file video khác trên máy", flat=True, on_click=self._pick_file))
+        self.add(gv)
+        f = Group("Đăng lên", "share")
         self.plat: dict[str, dict] = {}
         for plat in ("youtube", "facebook", "tiktok"):
             sw = Switch(plat == "youtube")
@@ -326,6 +330,8 @@ class PublishCard(StepCard):
                 w.toggled.connect(self._changed)
             tg.currentIndexChanged.connect(self._changed)
             kd.currentIndexChanged.connect(self._changed)
+        self.add(f)
+        f = Group("Nội dung bài đăng", "text")
         self.title = f.row("Tiêu đề", QLineEdit())
         self.title.setPlaceholderText("Tiêu đề video (YouTube tối đa 100 ký tự)")
         self.desc = QPlainTextEdit()
@@ -334,13 +340,16 @@ class PublishCard(StepCard):
         f.row("Mô tả", self.desc)
         self.tags = f.row("Hashtag", QLineEdit())
         self.tags.setPlaceholderText("#phimhay #vietsub …")
-        self.add(f)
         self.ai_btn = button("AI viết tiêu đề, mô tả, hashtag", "sparkle", flat=True, on_click=self._ai_write)
         self.ai_out = label("", "muted", wrap=True)
-        self.add(flow(self.ai_btn, self.ai_out))
-        g = Form()
-        self.privacy = g.row("Quyền riêng tư (YouTube)", combo(publish.PRIVACY, s.get("publish_privacy", "public")))
-        self.category = g.row("Danh mục (YouTube)", combo(publish.YT_CATEGORIES, s.get("publish_category", "24")))
+        f.actions(self.ai_btn)
+        f.add(self.ai_out)
+        self.add(f)
+        g = Group("Tuỳ chọn", "settings")
+        self.privacy = g.row("Quyền riêng tư", combo(publish.PRIVACY, s.get("publish_privacy", "public")),
+                             "YouTube: Công khai / Không công khai / Riêng tư")
+        self.category = g.row("Danh mục", combo(publish.YT_CATEGORIES, s.get("publish_category", "24")),
+                              "Danh mục video trên YouTube")
         self.sched = Switch(False)
         self.when = QDateTimeEdit(QDateTime.currentDateTime().addSecs(3600))
         self.when.setDisplayFormat("dd/MM/yyyy HH:mm")
@@ -357,8 +366,9 @@ class PublishCard(StepCard):
                               button("Lấy khung đang xem", "film", "Chụp khung hình ở vị trí đang phát của video đăng",
                                      flat=True, on_click=self._grab_thumb),
                               button("Bỏ", "x", flat=True, on_click=lambda: self._set_thumb(""))))
-        self.notify = g.row("Báo cho người đăng ký (YouTube)", Switch(bool(s.get("publish_notify", True))))
-        self.synthetic = g.row("Có nội dung tạo bằng AI", Switch(bool(s.get("publish_synthetic", False))),
+        self.notify = g.row("Báo người đăng ký", Switch(bool(s.get("publish_notify", True))),
+                            "YouTube gửi thông báo video mới cho người đăng ký kênh")
+        self.synthetic = g.row("Nội dung tạo bằng AI", Switch(bool(s.get("publish_synthetic", False))),
                                "Bật nếu giọng / hình do AI tạo có thể bị nhầm là thật – YouTube gắn nhãn nội dung AI")
         self.add(g)
         self.warn = label("", "muted", wrap=True)
@@ -375,8 +385,9 @@ class PublishCard(StepCard):
             self.hist.setColumnWidth(c, w)
         self.hist.setMinimumHeight(130)
         self.hist.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.add(label("Đã đăng", "h3"))
-        self.add(self.hist)
+        gh = Group("Đã đăng", "list")
+        gh.add(self.hist)
+        self.add(gh)
         for w in (self.title, self.tags):
             w.textChanged.connect(self._save_draft)
         self.desc.textChanged.connect(self._save_draft)

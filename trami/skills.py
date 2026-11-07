@@ -156,7 +156,11 @@ Chỉ trả về JSON: {{"<số>": {{"sua": "bản dịch mới", "ly_do": "lý 
 def all_skills(settings: dict) -> list[dict]:
     """Kỹ năng có sẵn + kỹ năng của bạn (Cài đặt `translate_skills`)."""
     own = [dict(x, builtin=False) for x in (settings.get("translate_skills") or [])
-           if isinstance(x, dict) and x.get("id") and (x.get("text") or "").strip()]
+           if isinstance(x, dict) and x.get("id") and isinstance(x.get("text"), str) and x["text"].strip()]
+    for x in own:     # 2.3.7: tên hỏng (bản cũ: bấm "Thêm kỹ năng mới" lưu tên = False) -> tên mặc định
+        if not isinstance(x.get("name"), str) or not x["name"].strip():
+            x["name"] = "Kỹ năng mới"
+        x["id"] = str(x["id"])
     std = next((x for x in own if x["id"] == STD_ID), None) or dict(STD_SKILL, builtin=False)   # đã sửa -> bản của bạn
     return [std] + BUILTIN + [x for x in own if x["id"] != STD_ID]
 

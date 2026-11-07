@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QAbstractButton, QDoubleSpinBox, QFileDialog, QLi
 
 from .. import overlay
 from . import theme
-from .widgets import (ColorButton, Form, StepCard, SliderRow, Switch, button, combo, flow, hbox, label,
+from .widgets import (ColorButton, Group, StepCard, SliderRow, Switch, button, combo, flow, hbox, label,
                       set_combo)
 
 MIME = "application/x-subvideo-logo"
@@ -30,6 +30,34 @@ _PY = {"t": 0.1, "m": 0.5, "b": 0.86}
 def _fmt(t: float) -> str:
     m, s = divmod(max(0.0, t), 60)
     return f"{int(m):02d}:{s:04.1f}"
+
+
+class _Forms:
+    """Các khối Group của thẻ "Lớp đang chọn": setRowVisible / isRowVisible tìm đúng khối chứa ô đó (ô là layout ->
+    khung bọc nó)."""
+
+    def __init__(self, *groups):
+        self.groups = groups
+
+    def _find(self, w):
+        from PySide6.QtWidgets import QLayout
+
+        if isinstance(w, QLayout):
+            w = w.parentWidget()
+        for g in self.groups:
+            f = g._form_of(w)
+            if f is not None:
+                return f, w
+        return None, w
+
+    def setRowVisible(self, w, on: bool):
+        f, w = self._find(w)
+        if f is not None:
+            f.setRowVisible(w, on)
+
+    def isRowVisible(self, w) -> bool:
+        f, w = self._find(w)
+        return bool(f is not None and f.isRowVisible(w))
 
 
 class TemplateButton(QAbstractButton):
@@ -212,8 +240,12 @@ class LayersTab(QWidget):
 
     # ================================================================== thuộc tính
     def _build_props(self):
-        f = Form()
-        self.pf = f
+        # 2.3.7: chia khối – Chữ / Viền · bóng · nền / Ảnh logo / Vị trí & hiệu ứng / Thời gian hiện (mỗi khối nhãn thẳng
+        # cột riêng, không còn 1 cột nhãn dài kéo các ô sang phải)
+        self.g_text, self.g_look = Group("Chữ", "text"), Group("Viền · bóng · nền", "layers")
+        self.g_logo, self.g_pos = Group("Ảnh logo", "image"), Group("Vị trí & hiệu ứng", "sparkle")
+        self.g_time = Group("Thời gian hiện", "clock")
+        f = self.g_text
         self.p_text = f.row("Chữ", QPlainTextEdit())
         self.p_text.setPlaceholderText("Nhập chữ (Enter = xuống dòng)")
         self.p_text.setFixedHeight(66)
@@ -223,7 +255,7 @@ class LayersTab(QWidget):
         self.p_font.currentIndexChanged.connect(lambda *_: self._set("font", self.p_font.currentData()))
         self.p_addfont = f.row("", flow(button("Nạp font riêng…", "upload", "Chọn file .ttf / .otf trên máy",
                                                flat=True, on_click=self._add_font)))
-        self.p_size = f.row("Cỡ chữ (% cạnh ngắn khung)", SliderRow(1, 30, 0.5, 6, 1))
+        self.p_size = f.row("Cỡ chữ", SliderRow(1, 30, 0.5, 6, 1), "% cạnh ngắn của khung video")
         self.p_size.changed.connect(lambda v: self._set("size", round(v / 100, 4)))
         self.p_bold = f.row("Đậm", Switch(True))
         self.p_bold.toggledOn.connect(lambda on: self._set("bold", on))
@@ -233,6 +265,7 @@ class LayersTab(QWidget):
         self.p_align.currentIndexChanged.connect(lambda *_: self._set("align", self.p_align.currentData()))
         self.p_color = f.row("Màu chữ", ColorButton("#FFFFFF"))
         self.p_color.changed.connect(lambda c: self._set("color", c))
+        f = self.g_look
         self.p_outline = f.row("Viền chữ", hbox(SliderRow(0, 30, 1, 8, 0, suffix=" %"), ColorButton("#000000")))
         self.p_ol, self.p_olc = self.p_outline.itemAt(0).widget(), self.p_outline.itemAt(1).widget()
         self.p_ol.changed.connect(lambda v: self._set("outline", round(v / 100, 3)))
@@ -256,21 +289,23 @@ class LayersTab(QWidget):
         self.p_spacing = f.row("Giãn chữ", SliderRow(-10, 40, 1, 0, 0, suffix=" %"))
         self.p_spacing.changed.connect(lambda v: self._set("spacing", int(v)))
         # logo
-        self.p_file = f.row("Ảnh logo", hbox(label("", "muted"), button("Đổi ảnh…", "image", flat=True,
+        f = self.g_logo
+        self.p_file = f.row("Ảnh", hbox(label("", "muted"), button("Đổi ảnh…", "image", flat=True,
                                                                          on_click=self._change_logo)))
         self.p_file_lbl = self.p_file.itemAt(0).widget()
-        self.p_w = f.row("Cỡ logo (% bề rộng khung)", SliderRow(2, 100, 1, 16, 0, suffix=" %"))
+        self.p_w = f.row("Cỡ logo", SliderRow(2, 100, 1, 16, 0, suffix=" %"), "% bề rộng khung video")
         self.p_w.changed.connect(lambda v: self._set("w", round(v / 100, 4)))
         # chung
+        f = self.g_pos
         self.p_rot = f.row("Nghiêng / xoay", SliderRow(-180, 180, 1, 0, 0, suffix="°"))
         self.p_rot.changed.connect(lambda v: self._set("rot", float(v)))
         self.p_op = f.row("Độ rõ", SliderRow(5, 100, 5, 100, 0, suffix=" %"))
         self.p_op.changed.connect(lambda v: self._set("opacity", round(v / 100, 3)))
         self.p_pos = f.row("Vị trí", combo(POS_PRESETS, ""))
         self.p_pos.activated.connect(self._pos_preset)
-        self.p_x = f.row("Ngang (% từ trái)", SliderRow(-5, 105, 0.5, 50, 1))
+        self.p_x = f.row("Ngang", SliderRow(-5, 105, 0.5, 50, 1), "% từ mép trái khung")
         self.p_x.changed.connect(lambda v: self._set("x", round(v / 100, 4)))
-        self.p_y = f.row("Dọc (% từ trên)", SliderRow(-5, 105, 0.5, 12, 1))
+        self.p_y = f.row("Dọc", SliderRow(-5, 105, 0.5, 12, 1), "% từ mép trên khung")
         self.p_y.changed.connect(lambda v: self._set("y", round(v / 100, 4)))
         self.p_anim = f.row("Hiệu ứng", combo(overlay.ANIMS, "none"))
         self.p_anim.currentIndexChanged.connect(lambda *_: self._set("anim", self.p_anim.currentData()))
@@ -296,14 +331,17 @@ class LayersTab(QWidget):
         self.p_end.setSpecialValueText("hết video")
         self.p_start.valueChanged.connect(lambda v: self._set("start", round(v, 3)))
         self.p_end.valueChanged.connect(lambda v: self._set("end", round(v, 3)))
-        f.row("Hiện từ", hbox(self.p_start, button("= đầu phát", "clock", flat=True,
+        f = self.g_time
+        f.row("Từ", hbox(self.p_start, button("= đầu phát", "clock", flat=True,
                                                     on_click=lambda: self.p_start.setValue(self.page.player.position())),
                               None))
-        f.row("Đến (0 = hết video)", hbox(self.p_end, button("= đầu phát", "clock", flat=True,
+        f.row("Đến", hbox(self.p_end, button("= đầu phát", "clock", flat=True,
                                                              on_click=lambda: self.p_end.setValue(
                                                                  self.page.player.position())), None))
-        f.row("", flow(button("Hiện suốt video", "fit", flat=True, on_click=self.full_span)))
-        self.props.add(f)
+        f.actions(button("Hiện suốt video", "fit", "Từ đầu tới hết video", flat=True, on_click=self.full_span))
+        for g in (self.g_text, self.g_look, self.g_logo, self.g_pos, self.g_time):
+            self.props.add(g)
+        self.pf = _Forms(self.g_text, self.g_look, self.g_logo, self.g_pos, self.g_time)
         self.props.setVisible(False)
         self._text_rows = [self.p_text, self.p_font, self.p_addfont, self.p_size, self.p_bold, self.p_italic,
                            self.p_align, self.p_color, self.p_outline, self.p_shadow, self.p_bg, self.p_bgop,
@@ -346,10 +384,9 @@ class LayersTab(QWidget):
         if not L:
             return
         is_logo = L.get("kind") == "logo"
-        for w in self._text_rows:
-            self.pf.setRowVisible(w, not is_logo)
-        for w in self._logo_rows:
-            self.pf.setRowVisible(w, is_logo)
+        self.g_text.setVisible(not is_logo)
+        self.g_look.setVisible(not is_logo)
+        self.g_logo.setVisible(is_logo)
         if not is_logo:
             bg = L.get("bg") or "none"
             self.pf.setRowVisible(self.p_bgop, bg != "none")

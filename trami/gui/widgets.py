@@ -6,8 +6,9 @@ from typing import Callable
 from PySide6.QtCore import (QEasingCurve, QEvent, QPoint, QPropertyAnimation, QRect, QRectF, QSize, Qt, QTimer, Signal,
                             Property)
 from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QAbstractButton, QComboBox, QDoubleSpinBox, QFormLayout, QFrame, QGraphicsDropShadowEffect,
-                               QHBoxLayout, QLabel, QLayout, QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QComboBox, QDoubleSpinBox, QFormLayout, QFrame,
+                               QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLayout, QPushButton, QSizePolicy, QSlider,
+                               QVBoxLayout, QWidget)
 
 from . import icons, theme
 
@@ -112,7 +113,7 @@ class GradientButton(QPushButton):
         super().__init__(text, parent)
         self.icon_name = icon_name
         self.big = big
-        self.num = num          # số thứ tự vẽ trước chữ (2.2.0 – nút bước 1, 2, 3…)
+        self.num = None         # 2.3.7: nút không còn số thứ tự (chỉ thẻ bước / thanh tab có số) – bỏ qua num
         self._hover = 0.0
         self._glow = QGraphicsDropShadowEffect(self)   # bóng sáng màu nhấn, rê chuột thì sáng lên
         self._glow.setOffset(0, 5)
@@ -211,7 +212,9 @@ def button(text: str, icon_name: str = "", tip: str = "", danger: bool = False, 
         b.setProperty("flat", True)
     b.setCursor(Qt.CursorShape.PointingHandCursor)
     if on_click:
-        b.clicked.connect(on_click)
+        # 2.3.7: gọi KHÔNG kèm tham số – clicked(bool) truyền False vào tham số đầu của hàm (vd "Thêm kỹ năng mới" lưu tên
+        # kỹ năng = False, "Nghe câu" phát câu số 0 thay vì câu đang chọn)
+        b.clicked.connect(lambda *_a, _f=on_click: _f())
     return b
 
 
@@ -697,6 +700,10 @@ class Form(QFormLayout):
             lb.setToolTip(tip)
             if isinstance(w, QWidget):
                 w.setToolTip(tip)
+        if isinstance(w, QAbstractSpinBox) and w.sizePolicy().horizontalPolicy() != QSizePolicy.Policy.Fixed:
+            # 2.3.7: ô số giữ cỡ vừa chữ (không bị kéo dài hết hàng như ô chọn)
+            w.setSizePolicy(QSizePolicy.Policy.Fixed, w.sizePolicy().verticalPolicy())
+            w.setMinimumWidth(max(w.minimumWidth(), 110))
         self.addRow(lb, w)
         return w
 
@@ -922,6 +929,108 @@ def flow(*ws, spacing: int = 8) -> QWidget:
     return box
 
 
+def field(*ws, spacing: int = 8, grow: bool = True) -> QWidget:
+    """1 ô của Form gồm ô chính + nút / ô phụ bám ngay bên phải (vd [ô chọn giọng][Đổi giọng]) – không bị tách xuống
+    dòng riêng như khi để trong flow(). grow=True: ô đầu giãn hết chỗ; False: mọi ô giữ cỡ vừa chữ, phần thừa để trống
+    (ô số không bị kéo dài cả hàng)."""
+    box = QWidget()
+    lay = QHBoxLayout(box)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(spacing)
+    for i, w in enumerate(x for x in ws if x is not None):
+        st = 1 if (grow and i == 0) else 0
+        if isinstance(w, QWidget):
+            lay.addWidget(w, st)
+        else:
+            lay.addLayout(w, st)
+    if not grow:
+        lay.addStretch(1)
+    return box
+
+
+class Group(QFrame):
+    """Khối nhóm trong thẻ bước (2.3.7): tiêu đề nhỏ (+ ô / nhãn bên phải), dòng gợi ý, các ô tuỳ chọn THẲNG HÀNG (nhãn
+    trái – ô phải, `row`) và hàng nút thao tác (`actions`) – nền sáng hơn thẻ 1 bậc, bo góc: nhìn là biết ô / nút nào đi
+    với nhau. `add` thêm widget / layout tuỳ ý (sau đó `row` mở 1 Form mới để giữ đúng thứ tự)."""
+
+    def __init__(self, title: str = "", icon_name: str = "", hint: str = "", right=None, parent=None):
+        super().__init__(parent)
+        self.lay = QVBoxLayout(self)
+        self.lay.setContentsMargins(12, 10, 12, 12)
+        self.lay.setSpacing(8)
+        self._form = None
+        self._forms: list = []
+        self.title_lb = None
+        if title or right is not None:
+            hl = QHBoxLayout()
+            hl.setSpacing(8)
+            if icon_name:
+                ic = QLabel()
+                ic.setFixedSize(18, 18)
+                ic.setPixmap(icons.pixmap(icon_name, theme.ACCENT2, 16))
+                hl.addWidget(ic)
+            if title:
+                self.title_lb = label(title, "h4")
+                hl.addWidget(self.title_lb)
+            hl.addStretch(1)
+            if right is not None:
+                if isinstance(right, QWidget):
+                    hl.addWidget(right)
+                else:
+                    hl.addLayout(right)
+            self.lay.addLayout(hl)
+        self.hint_lb = label(hint, "muted", wrap=True) if hint else None
+        if self.hint_lb is not None:
+            self.lay.addWidget(self.hint_lb)
+
+    def form(self) -> Form:
+        if self._form is None:
+            self._form = Form()
+            self._form.setVerticalSpacing(8)
+            self._forms.append(self._form)
+            self.lay.addLayout(self._form)
+        return self._form
+
+    def _form_of(self, w):
+        """Form của khối có chứa ô w (None nếu không có)."""
+        for f in self._forms:
+            if f.getWidgetPosition(w)[0] >= 0:
+                return f
+        return None
+
+    def row(self, text: str, w, tip: str = ""):
+        """1 dòng tuỳ chọn: nhãn trái, ô phải (layout -> gói thành 1 khối). Trả lại w."""
+        ww = w if isinstance(w, QWidget) else wrap(w)
+        self.form().row(text, ww, tip)
+        return w
+
+    def span(self, w):
+        """Dòng chiếm cả bề rộng NGAY TRONG khối tuỳ chọn đang có (vd dòng giải thích dưới 1 ô) – các nhãn vẫn thẳng
+        cột với dòng trước / sau."""
+        self.form().addRow(w if isinstance(w, QWidget) else wrap(w))
+        return w
+
+    def add(self, w):
+        self._form = None
+        if isinstance(w, QWidget):
+            self.lay.addWidget(w)
+        else:
+            self.lay.addLayout(w)
+        return w
+
+    def actions(self, *ws):
+        """Hàng nút thao tác (tự xuống dòng khi hẹp)."""
+        return self.add(flow(*ws))
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setBrush(QColor(255, 255, 255, 7))
+        p.setPen(QPen(QColor(theme.BORDER), 1))
+        p.drawRoundedRect(r, 11, 11)
+
+
 def wrap(layout) -> QWidget:
     w = QWidget()
     w.setLayout(layout)
@@ -1001,51 +1110,17 @@ def num_icon(n, icon_name: str = "", color: str = theme.TEXT):
 
 
 def numbered(b, n):
-    """Gắn số thứ tự trước chữ 1 nút (giữ icon cũ nếu có); bỏ "1. " ở đầu chữ nếu có sẵn. Trả lại chính nút đó."""
+    """2.3.7: nút KHÔNG còn số thứ tự (người dùng: chỉ đánh số ở thẻ bước / thanh tab bên ngoài) – chỉ bỏ "1. " ở đầu
+    chữ nếu có. Giữ tên hàm cho chỗ gọi cũ. Trả lại chính nút đó."""
     import re
 
     b.setText(re.sub(r"^\s*\d+\s*[.·)]\s*", "", b.text()))
-    if isinstance(b, GradientButton):
-        b.num = n
-        b.updateGeometry()
-        b.update()
-        return b
-    ic, sz = num_icon(n, getattr(b, "_icon_name", ""), theme.ERR if getattr(b, "_danger", False) else theme.TEXT)
-    b.setIcon(ic)
-    b.setIconSize(sz)
-    b._num = n
     return b
 
 
 def number_buttons(root, start: int = 1) -> int:
-    """Đánh số 1, 2, 3… cho các nút thao tác (nút thường có chữ, không phải nút phẳng / nút chỉ có icon / nút đã có
-    số) theo đúng thứ tự trên giao diện (duyệt layout). root: widget hoặc layout. Trả số kế tiếp."""
-    from PySide6.QtWidgets import QLayout
-
-    n = start
-
-    def walk(lay):
-        nonlocal n
-        if isinstance(lay, QFormLayout):     # nút nhỏ cạnh ô nhập trong form (Lấy vị trí đang phát…): không đánh số
-            return
-        for k in range(lay.count()):
-            it = lay.itemAt(k)
-            w, sub = it.widget(), it.layout()
-            if sub is not None:
-                walk(sub)
-            elif w is not None:
-                if isinstance(w, QPushButton) and not isinstance(w, GradientButton):
-                    if w.text().strip() and not w.property("flat") and not getattr(w, "_num", None) \
-                            and not getattr(w, "no_num", False):
-                        numbered(w, n)
-                        n += 1
-                elif w.layout() is not None and not isinstance(w, StepCard):
-                    walk(w.layout())
-
-    lay = root if isinstance(root, QLayout) else root.layout()
-    if lay is not None:
-        walk(lay)
-    return n
+    """2.3.7: không đánh số nút nữa (giữ hàm cho chỗ gọi cũ)."""
+    return start
 
 
 class ElideLabel(QLabel):
