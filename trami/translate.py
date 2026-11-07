@@ -220,16 +220,36 @@ SYL_PER_SEC = 4.6      # tiếng Việt lồng tiếng tự nhiên ~4–5 tiến
 BUDGET_RE = re.compile(r"\s*⟪[^⟫]*⟫\s*")
 HAN_RE = re.compile(r"[㐀-鿿]")
 
-SHORTEN_PROMPT = """Bạn là biên tập viên lồng tiếng phim. Mỗi mục gồm câu gốc tiếng Trung, bản dịch tiếng Việt hiện tại và
-số tiếng (âm tiết) tối đa. Hãy viết lại bản dịch NGẮN HƠN, không vượt số tiếng tối đa, vẫn tự nhiên, giữ đúng ý chính,
-giữ nguyên xưng hô (đại từ, cách gọi – không đổi nam / nữ, anh / em, ngôi) và tên riêng. Chỉ trả về JSON {"1": "câu
-mới", ...} không kèm giải thích."""
+SHORTEN_PROMPT = """Bạn là biên tập viên lồng tiếng phim. Mỗi mục là 1 câu thoại: câu gốc tiếng Trung ("goc"), bản dịch
+tiếng Việt hiện tại ("dich", dài "so_tieng" tiếng), số tiếng (âm tiết) TỐI ĐA được dùng ("toi_da"); có thể kèm thời gian
+giọng lồng đang đọc ("giong_dang_doc"), thời gian nhân vật nói / chỗ trống phải vừa ("nhan_vat_noi" / "cho_trong") và số
+tiếng cần bớt ("can_bot"). Giọng lồng phải đọc xong trong thời gian đó, nên câu mới KHÔNG ĐƯỢC dài hơn "toi_da" tiếng
+(đếm từng tiếng cách nhau bằng dấu cách, kể cả từ đệm).
+ĐƯỢC: bỏ từ thừa / từ đệm / chữ lặp, bỏ chủ ngữ hoặc tân ngữ khi đã rõ, dùng từ ngắn hơn cùng nghĩa, nói gọn hơn, gộp
+2 ý nhỏ thành 1.
+KHÔNG ĐƯỢC: bỏ ý chính, đổi nghĩa, thêm ý mới, đổi câu hỏi thành câu kể, bỏ dấu câu cuối, đổi / bỏ tên riêng, đổi xưng hô
+(đại từ, cách gọi – không đổi nam / nữ, anh / em, ngôi).
+Mỗi mục viết 2 phương án: "a" = ngắn vừa đủ (không quá "toi_da" tiếng, giữ được nhiều ý nhất), "b" = ngắn hơn nữa
+(vẫn đủ ý chính). Chỉ trả về JSON {"1": {"a": "…", "b": "…"}, ...} không kèm giải thích."""
+
+SHORTEN_RETRY_VI = ("CÁC BẢN SAU VẪN DÀI HƠN \"toi_da\" – \"ban_vua_viet\" là bản bạn vừa viết (dài \"ban_vua_viet_dai\"). "
+                    "Viết lại NGẮN HƠN NỮA cho không quá \"toi_da\" tiếng, vẫn giữ ý chính:")
 
 
-SHORTEN_PROMPT_EN = """You are a film dubbing script editor. Each item has the source line, the current {lang} translation and
-the maximum length in {unit}. Rewrite the translation SHORTER, within the maximum length, still natural, keeping the core
-meaning, names and forms of address (never change he / she, older / younger, or the grammatical person). Return ONLY
-JSON {{"1": "new line", ...}} with no explanation."""
+SHORTEN_PROMPT_EN = """You are a film dubbing script editor. Each item is one line: the source line ("source"), the current
+{lang} translation ("translation", "length" {unit} long) and the MAXIMUM length in {unit} ("max"); it may also give how
+long the dubbed voice reads now ("voice_now"), how long the character speaks / the room it must fit ("speech" / "room")
+and how many {unit} to cut ("cut"). The voice must finish within that time, so the new line must NOT exceed "max".
+ALLOWED: drop filler / repeated words, drop a subject or object that is already clear, use shorter words with the same
+meaning, phrase it tighter, merge 2 small ideas into 1.
+NOT ALLOWED: dropping the core meaning, changing the meaning, adding new ideas, turning a question into a statement,
+dropping the final punctuation, changing / dropping names, changing forms of address (never change he / she, older /
+younger, or the grammatical person).
+Write 2 versions per item: "a" = just short enough (within "max", keeping as much meaning as possible), "b" = shorter
+still (core meaning kept). Return ONLY JSON {{"1": {{"a": "…", "b": "…"}}, ...}} with no explanation."""
+
+SHORTEN_RETRY_EN = ("THESE ARE STILL LONGER THAN \"max\" – \"your_last\" is the version you just wrote (\"your_last_length\" "
+                    "long). Rewrite them SHORTER still, within \"max\", keeping the core meaning:")
 
 
 CLAUSE_PROMPT = """Bạn là biên tập viên lồng tiếng phim. Mỗi mục có câu gốc đã chia thành các VẾ theo chỗ nhân vật ngắt hơi
@@ -314,6 +334,10 @@ def punct_fix(trans: str, src: str = "", lang: str = "vi", names: list[str] | tu
     if langs.norm(lang) == "vi":
         trans = fix_commas(trans, names)
     return end_punct(trans, src, lang) if src else trans
+
+
+def _sec_text(x: float) -> str:
+    return f"{float(x):.1f}".replace(".", ",") + " giây"
 
 
 def syllables(text: str, lang: str = "vi") -> int:
@@ -1274,31 +1298,108 @@ class Translator:
                 self.cache.setdefault(cache_key(self.engine, self.style, self.target, segs[i].text), segs[i].trans)
         return segs
 
-    def shorten(self, items: list[tuple[str, str, int]]) -> list[str]:
-        """Rút gọn bản dịch quá dài so với thời gian nói. items: (câu gốc, bản dịch, số tiếng tối đa)."""
+    def _shorten_call(self, items: list[tuple[str, str, int]], info: list, prev: list | None = None) -> list[list[str]]:
+        """1 lần gửi AI rút gọn: trả mỗi mục các bản AI viết (đã làm sạch, bỏ bản còn chữ Hán). prev = bản lần trước
+        vẫn dài (hỏi lại)."""
+        L = langs.INFO[self.target]
+        vi = self.target == "vi"
+        payload = {}
+        for k, (zh, tr, n) in enumerate(items):
+            it = info[k] or {}
+            cur = syllables(tr, self.target)
+            if vi:
+                d = {"goc": zh, "dich": tr, "so_tieng": cur, "toi_da": f"{n} tiếng"}
+                if it.get("now"):
+                    d["giong_dang_doc"] = _sec_text(it["now"])
+                if it.get("have"):
+                    d["cho_trong" if it.get("what") == "slot" else "nhan_vat_noi"] = _sec_text(it["have"])
+                if it.get("cut"):
+                    d["can_bot"] = f"khoảng {it['cut']} tiếng"
+                if prev and prev[k]:
+                    d["ban_vua_viet"], d["ban_vua_viet_dai"] = prev[k], f"{syllables(prev[k], 'vi')} tiếng"
+            else:
+                d = {"source": zh, "translation": tr, "length": f"{cur} {L['unit_ai']}", "max": f"{n} {L['unit_ai']}"}
+                if it.get("now"):
+                    d["voice_now"] = f"{it['now']:.1f} s"
+                if it.get("have"):
+                    d["room" if it.get("what") == "slot" else "speech"] = f"{it['have']:.1f} s"
+                if it.get("cut"):
+                    d["cut"] = f"about {it['cut']} {L['unit_ai']}"
+                if prev and prev[k]:
+                    d["your_last"] = prev[k]
+                    d["your_last_length"] = f"{syllables(prev[k], self.target)} {L['unit_ai']}"
+            payload[str(k + 1)] = d
+        if vi:
+            sysp = SHORTEN_PROMPT
+            head = SHORTEN_RETRY_VI if prev else "RÚT GỌN CÁC BẢN DỊCH SAU:"
+        else:
+            sysp = SHORTEN_PROMPT_EN.format(lang=L["english"], unit=L["unit_ai"])
+            head = SHORTEN_RETRY_EN if prev else "SHORTEN THESE TRANSLATIONS:"
+        user = head + "\n" + json.dumps(payload, ensure_ascii=False, indent=0)
+        d = _extract_json(self.llm.chat(with_skill(sysp, self.skill) + address_tail(self.target), user))
+        out = []
+        for k in range(len(items)):
+            v = d.get(str(k + 1)) if isinstance(d, dict) else None
+            if isinstance(v, dict):
+                vals = [v.get(x) for x in ("a", "b")] + [x for key, x in v.items() if key not in ("a", "b")]
+            elif isinstance(v, list):
+                vals = v
+            else:
+                vals = [v]
+            got = []
+            for x in vals:
+                x = BUDGET_RE.sub(" ", x).strip() if isinstance(x, str) else ""
+                x = self._post(x, items[k][0]) if x else ""
+                if x and not untranslated(x, self.target) and x not in got:
+                    got.append(x)
+            out.append(got)
+        return out
+
+    def _best_short(self, cands: list[str], tr: str, n: int) -> tuple[str | None, bool]:
+        """Chọn bản rút gọn: bản DÀI NHẤT mà không quá n (giữ nhiều ý nhất) -> (bản, True); không bản nào đủ ngắn ->
+        bản ngắn nhất mà vẫn ngắn hơn bản cũ -> (bản, False); không có -> (None, False)."""
+        cur = syllables(tr, self.target)
+        ok = [c for c in cands if syllables(c, self.target) < cur]
+        fit = [c for c in ok if syllables(c, self.target) <= n]
+        if fit:
+            return max(fit, key=lambda c: syllables(c, self.target)), True
+        if ok:
+            return min(ok, key=lambda c: syllables(c, self.target)), False
+        return None, False
+
+    def shorten(self, items: list[tuple[str, str, int]], info: list | None = None, retry: bool = True) -> list[str]:
+        """Rút gọn bản dịch quá dài so với thời gian nói. items: (câu gốc, bản dịch, số tiếng tối đa); info (2.3.6):
+        mỗi mục {"now": giây giọng đang đọc, "have": giây phải vừa, "cut": số tiếng cần bớt, "what": speech / slot}
+        gửi kèm cho AI. AI viết 2 phương án -> chọn bản giữ ý nhiều nhất mà vẫn vừa số tiếng; bản nào vẫn quá số tiếng
+        thì hỏi lại riêng các câu đó 1 lần (retry). Không bản nào ngắn hơn -> giữ bản cũ."""
         if not self.llm or not items:
             return [vi for _, vi, _ in items]
-        L = langs.INFO[self.target]
-        if self.target == "vi":
-            payload = {str(k + 1): {"goc": zh, "dich": vi, "toi_da": f"{n} tiếng"} for k, (zh, vi, n) in enumerate(items)}
-            sysp, user = SHORTEN_PROMPT, "RÚT GỌN CÁC BẢN DỊCH SAU:\n" + json.dumps(payload, ensure_ascii=False, indent=0)
-        else:
-            payload = {str(k + 1): {"source": zh, "translation": vi, "max": f"{n} {L['unit_ai']}"}
-                       for k, (zh, vi, n) in enumerate(items)}
-            sysp = SHORTEN_PROMPT_EN.format(lang=L["english"], unit=L["unit_ai"])
-            user = "SHORTEN THESE TRANSLATIONS:\n" + json.dumps(payload, ensure_ascii=False, indent=0)
+        info = list(info or []) + [None] * (len(items) - len(info or []))
         try:
-            d = _extract_json(self.llm.chat(with_skill(sysp, self.skill) + address_tail(self.target), user))
+            first = self._shorten_call(items, info)
         except (Cancelled, net.NetworkDown):
             raise
         except Exception:  # noqa: BLE001
             return [vi for _, vi, _ in items]
-        out = []
-        for k, (_, vi, n) in enumerate(items):
-            v = d.get(str(k + 1)) if isinstance(d, dict) else None
-            v = BUDGET_RE.sub(" ", v).strip() if isinstance(v, str) else ""
-            v = self._post(v, items[k][0]) if v else ""
-            out.append(v if v and syllables(v, self.target) < syllables(vi, self.target) else vi)
+        out, redo, prev = [], [], []
+        for k, (_zh, tr, n) in enumerate(items):
+            best, ok = self._best_short(first[k], tr, n)
+            out.append(best or tr)
+            if not ok and retry:
+                redo.append(k)
+                prev.append(best or (min(first[k], key=lambda c: syllables(c, self.target)) if first[k] else None))
+        if redo:
+            try:
+                second = self._shorten_call([items[k] for k in redo], [info[k] for k in redo], prev=prev)
+            except (Cancelled, net.NetworkDown):
+                raise
+            except Exception:  # noqa: BLE001
+                second = [[] for _ in redo]
+            for j, k in enumerate(redo):
+                tr, n = items[k][1], items[k][2]
+                best, _ = self._best_short(second[j] + ([out[k]] if out[k] != tr else []), tr, n)
+                if best:
+                    out[k] = best
         return out
 
     def match_clauses(self, items: list[tuple[list[str], str]]) -> list[str]:

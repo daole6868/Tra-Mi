@@ -198,6 +198,15 @@ def fit_tip(s: Segment) -> str:
                          f"{cat_txt} – 'Về tốc độ gốc' để bỏ")
     if ex.get("trans_long"):
         lines.append(f"AI đã rút gọn từ: {ex['trans_long']}")
+    if ex.get("shorten_info"):
+        from ..pipeline import shorten_line_note
+
+        note = shorten_line_note(s)
+        if note:
+            lines.append(f"AI rút gọn lần gần nhất: {note}")
+    if ex.get("short_speed"):
+        lines.append(f"⚡ Đọc nhanh vừa đủ ×{float(ex['short_speed']):.2f} do AI rút gọn đặt – 'Bỏ rút gọn' hoặc 'Về "
+                     "tốc độ gốc' để bỏ")
     return "\n".join(lines)
 
 

@@ -171,6 +171,12 @@ DEFAULT_SETTINGS: dict = {
     "trans_clause_match": True,       # AI dịch: câu dịch thiếu vế so với chỗ ngắt hơi -> AI sửa cho đủ vế
     "dub_fit": True,                  # AI dịch vừa thời lượng câu (giới hạn số tiếng)
     "dub_auto_shorten": True,         # câu đọc vẫn quá dài -> AI rút gọn rồi đọc lại
+    # nút "AI rút gọn" (tab Lồng tiếng, 2.3.6)
+    "shorten_mode": "speech",         # rút cho vừa: speech = thời gian nhân vật nói / slot = chỗ trống tới câu sau (cũ)
+    "shorten_speed": 1.1,             # ... khi giọng đọc nhanh tối đa (×)
+    "shorten_rounds": 3,              # rút gọn -> đọc lại giọng -> đo -> còn dài thì rút tiếp, tối đa N lượt
+    "shorten_fallback": "both",       # rút nữa mất ý: both = đọc nhanh vừa đủ, vẫn dài thì tích sẵn / speed / mark
+    "shorten_max_speed": 1.2,         # ... đọc nhanh vừa đủ tối đa (×)
     "align_words": True,              # căn thời gian từng chữ sau khi nhận dạng
     "asr_rescue": True,               # nghe lại đoạn có tiếng mà bộ chia đoạn bỏ sót (cần tách giọng trước)
     "asr_rescue_conf": 0.5,           # ... bỏ câu nghe lại có độ tin cậy (xác suất trung bình mỗi chữ) dưới mức này

@@ -684,13 +684,8 @@ def cat_action(pid: str, cat: str, action: str, value: float | None = None) -> d
     if action == "shorten":
         def fn(j, p):
             rs = _check_rows(p, rows, texts)
-            r = pipeline.shorten_lines(p, rs, st)
-            ch = r.get("changed") or []
-            msg = f"AI rút gọn {len(ch)} câu"
-            if ch and pipeline.has_dub(p):
-                pipeline.redub(p, ch, st.get("tts_rate"), st, j.update, j.cancelled, st.get("tts_engine"))
-                msg += " và đã đọc lại giọng"
-            return {"message": msg, "pick": ch}
+            r = pipeline.shorten_fit(p, rs, st, st.get("tts_rate"), st.get("tts_engine"), j.update, j.cancelled)
+            return {"message": pipeline.shorten_note(r, p.segments, pipeline.trans_lang(p)), "pick": r["pick"]}
         return submit(pid, "redub", f"AI rút gọn {len(rows)} câu", fn)
     if action == "speed":
         v = None if value is None else float(value)

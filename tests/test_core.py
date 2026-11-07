@@ -857,7 +857,7 @@ def test_shorten_selected_lines(monkeypatch):
         pipeline.shorten_lines(p, [0], {"translate_engine": "google"})
     asked = []
     monkeypatch.setattr(translate.Translator, "shorten",
-                        lambda self, items: asked.extend(items) or ["Chào bạn" for _ in items])
+                        lambda self, items, **k: asked.extend(items) or ["Chào bạn" for _ in items])
     r = pipeline.shorten_lines(p, [0, 1], {"translate_engine": "openai", "openai_api_key": "x"})
     segs = p.segments
     assert r["changed"] == [0] and segs[0].trans == "Chào bạn" and segs[0].extra["trans_long"].startswith("Xin chào")
@@ -14156,3 +14156,231 @@ def test_hf_local_first_and_hidden_bars(tmp_path):
         w._run()
         bar.close()
     assert hit == [50_000_000]
+
+
+def _shorten_env(monkeypatch, ai):
+    """Edge giả: giọng dài 0,25 s mỗi tiếng; AI giả `ai(item, retry)` -> {"a", "b"} / chuỗi."""
+    from trami import translate, tts
+
+    spoken, calls = [], []
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, p, voice in items:
+            spoken.append((i, text))
+            _fake_audio(p, 0.25 * len(text.split()), 300 + 50 * i)
+        return []
+
+    def chat(self, system, user, *a, **k):
+        calls.append((system, user))
+        d = json.loads(user.split("\n", 1)[1])
+        return json.dumps({key: ai(it, "ban_vua_viet" in it) for key, it in d.items()}, ensure_ascii=False)
+
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    monkeypatch.setattr(translate.LLMClient, "chat", chat)
+    return spoken, calls
+
+
+def _shorten_project(name, segs):
+    from trami import pipeline
+    from trami.project import Project
+
+    p = Project.create(name)
+    p.data["info"] = {"duration": 20}
+    p.segments = segs
+    p.save()
+    st = {"translate_engine": "openai", "openai_api_key": "x", "tts_voice": "vi-VN-HoaiMyNeural",
+          "dub_auto_shorten": False}
+    pipeline.dub(p, None, settings=st, engine="edge")
+    return p, st
+
+
+def test_shorten_fit_speech_time_236(monkeypatch):
+    """2.3.6 AI rút gọn: mục tiêu = thời gian nhân vật nói (không phải chỗ trống tới câu sau); bản AI quá số tiếng ->
+    hỏi lại kèm bản vừa viết; rút -> đọc lại -> đo -> rút tiếp; vẫn dài -> đọc nhanh vừa đủ / tích sẵn; báo từng câu."""
+    from trami import pipeline
+    from trami import translate as tr
+
+    def stubborn(it, retry):      # lần đầu chỉ bớt 1 tiếng, hỏi lại thì làm đúng số tiếng
+        w, n = it["dich"].split(), int(it["toi_da"].split()[0])
+        if retry:
+            assert it["ban_vua_viet"] and it["ban_vua_viet_dai"].endswith("tiếng")
+            return {"a": " ".join(w[:n]) + ".", "b": " ".join(w[:max(2, n - 2)]) + "."}
+        assert it["nhan_vat_noi"] and it["giong_dang_doc"] and it["can_bot"].startswith("khoảng")
+        return {"a": " ".join(w[:-1]) + ".", "b": " ".join(w[:-2]) + "."}
+
+    spoken, calls = _shorten_env(monkeypatch, stubborn)
+    # câu 1: 14 tiếng = 3,5 s, nhân vật nói 2 s (chỗ trống tới câu sau 5,5 s – cách cũ coi là vừa ✓)
+    p, st = _shorten_project("sh236", [
+        Segment(0.5, 2.5, "a", "một hai ba bốn năm sáu bảy tám chín mười mười một mười hai", "S1"),
+        Segment(6.0, 7.0, "b", "Hai ba", "S1"), Segment(9.0, 10.0, "c", "a b c d e f g h", "S1")])
+    try:
+        segs = p.segments
+        assert segs[0].extra["fit"] == "ok" and pipeline.shorten_target(segs[0], 5.5) is None      # cách cũ: vừa
+        assert pipeline.long_rows(segs, st) == [0, 2]
+        spoken.clear()
+        res = pipeline.shorten_fit(p, [0, 1, 2], st, engine="edge")
+        segs = p.segments
+        assert res["changed"] == [0, 2] and res["ok"] == [0, 2] and res["fit"] == [1] and res["pick"] == [0, 2]
+        assert len(calls) == 2 and tr.SHORTEN_RETRY_VI.split(" –")[0] in calls[1][1]        # 1 lần + hỏi lại
+        assert "2 phương án" in calls[0][0] and "không đổi nam / nữ" in calls[0][0]
+        assert segs[0].trans == "Một hai ba bốn năm sáu bảy tám." and segs[0].extra["trans_long"].startswith("một")
+        assert sorted(i for i, _ in spoken) == [0, 2]                  # chỉ đọc lại 2 câu đã rút gọn
+        assert pipeline.voice_secs(segs[0]) <= 2.0 + pipeline.SHORTEN_TOL and pipeline.long_rows(segs, st) == []
+        info = segs[0].extra["shorten_info"]
+        assert info["st"] == "ok" and info["s"] == [14, 8] and info["m"] == "speech"
+        note = pipeline.shorten_line_note(segs[0])
+        assert note.startswith("14 → 8 tiếng · giọng 3,2 → 1,8 s / nói 2,0 s") and note.endswith("✓")
+        msg = pipeline.shorten_note(res, segs)
+        assert "AI rút gọn 2/3 câu cho vừa thời gian nhân vật nói" in msg and "bỏ qua 1 câu đã vừa sẵn" in msg
+        assert "#1 14 → 8 tiếng" in msg
+        # cách cũ (chỗ trống tới câu sau): câu đã vừa chỗ trống thì giữ
+        assert pipeline.long_rows(segs, {"shorten_mode": "slot"}) == []
+    finally:
+        p.delete()
+
+
+def test_shorten_fit_fallback_236(monkeypatch):
+    """AI không rút ngắn được / rút nữa mất ý: both = đọc nhanh vừa đủ (khoá tốc độ ≤ tối đa, xếp lại không đọc lại),
+    vẫn dài thì tích sẵn; speed = chỉ đọc nhanh; mark = chỉ tích sẵn. Bỏ rút gọn trả tốc độ cũ; nhiều lượt dừng ở 1/2."""
+    from trami import pipeline
+
+    def same(it, retry):
+        return {"a": it["dich"]}
+
+    def one(it, retry):
+        return {"a": " ".join(it["dich"].split()[:-1])}
+
+    for ai, fb, want in ((same, "both", {"state": {0: "sped", 1: "same"}, "marked": [1], "sped": [0, 1]}),
+                         (same, "speed", {"state": {0: "sped", 1: "same"}, "marked": [], "sped": [0, 1]}),
+                         (same, "mark", {"state": {0: "same", 1: "same"}, "marked": [0, 1], "sped": []}),
+                         (one, "both", {"state": {0: "ok", 1: "sped"}, "marked": [], "sped": [1], "rounds": 3})):
+        spoken, calls = _shorten_env(monkeypatch, ai)
+        p, st = _shorten_project("shfb" + fb, [Segment(0.5, 2.5, "a", "một hai ba bốn năm sáu bảy tám chín mười", "S1"),
+                                               Segment(6.0, 7.0, "c", "a b c d e f g h", "S1")])
+        try:
+            segs = p.segments
+            segs[1].extra["speed"] = 0.95          # tốc độ người dùng đặt trước (ít nhất) – Bỏ rút gọn trả lại
+            p.segments = segs
+            p.save()
+            pipeline.relayout(p, st)
+            spoken.clear()
+            st["shorten_fallback"] = fb
+            res = pipeline.shorten_fit(p, [0, 1], st, engine="edge")
+            segs = p.segments
+            for k, v in want.items():
+                assert res[k] == v, (fb, k, res[k])
+            for k in res["sped"]:
+                ex = segs[k].extra
+                assert ex["speed_lock"] and ex["short_speed"] == ex["speed"] <= 1.2 and ex["fit_speed"] == ex["speed"]
+            if ai is same:
+                assert spoken == [] and res["changed"] == []          # không đổi lời -> không đọc lại câu nào
+                assert "AI không rút ngắn thêm được câu nào" in pipeline.shorten_note(res, segs)
+            if fb == "both" and ai is same:
+                assert "⚠ 1 câu vẫn dài" in pipeline.shorten_note(res, segs) and "Đã tích 1 câu" in \
+                    pipeline.shorten_note(res, segs)
+                assert pipeline.long_rows(segs, st) == [1]          # câu đọc nhanh vừa đủ không tính là còn dài
+                assert pipeline.unshorten_lines(p, [0, 1]) == [0, 1]
+                segs = p.segments
+                assert segs[0].extra.get("speed") is None and segs[1].extra["speed"] == 0.95
+                assert not segs[1].extra.get("speed_lock") and "shorten_info" not in segs[1].extra
+            if ai is one:
+                info = segs[1].extra["shorten_info"]
+                assert info["s"] == [8, 5] and info["r"] == 3 and info["sp"] == 1.2 and info["st"] == "sped"
+                assert segs[0].extra["shorten_info"]["r"] == 1 and len(calls) >= 3
+        finally:
+            p.delete()
+
+
+def test_shorten_pick_variant_236():
+    """Translator.shorten: 2 phương án -> chọn bản DÀI NHẤT mà vẫn vừa số tiếng (giữ nhiều ý nhất); không bản nào vừa
+    -> hỏi lại 1 lần, vẫn không vừa thì lấy bản ngắn nhất mà ngắn hơn bản cũ; bản không ngắn hơn -> giữ bản cũ; nhận cả
+    dạng cũ {"1": "câu"}; tiếng khác gửi khoá tiếng Anh."""
+    from trami import translate as tr
+
+    seen = []
+
+    class LLM:
+        def __init__(self, replies):
+            self.replies = list(replies)
+
+        def chat(self, sysp, user, **k):
+            seen.append(user)
+            return self.replies.pop(0)
+
+    t = tr.Translator({"openai_api_key": "x"}, "openai", target="vi")
+    items = [("你好", "một hai ba bốn năm sáu bảy tám", 5), ("走", "một hai ba", 2), ("吃", "một hai ba bốn", 3)]
+    t.llm = LLM(['{"1": {"a": "một hai ba bốn năm", "b": "một hai ba"}, "2": "một hai ba", '
+                 '"3": {"a": "một hai ba bốn năm", "b": "một hai"}}', '{"1": "một hai ba"}'])
+    out = t.shorten(items, info=[{"now": 2.0, "have": 1.2, "cut": 3}, None, None])
+    assert out == ["Một hai ba bốn năm.", "một hai ba", "Một hai."] and len(seen) == 2     # câu 2 hỏi lại vẫn y cũ
+    assert '"giong_dang_doc"' not in seen[1] and '"so_tieng": 3' in seen[1]
+    assert '"giong_dang_doc": "2,0 giây"' in seen[0] and '"nhan_vat_noi": "1,2 giây"' in seen[0]
+    # không bản nào vừa -> hỏi lại riêng câu đó, kèm bản vừa viết
+    seen.clear()
+    t.llm = LLM(['{"1": {"a": "một hai ba bốn năm sáu bảy"}}', '{"1": {"a": "một hai ba bốn năm sáu"}}'])
+    out = t.shorten([items[0]])
+    assert out == ["Một hai ba bốn năm sáu."] and len(seen) == 2 and '"ban_vua_viet": "Một hai ba bốn năm sáu bảy."' \
+        in seen[1] and '"ban_vua_viet_dai": "7 tiếng"' in seen[1]
+    te = tr.Translator({"openai_api_key": "x"}, "openai", target="en")
+    seen.clear()
+    te.llm = LLM(['{"1": {"a": "go now", "b": "go"}}'])
+    assert te.shorten([("走吧", "we should go right now", 2)], info=[{"now": 2.5, "have": 1.0, "what": "slot"}]) == \
+        ["Go now."]
+    assert '"room": "1.0 s"' in seen[0] and '"max": "2 words"' in seen[0] and "your_last" not in seen[0]
+
+
+def test_shorten_gui_236(monkeypatch):
+    """Tab Lồng tiếng: hàng 'Rút gọn cho vừa' lưu Cài đặt, 'Tích câu còn dài', AI rút gọn chạy shorten_fit -> thông báo
+    + tích sẵn, chú thích cột Độ vừa có kết quả rút gọn."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+
+    from trami import jobs
+    from trami.config import load_settings, save_settings
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.gui.subs_model import C_FIT
+    from trami.gui.widgets import set_combo
+
+    def good(it, retry):
+        w, n = it["dich"].split(), int(it["toi_da"].split()[0])
+        return {"a": " ".join(w[:n]) + "."}
+
+    _shorten_env(monkeypatch, good)
+    p, st = _shorten_project("shgui", [Segment(0.5, 2.5, "a", "một hai ba bốn năm sáu bảy tám chín mười mười một", "S1"),
+                                       Segment(6.0, 7.0, "b", "Hai ba", "S1")])
+    save_settings({"translate_engine": "openai", "openai_api_key": "x"})
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    win = MainWindow()
+    win.show()
+    win.open_project(p.id)
+    pp = win.project_page
+    toasts, subs = [], []
+    monkeypatch.setattr(win, "toast", lambda m, *a, **k: toasts.append(m))
+    monkeypatch.setattr(jobs.manager, "submit", lambda kind, title, fn, pid="", gpu=None: subs.append((kind, fn)))
+    J = type("J", (), {"update": staticmethod(lambda *a, **k: None), "cancelled": staticmethod(lambda: False)})()
+    try:
+        app.processEvents()
+        assert pp.d_sh_mode.currentData() == "speech" and pp.d_sh_fb.currentData() == "both"
+        pp.d_sh_rounds.setValue(2)
+        set_combo(pp.d_sh_fb, "mark")
+        assert load_settings()["shorten_rounds"] == 2 and load_settings()["shorten_fallback"] == "mark"
+        assert not pp.d_sh_vmax.isEnabled()
+        set_combo(pp.d_sh_fb, "both")
+        pp._pick_still_long()
+        assert sorted(pp.model.selected) == [0] and "còn dài hơn thời gian nhân vật nói" in toasts[-1]
+        pp._shorten_picked()
+        kind, fn = subs[-1]
+        assert kind == "redub"
+        out = fn(J)
+        assert "AI rút gọn 1/1 câu" in out["message"] and out["pick"] == [0]
+        p.reload()
+        pp.model.set_segments(p.segments)
+        tip = pp.model.data(pp.model.index(0, C_FIT), Qt.ItemDataRole.ToolTipRole)
+        assert "AI rút gọn lần gần nhất: 12 → " in tip and "✓" in tip
+    finally:
+        save_settings({"shorten_rounds": 3, "shorten_fallback": "both", "translate_engine": "google"})
+        win.timer.stop()
+        p.delete()

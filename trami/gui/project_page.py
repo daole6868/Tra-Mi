@@ -2895,7 +2895,10 @@ class ProjectPage(QWidget):
                      button("Tích các câu đang lọc", "check", "Tích tất cả câu đang hiện trong bảng",
                             flat=True, on_click=self._pick_visible),
                      button("Tích câu ⚠ quá dài", "info", "Tích các câu ⚠ quá dài và ⚡ phải đọc nhanh hơn ×1,15 so với "
-                            "thời gian nhân vật nói (đúng các câu 'AI rút gọn' sẽ làm)", flat=True, on_click=self._pick_long),
+                            "thời gian nhân vật nói", flat=True, on_click=self._pick_long),
+                     button("Tích câu còn dài", "info", "Tích mọi câu có giọng lồng vẫn dài hơn mục tiêu ở ô 'Rút gọn "
+                            "cho vừa' (mặc định: thời gian nhân vật nói, đọc tối đa ×1,10) – gồm câu AI rút gọn rồi mà "
+                            "vẫn dài. Câu đã đọc nhanh vừa đủ không tính", flat=True, on_click=self._pick_still_long),
                      button("Bỏ tích", "x", flat=True, on_click=lambda: self.model.set_picked(range(len(self.model.segs)), False))))
         spk.add(flow(button("Tích câu chưa lồng", "check", "Tích các câu đã có lời dịch mà chưa có giọng trong bản lồng "
                             "đang dùng (bị sót, đọc lỗi, câu mới thêm) – rồi bấm 'Tạo lại giọng các câu đã tích'",
@@ -2990,9 +2993,52 @@ class ProjectPage(QWidget):
                             "đã vừa giữ nguyên) rồi tự tạo lại giọng đúng các câu đó. Dùng công cụ dịch AI ở Cài đặt "
                             "(DeepSeek, Claude, GPT, Gemini, Ollama – không dùng được Google / Hy-MT2)",
                             on_click=self._shorten_picked),
-                     button("Bỏ rút gọn", "refresh", "Các câu đã tích quay về lời dịch trước khi AI rút gọn và tạo lại "
-                            "giọng", flat=True, on_click=lambda: self._unshorten_rows(sorted(self.model.selected))),
+                     button("Bỏ rút gọn", "refresh", "Các câu đã tích quay về lời dịch trước khi AI rút gọn (và bỏ tốc "
+                            "độ 'đọc nhanh vừa đủ') rồi tạo lại giọng", flat=True,
+                            on_click=lambda: self._unshorten_rows(sorted(self.model.selected))),
                      button("Nghe câu", "play", "Phát câu đang chọn trên trình phát bên phải", on_click=self._play_line)))
+        # tuỳ chọn nút AI rút gọn (2.3.6): mục tiêu, số lượt đo lại, khi rút nữa mất ý
+        sh = pipeline.shorten_opts(self.settings)
+        self.d_sh_mode = combo(list(pipeline.SHORTEN_MODES), sh["mode"])
+        self.d_sh_mode.setMinimumContentsLength(18)
+        self.d_sh_mode.setToolTip("Thời gian nhân vật nói: giọng lồng phải đọc xong trong đúng lúc nhân vật nói (từ đầu "
+                                  "tới cuối câu phụ đề gốc).\nChỗ trống tới câu sau: cách cũ – giọng được kéo dài sang "
+                                  "khoảng lặng sau khi nhân vật thôi nói, miễn chưa tới câu sau")
+        self.d_sh_speed = QDoubleSpinBox()
+        self.d_sh_speed.setRange(1.0, 1.3)
+        self.d_sh_speed.setSingleStep(0.05)
+        self.d_sh_speed.setDecimals(2)
+        self.d_sh_speed.setPrefix("×")
+        self.d_sh_speed.setValue(sh["v"])
+        self.d_sh_speed.setToolTip("Tính câu là vừa khi giọng đọc nhanh tới mức này (×1,00 = đúng tốc độ thường)")
+        self.d_sh_rounds = QSpinBox()
+        self.d_sh_rounds.setRange(1, 3)
+        self.d_sh_rounds.setSuffix(" lượt")
+        self.d_sh_rounds.setValue(sh["rounds"])
+        self.d_sh_rounds.setToolTip("Rút gọn -> đọc lại giọng -> đo giọng mới -> câu còn dài thì AI rút tiếp. Mỗi lượt "
+                                    "thêm 1 lần gọi AI + đọc lại các câu còn dài (đã có bản lồng mới đo được)")
+        self.d_sh_fb = combo(list(pipeline.SHORTEN_FALLBACKS), sh["fb"])
+        self.d_sh_fb.setMinimumContentsLength(16)
+        self.d_sh_fb.setToolTip("Câu vẫn dài sau các lượt rút gọn (rút nữa sẽ mất ý – không rút còn dưới 1/2 số tiếng "
+                                "của bản dịch ban đầu):\n• Đọc nhanh + tích sẵn: khoá tốc độ đúng mức cần cho vừa (tối "
+                                "đa ô bên cạnh) rồi xếp lại bản lồng, không đọc lại; đọc nhanh tối đa vẫn dài thì tích sẵn "
+                                "câu đó\n• Chỉ đọc nhanh: như trên, không tích\n• Chỉ tích sẵn: để nguyên, tích các câu đó "
+                                "để bạn sửa tay ô Tiếng Việt hoặc dùng tab Chỉnh sửa → Làm chậm → 'Chỉ khoảng nghỉ – theo "
+                                "câu dài'")
+        self.d_sh_vmax = QDoubleSpinBox()
+        self.d_sh_vmax.setRange(1.0, 1.5)
+        self.d_sh_vmax.setSingleStep(0.05)
+        self.d_sh_vmax.setDecimals(2)
+        self.d_sh_vmax.setPrefix("×")
+        self.d_sh_vmax.setValue(sh["vmax"])
+        self.d_sh_vmax.setToolTip("Đọc nhanh vừa đủ tối đa tới mức này (nhanh hơn nghe vội)")
+        for w in (self.d_sh_mode, self.d_sh_fb):
+            w.currentIndexChanged.connect(lambda _i: self._shorten_opts_changed())
+        for w in (self.d_sh_speed, self.d_sh_rounds, self.d_sh_vmax):
+            w.valueChanged.connect(lambda _v: self._shorten_opts_changed())
+        spk.add(flow(hbox(label("Rút gọn cho vừa", "muted"), self.d_sh_mode),
+                     hbox(label("đọc ≤", "muted"), self.d_sh_speed), hbox(label("rút tối đa", "muted"), self.d_sh_rounds),
+                     hbox(label("Còn dài thì", "muted"), self.d_sh_fb), hbox(label("nhanh ≤", "muted"), self.d_sh_vmax)))
         regen = GradientButton("Tạo lại giọng các câu đã tích", "refresh")
         regen.setToolTip("Đọc lại riêng các câu đã tích theo lời Việt + giọng hiện tại, cập nhật ngay vào bản lồng "
                          "tiếng đang dùng (không đọc lại cả video)")
@@ -4281,6 +4327,7 @@ class ProjectPage(QWidget):
             self.model.set_ocr_thr(float(self.s_ocrconf.value()))
         finally:
             self.loading = was
+        self._sync_shorten_opts()
         self._update_engine_label()
 
     # ------------------------------------------------------------------ kỹ năng dịch AI
@@ -6541,6 +6588,31 @@ class ProjectPage(QWidget):
             self.loading = was
         self._follow_enable()
 
+    def _shorten_opts_changed(self):
+        """Lưu tuỳ chọn nút AI rút gọn vào Cài đặt (1 giá trị chung mọi dự án)."""
+        self.d_sh_vmax.setEnabled(self.d_sh_fb.currentData() != "mark")
+        if self.loading:
+            return
+        from ..config import save_settings
+
+        vals = {"shorten_mode": self.d_sh_mode.currentData(), "shorten_speed": round(self.d_sh_speed.value(), 2),
+                "shorten_rounds": int(self.d_sh_rounds.value()), "shorten_fallback": self.d_sh_fb.currentData(),
+                "shorten_max_speed": round(max(self.d_sh_vmax.value(), self.d_sh_speed.value()), 2)}
+        self.settings = save_settings(vals)
+
+    def _sync_shorten_opts(self):
+        sh = pipeline.shorten_opts(self.settings)
+        was, self.loading = self.loading, True
+        try:
+            set_combo(self.d_sh_mode, sh["mode"])
+            set_combo(self.d_sh_fb, sh["fb"])
+            self.d_sh_speed.setValue(sh["v"])
+            self.d_sh_rounds.setValue(sh["rounds"])
+            self.d_sh_vmax.setValue(sh["vmax"])
+            self.d_sh_vmax.setEnabled(sh["fb"] != "mark")
+        finally:
+            self.loading = was
+
     def _dub_autoshort_changed(self, on: bool):
         if not self.loading:
             from ..config import save_settings
@@ -6672,6 +6744,21 @@ class ProjectPage(QWidget):
         self.model.set_picked(rows)
         self.win.toast(f"Đã tích {len(rows)} câu quá dài / đọc quá nhanh – bấm 'AI rút gọn' để rút gọn và tạo lại giọng",
                        "ok")
+
+    def _pick_still_long(self):
+        """Tích các câu có giọng lồng vẫn dài hơn mục tiêu ô 'Rút gọn cho vừa' (2.3.6)."""
+        if not pipeline.has_dub(self.p):
+            return self.win.toast("Chưa có bản lồng tiếng – bấm 'Tạo bản lồng tiếng' ở mục 3 trước", "warn")
+        rows = pipeline.long_rows(self.model.segs, self.settings)
+        sh = pipeline.shorten_opts(self.settings)
+        goal = ("thời gian nhân vật nói" if sh["mode"] == "speech" else "chỗ trống tới câu sau") + \
+            f" (đọc ≤ ×{sh['v']:.2f})".replace(".", ",")
+        if not rows:
+            return self.win.toast(f"Không có câu nào có giọng lồng dài hơn {goal}", "ok")
+        self.model.set_picked(range(len(self.model.segs)), False)
+        self.model.set_picked(rows)
+        self.win.toast(f"Đã tích {len(rows)} câu giọng lồng còn dài hơn {goal} – bấm 'AI rút gọn', sửa tay ô Tiếng "
+                       "Việt, hoặc 'Đổi tốc độ giọng'", "ok")
 
     def _pick_undubbed(self):
         """Tích các câu đã dịch mà chưa có giọng trong bản lồng đang dùng (sót / đọc lỗi / câu mới)."""
@@ -7425,44 +7512,34 @@ class ProjectPage(QWidget):
         self._shorten_rows(rows)
 
     def _shorten_rows(self, rows: list[int]):
-        """AI rút gọn các câu QUÁ DÀI trong các câu đã chọn (câu đã vừa giữ nguyên) rồi tự tạo lại giọng đúng các câu
-        vừa rút gọn (đã có bản lồng) – trình phát nghe được ngay; các câu đã rút gọn được tích sẵn."""
+        """AI rút gọn các câu còn dài hơn mục tiêu (ô 'Rút gọn cho vừa') trong các câu đã chọn rồi tự tạo lại giọng đúng
+        các câu đó, đo lại – còn dài thì rút tiếp (2.3.6); câu vẫn dài: đọc nhanh vừa đủ / tích sẵn theo ô 'Rút nữa mất ý
+        thì'. Thông báo + cột Độ vừa ghi kết quả từng câu."""
         self.inspector._flush()
         eng = self.d_engine.currentData()
         rate = self.d_rate.currentData()
         st = dict(load_settings())
         st["dub_skip_songs"] = self.d_skipsong.isChecked()
         self._replay_row = None
+        dubbed = pipeline.has_dub(self.p)
 
         def fn(j, p):
-            j.update(0.05, f"AI đang rút gọn các câu quá dài trong {len(rows)} câu đã chọn…")
-            r = pipeline.shorten_lines(p, rows, st)
-            ch = r["changed"]
-            if not ch:
-                msg = "Không có câu nào cần rút gọn"
-                if r["fit"]:
-                    msg += f" – {len(r['fit'])} câu đã vừa thời gian nhân vật nói (✓ xanh / đọc nhanh ≤ ×1,15)"
-                if r["same"]:
-                    msg += f" – AI không viết ngắn hơn được {len(r['same'])} câu (sửa tay ở ô Tiếng Việt)"
-                return {"message": msg}
-            msg = f"AI đã rút gọn {len(ch)} câu"
-            if r["fit"]:
-                msg += f" (bỏ qua {len(r['fit'])} câu đã vừa)"
-            if r["same"]:
-                msg += f", {len(r['same'])} câu AI không rút ngắn được"
-            if pipeline.has_dub(p):
-                pipeline.redub(p, ch, rate, st, lambda x, m="": j.update(0.3 + 0.7 * x, m), j.cancelled, eng)
-                msg += " và đã tạo lại giọng đúng các câu đó – trình phát đang dùng bản mới"
-            else:
-                msg += " – bấm 'Tạo bản lồng tiếng' để đọc"
-            return {"message": msg, "pick": ch}
-        self.submit("redub" if pipeline.has_dub(self.p) else "shorten", f"AI rút gọn {len(rows)} câu", fn)
+            j.update(0.02, f"AI đang rút gọn các câu còn dài trong {len(rows)} câu đã chọn…")
+            r = pipeline.shorten_fit(p, rows, st, rate, eng, j.update, j.cancelled)
+            out = {"message": pipeline.shorten_note(r, p.segments, pipeline.trans_lang(p))}
+            if r["pick"]:
+                out["pick"] = r["pick"]
+            return out
+        self.submit("redub" if dubbed else "shorten", f"AI rút gọn {len(rows)} câu", fn)
 
     def _unshorten_rows(self, rows: list[int]):
         """Bỏ bản AI rút gọn (câu đã chọn quay về lời dịch cũ) rồi tạo lại giọng các câu đó."""
-        rows = [r for r in rows if 0 <= r < len(self.model.segs) and self.model.segs[r].extra.get("trans_long")]
+        segs = self.model.segs
+        rows = [r for r in rows if 0 <= r < len(segs) and (segs[r].extra.get("trans_long") or
+                                                           segs[r].extra.get("short_speed"))]
         if not rows:
             return self.win.toast("Các câu đã tích chưa được AI rút gọn (không có lời cũ để quay về)", "info")
+        reread = [r for r in rows if segs[r].extra.get("trans_long")]
         self.inspector._flush()
         eng = self.d_engine.currentData()
         rate = self.d_rate.currentData()
@@ -7472,10 +7549,15 @@ class ProjectPage(QWidget):
 
         def fn(j, p):
             back = pipeline.unshorten_lines(p, rows)
-            msg = f"Đã đưa {len(back)} câu về lời trước khi rút gọn"
+            redo = [r for r in back if r in reread]
+            msg = f"Đã đưa {len(back)} câu về lời / tốc độ trước khi rút gọn"
             if back and pipeline.has_dub(p):
-                pipeline.redub(p, back, rate, st, j.update, j.cancelled, eng)
-                msg += " và tạo lại giọng"
+                if redo:
+                    pipeline.redub(p, redo, rate, st, j.update, j.cancelled, eng)
+                    msg += " và tạo lại giọng"
+                else:
+                    pipeline.relayout(p, st, j.update, j.cancelled)
+                    msg += " và xếp lại bản lồng"
             return {"message": msg, "pick": back}
         self.submit("redub", f"Bỏ rút gọn {len(rows)} câu", fn)
 

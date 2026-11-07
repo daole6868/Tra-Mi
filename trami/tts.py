@@ -2098,7 +2098,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         s = segs[k]
         p = s.extra.pop("_tts", None)
         for key in ("fit", "fit_shift", "fit_over", "fit_need", "fit_have", "dub_at", "dub_pauses", "fit_auto",
-                    "fit_auto_speed"):
+                    "fit_auto_speed", "fit_pause"):
             s.extra.pop(key, None)
         if not p or not Path(p).exists():
             continue
@@ -2226,6 +2226,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                 s.extra["dub_at"] = [a0, a1]   # đoạn giọng đang phát của câu (phụ đề chạy theo giọng lồng)
                 if any(q[1] > 0 for q in gaps):
                     s.extra["dub_pauses"] = sum(1 for q in gaps if q[1] > 0)
+                    # tổng lặng chèn giữa câu (nghỉ đúng chỗ nhân vật ngắt hơi) – AI rút gọn tính cả phần này (2.3.6)
+                    s.extra["fit_pause"] = round(sum(q[1] for q in gaps if q[1] > 0) / SR * vspeed, 2)
                 if abs(x["shift"]) >= 0.05:
                     s.extra["fit_shift"] = round(x["shift"], 2)
                 if x["over"] >= 0.05:

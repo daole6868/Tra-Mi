@@ -817,7 +817,8 @@ def diarize(p: Project, settings: dict | None = None, progress: Prog | None = No
     return n
 
 
-DUB_MARKS = ("dub_at", "fit", "fit_speed", "fit_shift", "fit_over", "fit_need", "fit_have", "fit_auto", "fit_auto_speed")
+DUB_MARKS = ("dub_at", "fit", "fit_speed", "fit_shift", "fit_over", "fit_need", "fit_have", "fit_auto", "fit_auto_speed",
+             "fit_pause")
 
 
 def forget_stale_voice(old_texts: set, segs: list, moved: bool) -> int:
@@ -4376,13 +4377,15 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
         try:
             lg = trans_lang(p)
             tr = Translator(settings, target=lg, source=source_lang(p), skill=_skill(settings))
-            items = []
+            items, infos = [], []
             for k, need, have in long_:
                 cur = segs[k].trans
                 n = min(syllables(cur, lg) - 1,
                         max(2, int(syllables(cur, lg) * max(0.4, have / max(need, 0.1)) * 0.95)))
-                items.append((segs[k].text, cur, max(2, min(n, budget_for(have, 1.25, lg)))))
-            new = tr.shorten(items)
+                n = max(2, min(n, budget_for(have, 1.25, lg)))
+                items.append((segs[k].text, cur, n))
+                infos.append({"now": need, "have": have, "cut": max(1, syllables(cur, lg) - n), "what": "slot"})
+            new = tr.shorten(items, info=infos)
             for (k, _, _), t in zip(long_, new):
                 if t != segs[k].trans:
                     segs[k].extra.setdefault("trans_long", segs[k].trans)   # giữ bản dài để người dùng xem lại
@@ -4478,7 +4481,7 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
 
 # kết quả lồng tiếng ghi vào từng câu (xếp lại / đọc lại) – được ghép vào câu tương ứng khi người dùng sửa song song
 _DUB_EXTRA = ("tts_file", "dub_at", "fit", "fit_speed", "fit_need", "fit_have", "fit_shift", "fit_over", "voice_used",
-              "take", "take_pending", "dub_pauses", "fit_auto", "fit_auto_speed")
+              "take", "take_pending", "dub_pauses", "fit_auto", "fit_auto_speed", "fit_pause")
 
 
 def _seg_sig(s) -> tuple:
@@ -5156,6 +5159,8 @@ def apply_speed(segs: list, rows: list[int], mode: str, value: float | None) -> 
     for r, v in speed_values(segs, rows, mode, value).items():
         ex = segs[r].extra
         old = (ex.get("speed"), bool(ex.get("speed_lock")))
+        ex.pop("short_speed", None)        # người dùng tự đặt tốc độ: không còn là tốc độ "đọc nhanh vừa đủ" của AI rút gọn
+        ex.pop("short_speed_prev", None)
         if v is None:
             ex.pop("speed", None)
             ex.pop("speed_lock", None)
@@ -5260,40 +5265,175 @@ def needs_shorten(s, lang: str = "vi") -> bool:
         shorten_target(s, s.duration, lang) is not None
 
 
+# ---- AI rút gọn cho vừa thời gian nhân vật nói (2.3.6) ---------------------------------------------------------
+SHORTEN_MODES = (("speech", "Thời gian nhân vật nói"), ("slot", "Chỗ trống tới câu sau"))
+SHORTEN_FALLBACKS = (("both", "Đọc nhanh + tích sẵn"), ("speed", "Chỉ đọc nhanh"), ("mark", "Chỉ tích sẵn"))
+SHORTEN_TOL = 0.12          # giọng dài hơn mục tiêu ≤ max(0,12 s, 5 %) coi là vừa
+SHORTEN_MIN_SHARE = 0.5     # không rút còn dưới 1/2 số tiếng của bản dịch ban đầu (ngắn hơn nữa là mất ý)
+SHORTEN_STATE = {"fit": "đã vừa sẵn", "ok": "đã vừa", "sped": "đọc nhanh vừa đủ", "left": "vẫn dài",
+                 "same": "AI không rút ngắn được", "est": "đã rút theo ước tính (chưa có giọng để đo)"}
+
+
+def shorten_opts(settings: dict | None) -> dict:
+    """Tuỳ chọn nút AI rút gọn: mode speech / slot, v = tốc độ đọc tối đa khi tính mục tiêu, rounds, fb (rút nữa mất
+    ý: both / speed / mark), vmax = đọc nhanh vừa đủ tối đa."""
+    st = settings or {}
+
+    def num(key, dflt, lo, hi):
+        try:
+            return min(hi, max(lo, float(st.get(key, dflt) or dflt)))
+        except (TypeError, ValueError):
+            return dflt
+
+    mode = st.get("shorten_mode") if st.get("shorten_mode") in ("speech", "slot") else "speech"
+    fb = st.get("shorten_fallback") if st.get("shorten_fallback") in ("both", "speed", "mark") else "both"
+    v = num("shorten_speed", 1.1, 1.0, 1.3)
+    return {"mode": mode, "v": v, "rounds": int(num("shorten_rounds", 3, 1, 3)), "fb": fb,
+            "vmax": max(v, num("shorten_max_speed", 1.2, 1.0, 1.5))}
+
+
+def _target_secs(s, mode: str, slot: float | None = None) -> float:
+    """Giọng lồng phải đọc xong trong bao nhiêu giây: speech = thời gian nhân vật nói (không quá chỗ trống tới câu
+    sau), slot = chỗ trống từ lúc nhân vật nói tới câu sau (cách cũ)."""
+    t = max(0.3, s.end - s.start)
+    have = float(s.extra.get("fit_have") or 0)
+    if mode == "slot":
+        return have if have > 0 else max(t, slot or t)
+    return min(t, have) if have > 0 else t
+
+
+def _read_speed(s, v: float, own_lock: bool = True) -> float:
+    """Tốc độ dùng để tính giọng dài bao nhiêu: tốc độ người dùng khoá (đúng tốc độ) / tối thiểu, không có thì v.
+    own_lock False: bỏ qua tốc độ do AI rút gọn tự khoá (short_speed) – để rút tiếp được."""
+    ex = s.extra
+    sp = float(ex.get("speed") or 0)
+    if sp and (own_lock or not ex.get("short_speed")):
+        return sp if ex.get("speed_lock") else max(v, sp)
+    return v
+
+
+def voice_secs(s, v: float = 1.1, own_lock: bool = True) -> float | None:
+    """Giọng lồng của câu dài bao nhiêu giây khi đọc ở tốc độ v (hoặc tốc độ đặt tay) – gồm lặng chèn giữa câu; None =
+    chưa có giọng / bỏ lồng."""
+    ex = s.extra
+    need = float(ex.get("fit_need") or 0)
+    if need <= 0 or not ex.get("fit") or ex.get("nodub"):
+        return None
+    return need / _read_speed(s, v, own_lock) + float(ex.get("fit_pause") or 0)
+
+
+def shorten_tol(target: float) -> float:
+    return max(SHORTEN_TOL, 0.05 * target)
+
+
+def voice_over(s, mode: str = "speech", v: float = 1.1, own_lock: bool = True) -> float | None:
+    """Giây giọng lồng dài hơn mục tiêu (> 0 = dài hơn); None = câu chưa có giọng."""
+    secs = voice_secs(s, v, own_lock)
+    return None if secs is None else secs - _target_secs(s, mode)
+
+
+def long_rows(segs: list, settings: dict | None = None) -> list[int]:
+    """Câu có giọng lồng vẫn dài hơn mục tiêu của ô "Rút cho vừa" (nút "Tích câu còn dài")."""
+    o = shorten_opts(settings)
+    out = []
+    for i, s in enumerate(segs):
+        x = voice_over(s, o["mode"], o["v"])
+        if x is not None and (s.trans or "").strip() and x > shorten_tol(_target_secs(s, o["mode"])):
+            out.append(i)
+    return out
+
+
+def shorten_plan(s, mode: str = "speech", v: float = 1.1, lang: str = "vi", slot: float | None = None) -> dict | None:
+    """Câu cần rút gọn còn bao nhiêu tiếng: None = đã vừa (hoặc không có lời / bỏ lồng); {"n": số tiếng tối đa, "syl":
+    số tiếng hiện tại, "now": giây giọng đang đọc (None = chưa lồng, ước theo số tiếng), "have": giây phải vừa,
+    "floor": đã chạm mức giữ ý (n >= syl = không rút thêm được)}. Đã lồng: tính theo tốc độ đọc THẬT của giọng câu đó
+    (fit_need = giây ở ×1 cho đúng số tiếng đó)."""
+    from .translate import budget_for, syllables
+
+    ex = s.extra
+    if ex.get("nodub") or (ex.get("song") and not ex.get("dub_at")):
+        return None
+    syl = syllables(s.trans, lang)
+    if syl < 2:
+        return None
+    tt = _target_secs(s, mode, slot)
+    now = voice_secs(s, v, own_lock=False)
+    if now is not None:
+        if now <= tt + shorten_tol(tt):
+            return None
+        room = max(0.2, tt - float(ex.get("fit_pause") or 0)) * _read_speed(s, v, own_lock=False)
+        ratio = room / float(ex["fit_need"])
+    else:
+        b = budget_for(tt, v, lang)
+        if syl <= b:
+            return None
+        ratio = b / max(1, syl)
+    floor = max(2, -(-syllables(ex.get("trans_long") or s.trans, lang) * SHORTEN_MIN_SHARE // 1))
+    n = min(syl - 1, int(syl * min(1.0, ratio) * 0.97))
+    hit = n < floor
+    n = int(max(n, floor))
+    return {"n": min(n, syl), "syl": syl, "now": now, "have": tt, "floor": hit or n >= syl}
+
+
+def _drop_short_speed(ex: dict) -> None:
+    """Bỏ tốc độ AI rút gọn tự khoá (đọc nhanh vừa đủ), trả lại tốc độ đặt tay trước đó nếu có."""
+    if not ex.pop("short_speed", None):
+        return
+    prev = ex.pop("short_speed_prev", None)
+    if prev:
+        ex["speed"] = prev[0]
+        if prev[1]:
+            ex["speed_lock"] = True
+        else:
+            ex.pop("speed_lock", None)
+    else:
+        ex.pop("speed", None)
+        ex.pop("speed_lock", None)
+
+
 def shorten_lines(p: Project, rows: list[int], settings: dict | None = None) -> dict:
-    """AI viết lại NGẮN HƠN bản dịch của các câu QUÁ DÀI trong các câu đã chọn (câu đã vừa giữ nguyên), giữ bản cũ ở
-    trans_long. Trả về {"changed": câu đã rút gọn, "fit": câu đã vừa (bỏ qua), "same": câu AI không rút ngắn được}.
-    Cần công cụ dịch AI (không dùng được Google / Hy-MT2)."""
+    """1 lượt AI rút gọn các câu đã chọn còn dài hơn mục tiêu (Cài đặt shorten_mode / shorten_speed), giữ bản cũ ở
+    trans_long. Trả về {"changed": câu đã rút gọn, "fit": câu đã vừa (bỏ qua), "same": câu AI không rút ngắn được,
+    "floor": câu đã rút tới mức giữ ý (không gửi AI), "plans": {câu: shorten_plan}}. Cần công cụ dịch AI."""
     from .translate import Translator
 
     settings = settings or load_settings()
     if settings.get("translate_engine", "google") in ("google", "hymt", NO_TRANSLATE):
         raise ValueError("Rút gọn câu cần công cụ dịch AI hội thoại (DeepSeek, Claude, GPT…) – Google và Hy-MT2 chỉ "
                          "dịch được, không viết lại câu. Chọn ở Cài đặt → Công cụ dịch.")
+    o = shorten_opts(settings)
     segs = p.segments
     lg = trans_lang(p)
     total = float(p.data.get("info", {}).get("duration", 0) or 0)
     starts = sorted(x.start for x in segs)
-    items, fits = [], []
+    items, infos, fits, floor, plans = [], [], [], [], {}
     for k in sorted(set(rows)):
         if not (0 <= k < len(segs)) or not segs[k].trans.strip():
             continue
         s = segs[k]
         nxt = next((t for t in starts if t > s.start + 0.01), max(total, s.end))
-        n = shorten_target(s, max(s.duration, nxt - s.start), lg)
-        if n is None:
+        pl = shorten_plan(s, o["mode"], o["v"], lg, max(s.duration, nxt - s.start))
+        if pl is None:
             fits.append(k)
-        else:
-            items.append((k, (s.text, s.trans, n)))
-    res = {"changed": [], "fit": fits, "same": []}
+            continue
+        plans[k] = pl
+        if pl["n"] >= pl["syl"]:
+            floor.append(k)
+            continue
+        items.append((k, (s.text, s.trans, pl["n"])))
+        infos.append({"now": pl["now"], "have": pl["have"], "cut": pl["syl"] - pl["n"], "what": o["mode"]})
+    res = {"changed": [], "fit": fits, "same": [], "floor": floor, "plans": plans}
     if not items:
         return res
-    new = Translator(settings, target=lg, source=source_lang(p), skill=_skill(settings)).shorten([x for _, x in items])
+    tr = Translator(settings, target=lg, source=source_lang(p), skill=_skill(settings))
+    new = tr.shorten([x for _, x in items], info=infos)
     for (k, _), t in zip(items, new):
         if t and t != segs[k].trans:
-            segs[k].extra.setdefault("trans_long", segs[k].trans)
+            ex = segs[k].extra
+            ex.setdefault("trans_long", segs[k].trans)
             segs[k].trans = t
-            segs[k].extra.pop("fit", None)
+            ex.pop("fit", None)
+            _drop_short_speed(ex)
             res["changed"].append(k)
         else:
             res["same"].append(k)
@@ -5302,15 +5442,221 @@ def shorten_lines(p: Project, rows: list[int], settings: dict | None = None) -> 
     return res
 
 
+def shorten_fit(p: Project, rows: list[int], settings: dict | None = None, rate: str | None = None,
+                engine: str | None = None, progress: Prog | None = None, cancel=None) -> dict:
+    """Nút "AI rút gọn" (2.3.6): rút gọn -> đọc lại giọng đúng các câu đó -> đo giọng mới -> câu còn dài thì rút tiếp
+    (tối đa shorten_rounds lượt, lượt nào AI không rút ngắn được nữa / chạm mức giữ ý thì thôi). Câu vẫn dài: đọc nhanh
+    vừa đủ (khoá tốc độ ≤ shorten_max_speed, xếp lại không đọc lại) và / hoặc tích sẵn để sửa tay theo shorten_fallback.
+    Ghi extra["shorten_info"] mỗi câu (báo trong cột Độ vừa). Trả {"changed", "fit", "ok", "sped", "left", "same",
+    "est", "marked", "floor", "rounds", "state", "opts", "pick"}."""
+    from .translate import syllables
+
+    settings = settings or load_settings()
+    o = shorten_opts(settings)
+    lg = trans_lang(p)
+    dubbed = has_dub(p)
+    segs = p.segments
+    rows = sorted({k for k in rows if 0 <= k < len(segs) and segs[k].trans.strip()})
+    start = {k: (syllables(segs[k].trans, lg), voice_secs(segs[k], o["v"], own_lock=False)) for k in rows}
+    rounds = o["rounds"] if dubbed else 1
+    state: dict[int, str] = {}
+    round_of: dict[int, int] = {}
+    changed: list[int] = []
+    fit0: list[int] = []
+    floor_hit: set[int] = set()
+    active = rows
+    done = 0
+    span = 0.92 / rounds
+    for r in range(rounds):
+        if cancel and cancel():
+            raise ff.Cancelled()
+        base = r * span
+        if progress:
+            goal = "thời gian nhân vật nói…" if o["mode"] == "speech" else "chỗ trống tới câu sau…"
+            progress(base, f"Lượt 1/{rounds}: AI đang rút gọn {len(active)} câu cho vừa {goal}" if r == 0 else
+                     f"Lượt {r + 1}/{rounds}: đo lại giọng {len(active)} câu vừa rút gọn, câu còn dài thì AI rút tiếp…")
+        res = shorten_lines(p, active, settings)
+        if r == 0:
+            fit0 = list(res["fit"])
+        floor_hit.update(res["floor"])
+        for k in res["same"] + res["floor"]:
+            state[k] = "left" if k in round_of else "same"
+        ch = res["changed"]
+        if not ch:
+            break
+        done = r + 1
+        for k in ch:
+            round_of[k] = r + 1
+            if k not in changed:
+                changed.append(k)
+        if dubbed:
+            redub(p, ch, rate, settings, _sub(progress, base + 0.15 * span, base + span), cancel, engine)
+        active = ch
+    segs = p.segments
+    for k in rows:
+        if k in fit0 and k not in round_of:
+            state[k] = "fit"
+        elif not dubbed:
+            state[k] = "est" if k in round_of else state.get(k, "same")
+        elif shorten_plan(segs[k], o["mode"], o["v"], lg) is None:
+            state[k] = "ok"
+        elif state.get(k) != "same":
+            state[k] = "left"
+    long_ = [k for k in rows if state[k] in ("left", "same")] if dubbed else []
+    sped: dict[int, float] = {}
+    if long_ and o["fb"] in ("both", "speed"):
+        for k in long_:
+            ex = segs[k].extra
+            need = float(ex.get("fit_need") or 0)
+            if need <= 0:
+                continue
+            tt = _target_secs(segs[k], o["mode"])
+            pause = float(ex.get("fit_pause") or 0)
+            rq = need / max(0.2, tt - pause)
+            lock = round(min(o["vmax"], -(-rq * 100 // 1) / 100), 2)
+            if ex.get("speed") and not ex.get("short_speed"):
+                ex["short_speed_prev"] = [ex["speed"], bool(ex.get("speed_lock"))]
+            ex["speed"], ex["speed_lock"], ex["short_speed"] = lock, True, lock
+            sped[k] = lock
+            if need / lock + pause <= tt + shorten_tol(tt):
+                state[k] = "sped"
+        if sped:
+            p.segments = segs
+            p.save()
+            if progress:
+                progress(0.93, f"Đọc nhanh vừa đủ {len(sped)} câu – đang xếp lại bản lồng (không đọc lại)…")
+            relayout(p, settings, _sub(progress, 0.93, 1.0), cancel)
+            segs = p.segments
+    if o["fb"] == "mark":
+        marked = list(long_)
+    elif o["fb"] == "both":
+        marked = [k for k in long_ if state[k] != "sped"]
+    else:
+        marked = []
+    for k in rows:
+        s = segs[k]
+        syl0, now0 = start[k]
+        info = {"m": o["mode"], "v": o["v"], "lg": lg, "st": state[k], "s": [syl0, syllables(s.trans, lg)],
+                "h": round(_target_secs(s, o["mode"]), 2)}
+        now1 = voice_secs(s, o["v"])
+        if now0 is not None or now1 is not None:
+            info["t"] = [round(now0, 2) if now0 is not None else None, round(now1, 2) if now1 is not None else None]
+        if round_of.get(k):
+            info["r"] = round_of[k]
+        if k in sped:
+            info["sp"] = sped[k]
+        if k in floor_hit:
+            info["floor"] = True
+        s.extra["shorten_info"] = info
+    p.segments = segs
+    p.save()
+    by = {x: [k for k in rows if state[k] == x] for x in SHORTEN_STATE}
+    pick = marked or (changed + [k for k in sped if k not in changed])
+    return {"changed": changed, "fit": by["fit"], "ok": by["ok"], "sped": sorted(sped), "left": by["left"],
+            "same": by["same"], "est": by["est"], "marked": marked, "floor": sorted(floor_hit), "rounds": done,
+            "state": state, "opts": o, "dubbed": dubbed, "pick": sorted(set(pick))}
+
+
+def _secs(x: float | None) -> str:
+    return "?" if x is None else f"{x:.1f}".replace(".", ",") + " s"
+
+
+def shorten_line_note(s, lang: str = "vi") -> str:
+    """1 dòng kết quả rút gọn của câu (tooltip cột Độ vừa, thông báo): "18 → 12 tiếng · giọng 2,9 → 2,1 s / nói 2,0 s
+    ✓ (2 lượt)". Rỗng khi chưa rút gọn / lời đã đổi sau đó."""
+    from .translate import syllables
+
+    info = s.extra.get("shorten_info")
+    if not isinstance(info, dict) or not info.get("s") or syllables(s.trans, info.get("lg") or lang) != info["s"][1]:
+        return ""
+    st = info.get("st", "")
+    a, b = info["s"]
+    parts = [f"{a} → {b} tiếng" if a != b else f"{a} tiếng"]
+    t = info.get("t") or []
+    what = "nói" if info.get("m") == "speech" else "chỗ trống"
+    if len(t) == 2 and (t[0] is not None or t[1] is not None):
+        g = _secs(t[1]) if t[0] is None or abs((t[0] or 0) - (t[1] or 0)) < 0.05 else f"{_secs(t[0])[:-2]} → {_secs(t[1])}"
+        parts.append(f"giọng {g} / {what} {_secs(info.get('h'))}")
+    mark = {"ok": "✓", "fit": "✓ đã vừa sẵn",
+            "sped": f"✓ đọc nhanh ×{float(info.get('sp') or 1):.2f}".replace(".", ","),
+            "left": "⚠ vẫn dài", "same": "⚠ AI không rút ngắn được", "est": "chưa đo (bấm Tạo bản lồng tiếng)"}.get(st, st)
+    if st in ("left", "same") and info.get("sp"):
+        mark += f" (đã đọc nhanh tối đa ×{float(info['sp']):.2f})".replace(".", ",")
+    if info.get("floor") and st in ("left", "same", "sped"):
+        mark += " – đã rút tới mức giữ ý"
+    parts.append(mark)
+    if info.get("r", 0) > 1:
+        parts.append(f"{info['r']} lượt")
+    return " · ".join(parts)
+
+
+def shorten_note(res: dict, segs: list, lang: str = "vi") -> str:
+    """Thông báo sau khi bấm AI rút gọn: đếm từng loại kết quả + vài câu ví dụ."""
+    o = res.get("opts") or shorten_opts(None)
+    goal = (f"thời gian nhân vật nói (đọc ≤ ×{o['v']:.2f})" if o["mode"] == "speech"
+            else f"chỗ trống tới câu sau (đọc ≤ ×{o['v']:.2f})").replace(".", ",")
+    ch = res.get("changed") or []
+    state = res.get("state") or {}
+    n_all = len(state)
+    left = (res.get("left") or []) + (res.get("same") or [])
+    if ch:
+        msg = f"AI rút gọn {len(ch)}/{n_all} câu cho vừa {goal}"
+        if res.get("rounds", 0) > 1:
+            msg += f", {res['rounds']} lượt (rút → đọc lại → đo → rút tiếp)"
+    elif left or res.get("sped"):
+        msg = f"AI không rút ngắn thêm được câu nào ({n_all} câu đã tích, mục tiêu: vừa {goal})"
+    else:
+        msg = f"Không có câu nào cần rút gọn – {n_all} câu đã tích đều đã vừa {goal}"
+    bits = []
+    if res.get("ok"):
+        bits.append(f"✓ {len(res['ok'])} câu đã vừa")
+    fast = [k for k in res.get("sped") or [] if state.get(k) == "sped" and k < len(segs)]
+    if fast:
+        sp = [float(segs[k].extra.get("short_speed") or 1) for k in fast]
+        rg = f"×{min(sp):.2f}" + (f"–{max(sp):.2f}" if max(sp) - min(sp) > 0.005 else "")
+        bits.append(f"⚡ {len(fast)} câu đọc nhanh {rg} cho vừa".replace(".", ","))
+    if left:
+        over = [voice_over(segs[k], o["mode"], o["v"]) or 0 for k in left if k < len(segs)]
+        txt = f"⚠ {len(left)} câu vẫn dài" + (f" (tới {max(over):.1f} s".replace(".", ",") if over else " (")
+        if any(k in (res.get("sped") or []) for k in left):
+            txt += f", đã đọc nhanh tối đa ×{o['vmax']:.2f}".replace(".", ",")
+        txt = (txt + ")").replace(" ()", "")
+        if ch and res.get("same"):
+            txt += f" – AI không rút ngắn được {len(res['same'])} câu"
+        bits.append(txt)
+    if res.get("fit"):
+        bits.append(f"bỏ qua {len(res['fit'])} câu đã vừa sẵn")
+    if res.get("est"):
+        bits.append(f"{len(res['est'])} câu rút theo ước tính – bấm 'Tạo bản lồng tiếng' để đọc rồi rút tiếp nếu còn dài")
+    if bits:
+        msg += ": " + " · ".join(bits)
+    if res.get("marked"):
+        msg += (f". Đã tích {len(res['marked'])} câu còn dài: sửa tay ô Tiếng Việt, hoặc tab Chỉnh sửa → Làm chậm → "
+                "'Chỉ khoảng nghỉ – theo câu dài'")
+    elif ch and res.get("dubbed"):
+        msg += ". Đã tạo lại giọng các câu đổi – trình phát đang dùng bản mới"
+    ex = [k for k in ch if k < len(segs) and shorten_line_note(segs[k], lang)][:3]
+    if ex:
+        msg += ". Ví dụ: " + "; ".join(f"#{k + 1} {shorten_line_note(segs[k], lang)}" for k in ex)
+    return msg
+
+
 def unshorten_lines(p: Project, rows: list[int]) -> list[int]:
-    """Bỏ bản AI rút gọn: các câu đã chọn quay về lời dịch trước khi rút gọn. Trả về các câu đã đổi lại."""
+    """Bỏ bản AI rút gọn: các câu đã chọn quay về lời dịch trước khi rút gọn (và bỏ tốc độ AI rút gọn tự khoá). Trả về
+    các câu đã đổi lại."""
     segs = p.segments
     back = []
     for k in sorted(set(rows)):
-        if 0 <= k < len(segs) and segs[k].extra.get("trans_long"):
-            segs[k].trans = segs[k].extra.pop("trans_long")
-            segs[k].extra.pop("fit", None)
-            segs[k].extra["trans_user"] = True   # người dùng chọn giữ lời dài: "AI tự rút gọn" khi lồng không đụng vào
+        if not (0 <= k < len(segs)):
+            continue
+        ex = segs[k].extra
+        if ex.get("trans_long") or ex.get("short_speed"):
+            if ex.get("trans_long"):
+                segs[k].trans = ex.pop("trans_long")
+                ex["trans_user"] = True   # người dùng chọn giữ lời dài: "AI tự rút gọn" khi lồng không đụng vào
+            ex.pop("fit", None)
+            _drop_short_speed(ex)
+            ex.pop("shorten_info", None)
             back.append(k)
     if back:
         p.segments = segs
@@ -5401,7 +5747,8 @@ def apply_translation(segs: list, cues: list, stats: dict | None = None) -> list
             m = Segment(parts[0].start, max(x.end for x in parts), text, "", parts[0].speaker,
                         {k: v for k, v in parts[0].extra.items()
                          if k not in ("tts_file", "take", "dub_at", "dub_shift", "fit", "fit_need", "fit_have",
-                                      "fit_shift", "fit_over", "fit_auto", "fit_auto_speed")})
+                                      "fit_shift", "fit_over", "fit_auto", "fit_auto_speed", "fit_pause",
+                                      "shorten_info")})
             put(m, t)
             st["merged"] += len(ks) - 1
             new.append(m)
