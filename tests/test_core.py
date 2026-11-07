@@ -14441,6 +14441,10 @@ def test_gui_click_every_button_237(sample_video, monkeypatch):
     p.segments = [Segment(0.3 + i * 0.7, 0.9 + i * 0.7, "对了父亲", "Đúng rồi, cha.", f"S{1 + i % 2}",
                           {"fit": "ok", "fit_need": 0.5, "fit_have": 0.6}) for i in range(7)]
     p.save()
+    for w in QApplication.topLevelWidgets():     # cửa sổ của test trước (dự án đã xoá) không hỏi tiến độ nữa
+        if isinstance(w, MainWindow):
+            w.timer.stop()
+            w.hide()
     win = MainWindow()
     win.resize(1600, 1000)
     win.show()

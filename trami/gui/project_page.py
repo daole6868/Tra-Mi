@@ -4155,7 +4155,7 @@ class ProjectPage(QWidget):
         """Vừa tách vừa dịch: câu đã nghe / đã dịch hiện ngay ở tab Phụ đề (chỉ xem, sửa khi chạy xong)."""
         from .. import stream
 
-        f = stream.draft_path(self.p.work)
+        f = stream.draft_path(self.p.dir / "work")   # không dùng p.work (tạo thư mục) – gọi mỗi lần hỏi tiến độ
         try:
             mt = f.stat().st_mtime if job else 0.0
         except OSError:
