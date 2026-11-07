@@ -21,7 +21,9 @@ import numpy as np
 
 SR = 44100
 MODES = [("all", "Cả phim (theo ô Tốc độ)"), ("gaps", "Chỉ khoảng nghỉ – đều"),
-         ("need", "Chỉ khoảng nghỉ – theo câu dài")]
+         ("need", "Chỉ khoảng nghỉ – theo câu dài"),
+         ("dense", "Đoạn nói nhanh (đặt ở tab Lồng tiếng)")]
+WARP_MODES = ("gaps", "need", "dense")     # các cách giãn theo đoạn (giọng lồng xếp theo giờ giãn)
 DEFAULTS = {"gap_rate": 0.8, "gap_min": 0.3, "need_rate": 0.6, "need_max": 1.5}
 PAD = 0.08            # giữ nguyên 0,08 s sát lời thoại (hơi thở, tiếng vang cuối câu)
 MIN_SPAN = 0.05       # đoạn giãn ngắn hơn: bỏ
@@ -31,7 +33,13 @@ VERSION = 1           # đổi cách giãn âm thanh -> giãn lại
 
 def mode_of(edit: dict | None) -> str:
     m = (edit or {}).get("speed_mode") or "all"
-    return m if m in ("all", "gaps", "need") else "all"
+    return m if m in ("all",) + WARP_MODES else "all"
+
+
+def dense_spans(edit: dict | None) -> list[list[float]]:
+    """Các đoạn giãn đã áp ở "Đoạn nói nhanh" (2.3.8 – cố định khi bấm Áp dụng, không tự đổi khi lồng lại)."""
+    d = (edit or {}).get("dense") or {}
+    return Warp(d.get("spans") or []).to_list() if isinstance(d, dict) else []
 
 
 def params(edit: dict | None) -> dict:
@@ -54,6 +62,9 @@ def signature(edit: dict | None) -> str:
     m = mode_of(edit)
     if m == "all":
         return ""
+    if m == "dense":
+        sp = dense_spans(edit)
+        return "dense:" + (Warp(sp).key() if sp else "-")
     p = params(edit)
     keys = ("gap_rate", "gap_min") if m == "gaps" else ("need_rate", "need_max")
     return m + ":" + ",".join(f"{p[k]:.3f}" for k in keys)
@@ -193,6 +204,58 @@ def speech_spans(segs, pad: float = PAD) -> list[tuple[float, float]]:
     return [(a, b) for a, b in out]
 
 
+def voice_speech(segs, env=None, hop: float = 0.01) -> list[tuple[float, float]]:
+    """Các đoạn có lời theo GIỌNG THẬT (2.3.8): mỗi câu thu về phần có tiếng của giọng đã tách (phụ đề OCR / nói dồn
+    thường hiện nối sát nhau dù nhân vật đã ngừng nói) + tiếng nói nằm ngoài mọi câu (câu chưa có phụ đề, câu bị cắt
+    sớm). env = độ to 10 ms của giọng đã tách (None -> theo giờ phụ đề như trước). Câu không đoán được (quá nhỏ so với
+    nền) giữ nguyên giờ phụ đề."""
+    if env is None or len(env) < 3:
+        return speech_spans(segs)
+    from . import snap
+
+    env = np.asarray(env, np.float32)
+    floor = snap._floor(env)
+    lines = sorted((float(s.start), float(s.end)) for s in segs
+                   if (s.text or s.trans or "").strip() and s.end > s.start)
+    spans: list[tuple[float, float]] = []
+    thrs: list[float | None] = []
+    for a, b in lines:
+        thr = snap._thr(env, hop, a, b, floor)
+        thrs.append(thr)
+        cl = snap._clusters(env, hop, a, b, thr) if thr is not None else []
+        spans.append((cl[0][0], cl[-1][1]) if cl else (a, b))
+    out = list(spans)
+    for i in range(len(lines) - 1):          # tiếng nói giữa 2 câu (không câu nào phủ) cũng là lời – không giãn
+        lo, hi = lines[i][1], lines[i + 1][0]
+        thr = thrs[i] if thrs[i] is not None else thrs[i + 1]
+        if hi - lo > 0.05 and thr is not None:
+            out += [(x, y) for x, y in snap._clusters(env, hop, lo, hi, thr) if y - x >= 0.1]
+    merged: list[list[float]] = []
+    for a, b in sorted(out):
+        if merged and a <= merged[-1][1] + 1e-3:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return [(a, b) for a, b in merged]
+
+
+def free_between(speech, lo: float, hi: float, pad: float = PAD) -> list[tuple[float, float]]:
+    """Các chỗ không có lời trong [lo, hi] (bỏ pad sát lời), mỗi chỗ ≥ MIN_SPAN."""
+    free = []
+    prev = lo
+    for a, b in speech:
+        if b <= prev:
+            continue
+        if a >= hi:
+            break
+        if a > prev:
+            free.append((prev, min(a, hi)))
+        prev = max(prev, b)
+    if prev < hi:
+        free.append((prev, hi))
+    return [(a + pad, b - pad) for a, b in free if b - a - 2 * pad >= MIN_SPAN]
+
+
 def plan_gaps(segs, total: float, rate: float, min_gap: float, pad: float = PAD) -> list[list[float]]:
     """Cách "đều": mọi khoảng nghỉ GIỮA 2 câu dài ≥ min_gap giây chạy tốc độ rate (đầu / cuối video giữ nguyên)."""
     if rate >= 0.999:
@@ -209,12 +272,13 @@ def plan_gaps(segs, total: float, rate: float, min_gap: float, pad: float = PAD)
 
 
 def plan_need(items: list[dict], segs, total: float, rate_min: float, max_extra: float,
-              pad: float = PAD) -> list[list[float]]:
+              pad: float = PAD, speech=None) -> list[list[float]]:
     """Cách "theo câu dài": items = đoạn giọng lồng {"k", "want" (giây gốc nên bắt đầu), "dur" (giây ở ×1), "pause"}.
     Giọng câu i tràn qua lúc câu lồng tiếp theo bắt đầu -> giãn các khoảng nghỉ (không có lời) nằm giữa cuối lời câu i
     và câu lồng tiếp theo, cùng 1 tốc độ, đủ số giây còn thiếu (≤ max_extra, hình không chậm dưới rate_min)."""
     its = sorted(items, key=lambda x: (float(x["want"]), int(x["k"])))
-    sp = speech_spans(segs)
+    # 2.3.8: speech = lời theo giọng thật (voice_speech) – theo giờ phụ đề thì đoạn nói dồn (câu nối sát) không có chỗ giãn
+    sp = [tuple(x) for x in speech] if speech else speech_spans(segs)
     out = []
     for i, x in enumerate(its[:-1]):
         nx = its[i + 1]
@@ -223,20 +287,10 @@ def plan_need(items: list[dict], segs, total: float, rate_min: float, max_extra:
         if over < 0.05:
             continue
         e = float(segs[int(x["k"])].end)
+        if speech:     # lời theo giọng thật: chỗ nghỉ bắt đầu ngay khi nhân vật thôi nói (không đợi phụ đề tắt)
+            e = min(e, max((b for a, b in sp if a < e), default=e))
         lo, hi = max(e, float(x["want"])), float(nx["want"])
-        free = []
-        prev = lo
-        for a, b in sp:               # chỗ không có lời giữa lo và hi
-            if b <= prev:
-                continue
-            if a >= hi:
-                break
-            if a > prev:
-                free.append((prev, min(a, hi)))
-            prev = max(prev, b)
-        if prev < hi:
-            free.append((prev, hi))
-        free = [(a + pad, b - pad) for a, b in free if b - a - 2 * pad >= MIN_SPAN]
+        free = free_between(sp, lo, hi, pad)       # chỗ không có lời giữa lo và hi
         g = sum(b - a for a, b in free)
         if g < MIN_SPAN:
             continue

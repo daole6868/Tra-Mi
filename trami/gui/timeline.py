@@ -684,6 +684,20 @@ class _Canvas(QWidget):
         else:
             p.setPen(QColor(theme.MUTED))
             p.drawText(rv.adjusted(10, 0, 0, 0), Qt.AlignmentFlag.AlignVCenter, "Đang tạo ảnh thu nhỏ…")
+        # đoạn video đang chạy chậm (làm chậm khoảng nghỉ / đoạn nói nhanh – 2.3.8): dải vàng trên dòng Video + tốc độ
+        for a, b, r in tl.warps:
+            if b < t_lo or a > t_hi:
+                continue
+            rr = QRectF(self.x(a), rv.top(), max(2.0, (b - a) * tl.pps), rv.height())
+            fill = QColor(theme.WARN)
+            fill.setAlpha(70)
+            p.fillRect(rr, fill)
+            p.fillRect(QRectF(rr.left(), rv.top(), rr.width(), 3), QColor(theme.WARN))
+            if rr.width() > 36:
+                p.setFont(theme.font(7.4, QFont.Weight.DemiBold))
+                p.setPen(QColor("#FFFFFF"))
+                p.drawText(rr.adjusted(3, 4, -2, 0), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                           f"{r:.2f}×".replace(".", ","))
         # tiếng gốc: đường sóng âm
         ra = self.track_rect("audio")
         if tl.wave is not None and len(tl.wave):
@@ -1088,6 +1102,7 @@ class TrackTimeline(QWidget):
         self.sel_layer = ""
         self.pending: list[dict] = []         # đoạn chờ cắt (rút khoảng lặng / bài hát)
         self.spans: list[dict] = []           # đoạn chờ tách phụ đề {a, b, state} (2.1.35)
+        self.warps: list = []                 # đoạn video chạy chậm [a, b, tốc độ] (giây gốc – 2.3.8)
         self.thumbs: QPixmap | None = None
         self.thumb_step = 0.0
         self.thumb_count = 0
@@ -1183,6 +1198,13 @@ class TrackTimeline(QWidget):
     def set_spans(self, items: list):
         self.spans = list(items or [])
         self.canvas.update()
+
+    def set_warp(self, spans: list):
+        """Đoạn video chạy chậm (giây gốc) – dải vàng trên dòng Video."""
+        new = [(float(x[0]), float(x[1]), float(x[2])) for x in spans or [] if len(x) >= 3]
+        if new != self.warps:
+            self.warps = new
+            self.canvas.update()
 
     def set_thumbs(self, pm: QPixmap | None, step: float, count: int):
         self.thumbs, self.thumb_step, self.thumb_count = pm, step, count

@@ -818,7 +818,7 @@ def diarize(p: Project, settings: dict | None = None, progress: Prog | None = No
 
 
 DUB_MARKS = ("dub_at", "fit", "fit_speed", "fit_shift", "fit_over", "fit_need", "fit_have", "fit_auto", "fit_auto_speed",
-             "fit_pause")
+             "fit_pause", "fit_talk")
 
 
 def forget_stale_voice(old_texts: set, segs: list, moved: bool) -> int:
@@ -4339,6 +4339,12 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     ver = next((v for v in dub_versions(p) if v.get("wav") == str(target)), None) if use_cur else None
     vsp = dub_speed(p.edit)   # video đổi tốc độ mà giọng lồng giữ tốc độ tự nhiên (2.1.24)
     wplan = warp_plan(p.edit)   # làm chậm chỉ khoảng nghỉ (2.1.27): xếp giọng theo giờ giãn
+    if wplan and wplan["mode"] == "need":     # 2.3.8: chỗ nghỉ theo giọng thật (câu nói dồn nối sát vẫn có chỗ giãn)
+        wplan["speech"] = speech_voice(p, segs)
+    elif wplan and wplan["mode"] == "dense":  # đoạn nói nhanh: các đoạn đã áp cố định
+        from . import timewarp as _tw
+
+        wplan["spans"] = _tw.dense_spans(p.edit)
     patch = {"wav": str(target), "placed": ver["placed"], "vspeed": float(ver.get("vspeed") or 1.0),
              "warp": ver.get("warp") or []} if ver and ver.get("placed") else None
     old_stat = target.stat() if patch else None
@@ -4481,7 +4487,7 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
 
 # kết quả lồng tiếng ghi vào từng câu (xếp lại / đọc lại) – được ghép vào câu tương ứng khi người dùng sửa song song
 _DUB_EXTRA = ("tts_file", "dub_at", "fit", "fit_speed", "fit_need", "fit_have", "fit_shift", "fit_over", "voice_used",
-              "take", "take_pending", "dub_pauses", "fit_auto", "fit_auto_speed", "fit_pause")
+              "take", "take_pending", "dub_pauses", "fit_auto", "fit_auto_speed", "fit_pause", "fit_talk")
 
 
 def _seg_sig(s) -> tuple:
@@ -4690,6 +4696,8 @@ def time_warp(p: Project, edit: dict | None = None, segs: list | None = None):
     if d.get("enabled") and d.get("wav") and Path(d["wav"]).exists() and \
             (d.get("warp_sig") or "") == timewarp.signature(ed):
         return timewarp.Warp.of(d.get("warp") or [])
+    if m == "dense":     # đoạn nói nhanh (2.3.8): đoạn giãn cố định – dùng được cả khi chưa xếp lại bản lồng
+        return timewarp.Warp.of(timewarp.dense_spans(ed))
     if m == "gaps":
         prm = timewarp.params(ed)
         dur = float(p.data.get("info", {}).get("duration") or 0)
@@ -4709,11 +4717,98 @@ def warp_note(p: Project, edit: dict | None = None, segs: list | None = None) ->
     d = ed.get("dub") or {}
     if m == "need" and not (d.get("enabled") and d.get("wav")):
         return "Cách này cần bản lồng tiếng – bấm Tạo bản lồng tiếng (tab Lồng tiếng) trước"
-    w = time_warp(p, ed, segs)
-    txt = timewarp.summary(w, m)
+    if m == "dense":
+        from . import dense
+
+        txt = dense.applied_note(ed.get("dense")) or ("Chưa áp đoạn nào – tab Lồng tiếng → mục 3 → khối 'Giãn video ở "
+                                                      "đoạn nói nhanh' → Tìm đoạn → Áp dụng")
+    else:
+        txt = timewarp.summary(time_warp(p, ed, segs), m)
+    if time_warp(p, ed, segs) and float(p.data.get("info", {}).get("duration") or 0) >= 600:
+        txt += " · có giãn nên xuất video 1 lượt (không dùng Xuất lại nhanh)"
     if (d.get("warp_sig") or "") != timewarp.signature(ed) and d.get("enabled") and d.get("wav"):
         txt += " · giọng lồng sẽ được xếp lại theo cách này"
     return txt[:1].upper() + txt[1:]
+
+
+def speech_voice(p: Project, segs: list | None = None) -> list:
+    """Các đoạn có lời theo GIỌNG THẬT (giọng đã tách – 2.3.8), chưa tách giọng -> theo giờ phụ đề như trước."""
+    from . import timewarp
+
+    segs = p.segments if segs is None else segs
+    env, hop = None, 0.01
+    if stems(p):
+        try:
+            env, hop, kind = voice_env(p)
+            if kind != "vocals":
+                env = None
+        except ff.Cancelled:
+            raise
+        except Exception:  # noqa: BLE001 – không đo được: theo giờ phụ đề
+            log_error("Đo lời theo giọng thật (giãn khoảng nghỉ)")
+            env = None
+    return timewarp.voice_speech(segs, env, hop)
+
+
+def _dense_layout(settings: dict):
+    from .tts import plan_layout
+
+    args = (settings.get("dub_overflow", "smart"), float(settings.get("tts_max_speedup", 1.3)),
+            float(settings.get("dub_lead_max", 1.0)), float(settings.get("dub_max_lag", 2.0)))
+    return lambda its, tot: plan_layout(its, tot, *args)
+
+
+def _dense_base(p: Project, segs: list, settings: dict):
+    """Mục + kết quả bộ xếp giọng chạy nháp trên GIỜ GỐC, tốc độ tự tính (không tính tốc độ đặt tay)."""
+    items = _layout_items(segs, {k: (None, False) for k in range(len(segs))})
+    if not items:
+        raise ValueError("Chưa có bản lồng tiếng – bấm 'Tạo bản lồng tiếng' (tab Lồng tiếng) trước: tool cần độ dài "
+                         "giọng lồng thật để biết câu nào phải đọc nhanh")
+    total = max(float(p.data.get("info", {}).get("duration", 0) or 0), max(x.end for x in segs) + 1)
+    layout = _dense_layout(settings)
+    return items, layout(items, total), total, layout
+
+
+def dense_find(p: Project, settings: dict | None = None, segs: list | None = None) -> dict:
+    """Tìm đoạn nói nhanh + lập giãn theo tuỳ chọn ở Cài đặt (dense_*) – chưa sửa gì (bấm Áp dụng mới lưu)."""
+    from . import dense
+
+    settings = settings or load_settings()
+    segs = p.segments if segs is None else segs
+    items, plan, total, layout = _dense_base(p, segs, settings)
+    o = dense.opts(settings)
+    speech = speech_voice(p, segs) if o["dense_how"] != "block" else []
+    res = dense.find(segs, items, plan, speech, total, o, layout)
+    res["voice"] = bool(stems(p))
+    res["_base"] = (items, plan, total, layout)
+    return res
+
+
+def dense_estimate(found: dict, chosen: list[int]) -> None:
+    """Ước tính lại tốc độ sau khi giãn khi bỏ / tích đoạn (chỉ các đoạn được chọn)."""
+    from . import dense
+
+    items, plan, total, layout = found["_base"]
+    dense.estimate(found["runs"], items, plan, total, found["opts"], layout, set(chosen))
+
+
+def dense_left_rows(p: Project, settings: dict | None = None, segs: list | None = None) -> list[int]:
+    """Câu trong các đoạn đã giãn mà vẫn phải đọc nhanh hơn ngưỡng (bộ xếp chạy nháp theo giờ giãn đang áp)."""
+    from . import dense, timewarp
+
+    settings = settings or load_settings()
+    segs = p.segments if segs is None else segs
+    d = p.edit.get("dense") or {}
+    w = timewarp.Warp.of(timewarp.dense_spans(p.edit))
+    if not w or not d.get("runs"):
+        return []
+    items, plan, total, layout = _dense_base(p, segs, settings)
+    after = layout([dict(x, want=w.fwd(float(x["want"]))) for x in items], w.fwd(total))
+    thr = float((d.get("opts") or {}).get("dense_thr") or dense.opts(settings)["dense_thr"])
+    spans = [(float(r["a"]) - 0.05, float(r["b"]) + 0.05) for r in d["runs"]]
+    return sorted(k for k, x in after.items()
+                  if any(a <= segs[k].start <= b for a, b in spans)
+                  and (float(x.get("speed") or 1) > thr + dense.EPS or x.get("fit") == "long"))
 
 
 def dub_speed(edit: dict) -> float:
@@ -5294,8 +5389,9 @@ def shorten_opts(settings: dict | None) -> dict:
 
 def _target_secs(s, mode: str, slot: float | None = None) -> float:
     """Giọng lồng phải đọc xong trong bao nhiêu giây: speech = thời gian nhân vật nói (không quá chỗ trống tới câu
-    sau), slot = chỗ trống từ lúc nhân vật nói tới câu sau (cách cũ)."""
-    t = max(0.3, s.end - s.start)
+    sau), slot = chỗ trống từ lúc nhân vật nói tới câu sau (cách cũ). Video đã giãn (2.3.8 – giãn cả đoạn nói nhanh):
+    thời gian nói theo giờ đã giãn (fit_talk, bộ xếp giọng ghi)."""
+    t = max(0.3, float(s.extra.get("fit_talk") or 0) or (s.end - s.start))
     have = float(s.extra.get("fit_have") or 0)
     if mode == "slot":
         return have if have > 0 else max(t, slot or t)
@@ -6222,10 +6318,75 @@ def export_subs(p: Project, fmt: str = "srt", which: str = "trans", settings: di
     segs = subs_follow_dub(p, p.segments, None, settings, which) if which != "source" else p.segments
     if which != "source":   # SRT gốc để dịch ở phần mềm khác rồi nạp lại -> không tách mảnh
         segs = subs_split(segs, settings, which)
+        if settings.get("srt_output_time", True):    # 2.3.8: khớp video đã xuất (đã cắt / đổi tốc độ / giãn / chèn)
+            segs = output_segments(p, segs)
     save_subtitles(segs, out, which, {**(settings.get("sub_style") or {}), "lang": tl}, info.get("width") or 1920,
                    info.get("height") or 1080)
     p.add_output(out, "subtitle")
     return out
+
+
+def timeline_changed(p: Project, edit: dict | None = None) -> bool:
+    """Video xuất có giờ khác video gốc (cắt đầu / cuối / giữa, đổi tốc độ, giãn khoảng nghỉ, chèn video)?"""
+    from . import timewarp
+    from .video import keep_ranges
+
+    ed = edit or p.edit
+    dur = float(p.data.get("info", {}).get("duration") or 0)
+    if time_warp(p, ed) or ed.get("inserts"):
+        return True
+    if timewarp.mode_of(ed) == "all" and abs(float(ed.get("speed") or 1.0) - 1) > 1e-3:
+        return True
+    keep = keep_ranges(dur, ed.get("trim"), ed.get("cuts")) if dur else []
+    return bool(keep) and not (len(keep) == 1 and keep[0][0] <= 0.01 and abs(keep[0][1] - dur) < 0.05)
+
+
+def output_segments(p: Project, segs: list, edit: dict | None = None) -> list:
+    """Bản sao các câu theo giờ VIDEO ĐÃ XUẤT (2.3.8 – SRT đăng riêng kèm video): giãn khoảng nghỉ -> cắt đầu / cuối
+    / giữa -> tốc độ cả phim -> chèn video (câu sau chỗ chèn dời theo, câu vắt qua chỗ chèn chia 2) – đúng thứ tự như
+    video.build_and_render."""
+    from . import ffmpeg as ff
+    from . import timewarp
+    from .subtitle import remap_after_cut, scale_time
+    from .video import keep_ranges, out_time
+
+    ed = edit or p.edit
+    dur = float(p.data.get("info", {}).get("duration") or 0) or (max((x.end for x in segs), default=0) + 1)
+    out = [Segment(s.start, s.end, s.text, s.trans, s.speaker, dict(s.extra)) for s in segs]
+    trim, cuts, inserts = dict(ed.get("trim") or {}), list(ed.get("cuts") or []), list(ed.get("inserts") or [])
+    tw = time_warp(p, ed)
+    if tw:
+        out = timewarp.map_segments(out, tw)
+        sp = timewarp.map_spec({"trim": trim, "cuts": cuts, "inserts": inserts}, tw)
+        trim, cuts, inserts = sp.get("trim") or {}, sp.get("cuts") or [], sp.get("inserts") or []
+        dur = float(tw.fwd(dur))
+    keep = keep_ranges(dur, trim, cuts)
+    if keep and not (len(keep) == 1 and keep[0][0] <= 0.01 and abs(keep[0][1] - dur) < 0.05):
+        out = remap_after_cut(out, keep)
+    speed = 1.0 if timewarp.mode_of(ed) != "all" else min(4.0, max(0.25, float(ed.get("speed") or 1.0)))
+    out = scale_time(out, speed)
+    ins = []
+    for it in inserts:
+        ip = Path(it.get("path") or "")
+        try:
+            d = ff.probe(ip).duration if ip.exists() else 0
+        except Exception:  # noqa: BLE001
+            d = 0
+        if d > 0.05:
+            ins.append((out_time(float(it.get("at") or 0), keep or [(0.0, dur)], speed), d))
+    for at, d in sorted(ins, reverse=True):     # chèn sau cùng trước: mốc các chỗ chèn trước không bị dời
+        res = []
+        for s in out:
+            if s.start >= at - 1e-3:
+                s.start, s.end = s.start + d, s.end + d
+                res.append(s)
+            elif s.end > at + 0.15:     # câu vắt qua chỗ chèn: như video xuất (phần sau hiện lại sau đoạn chèn)
+                res.append(Segment(s.start, at, s.text, s.trans, s.speaker, dict(s.extra)))
+                res.append(Segment(at + d, s.end + d, s.text, s.trans, s.speaker, dict(s.extra)))
+            else:
+                res.append(s)
+        out = res
+    return [s for s in out if s.end - s.start > 0.05]
 
 
 def ocr_box(p: Project) -> dict | None:

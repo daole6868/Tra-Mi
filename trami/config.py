@@ -149,6 +149,10 @@ DEFAULT_SETTINGS: dict = {
     "tts_voice": "vi-VN-HoaiMyNeural",
     "tts_rate": "+0%",
     "tts_max_speedup": 1.3,           # tăng tốc giọng lồng tối đa (cao hơn nghe vội, mất tự nhiên)
+    "srt_output_time": True,          # 2.3.8: SRT đã dịch / song ngữ theo giờ VIDEO ĐÃ XUẤT (cắt / tốc độ / giãn / chèn)
+    "dense_min": 5, "dense_thr": 1.1, "dense_mix": True, "dense_how": "gaps",    # giãn video ở đoạn nói nhanh (2.3.8)
+    "dense_gap": "auto", "dense_gap_add": 0.4, "dense_gap_floor": 0.4, "dense_block": "auto",
+    "dense_block_rate": 0.85, "dense_block_floor": 0.75, "dense_cap": 6.0,
     "dub_speed_mode": "exact",        # cách đổi tốc độ giọng câu đã tích: exact (đúng tốc độ) / rel (%) / min (tối thiểu)
     "dub_speed_pct": -10,             # % nhanh (+) / chậm (−) so với tốc độ đang đọc khi cách đổi = rel
     "dub_overflow": "smart",          # câu đọc dài hơn chỗ trống: smart / push / overlap / early / cut (tts.OVERFLOW_MODES)

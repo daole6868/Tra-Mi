@@ -1733,12 +1733,13 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     vspeed ≠ 1 (2.1.24, video làm chậm / nhanh mà giọng lồng giữ tốc độ tự nhiên): xếp giọng theo giờ video gốc với độ
     dài giọng × vspeed (video chậm 0,85 -> mỗi câu có thêm chỗ), bản lồng ghi theo giờ video ĐÃ đổi tốc độ (giây gốc /
     vspeed) – xuất video / trình phát không co giãn lại giọng lồng. dub_at / layout vẫn theo giây video gốc.
-    warp (2.1.27, làm chậm CHỈ KHOẢNG NGHỈ – trami/timewarp.py): {"mode": "gaps" | "need", + timewarp.params}. Lập bản
+    warp (2.1.27, làm chậm CHỈ KHOẢNG NGHỈ – trami/timewarp.py): {"mode": "gaps" | "need" | "dense", + timewarp.params,
+    "speech" (need: lời theo giọng thật), "spans" (dense: đoạn giãn cố định)}. Lập bản
     đồ giờ (gaps: theo câu; need: theo chỗ giọng lồng tràn – cần độ dài giọng), xếp giọng theo giờ giãn (giọng ×1), bản
     lồng ghi theo giờ giãn; dub_at / layout vẫn giây gốc (đổi ngược). stats["warp"] = các đoạn giãn [[a, b, tốc độ]]."""
     settings = settings or {}
     vspeed = min(4.0, max(0.25, float(vspeed or 1.0)))
-    if warp and warp.get("mode") in ("gaps", "need"):
+    if warp and warp.get("mode") in ("gaps", "need", "dense"):
         vspeed = 1.0
     stats = stats if stats is not None else {}
     lang = langs.norm(lang)
@@ -2098,7 +2099,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         s = segs[k]
         p = s.extra.pop("_tts", None)
         for key in ("fit", "fit_shift", "fit_over", "fit_need", "fit_have", "dub_at", "dub_pauses", "fit_auto",
-                    "fit_auto_speed", "fit_pause"):
+                    "fit_auto_speed", "fit_pause", "fit_talk"):
             s.extra.pop(key, None)
         if not p or not Path(p).exists():
             continue
@@ -2129,14 +2130,17 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     durs = {it["k"]: it["dur"] for it in items}
     user_min = {it["k"]: it["user"] for it in items if it["user"]}
     tw = None        # bản đồ giờ giãn khoảng nghỉ (2.1.27): mọi mốc xếp giọng theo giờ giãn, dub_at đổi ngược về giờ gốc
-    if warp and warp.get("mode") in ("gaps", "need"):
+    if warp and warp.get("mode") in ("gaps", "need", "dense"):
         from . import timewarp
 
         wp = timewarp.params(warp)
         if warp["mode"] == "gaps":
             spans = timewarp.plan_gaps(segs, total, wp["gap_rate"], wp["gap_min"])
+        elif warp["mode"] == "dense":      # đoạn nói nhanh (2.3.8): các đoạn đã áp cố định khi bấm Áp dụng
+            spans = warp.get("spans") or []
         else:
-            spans = timewarp.plan_need(items, segs, total, wp["need_rate"], wp["need_max"])
+            spans = timewarp.plan_need(items, segs, total, wp["need_rate"], wp["need_max"],
+                                       speech=warp.get("speech"))
         tw = timewarp.Warp.of(spans)
         if tw:
             for it in items:
@@ -2236,6 +2240,10 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             s.extra["fit_speed"] = round(x["speed"], 2)
             s.extra["fit_need"] = round(durs[k], 2)     # giọng ở ×1 cần bao lâu / chỗ trống của chính câu -> AI rút gọn
             s.extra["fit_have"] = round(x["slot"], 2)
+            if tw:      # 2.3.8: thời gian nhân vật nói theo giờ đã giãn (giãn cả đoạn -> nói chậm hơn) cho AI rút gọn
+                talk = tw.fwd(float(s.end)) - tw.fwd(float(s.start))
+                if talk - (s.end - s.start) > 0.02:
+                    s.extra["fit_talk"] = round(talk, 2)
             if k in auto:
                 s.extra["fit_auto"] = auto[k]["fit"]
                 s.extra["fit_auto_speed"] = round(auto[k]["speed"], 2)

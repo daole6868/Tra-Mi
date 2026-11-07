@@ -14553,3 +14553,244 @@ def test_skill_names_robust_237(monkeypatch):
     b = button("Thử", on_click=handler)
     b.click()
     assert got == ["mặc định"]
+
+
+def _dense_segs(n=8, talk=1.0, gap=0.4, need=1.8, t0=1.0):
+    out, t = [], t0
+    for i in range(n):
+        out.append(Segment(t, t + talk, "你好", f"câu {i}", "S1",
+                           {"dub_at": [t, t + talk], "fit_need": need, "fit": "fast", "tts_file": "x"}))
+        t += talk + gap
+    return out
+
+
+def test_dense_find_runs_238():
+    """Tìm đoạn nói nhanh: ≥ N câu liền nhau đọc nhanh hơn ngưỡng (cho xen 1 câu bình thường), đoạn cách nhau > 1,5 s
+    là 2 đoạn; giãn nghỉ (Vừa đủ) chỉ giãn chỗ không lời, giãn cả đoạn (Vừa đủ) -> câu khó nhất ≈ ngưỡng; Áp dụng ->
+    signature / time_warp; đo trên giờ gốc nên bấm Tìm lại sau khi giãn vẫn ra đúng đoạn đó."""
+    from trami import dense, pipeline, timewarp
+    from trami.project import Project
+
+    p = Project.create("dense")
+    try:
+        segs = _dense_segs(8)
+        segs[3].extra["fit_need"] = 0.6                      # 1 câu bình thường xen giữa
+        p.data["info"] = {"duration": 40.0}
+        p.segments = segs
+        p.save()
+        f = pipeline.dense_find(p, {"dense_how": "gaps"})
+        assert len(f["runs"]) == 1
+        r = f["runs"][0]
+        assert r["n"] >= 7 and 3 in r["rows"] and 3 not in r["fast"]
+        assert r["before"][1] > 1.1 and r["after"][1] < r["before"][1] and r["added"] > 0.3
+        speech = timewarp.speech_spans(segs)
+        for a, b, rr in r["spans"]:                          # chỉ giãn chỗ không lời (giờ phụ đề ± lề)
+            assert rr < 1 and not any(a < y - 1e-6 and b > x + 1e-6 for x, y in speech)
+        assert not pipeline.dense_find(p, {"dense_how": "gaps", "dense_mix": False})["runs"] or \
+            all(3 not in x["rows"] for x in pipeline.dense_find(p, {"dense_how": "gaps", "dense_mix": False})["runs"])
+        assert pipeline.dense_find(p, {"dense_min": 9})["runs"] == []
+        fb = pipeline.dense_find(p, {"dense_how": "block"})
+        rb = fb["runs"][0]
+        assert 0.75 <= rb["rate"] < 1 and rb["after"][1] <= 1.1 + 0.05
+        d = dense.applied(fb, [0])
+        ed = p.edit
+        ed.update({"speed_mode": "dense", "dense": d})
+        assert timewarp.signature(ed).startswith("dense:") and timewarp.mode_of(ed) == "dense"
+        w = pipeline.time_warp(p, ed)
+        assert w and abs(w.added() - rb["added"]) < 1e-3
+        assert "Đang giãn 1 đoạn" in pipeline.warp_note(p, ed)
+        p.data["edit"] = ed
+        p.save()
+        again = pipeline.dense_find(p, {"dense_how": "block"})     # vẫn đo trên giờ gốc -> cùng đoạn
+        assert [x["rows"] for x in again["runs"]] == [x["rows"] for x in fb["runs"]]
+        two = _dense_segs(6) + _dense_segs(6, t0=20.0)
+        p.segments = two
+        assert len(pipeline.dense_find(p, {}, two)["runs"]) == 2
+        p.segments = [Segment(0, 1, "a", "b")]
+        with pytest.raises(ValueError):
+            pipeline.dense_find(p, {}, p.segments)
+        assert dense.opts({"dense_min": 99, "dense_thr": 0.5, "dense_how": "x"}) == dict(
+            dense.DEFAULTS, dense_min=30, dense_thr=1.0)
+    finally:
+        p.delete()
+
+
+def test_voice_speech_need_238():
+    """Lời theo giọng thật: câu thu về phần có tiếng (phụ đề hiện nối sát nhau mà nhân vật đã ngừng) -> có chỗ để giãn
+    ('theo câu dài' trước đây không giãn được vì giờ phụ đề không có khoảng nghỉ); tiếng nói ngoài mọi câu vẫn là lời."""
+    from trami import timewarp
+
+    hop = 0.01
+    env = np.full(1000, -70.0, np.float32)
+    for a, b in ((1.0, 1.6), (2.0, 2.6), (4.0, 4.5), (5.0, 5.6)):    # tiếng nói; 4,0–4,5 không câu nào phủ
+        env[int(a / hop):int(b / hop)] = -20.0
+    segs = [Segment(1.0, 2.0, "a", "x"), Segment(2.0, 3.0, "b", "y"), Segment(5.0, 6.0, "c", "z")]
+    sp = timewarp.voice_speech(segs, env, hop)
+    assert any(abs(a - 1.0) < 0.05 and abs(b - 1.6) < 0.05 for a, b in sp)
+    assert any(abs(a - 4.0) < 0.05 and abs(b - 4.5) < 0.05 for a, b in sp)
+    free = timewarp.free_between(sp, 1.0, 2.6)
+    assert free and all(1.6 < a < b < 2.0 for a, b in free)
+    assert timewarp.voice_speech(segs, None) == timewarp.speech_spans(segs)
+    assert timewarp.free_between(timewarp.speech_spans(segs), 1.0, 3.0) == []
+
+
+def test_dense_dub_relayout_238(monkeypatch):
+    """Lồng tiếng thật (Edge giả) -> tìm đoạn nói nhanh -> áp giãn -> xếp lại: không đọc lại câu nào, câu trong đoạn
+    đọc chậm lại, dub_at vẫn giây gốc, bản lồng ghi warp_sig; giãn cả đoạn ghi fit_talk (AI rút gọn theo giờ giãn)."""
+    from trami import dense, pipeline, timewarp, tts
+    from trami.project import Project
+
+    spoken = []
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, path, voice in items:
+            spoken.append(i)
+            _fake_audio(path, 1.7, 400 + 50 * i)
+        return []
+
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    p = Project.create("densedub")
+    p.data["info"] = {"duration": 14}
+    p.segments = [Segment(1.0 + 1.3 * i, 2.0 + 1.3 * i, "你好", f"Câu số {i}", "S1") for i in range(7)]
+    p.save()
+    st = {"translate_engine": "google", "tts_voice": "vi-VN-HoaiMyNeural", "dub_overflow": "smart"}
+    try:
+        pipeline.dub(p, None, settings=st, engine="edge")
+        before = [s.extra.get("fit_speed") or 1.0 for s in p.segments]
+        assert max(before) > 1.15
+        f = pipeline.dense_find(p, dict(st, dense_how="block", dense_min=5))
+        assert len(f["runs"]) == 1
+        ed = p.edit
+        ed.update({"speed_mode": "dense", "dense": dense.applied(f, [0])})
+        p.data["edit"] = ed
+        p.save()
+        assert pipeline.dub_speed_stale(p)
+        spoken.clear()
+        pipeline.relayout(p, st)
+        assert spoken == []
+        after = [s.extra.get("fit_speed") or 1.0 for s in p.segments]
+        rows = f["runs"][0]["rows"]
+        assert sum(after[k] for k in rows) < sum(before[k] for k in rows) - 0.1
+        w = timewarp.Warp(p.edit["dense"]["spans"])
+        assert p.edit["dub"]["warp_sig"] == timewarp.signature(p.edit) and not pipeline.dub_speed_stale(p)
+        k = rows[1]
+        s = p.segments[k]
+        assert abs(s.extra["dub_at"][0] - s.start) < 0.6                     # giây gốc
+        assert s.extra.get("fit_talk") and abs(s.extra["fit_talk"] - (w.fwd(s.end) - w.fwd(s.start))) < 0.02
+        assert abs(pipeline._target_secs(s, "speech") - min(s.extra["fit_talk"], s.extra["fit_have"])) < 1e-6
+        left = pipeline.dense_left_rows(p, dict(st, dense_thr=1.0))
+        assert set(left) <= set(rows)
+    finally:
+        p.delete()
+
+
+def test_output_segments_srt_238(tmp_path):
+    """SRT đã dịch theo giờ VIDEO ĐÃ XUẤT: cắt đoạn / đổi tốc độ / giãn / chèn video -> giờ câu khớp video; SRT gốc +
+    Cài đặt tắt -> giờ gốc."""
+    from trami import dense, pipeline
+    from trami.project import Project
+    from trami.subtitle import load_subtitles
+
+    p = Project.create("srtout")
+    try:
+        p.data["info"] = {"duration": 20.0}
+        p.segments = [Segment(1.0, 2.0, "一", "Một"), Segment(5.0, 6.0, "二", "Hai"), Segment(10.0, 11.0, "三", "Ba")]
+        ed = p.edit
+        ed["cuts"] = [[3.0, 4.0]]
+        p.data["edit"] = ed
+        p.save()
+        assert pipeline.timeline_changed(p, p.edit)
+        o = pipeline.output_segments(p, p.segments)
+        assert [round(x.start, 2) for x in o] == [1.0, 4.0, 9.0]
+        ed["speed"] = 2.0
+        o = pipeline.output_segments(p, p.segments, ed)
+        assert [round(x.start, 2) for x in o] == [0.5, 2.0, 4.5]
+        ed.update({"speed": 1.0, "speed_mode": "dense",
+                   "dense": dense.applied({"runs": [{"a": 2, "b": 5, "n": 2, "fast": [0], "added": 1.0, "rate": 0.5,
+                                                     "before": (1.2, 1.2), "after": (1.0, 1.0), "left": [],
+                                                     "spans": [[2.0, 3.0, 0.5]]}], "opts": {}}, [0])})
+        o = pipeline.output_segments(p, p.segments, ed)
+        assert [round(x.start, 2) for x in o] == [1.0, 5.0, 10.0]          # +1 s giãn − 1 s cắt
+        clip = tmp_path / "chen.mp3"
+        _fake_audio(clip, 2.0)
+        ed.update({"speed_mode": "all", "dense": None, "cuts": [],
+                   "inserts": [{"at": 7.0, "path": str(clip), "dur": 2.0, "name": "x"}]})
+        o = pipeline.output_segments(p, p.segments, ed)
+        assert [round(x.start, 2) for x in o][:2] == [1.0, 5.0] and abs(o[2].start - 12.0) < 0.1
+        ed.update({"inserts": [], "cuts": [[3.0, 4.0]]})
+        p.data["edit"] = ed
+        p.save()
+        st = {"srt_output_time": True}
+        segs = load_subtitles(pipeline.export_subs(p, "srt", "trans", st))
+        assert [round(x.start, 2) for x in segs] == [1.0, 4.0, 9.0]
+        segs = load_subtitles(pipeline.export_subs(p, "srt", "source", st))
+        assert [round(x.start, 2) for x in segs] == [1.0, 5.0, 10.0]
+        segs = load_subtitles(pipeline.export_subs(p, "srt", "trans", {"srt_output_time": False}))
+        assert [round(x.start, 2) for x in segs] == [1.0, 5.0, 10.0]
+    finally:
+        p.delete()
+
+
+def test_dense_gui_238(monkeypatch):
+    """Tab Lồng tiếng mục 3 khối 'Giãn video ở đoạn nói nhanh': Tìm đoạn -> bảng + dòng kết quả, bỏ tích -> ước tính
+    lại, Áp dụng -> tab Chỉnh sửa 'Đoạn nói nhanh' + edit['dense'], Ctrl+Z / Ctrl+Y, Bỏ giãn, đổi ô -> lưu Cài đặt."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from trami import pipeline
+    from trami.config import load_settings, save_settings
+    from trami.gui import project_page as PP, theme
+    from trami.gui.main import MainWindow
+    from trami.gui.widgets import set_combo
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    p = Project.create("densegui")
+    p.data["info"] = {"duration": 30}
+    p.segments = _dense_segs(7) + _dense_segs(6, t0=16.0)
+    p.save()
+    monkeypatch.setattr(pipeline, "has_dub", lambda pr: True)
+    monkeypatch.setattr(PP, "run_async", lambda fn, done=None, err=None: done(fn()))
+    win = MainWindow()
+    win.show()
+    win.open_project(p.id)
+    pp = win.project_page
+    toasts = []
+    monkeypatch.setattr(win, "toast", lambda m, *a, **k: toasts.append(m))
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(pp, "_relayout", lambda *a, **k: None)
+    try:
+        app.processEvents()
+        set_combo(pp.d_dn_how, "block")
+        assert load_settings()["dense_how"] == "block"
+        assert not pp.d_dn_block_row.isHidden() or pp._dense_g._form_of(pp.d_dn_block_row) is not None
+        pp._dense_find()
+        assert pp.d_dn_table.rowCount() == 2 and "Tìm thấy 2 đoạn" in pp.d_dn_note.text()
+        assert "→" in pp.d_dn_table.item(0, 4).text()
+        pp.d_dn_table.item(1, 0).setCheckState(Qt.CheckState.Unchecked)
+        assert pp._dense_chosen() == [0] and "đã tích 1/2 đoạn" in pp.d_dn_note.text()
+        pp._dense_apply()
+        p.reload()
+        assert p.edit["speed_mode"] == "dense" and len(p.edit["dense"]["runs"]) == 1
+        assert pp.e_smode.currentData() == "dense" and "Đang giãn 1 đoạn" in pp.d_dn_state.text()
+        assert pp.tracks.warps
+        pp.undo()
+        p.reload()
+        assert p.edit["speed_mode"] == "all" and pp.e_smode.currentData() == "all"
+        pp.redo()
+        p.reload()
+        assert p.edit["speed_mode"] == "dense" and p.edit["dense"]["spans"]
+        pp._dense_clear()
+        p.reload()
+        assert p.edit["speed_mode"] == "all" and not p.edit.get("dense")
+        set_combo(pp.e_smode, "dense")
+        app.processEvents()
+        assert pp.frame_form.isRowVisible(pp.e_dense_go)
+        pp.d_dn_min.setValue(4)
+        assert load_settings()["dense_min"] == 4 and pp.d_dn_table.rowCount() == 0
+    finally:
+        save_settings({k: v for k, v in __import__("trami.dense", fromlist=["x"]).DEFAULTS.items()})
+        win.timer.stop()
+        p.delete()

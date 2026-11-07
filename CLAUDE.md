@@ -423,6 +423,39 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (`<bản lồng>.env10s_<mã>.npy` theo giờ gốc, đỉnh mỗi ô); karaoke `kw` đổi ngược `inv`. GUI tab Chỉnh sửa: "Làm chậm"
   `e_smode` (`timewarp.MODES`) + `e_speed` / `e_dubnat` (cả phim) / `e_grate` + `e_gmin` (đều) / `e_nrate` + `e_nmax`
   (theo câu dài) / `e_wnote` (`_smode_rows`, `_update_warp_note`); tab Xuất "Lấy khung đang xem" (`_out_time`) theo warp.
+- Giãn video ở ĐOẠN NÓI NHANH (2.3.8, `trami/dense.py` hàm thuần + `pipeline.dense_*`): cách làm chậm thứ 4
+  `speed_mode` "dense" (`timewarp.MODES` / `WARP_MODES`), đoạn giãn CỐ ĐỊNH ở edit["dense"] {spans [a, b, r] giây gốc,
+  t, opts, runs tóm tắt} (`timewarp.dense_spans`, `signature` "dense:<mã spans>", `time_warp` dùng thẳng spans – không
+  cần bản lồng; `tts.synthesize_dub` warp mode dense lấy `warp["spans"]`). Tìm: `pipeline._dense_base` = bộ xếp giọng chạy
+  nháp trên GIỜ GỐC, tốc độ tự tính (`_layout_items` speeds None, `_dense_layout` theo Cài đặt dub_overflow / max_speedup
+  / lead / lag; chưa có fit_need -> ValueError) -> `dense.find_runs`: câu đọc nhanh = tốc độ bộ xếp > `dense_thr` (1,1) hoặc
+  vẫn tràn VÀ tự nó dài hơn chỗ (`dur / slot` > ngưỡng – câu ngắn bị kéo theo tốc độ chung cụm câu dài không tính); ≥
+  `dense_min` 5 câu liền nhau, cho xen 1 câu thường (`dense_mix`), đứt khi lặng > `BREAK_GAP` 1,5 s / có câu không lồng xen
+  giữa, bỏ câu thường ở đuôi -> `plan_run` theo `dense_how`: "gaps" (chỗ thôi nói THEO GIỌNG THẬT
+  `timewarp.voice_speech` (`pipeline.speech_voice`: giọng đã tách "vocals", không thì giờ phụ đề) tới câu sau chạy
+  chậm, mức `dense_gap` auto (Vừa đủ: câu nhanh thêm vừa đủ để ≤ ngưỡng, ≤ `AUTO_GAP_MAX` 1,5 s) / 0.2 / 0.4 / 0.7 /
+  custom `dense_gap_add`; chậm nhất `dense_gap_floor` 0,4×) | "block" (cả đoạn 1 tốc độ: auto = thr / tốc độ cần cao nhất
+  dur / (chỗ − GAP), 0.9 / 0.85 / 0.8 / custom `dense_block_rate`, ≥ `dense_block_floor` 0,75×) | "both"; mỗi đoạn thêm ≤
+  `dense_cap` 6 s -> `estimate` (bộ xếp nháp trên giờ giãn, tốc độ trước / sau, câu vẫn nhanh `left`), `applied`, `note`,
+  `applied_note`. Đo luôn trên giờ gốc -> Tìm lại sau khi giãn ra đúng đoạn cũ. `pipeline.dense_find` / `dense_estimate`
+  (bỏ / tích đoạn) / `dense_left_rows` (câu trong đoạn đã giãn vẫn nhanh – bộ xếp nháp theo giờ giãn đang áp).
+  Cách "theo câu dài" (2.1.27) cũng đo lời theo giọng thật (`plan_need(speech=)`, `pipeline.dub` gắn `wplan["speech"]`;
+  signature không đổi). Giãn cả đoạn -> `tts` ghi `extra["fit_talk"]` = thời gian nói theo giờ giãn -> `_target_secs` (AI
+  rút gọn). GUI tab Lồng tiếng mục 3 khối `_dense_group` (Group "Giãn video ở đoạn nói nhanh": `d_dn_min` / `d_dn_thr` /
+  `d_dn_mix` / `d_dn_how` / `d_dn_gap` + `d_dn_gap_add` / `d_dn_gap_floor` / `d_dn_block` + `d_dn_block_rate` /
+  `d_dn_block_floor` / `d_dn_cap` = Cài đặt dense_* (`_dense_opts_changed` lưu + bỏ kết quả cũ, `_dense_rows` ẩn / hiện);
+  "Tìm đoạn" `_dense_find` (run_async) -> bảng `d_dn_table` ☑ / # / Từ – Đến / Câu / Tốc độ đọc trước → sau (⚠ còn câu
+  nhanh) / Thêm / Xem (`_dense_play`), bỏ tích -> `_dense_ticked` ước tính lại, `d_dn_note`; "Áp dụng" `_dense_apply` (cách
+  làm chậm khác đang dùng -> hỏi) -> `_dense_set` (self._dense + e_smode "dense" + `_save_edit_now` -> xếp lại giọng lồng,
+  không đọc lại + `_undo_mark`), "Bỏ giãn" `_dense_clear`, "Tích câu vẫn còn nhanh" `_dense_pick`, `d_dn_state`). Tab Chỉnh
+  sửa: Làm chậm "Đoạn nói nhanh" -> dòng ghi chú + nút "Đặt đoạn nói nhanh…" `e_dense_go` -> `_goto_dense`. Hoàn tác:
+  `_snap` "e"["warp"] = `_warp_state` (cách + dense + tốc độ / mức giãn – đọc từ ô), đổi cách / thanh ở tab Chỉnh sửa
+  `_warp_undo_mark` (join), `_undo_step` khôi phục `_warp_restore`. Timeline: `TrackTimeline.set_warp` dải vàng + "0,85×"
+  trên dòng Video (`_update_timeline`). `warp_note` + " · có giãn nên xuất video 1 lượt" (phim ≥ 10 phút).
+  SRT theo video đã xuất: `pipeline.output_segments(p, segs, edit)` (giãn -> cắt đầu / cuối / giữa -> tốc độ cả phim ->
+  chèn video: câu sau dời, câu vắt qua chia 2 – như `video.build_and_render`), `timeline_changed`; `export_subs` bản dịch /
+  song ngữ theo giờ xuất khi Cài đặt `srt_output_time` (mặc định bật, SRT gốc luôn giờ gốc), tab Phụ đề → Công cụ → Nhập –
+  xuất SRT dòng "Giờ SRT" `s_srt_out`, `_export_sub`.
 - Tách phụ đề HIỂN THỊ (2.1.28, `trami/subsplit.py`) – khác "Tách câu dài" (`align.split_clauses`, tách hẳn câu + đọc lại
   giọng): câu / bản dịch / giọng lồng / karaoke giữ nguyên, chỉ chữ HIỆN thành nhiều mảnh nối nhau, mỗi mảnh hiện đúng lúc
   giọng đọc tới từ đầu mảnh (`karaoke.word_times` theo kv / kw; mảnh đầu từ đầu câu, mảnh cuối tới cuối câu). Cách
@@ -896,7 +929,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (322 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (327 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -2844,7 +2877,22 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   name) -> danh sách kỹ năng + hộp "Thiết lập…" (Trang chủ) lỗi TypeError; "Nghe câu" tab Lồng tiếng luôn phát câu số 1;
   nút "Gemini xem video & soát" hiện "_soát" (thiếu &&). Sửa: `button(on_click=)` gọi không tham số, `skills.all_skills`
   sửa tên hỏng đã lưu, `_play_line` bỏ qua bool.
+- 2.3.8: "đoạn nhiều câu nói nhanh: chọn N câu dài liên tiếp (5), giãn nghỉ giữa các câu (tuỳ mức – câu vẫn đọc tốc độ
+  tool tự tính), giãn cả đoạn (tuỳ mức – đổi luôn tốc độ đọc lồng tiếng và video), nút Áp dụng; tool tìm đoạn ≥ 5 câu đọc
+  nhanh hơn ×1,1 rồi áp" -> lên kế hoạch trước, người dùng chọn: giãn nghỉ không đặt tay tốc độ đọc (bộ xếp tự tính lại),
+  giãn cả đoạn mỗi câu tự tính tốc độ, cho xen 1 câu bình thường, làm luôn "SRT theo video đã xuất". Cách "theo câu dài"
+  có sẵn (2.1.27) gần như không giãn được ở đoạn nói dồn vì đo khoảng nghỉ theo giờ phụ đề (OCR / nói dồn: phụ đề nối sát
+  nhau) -> đo theo giọng đã tách. Kèm: AI rút gọn theo thời gian nói đã giãn, dải vàng đoạn giãn trên timeline, Ctrl+Z cho
+  mọi thay đổi Làm chậm, SRT đã dịch theo giờ video đã xuất (cắt / tốc độ / giãn / chèn). Xem Cấu trúc "Giãn video ở đoạn
+  nói nhanh". Lỗi tìm ra khi thử: "Vừa đủ" cả đoạn tính theo tốc độ bộ xếp đang đọc (đã bị chặn ở ×1,15 vì bộ xếp đọc sớm /
+  lùi câu sau) -> không chậm đủ (×1,15 -> ×1,15); giờ theo độ dài giọng / chỗ thật (×1,15 -> ×1,09); câu ngắn trong cụm câu
+  dài bị bộ xếp "Tự động" kéo cùng tốc độ chung bị tính là câu nhanh -> chỉ tính câu tự nó dài hơn chỗ. Thử: Edge giả 7
+  câu 1,7 s / chỗ 1,3 s -> giãn cả đoạn, xếp lại không đọc lại câu nào, tốc độ đọc giảm, dub_at vẫn giây gốc; SRT với cắt /
+  ×2 / giãn / chèn video đúng giờ; giao diện offscreen (Tìm 2 đoạn, bỏ tích 1, Áp dụng, Ctrl+Z / Ctrl+Y, Bỏ giãn).
 ## Vấn đề đang mở
+- 2.3.8: chờ người dùng chép file, mở phim đã lồng có đoạn nói dồn: tab Lồng tiếng → mục 3 → khối "Giãn video ở đoạn nói
+  nhanh" → Tìm đoạn (nên tách giọng trước để đo chỗ nghỉ theo giọng thật) → Xem từng đoạn → Áp dụng: hình chậm có lộ không
+  (nghỉ chậm nhất 0,4× / cả đoạn ≥ 0,75×), giọng có hết đọc vội không; câu ⚠ còn nhanh -> Tích câu vẫn còn nhanh → AI rút gọn.
 - 2.3.7: chờ người dùng chép 11 file, mở từng tab xem bố cục mới (tab Lồng tiếng mục 2: khối Giọng đọc / Các câu lồng
   tiếng / Câu đã tích / Tốc độ giọng / AI rút gọn; tab Phụ đề → Công cụ: dòng nhãn – nút); nút nào khó tìm / thiếu -> báo tên.
 - 2.3.6: chờ người dùng chép 9 file, tab Lồng tiếng mục 2: 'Tích câu còn dài' (hoặc tích câu) → AI rút gọn – xem thông báo (mỗi câu: tiếng trước → sau, giọng trước → sau / nhân vật nói, ✓ / đọc nhanh / còn dài), câu AI rút có mất ý không (nhiều -> giảm 'rút tối đa' hoặc chọn 'Chỉ tích sẵn'), đọc nhanh ×1,2 có nghe vội không (hạ 'nhanh ≤').
