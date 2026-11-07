@@ -1,0 +1,630 @@
+"""Bám mép câu theo giọng đã tách (2.0.96).
+
+Mốc câu từ bộ căn thời gian (Qwen3-ForcedAligner / fa-zh / ước lượng theo độ to) lệch ±0,1–0,2 s so với lúc nhân vật
+thật sự bắt đầu / thôi nói (đo trên ảnh timeline người dùng gửi: sớm 0,11–0,15 s, trễ 0,13 s). Bước này nhìn thẳng độ
+to giọng đã tách (mỗi 10 ms): quanh đầu câu tìm chỗ "lặng -> có tiếng" gần nhất, quanh cuối câu chỗ "có tiếng -> lặng"
+gần nhất, ngưỡng lặng tính theo độ to của chính câu đó (tiếng thở / nhạc rò không tính là nói). Không lấn câu bên cạnh,
+không vượt mốc chữ đầu / chữ cuối đã đo; câu nói liền không có chỗ ngắt giữ nguyên.
+
+extra["snap"] = [đầu bám được, cuối bám được]; câu không có mốc từng chữ thật (extra["ct"]) mà không bám được cả 2 đầu
+= mốc ước lượng (`estimated`, tô khác trên timeline).
+"""
+from __future__ import annotations
+
+import numpy as np
+
+from .align import CJK, _runs
+
+HOP = 0.01          # độ to mỗi 10 ms
+WIN = 0.35          # tìm chỗ bắt đầu / thôi nói trong ±0,35 s quanh mốc cũ
+WIN_EST = 0.8       # câu chưa có mốc từng chữ thật (mốc ước lượng / phụ đề OCR): tìm rộng hơn
+DROP_DB = 22.0      # thấp hơn độ to của chính câu 22 dB = lặng
+FLOOR_DB = 6.0      # ... và phải to hơn nền ồn của cả phim ít nhất 6 dB mới là tiếng
+MIN_CONTRAST = 10.0  # câu to hơn nền ồn chưa tới 10 dB (nhạc rò, giọng quá nhỏ): không đoán được -> giữ nguyên
+MIN_SIL = 0.08      # lặng ≥ 80 ms mới là chỗ ngắt (khe giữa 2 âm tiết ngắn hơn)
+MIN_VOICE = 0.05    # tiếng ≥ 50 ms (không phải tiếng tách / tiếng click)
+GAP = 0.02          # cách câu bên cạnh tối thiểu
+MOVED = 0.02        # dời > 20 ms mới tính là đã sửa
+CT_SLACK = 0.3      # bộ căn có thể lệch: cho phép đầu câu muộn hơn chữ đầu đã đo / cuối câu sớm hơn chữ cuối tới 0,3 s
+
+
+def ct_ok(s) -> bool:
+    """Câu có mốc từng chữ thật còn khớp lời (đủ số chữ Hán, nằm quanh câu – không cũ sau khi kéo / sửa)."""
+    ct = s.extra.get("ct")
+    if not ct or len(ct) != len(CJK.findall(s.text or "")):
+        return False
+    try:
+        return float(ct[0][0]) >= s.start - 1.0 and float(ct[-1][1]) <= s.end + 1.0
+    except (TypeError, ValueError, IndexError):
+        return False
+
+
+def estimated(s) -> bool:
+    """Mốc câu chỉ là ước lượng: không có mốc từng chữ thật và chưa bám được cả 2 đầu theo giọng."""
+    sn = s.extra.get("snap") or [False, False]
+    return not ct_ok(s) and not (sn[0] and sn[1])
+
+
+def _mask(env: np.ndarray, thr: float, hop: float) -> np.ndarray:
+    """Khung có tiếng: to hơn ngưỡng, lấp khe ≤ 30 ms giữa tiếng, bỏ tiếng < MIN_VOICE."""
+    m = env > thr
+    fill = max(1, int(round(0.03 / hop)))
+    for i, j in list(_runs(m, False)):
+        if 0 < i and j < len(m) and j - i <= fill:
+            m[i:j] = True
+    nv = max(1, int(round(MIN_VOICE / hop)))
+    for i, j in list(_runs(m, True)):
+        if j - i < nv:
+            m[i:j] = False
+    return m
+
+
+def _floor(env: np.ndarray) -> float:
+    e = env[env > -95]
+    return float(np.percentile(e, 5)) if len(e) else -90.0
+
+
+def _voiced_at(env: np.ndarray, hop: float, t: float, thr: float) -> bool:
+    """Lúc t đang có tiếng (theo cùng mặt nạ với _edges)."""
+    k = int(t / hop)
+    a, b = max(0, k - 30), min(len(env), k + 30)
+    if not a <= k < b:
+        return False
+    return bool(_mask(env[a:b].copy(), thr, hop)[k - a])
+
+
+def _edges(env: np.ndarray, hop: float, lo: float, hi: float, thr: float):
+    """Chỗ bắt đầu nói (lặng ≥ MIN_SIL rồi có tiếng) và chỗ thôi nói (có tiếng rồi lặng ≥ MIN_SIL) trong [lo, hi].
+    Lặng tính cả phần ngay ngoài cửa sổ (đo trên env) để chỗ sát mép cửa sổ vẫn nhận ra."""
+    ns = max(1, int(round(MIN_SIL / hop)))
+    a = max(0, int(lo / hop) - ns)
+    b = min(len(env), int(np.ceil(hi / hop)) + ns)
+    if b - a < 3:
+        return [], []
+    m = _mask(env[a:b].copy(), thr, hop)
+    on, off = [], []
+    for i, j in _runs(m, True):
+        if i >= ns and not m[i - ns:i].any():
+            t = (a + i) * hop
+            if lo - 1e-6 <= t <= hi + 1e-6:
+                on.append(t)
+        if j <= len(m) - ns and not m[j:j + ns].any():
+            t = (a + j) * hop
+            if lo - 1e-6 <= t <= hi + 1e-6:
+                off.append(t)
+    return on, off
+
+
+def _thr(env: np.ndarray, hop: float, a: float, b: float, floor: float) -> float | None:
+    """Ngưỡng "có tiếng" cho đoạn [a, b] theo độ to của chính đoạn đó (None: quá nhỏ so với nền, không đoán được)."""
+    seg = env[max(0, int(a / hop)):max(int(a / hop) + 1, int(np.ceil(b / hop)))]
+    if len(seg) < 3:
+        return None
+    level = float(np.percentile(seg, 80))
+    if level - floor < MIN_CONTRAST:
+        return None
+    return max(level - DROP_DB, floor + FLOOR_DB)
+
+
+def _clusters(env: np.ndarray, hop: float, a: float, b: float, thr: float, gap: float = 0.15) -> list[list[float]]:
+    """Các cụm có tiếng trong [a, b] (giây), cụm cách nhau < gap giây gộp lại."""
+    fa = max(0, int(a / hop))
+    fb = min(len(env), max(fa + 1, int(np.ceil(b / hop))))
+    if fb - fa < 2:
+        return []
+    out: list[list[float]] = []
+    for i, j in _runs(_mask(env[fa:fb].copy(), thr, hop), True):
+        x, y = (fa + i) * hop, (fa + j) * hop
+        if out and x - out[-1][1] < gap:
+            out[-1][1] = y
+        else:
+            out.append([x, y])
+    return out
+
+
+def voiced_span(env: np.ndarray, hop: float, a: float, b: float, floor: float | None = None):
+    """(lúc bắt đầu có tiếng, lúc hết tiếng) trong [a, b] theo giọng đã tách; None nếu không đoán được."""
+    env = np.asarray(env, np.float32)
+    thr = _thr(env, hop, a, b, _floor(env) if floor is None else floor)
+    cl = _clusters(env, hop, a, b, thr) if thr is not None else []
+    return (cl[0][0], cl[-1][1]) if cl else None
+
+
+def fix_stretched(segs: list, env: np.ndarray, hop: float = HOP, rows=None) -> int:
+    """Chữ bị bộ căn thời gian kéo dài bất thường (`align.stretched_chars`): co lại theo độ to giọng đã tách – chữ cuối
+    / chữ giữa giữ phần có tiếng ở đầu (đoạn lặng phía sau là chỗ nhân vật ngừng), chữ đầu giữ phần có tiếng ở cuối.
+    Đầu / cuối câu theo chữ đầu / chữ cuối đã sửa. Trả số câu đã sửa (2.1.3)."""
+    from .align import PAD, _latin_run, stretched_chars
+
+    env = np.asarray(env, np.float32)
+    n = len(segs)
+    pick = range(n) if rows is None else sorted({int(r) for r in rows if 0 <= int(r) < n})
+    if not len(env):
+        return 0
+    floor = _floor(env)
+    fixed = 0
+    for i in pick:
+        s = segs[i]
+        if not ct_ok(s):
+            continue
+        ct = [[float(a), float(b)] for a, b in s.extra["ct"]]
+        bad = stretched_chars(ct)
+        if not bad:
+            continue
+        thr = _thr(env, hop, ct[0][0], ct[-1][1], floor)
+        if thr is None:
+            continue
+        good = [b - a for k, (a, b) in enumerate(ct) if k not in bad]
+        med = float(np.median(good)) if good else 0.25
+        last = len(ct) - 1
+        changed = False
+        for k in bad:
+            a, b = ct[k]
+            cl = _clusters(env, hop, a, b, thr)
+            head = bool(cl) and cl[0][0] - a < 0.12      # có tiếng ngay đầu chữ
+            tail = bool(cl) and b - cl[-1][1] < 0.12     # có tiếng tới cuối chữ
+            if not cl:
+                na, nb = (b - med, b) if k == 0 and last > 0 else (a, a + med)
+            elif k == 0 and last > 0:          # chữ đầu: bộ căn cho bắt đầu từ tiếng động / lặng trước câu
+                na, nb = cl[-1][0], (b if tail else cl[-1][1])
+            elif k == last:                    # chữ cuối: kéo qua đoạn lặng sau câu
+                na, nb = (a if head else cl[0][0]), cl[0][1]
+            elif head:                         # chữ giữa: nhân vật ngừng SAU chữ này
+                na, nb = a, cl[0][1]
+            elif tail:                         # ... ngừng TRƯỚC chữ này
+                na, nb = cl[-1][0], b
+            else:
+                na, nb = cl[0][0], cl[0][1]
+            na = max(na, ct[k - 1][1] if k > 0 else na)
+            nb = min(nb, ct[k + 1][0] if k < last else nb)
+            if nb - na >= 0.04 and (abs(na - a) > 0.05 or abs(nb - b) > 0.05):
+                ct[k] = [round(na, 3), round(nb, 3)]
+                changed = True
+        if not changed:
+            continue
+        s.extra["ct"] = ct
+        lo = segs[i - 1].end + GAP if i > 0 else 0.0
+        if 0 in bad and not _latin_run(s.text, True):
+            s.start = round(max(lo, ct[0][0] - PAD), 3)
+        if last in bad and not _latin_run(s.text, False):
+            s.end = round(max(s.start + 0.2, ct[-1][1] + PAD), 3)
+        fixed += 1
+    return fixed
+
+
+OPEN_GAP = 0.3      # chỗ lặng ≥ 0,3 s bên trong câu = nhân vật ngừng (như dub_pause_min)
+OPEN_NEAR = 0.25    # chỗ ranh giới 2 chữ (theo bộ căn) cách đoạn lặng ≤ 0,25 s mới coi là chỗ ngừng của 2 chữ đó
+MIN_CHAR = 0.04     # mỗi chữ còn ≥ 40 ms sau khi sửa
+
+
+def _voiced_len(env: np.ndarray, hop: float, a: float, b: float, thr: float) -> float:
+    fa, fb = max(0, int(a / hop)), min(len(env), int(np.ceil(b / hop)))
+    return float(np.sum(env[fa:fb] > thr)) * hop if fb > fa else 0.0
+
+
+def _ct_valid(ct: list) -> bool:
+    return all(b - a >= MIN_CHAR - 1e-6 for a, b in ct) and \
+        all(ct[k][1] <= ct[k + 1][0] + 1e-6 for k in range(len(ct) - 1))
+
+
+def open_pauses(segs: list, env: np.ndarray, hop: float = HOP, min_gap: float = OPEN_GAP, rows=None) -> list[int]:
+    """Chỗ nhân vật NGỪNG giữa câu mà mốc từng chữ không có khe (2.1.20): bộ căn thời gian hay kéo chữ qua đoạn lặng
+    khi nói ngắt quãng – đếm chậm "一……二……三", có người khác chen ngang – nên khe giữa 2 chữ = 0 -> không thêm dấu
+    phẩy, giọng lồng đọc liền 1 mạch. Đo độ to giọng đã tách: đoạn lặng ≥ min_gap nằm TRONG câu -> đặt lại mốc 2 chữ ở
+    2 bên cho có khe đúng đoạn lặng (ranh giới 2 chữ gần đoạn lặng nhất; đoạn lặng nằm giữa 1 chữ -> chữ đó là phần có
+    tiếng nhiều hơn, phần còn lại thuộc chữ bên cạnh). Chữ đầu / cuối kéo qua đoạn lặng ở mép câu -> co lại, mép câu
+    theo. Không đổi chữ. Trả các câu đã sửa."""
+    env = np.asarray(env, np.float32)
+    n = len(segs)
+    pick = range(n) if rows is None else sorted({int(r) for r in rows if 0 <= int(r) < n})
+    if not len(env):
+        return []
+    floor = _floor(env)
+    changed: list[int] = []
+    for i in pick:
+        s = segs[i]
+        if not ct_ok(s) or len(s.extra["ct"]) < 2:
+            continue
+        ct = [[float(a), float(b)] for a, b in s.extra["ct"]]
+        a0, b0 = ct[0][0], ct[-1][1]
+        thr = _thr(env, hop, a0, b0, floor)
+        if thr is None:
+            continue
+        cl = _clusters(env, hop, a0, b0, thr)
+        sil = [(cl[j][1], cl[j + 1][0]) for j in range(len(cl) - 1) if cl[j + 1][0] - cl[j][1] >= min_gap]
+        new = [list(c) for c in ct]
+        used: set[int] = set()
+        for x0, x1 in sil:
+            if any(new[k + 1][0] - new[k][1] >= 0.6 * (x1 - x0) and new[k][1] < x1 and new[k + 1][0] > x0
+                   for k in range(len(new) - 1)):
+                continue   # mốc chữ đã có khe ở đúng đoạn lặng
+            dist = []
+            for k in range(len(new) - 1):
+                lo, hi = new[k][1], new[k + 1][0]
+                d = 0.0 if lo <= x1 and hi >= x0 else min(abs(lo - x1), abs(hi - x0), abs(lo - x0), abs(hi - x1))
+                dist.append((d, k))
+            d, k = min(dist)
+            if d > OPEN_NEAR:   # đoạn lặng nằm giữa 1 chữ: chữ đó ở phía có tiếng nhiều hơn
+                m = (x0 + x1) / 2
+                inside = [j for j, (a, b) in enumerate(new) if a < m < b]
+                if not inside:
+                    continue
+                j = inside[0]
+                before = _voiced_len(env, hop, new[j][0], x0, thr)
+                after = _voiced_len(env, hop, x1, new[j][1], thr)
+                k = j if before >= after else j - 1
+                if not 0 <= k < len(new) - 1:
+                    continue
+            if k in used:
+                continue
+            trial = [list(c) for c in new]
+            trial[k][1], trial[k + 1][0] = x0, x1   # chữ trước thôi đúng lúc lặng, chữ sau vào đúng lúc có tiếng lại
+            if not _ct_valid(trial):
+                continue
+            new = trial
+            used.add(k)
+        # chữ đầu / chữ cuối bị kéo qua đoạn lặng ở mép câu (câu vừa tách ở chỗ ngừng): co về phần có tiếng, mép câu
+        # theo (snap sau đó bám đúng chỗ bắt đầu / thôi nói)
+        edge = [False, False]
+        if cl and cl[-1][1] < new[-1][1] - min_gap and cl[-1][1] - new[-1][0] >= MIN_CHAR:
+            new[-1][1] = cl[-1][1]
+            edge[1] = True
+        if cl and cl[0][0] > new[0][0] + min_gap and new[0][1] - cl[0][0] >= MIN_CHAR:
+            new[0][0] = cl[0][0]
+            edge[0] = True
+        if (used or any(edge)) and _ct_valid(new):
+            s.extra["ct"] = [[round(a, 3), round(b, 3)] for a, b in new]
+            if edge[0]:
+                s.start = round(max(s.start, new[0][0] - 0.05), 3)
+            if edge[1]:
+                s.end = round(max(s.start + 0.2, min(s.end, new[-1][1] + 0.05)), 3)
+            changed.append(i)
+    return changed
+
+
+SIL_CHAR = 0.2       # chữ có < 20 % thời gian là tiếng = chữ bị đặt vào chỗ lặng
+BAD_SIL = 0.3        # ≥ 30 % số chữ nằm trong chỗ lặng ...
+BAD_UNCOVERED = 1.0  # ... và ≥ 1 s tiếng nói (≥ 30 % phần có tiếng) không chữ nào phủ -> bộ căn đặt sai giờ
+RE_WIN = 8.0         # câu đã tách: tìm phần tiếng nói bị bỏ sót tới câu bên cạnh, tối đa 8 s mỗi bên
+
+
+def _overlap(a: float, b: float, spans: list) -> float:
+    return sum(max(0.0, min(b, y) - max(a, x)) for x, y in spans)
+
+
+def _sil_frac(ct: list, env: np.ndarray, hop: float, thr: float) -> float:
+    bad = sum(1 for a, b in ct if _voiced_len(env, hop, a, b, thr) < SIL_CHAR * max(b - a, hop))
+    return bad / max(1, len(ct))
+
+
+def _uncovered(cl: list, spans: list) -> float:
+    return sum(max(0.0, (b - a) - _overlap(a, b, spans)) for a, b in cl)
+
+
+def retime_by_voice(segs: list, env: np.ndarray, hop: float = HOP, rows=None) -> list[int]:
+    """Bộ căn thời gian đặt SAI GIỜ cả khúc (2.1.20) – hay gặp khi nhân vật nói chậm, ngắt quãng ("一……二……三……"): mốc
+    chữ dồn vào vài giây đầu / rơi vào chỗ lặng, phần nhân vật nói thật thì không chữ nào phủ -> phụ đề sai chỗ, giọng
+    lồng đọc liền 1 mạch. So mốc từng chữ với độ to giọng đã tách trong khúc đã nghe (extra["chunk"]; câu đã tách: tới
+    câu bên cạnh, ≤ RE_WIN giây – dự án cũ, nút "Căn mép theo giọng"; `segs` theo thứ tự giờ): ≥ 30 % số chữ
+    nằm trong chỗ lặng VÀ ≥ 1 s tiếng nói không chữ nào phủ (không tính phần thuộc chữ của câu khác) -> chia lại chữ
+    theo các cụm có tiếng (`align.alloc_chars`); chỉ nhận khi chữ mới hầu hết nằm trong tiếng và phủ được phần lớn
+    tiếng nói. extra["ct_voice"] = True. Trả các câu đã căn lại."""
+    from .align import GAP_SPLIT, PAD, _char_positions, alloc_chars
+
+    env = np.asarray(env, np.float32)
+    n = len(segs)
+    pick = range(n) if rows is None else sorted({int(r) for r in rows if 0 <= int(r) < n})
+    if not len(env):
+        return []
+    floor = _floor(env)
+    spans_of = [[(float(a), float(b)) for a, b in x.extra["ct"]] if ct_ok(x) else [(x.start, x.end)] for x in segs]
+    changed: list[int] = []
+    for i in pick:
+        s = segs[i]
+        ct = spans_of[i] if ct_ok(s) else []
+        if len(ct) < 3:
+            continue
+        if s.extra.get("chunk"):      # ngay sau khi nghe: cả khúc đã nghe
+            w0, w1 = (float(v) for v in s.extra["chunk"])
+        else:                         # câu đã tách: tới câu bên cạnh (≤ RE_WIN giây)
+            w0 = max(s.start - RE_WIN, segs[i - 1].end if i > 0 else 0.0)
+            w1 = min(s.end + RE_WIN, segs[i + 1].start if i + 1 < n else s.end + RE_WIN)
+        w0, w1 = min(w0, ct[0][0]), max(w1, ct[-1][1])
+        thr = _thr(env, hop, w0, w1, floor)
+        if thr is None:
+            continue
+        cl = _clusters(env, hop, w0, w1, thr, gap=0.1)
+        voiced = sum(b - a for a, b in cl)
+        others = [x for j, sp in enumerate(spans_of) if j != i for x in sp if x[1] > w0 and x[0] < w1]
+        f0, u0 = _sil_frac(ct, env, hop, thr), _uncovered(cl, ct + others)
+        if f0 < BAD_SIL or u0 < max(BAD_UNCOVERED, 0.3 * voiced):
+            continue
+        groups: list[list[float]] = []
+        for a, b in cl:
+            if _overlap(a, b, others) > 0.5 * (b - a):
+                continue      # tiếng của câu khác
+            if groups and a - groups[-1][1] < GAP_SPLIT:
+                groups[-1][1] = b
+            else:
+                groups.append([a, b])
+        new = alloc_chars([tuple(g) for g in groups], s.text, _char_positions(s.text))
+        if not new:
+            continue
+        new = [list(x) for x in new]
+        if _sil_frac(new, env, hop, thr) >= 0.15 or _uncovered(cl, new + others) > 0.5 * u0:
+            continue
+        s.extra["ct"] = new
+        s.extra["ct_voice"] = True
+        s.start = round(max(0.0, new[0][0] - PAD), 3)
+        s.end = round(new[-1][1] + PAD, 3)
+        spans_of[i] = [tuple(x) for x in new]
+        changed.append(i)
+    return changed
+
+
+EXT_PAUSE = 1.0      # đầu / cuối câu bị cắt: tiếng nói tiếp diễn qua các chỗ ngừng ≤ 1 s ...
+EXT_MAX = 4.0        # ... nới mép tối đa 4 s mỗi bên (không qua câu bên cạnh)
+EXT_MIN = 0.3        # nới < 0,3 s thì để bám mép (snap) lo
+STEP_MAX = 6         # 2.1.22: mỗi bên thử tối đa 6 nấc nới (mỗi nấc dừng ở 1 chỗ ngừng), nhận nấc xa nhất nghe đúng
+PARTICLES = set("啊呀吧嘛呢哦嗯哈了啦哇噢喔欸诶")   # nghe lại khúc nới mà thêm đúng 1 trợ từ cuối câu vẫn coi như cùng câu
+SQUEEZE = 0.05       # 2.1.22: chữ ở mép câu dài ≤ 0,05 s = bộ căn ép chữ (tiếng của chữ nằm ngoài khúc câu)
+UNCOVERED = 0.25     # ... hoặc trong khúc câu, ngoài chữ đầu / cuối còn ≥ 0,25 s tiếng không chữ nào phủ
+PAIR_GAP = 1.0       # cặp câu liền nhau: cách nhau ≤ 1 s (hoặc chồng nhau)
+PAIR_MAX = 40.0      # cả cặp dài quá 40 s thì không nghe gộp
+PAIR_MIN = 0.12      # ranh giới mới phải lệch ranh giới cũ ≥ 0,12 s mới đổi
+
+
+def _thin(xs: list[float], k: int) -> list[float]:
+    """Giữ tối đa k mốc rải đều (luôn giữ mốc xa nhất)."""
+    if len(xs) <= k:
+        return xs
+    idx = sorted({round(j * (len(xs) - 1) / (k - 1)) for j in range(k)})
+    return [xs[j] for j in idx]
+
+
+def _order(segs: list) -> tuple[list[int], dict[int, int]]:
+    order = sorted(range(len(segs)), key=lambda k: segs[k].start)
+    return order, {k: j for j, k in enumerate(order)}
+
+
+def edge_steps(segs: list, env: np.ndarray, hop: float = HOP, rows=None,
+               total: float = 0.0) -> list[tuple[int, list[float], list[float]]]:
+    """Các nấc nới đầu / cuối câu (2.1.22): ngay sau cuối câu (trước đầu câu) giọng đã tách vẫn còn tiếng nói, nối tiếp
+    qua các chỗ ngừng ≤ EXT_PAUSE, không qua câu bên cạnh, mỗi nấc dừng ở hết 1 cụm tiếng (nới ≥ EXT_MIN). Ngưỡng "có
+    tiếng" theo độ to của chính câu. Trả [(câu, [đầu mới gần -> xa], [cuối mới gần -> xa])]. Câu bên cạnh cũng bị cắt
+    (tiếng của 2 câu nối nhau qua chỗ ngừng ngắn) thì nấc xa nghe ra cả chữ câu bên cạnh – nấc gần vẫn đúng."""
+    from .align import CJK, PAD
+
+    env = np.asarray(env, np.float32)
+    n = len(segs)
+    if not len(env) or not n:
+        return []
+    end_t = total or len(env) * hop
+    order, pos = _order(segs)
+    pick = order if rows is None else sorted({int(r) for r in rows if 0 <= int(r) < n}, key=lambda k: segs[k].start)
+    floor = _floor(env)
+    out = []
+    for i in pick:
+        s = segs[i]
+        if not CJK.search(s.text or "") or s.extra.get("song") or s.extra.get("noise"):
+            continue
+        thr = _thr(env, hop, s.start, s.end, floor)
+        if thr is None:
+            continue
+        j = pos[i]
+        prev_end = max((segs[k].end for k in order[:j] if segs[k].end <= s.end), default=0.0)
+        next_start = min((segs[k].start for k in order[j + 1:] if segs[k].start >= s.start), default=end_t)
+        tails: list[float] = []
+        hi = min(next_start - GAP, s.end + EXT_MAX, end_t)
+        if hi - s.end >= EXT_MIN:
+            cur = s.end
+            for a, b in _clusters(env, hop, s.end - 0.05, hi, thr, gap=0.1):
+                if b <= cur + 0.02:
+                    continue
+                if a - cur > EXT_PAUSE:
+                    break
+                cur = b
+                tails.append(round(min(hi, cur + PAD), 3))
+        heads: list[float] = []
+        lo = max(prev_end + GAP, s.start - EXT_MAX, 0.0)
+        if s.start - lo >= EXT_MIN:
+            cur = s.start
+            for a, b in reversed(_clusters(env, hop, lo, s.start + 0.05, thr, gap=0.1)):
+                if a >= cur - 0.02:
+                    continue
+                if cur - b > EXT_PAUSE:
+                    break
+                cur = a
+                heads.append(round(max(lo, cur - PAD), 3))
+        tails = _thin(sorted({x for x in tails if x - s.end >= EXT_MIN}), STEP_MAX)
+        heads = _thin(sorted({x for x in heads if s.start - x >= EXT_MIN}, reverse=True), STEP_MAX)
+        if heads or tails:
+            out.append((i, heads, tails))
+    return out
+
+
+def edge_candidates(segs: list, env: np.ndarray, hop: float = HOP, rows=None,
+                    total: float = 0.0) -> list[tuple[int, float, float]]:
+    """Câu có thể bị cắt đầu / cuối (2.1.21): [(câu, đầu mới, cuối mới)] = nấc nới xa nhất mỗi bên (`edge_steps`) – còn
+    phải cho bộ nghe nghe lại xác nhận (`edge_heard_ok`): tiếng đó có thể là câu khác bộ nghe bỏ sót / tiếng thở / tiếng
+    động."""
+    return [(i, heads[-1] if heads else segs[i].start, tails[-1] if tails else segs[i].end)
+            for i, heads, tails in edge_steps(segs, env, hop, rows, total)]
+
+
+def _edge_suspect(s, env: np.ndarray, hop: float, floor: float, side: str) -> bool:
+    """Mép câu nghi chia sai với câu bên cạnh (2.1.22): bộ căn ép chữ ở mép (≤ SQUEEZE – tiếng của chữ nằm ngoài khúc
+    câu, thường trong câu bên cạnh) hoặc trong khúc câu ngoài chữ mép còn ≥ UNCOVERED tiếng không chữ nào phủ (tiếng
+    của câu bên cạnh lọt vào câu này)."""
+    ct = s.extra.get("ct") or []
+    if not ct:
+        return False
+    edge = ct[-2:] if side == "tail" else ct[:2]
+    if any(float(y) - float(x) <= SQUEEZE for x, y in edge):
+        return True
+    thr = _thr(env, hop, s.start, s.end, floor)
+    if thr is None:
+        return False
+    a, b = (float(ct[-1][1]) + 0.1, s.end) if side == "tail" else (s.start, float(ct[0][0]) - 0.1)
+    if b - a < UNCOVERED:
+        return False
+    return sum(y - x for x, y in _clusters(env, hop, a, b, thr, gap=0.05)) >= UNCOVERED
+
+
+def pair_suspects(segs: list, env: np.ndarray, hop: float = HOP, rows=None, extra=()) -> list[tuple[int, int]]:
+    """Cặp câu liền nhau (cách ≤ PAIR_GAP hoặc chồng nhau) có ranh giới nghi đặt sai (2.1.22): mép giữa 2 câu bị bộ căn
+    ép chữ / có tiếng không chữ nào phủ (`_edge_suspect`), hoặc extra = cặp mà nới mép không qua được vì nghe ra chữ câu
+    bên cạnh (khoảng giữa toàn tiếng nói – không xét khoảng cách). rows: chỉ cặp có ít nhất 1 câu trong đó. Trả [(câu trước, câu sau)] – còn phải nghe gộp cả cặp xác nhận
+    (`pair_heard_ok`)."""
+    from .align import CJK
+
+    env = np.asarray(env, np.float32)
+    if not len(env) or len(segs) < 2:
+        return []
+    order, _pos = _order(segs)
+    want = None if rows is None else {int(r) for r in rows}
+    floor = _floor(env)
+    keep = {tuple(x) for x in extra}
+    out = []
+    for i, k in zip(order, order[1:]):
+        a, b = segs[i], segs[k]
+        if want is not None and i not in want and k not in want:
+            continue
+        if b.end - a.start > PAIR_MAX or (b.start - a.end > PAIR_GAP and (i, k) not in keep):
+            continue
+        if not (CJK.search(a.text or "") and CJK.search(b.text or "")):
+            continue
+        if any(s.extra.get("song") or s.extra.get("noise") for s in (a, b)):
+            continue
+        if (i, k) in keep or _edge_suspect(a, env, hop, floor, "tail") or _edge_suspect(b, env, hop, floor, "head"):
+            out.append((i, k))
+    return out
+
+
+def pair_heard_ok(a_text: str, b_text: str, heard: str) -> bool:
+    """Nghe gộp cả cặp câu xác nhận chia lại ranh giới (2.1.22): bộ nghe nghe khúc [đầu câu trước, cuối câu sau] ra đúng
+    lời 2 câu nối nhau – sai tối đa 2 chữ (câu dài: 15 %; nghe nhầm chữ đồng âm / bỏ sót), không thêm chữ lạ nào (thêm = có câu khác /
+    người khác nói chen; riêng 1 trợ từ thì được)."""
+    from difflib import SequenceMatcher
+
+    from .dual import core
+
+    A, B, E = core(a_text), core(b_text), core(heard)
+    L = A + B
+    if not A or not B or not E:
+        return False
+    if _matched(L, E) < max(0.6 * len(L), min(len(L) - 2, 0.85 * len(L))):
+        return False
+    added: list[str] = []
+    for tag, i1, i2, j1, j2 in SequenceMatcher(None, L, E, autojunk=False).get_opcodes():
+        if tag == "insert":
+            added += list(E[j1:j2])
+        elif tag == "replace" and j2 - j1 > i2 - i1:
+            added += list(E[j1 + (i2 - i1):j2])
+    return not added or (len(added) == 1 and added[0] in PARTICLES)
+
+
+def _matched(a: str, b: str) -> int:
+    from difflib import SequenceMatcher
+
+    return sum(m.size for m in SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks())
+
+
+def _unmatched(line: str, heard: str) -> list[str]:
+    from difflib import SequenceMatcher
+
+    out: list[str] = []
+    for tag, _i1, _i2, j1, j2 in SequenceMatcher(None, line, heard, autojunk=False).get_opcodes():
+        if tag in ("insert", "replace"):
+            out += list(heard[j1:j2])
+    return out
+
+
+def edge_heard_ok(line: str, base: str, ext: str) -> bool:
+    """Nghe lại xác nhận nới mép câu (2.1.21): base = bộ nghe nghe đúng khúc câu đang có, ext = nghe khúc đã nới.
+    Nhận khi khúc nới nghe ra THÊM ít nhất 1 chữ của chính câu (phần câu bị cắt nằm ngoài khúc cũ), nghe ra ≥ 75 % lời
+    câu, và không thêm chữ lạ nào ngoài những gì khúc cũ vốn nghe sai (thêm ≥ 2 chữ = câu khác bộ nghe bỏ sót -> không
+    nới; thêm 1 chữ chỉ được là trợ từ 啊 / 吧 / 呢…). Chữ so theo `dual.core` (bỏ dấu câu)."""
+    from .dual import core
+
+    L, B, E = core(line), core(base), core(ext)
+    if len(L) < 2 or not E:
+        return False
+    mb, me = _matched(L, B), _matched(L, E)
+    if me < mb + 1 or me < 0.75 * len(L):
+        return False
+    new = list(_unmatched(L, E))
+    for ch in _unmatched(L, B):
+        if ch in new:
+            new.remove(ch)
+    return not new or (len(new) == 1 and new[0] in PARTICLES)
+
+
+def snap(segs: list, env: np.ndarray, hop: float = HOP, rows=None, total: float = 0.0) -> dict:
+    """Dời đầu / cuối các câu (tại chỗ) về đúng lúc nhân vật bắt đầu / thôi nói. rows: chỉ các câu này (số thứ tự
+    trong segs đã sắp theo giờ). Trả {"moved": số câu dời, "start": số đầu câu dời, "end": số cuối câu dời,
+    "shift": dời trung bình (giây), "est": số câu mốc ước lượng còn lại, "checked": số câu đã xét}."""
+    env = np.asarray(env, np.float32)
+    n = len(segs)
+    pick = set(range(n)) if rows is None else {int(r) for r in rows if 0 <= int(r) < n}
+    if not len(env) or not pick:
+        return {"moved": 0, "start": 0, "end": 0, "shift": 0.0, "est": sum(estimated(s) for s in segs),
+                "checked": 0}
+    floor = _floor(env)
+    end_t = total or len(env) * hop
+    orig = [(s.start, s.end) for s in segs]
+    flags: dict[int, list[bool]] = {i: [False, False] for i in pick}
+    for _ in range(2):   # lượt 2: câu bên cạnh đã về đúng chỗ -> câu bị chặn ở lượt 1 tới được mép thật
+        for i in sorted(pick):
+            s = segs[i]
+            fa, fb = int(s.start / hop), max(int(s.start / hop) + 1, int(s.end / hop))
+            seg_env = env[fa:fb]
+            if len(seg_env) < 5:
+                seg_env = env[max(0, fa - 5):fb + 5]
+            if not len(seg_env):
+                continue
+            level = float(np.percentile(seg_env, 80))
+            if level - floor < MIN_CONTRAST:
+                continue
+            thr = max(level - DROP_DB, floor + FLOOR_DB)
+            exact = ct_ok(s)
+            win = WIN if exact else WIN_EST
+            prev_end = segs[i - 1].end if i > 0 else 0.0
+            next_start = segs[i + 1].start if i + 1 < n else end_t
+            ct = s.extra.get("ct") if exact else None
+            # đầu câu: không trước câu trước, không sau chữ đầu tiên đã đo / quá sát cuối câu
+            lo = max(0.0, prev_end + GAP if i > 0 else 0.0, s.start - win)
+            hi = min(s.start + win, s.end - 0.15, float(ct[0][1]) + CT_SLACK if ct else s.end)
+            on, _o = _edges(env, hop, lo, hi, thr) if hi > lo else ([], [])
+            # mốc đang nằm trong tiếng nói -> lùi về chỗ bắt đầu của đoạn tiếng đó; nằm trong lặng -> tới chỗ bắt đầu
+            # nói kế tiếp (không nhảy vào chỗ ngắt hơi giữa câu dù gần hơn)
+            on = [x for x in on if x <= s.start + 1e-6] if _voiced_at(env, hop, s.start, thr) else \
+                [x for x in on if x >= s.start - 1e-6]
+            if on:
+                t = min(on, key=lambda x: abs(x - s.start))
+                s.start = round(t, 3)
+                flags[i][0] = True
+            # cuối câu: không sau câu sau, không trước chữ cuối đã đo
+            lo = max(s.start + 0.15, s.end - win, float(ct[-1][0]) - CT_SLACK if ct else s.start + 0.15)
+            hi = min(next_start - GAP if i + 1 < n else end_t, s.end + win)
+            _n, off = _edges(env, hop, lo, hi, thr) if hi > lo else ([], [])
+            off = [x for x in off if x >= s.end - 1e-6] if _voiced_at(env, hop, max(0.0, s.end - hop), thr) else \
+                [x for x in off if x <= s.end + 1e-6]
+            if off:
+                t = min(off, key=lambda x: abs(x - s.end))
+                s.end = round(t, 3)
+                flags[i][1] = True
+    moved = st = en = 0
+    shift = 0.0
+    for i in pick:
+        s = segs[i]
+        old = s.extra.get("snap") or [False, False]
+        s.extra["snap"] = [bool(flags[i][0] or old[0]), bool(flags[i][1] or old[1])]
+        ds, de = abs(s.start - orig[i][0]), abs(s.end - orig[i][1])
+        st += ds > MOVED
+        en += de > MOVED
+        if ds > MOVED or de > MOVED:
+            moved += 1
+            shift += max(ds, de)
+    return {"moved": moved, "start": st, "end": en, "shift": round(shift / moved, 3) if moved else 0.0,
+            "est": sum(estimated(s) for s in segs), "checked": len(pick)}
