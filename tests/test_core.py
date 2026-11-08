@@ -6473,7 +6473,8 @@ def test_ai_steps_run_with_live_drafts(monkeypatch):
     monkeypatch.setattr(tr.LLMClient, "chat", fake_chat)
     st_ = {**load_settings(), "translate_engine": "openai", "openai_api_key": "x",
            "openai_base_url": "https://api.example.com/v1", "ai_clean_before_translate": True,
-           "ai_review_after_translate": True, "split_long_trans": True, "translate_skill": ""}
+           "ai_review_after_translate": True, "split_long_trans": True, "translate_skill": "",
+           "ai_join_before_translate": None}     # bài khác (giao diện) có thể đã lưu công tắc nối câu
     p = Project.create("live_ai")
     p.segments = [Segment(0, 1.5, "真的加的", "Nháp 1"), Segment(2, 3.5, "你好", "Nháp 2"),
                   Segment(4, 5.5, "走吧", "Nháp 3")]
@@ -14937,7 +14938,7 @@ def test_address_speakers_unsure_240(monkeypatch):
     base = {**load_settings(), "translate_engine": "openai", "openai_api_key": "x", "translate_skill": "",
             "openai_base_url": "https://api.example.com/v1", "ai_review_after_translate": True,
             "split_long_trans": False, "ai_song_filter": False, "ai_clean_before_translate": False,
-            "ai_join_before_translate": False, "dub_fit": False}
+            "ai_join_before_translate": False, "dub_fit": False, "translate_speakers": True, "addr_unsure": "drop"}
     p = Project.create("xungho")
     p.segments = [Segment(0, 1, "你想吃什么？", "", "S1"), Segment(1, 2, "随你", "", "S2"), Segment(2, 3, "你去哪？", "", "S1")]
     p.save()
