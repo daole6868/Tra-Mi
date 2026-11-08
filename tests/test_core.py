@@ -2323,7 +2323,7 @@ def test_translate_only_chosen_rows_without_cache(monkeypatch):
 
     calls = []
 
-    def fake(self, lines, progress=None, cancel=None, summary=""):
+    def fake(self, lines, progress=None, cancel=None, summary="", **kw):
         calls.append(list(lines))
         return [f"mới {len(calls)}" for _ in lines]
     monkeypatch.setattr(translate.Translator, "translate_lines", fake)
@@ -2350,7 +2350,8 @@ def test_target_language_detect_and_translate(monkeypatch):
     assert langs.units("สวัสดีครับ", "th") == 7          # 10 ký tự, 3 dấu ั ี ั không tính riêng
     assert langs.units("I am fine, thanks", "en") == 4 and langs.budget(2.0, "th") > langs.budget(2.0, "en")
     assert langs.edge_voice("en", "male") == "edge:en-US-GuyNeural"
-    assert translate.system_prompt("vi") == translate.SYSTEM_PROMPT.replace("{fill}", "")
+    assert translate.system_prompt("vi") == translate.SYSTEM_PROMPT.replace("{fill}", "").replace(
+        "{addr}", translate.ADDR_RULE_VI["drop"])
     sp = translate.system_prompt("ko")
     assert "Korean" in sp and "Korean syllables" in sp and "Hán" not in sp
     assert translate.untranslated("你好世界", "ja") and not translate.untranslated("大丈夫です", "ja")
@@ -2382,7 +2383,7 @@ def test_target_language_detect_and_translate(monkeypatch):
     # dự án: đổi tiếng đích -> dịch lại mọi câu (kể cả câu đã có bản tiếng Việt), thuật ngữ theo tiếng
     seen = []
 
-    def fake(self, lines, progress=None, cancel=None, summary=""):
+    def fake(self, lines, progress=None, cancel=None, summary="", **kw):
         seen.append((self.target, dict(self.glossary), list(lines)))
         return [f"EN {x}" for x in lines]
     monkeypatch.setattr(translate.Translator, "translate_lines", fake)
@@ -8394,9 +8395,9 @@ def test_address_follows_source_234():
     # câu nhắc ở CUỐI lời nhắc (sau form thể loại + kỹ năng của người dùng)
     t = tr.Translator({"openai_api_key": "x", "translate_style": "tu_tien"}, "openai", target="vi",
                       skill="- Luôn xưng ta – ngươi")
-    assert t.system().endswith(tr.ADDRESS_TAIL_VI) and "Trúc Cơ" in t.system()
+    assert t.system().endswith(tr.address_tail("vi")) and "Trúc Cơ" in t.system()
     te = tr.Translator({"openai_api_key": "x"}, "openai", target="en")
-    assert te.system().endswith(tr.ADDRESS_TAIL_EN)
+    assert te.system().endswith(tr.address_tail("en"))
     # kỹ năng không được đè luật xưng hô; kỹ năng / form có sẵn ghi rõ
     assert "xưng hô theo đúng đại từ" in skills.with_skill("SYS", "- abc")
     assert "XƯNG HÔ THEO ĐÚNG DÒNG GỐC" in skills.STD_SKILL["text"]
@@ -8419,11 +8420,11 @@ def test_address_follows_source_234():
     t.llm = LLM()
     t.shorten([("哥，你走吧。", "Anh à, anh đi đi nhé.", 3)])
     t.match_clauses([(["哥", "你走吧"], "Anh đi đi.")])
-    assert len(seen) == 2 and all(x.endswith(tr.ADDRESS_TAIL_VI) for x in seen)
+    assert len(seen) == 2 and all(x.endswith(tr.address_tail("vi")) for x in seen)
     seen.clear()
     skills.review_lines(LLM(), [(0, "他来了。", "Cô ta tới rồi.", 6)], "", "", "tiếng Trung", "tiếng Việt", "tiếng",
                         genre="- x")
-    assert seen and seen[0].endswith(tr.ADDRESS_TAIL_VI) and "chỉ dùng cho dòng gốc KHÔNG ghi rõ" in seen[0]
+    assert seen and seen[0].endswith(tr.address_tail("vi")) and "chỉ dùng cho dòng gốc KHÔNG ghi rõ" in seen[0]
 
 
 def test_translate_forms_2113(monkeypatch):
