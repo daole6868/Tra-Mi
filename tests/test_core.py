@@ -14853,3 +14853,186 @@ def test_pre_translate_fix_join_split_239(monkeypatch):
     p.delete()
     sm = autoflow.summary({**base, "ai_clean_before_translate": False, "ai_join_before_translate": True})
     assert "AI nối câu, lọc lời hát" in sm
+
+
+def test_address_speakers_unsure_240(monkeypatch):
+    """2.4.0 xưng hô: gửi người nói + nam / nữ từng câu cho AI (ngữ cảnh có nhãn, dịch câu đã tích kèm dòng liền trước /
+    sau thật trong phim), luật 5f khi không chắc (bỏ đại từ / cặp trung tính / AI đoán), cờ "xh" -> addr_unsure, bộ nhớ
+    bản dịch tách theo nam / nữ, nam / nữ chọn tay được, kiểm tra bản dịch nhận nhãn người nói, kỹ năng Dịch chuẩn mới."""
+    from trami import pipeline, skills
+    from trami import translate as tr
+    from trami.config import load_settings
+    from trami.project import Project
+
+    # luật 5f theo cách chọn
+    assert "Tùy thôi" in tr.system_prompt("vi") and "cậu – tớ" in tr.system_prompt("vi") and '"xh": "?"' in tr.system_prompt("vi")
+    assert "{addr}" not in tr.system_prompt("vi") and "Tùy cậu" in tr.system_prompt("vi", addr="neutral")
+    assert "Tùy thôi" not in tr.system_prompt("vi", addr="guess") and "NGƯỜI NÓI TỪNG DÒNG" in tr.system_prompt("vi")
+    en = tr.system_prompt("en", addr="drop")
+    assert "SPEAKER OF EACH LINE" in en and '"addr": "?"' in en and "{addr" not in en and "{thai" not in en
+    assert "ครับ / ค่ะ" in tr.system_prompt("th")
+    assert "cậu – tớ" in tr.address_tail("vi") and tr.address_tail("vi", "guess") == tr.ADDRESS_TAIL_VI
+    assert tr.addr_mode({"addr_unsure": "lạ"}) == "drop" and tr.addr_mode({"addr_unsure": "neutral"}) == "neutral"
+    assert tr.cache_text("openai|auto|随你 ⟪≤4 tiếng⟫ ⟦F⟧") == "随你"
+    asked = []
+    answers = {"你想吃什么？": "Em muốn ăn gì?", "随你": "Tùy anh.", "你去哪？": "Đi đâu thế?"}
+
+    def fake_chat(self, system, user, max_tokens=8000, temperature=0.3):
+        if "KIỂM TRA CÁC CÂU SAU" in user:
+            asked.append(("review", system, user))
+            return "{}"
+        if 'lập "HỒ SƠ PHIM"' in system:
+            return json.dumps({"the_loai": "hiện đại"}, ensure_ascii=False)
+        payload = json.loads(user[user.rindex("{"):])
+        asked.append(("tr", system, user))
+        out = {}
+        for k, v in payload.items():
+            src = tr.BUDGET_RE.sub(" ", v).strip()
+            out[k] = {"dau": src[:3], "dich": answers.get(src, "X."), **({"xh": "?"} if src == "你去哪？" else {})}
+        return json.dumps(out, ensure_ascii=False)
+
+    monkeypatch.setattr(tr.LLMClient, "chat", fake_chat)
+    segs = [Segment(0, 1, "你想吃什么？", speaker="S1"), Segment(1, 2, "随你", speaker="S2"),
+            Segment(2, 3, "你去哪？", speaker="S1")]
+    t = tr.Translator({"openai_api_key": "x", "dub_fit": False}, "openai", target="vi")
+    t.genders = {"S1": "male", "S2": "female"}
+    t.translate_segments(segs, auto_terms=False)
+    _, sysp, user = asked[0]
+    assert "NGƯỜI NÓI TỪNG DÒNG" in user and "2: S2 · nữ" in user and "1: S1 · nam" in user
+    assert [x.trans for x in segs] == ["Em muốn ăn gì?", "Tùy anh.", "Đi đâu thế?"]
+    assert segs[2].extra.get("addr_unsure") and not segs[1].extra.get("addr_unsure")
+    assert any(k.endswith("随你 ⟦F⟧") for k in t.cache)          # "随你" của nữ nhớ riêng
+    # câu đã tích: kèm dòng liền trước / sau THẬT trong phim (có nhãn + bản dịch)
+    asked.clear()
+    t2 = tr.Translator({"openai_api_key": "x", "dub_fit": False}, "openai", target="vi")
+    t2.genders = {"S1": "male", "S2": "female"}
+    t2.translate_segments(segs, auto_terms=False, rows={1})
+    assert "trước: [S1 · nam] 你想吃什么？ => Em muốn ăn gì?" in asked[0][2]
+    # cùng câu, nam nói -> không lấy bản "随你 của nữ" trong bộ nhớ, hỏi AI lại
+    asked.clear()
+    segs2 = [Segment(0, 1, "随你", speaker="S1"), Segment(1, 2, "好", speaker="S2")]
+    t3 = tr.Translator({"openai_api_key": "x", "dub_fit": False}, "openai", target="vi", cache=dict(t.cache))
+    t3.genders = {"S1": "male", "S2": "female"}
+    t3.translate_segments(segs2, auto_terms=False)
+    assert asked and "1: S1 · nam" in asked[0][2]
+    # cờ chưa chắc nhớ theo bộ nhớ dịch: dịch lại không cần hỏi AI vẫn giữ cờ
+    asked.clear()
+    segs[2].trans = ""
+    segs[2].extra.pop("addr_unsure")
+    t4 = tr.Translator({"openai_api_key": "x", "dub_fit": False}, "openai", target="vi", cache=dict(t.cache))
+    t4.genders = {"S1": "male", "S2": "female"}
+    t4.translate_segments(segs, auto_terms=False, rows={2})
+    assert not asked and segs[2].trans == "Đi đâu thế?" and segs[2].extra.get("addr_unsure")
+    # tắt "Gửi người nói" / 1 người nói -> không gửi nhãn
+    asked.clear()
+    t5 = tr.Translator({"openai_api_key": "x", "dub_fit": False, "translate_speakers": False}, "openai", target="vi")
+    t5.translate_segments([Segment(0, 1, "你好", speaker="S1"), Segment(1, 2, "好", speaker="S2")], auto_terms=False)
+    assert "NGƯỜI NÓI TỪNG DÒNG" not in asked[0][2]
+    asked.clear()
+    t5 = tr.Translator({"openai_api_key": "x", "dub_fit": False}, "openai", target="vi")
+    t5.translate_segments([Segment(0, 1, "你好", speaker="S1"), Segment(1, 2, "好", speaker="S1")], auto_terms=False)
+    assert "NGƯỜI NÓI TỪNG DÒNG" not in asked[0][2]
+    # dự án: nam / nữ chọn tay giữ khi đo lại; nhãn cho AI kiểm tra bản dịch; thông báo câu chưa chắc
+    base = {**load_settings(), "translate_engine": "openai", "openai_api_key": "x", "translate_skill": "",
+            "openai_base_url": "https://api.example.com/v1", "ai_review_after_translate": True,
+            "split_long_trans": False, "ai_song_filter": False, "ai_clean_before_translate": False,
+            "ai_join_before_translate": False, "dub_fit": False}
+    p = Project.create("xungho")
+    p.segments = [Segment(0, 1, "你想吃什么？", "", "S1"), Segment(1, 2, "随你", "", "S2"), Segment(2, 3, "你去哪？", "", "S1")]
+    p.save()
+    pipeline.set_speaker_gender(p, "S1", "male")
+    pipeline.set_speaker_gender(p, "S2", "female")
+    assert pipeline.measure_genders(Project(p.id))["S2"]["g"] == "female"    # bạn tự chọn -> không đo lại
+    asked.clear()
+    pipeline.translate(p, "openai", "auto", False, base, split=False)
+    p = Project(p.id)
+    assert [x.trans for x in p.segments] == ["Em muốn ăn gì?", "Tùy anh.", "Đi đâu thế?"]
+    assert "1 câu xưng hô chưa chắc" in p.data.get("skill_note", "")
+    rev = next(x for x in asked if x[0] == "review")
+    assert '"nguoi_noi": "S2 · nữ"' in rev[2] and "cậu – tớ" in rev[1]
+    assert pipeline.speaker_tags(p, base) == ["S1 · nam", "S2 · nữ", "S1 · nam"]
+    pipeline.set_speaker_gender(p, "S2", "")
+    assert "S2" not in Project(p.id).data["speaker_gender"]
+    p.delete()
+    # kỹ năng Dịch chuẩn: bản lưu y nguyên mặc định cũ -> dùng bản mới; bản bạn sửa giữ nguyên
+    std = next(x for x in skills.all_skills({}) if x["id"] == skills.STD_ID)
+    assert "Tùy anh" in std["text"] and "5f" in std["text"]
+    old = subprocess.run(["git", "show", "dc9ddf4:trami/skills.py"], cwd=Path(__file__).resolve().parent.parent,
+                         capture_output=True, text=True).stdout
+    if old:
+        import ast
+        import re as _re
+
+        m = _re.search(r'STD_SKILL = \{.*?"text": \((.*?)\)\}', old, _re.S)
+        old_text = ast.literal_eval("(" + m.group(1) + ")")
+        got = next(x for x in skills.all_skills({"translate_skills": [{"id": skills.STD_ID, "name": "x",
+                                                                         "text": old_text}]})
+                   if x["id"] == skills.STD_ID)
+        assert "Tùy anh" in got["text"]
+    mine = next(x for x in skills.all_skills({"translate_skills": [{"id": skills.STD_ID, "name": "x",
+                                                                      "text": "- luật của tôi"}]})
+                if x["id"] == skills.STD_ID)
+    assert mine["text"] == "- luật của tôi"
+
+
+def test_address_gui_240(sample_video, monkeypatch):
+    """Giao diện 2.4.0: bảng người nói có cột Nam / nữ chọn tay, tab Tự động 2 ô xưng hô (lưu Cài đặt), bảng câu tô bản
+    dịch chưa chắc + nút Tích câu xưng hô chưa chắc, Cài đặt có 2 ô cùng tên."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication, QComboBox
+
+    from trami import pipeline
+    from trami.config import load_settings
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.gui.subs_model import ADDR_COLOR, C_VI
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    theme.load_fonts()
+    app.setStyleSheet(theme.stylesheet())
+    p = Project.create("xungho_gui")
+    pipeline.attach_source(p, sample_video)
+    a = Segment(0.5, 1.5, "随你", "Tùy thôi.", "S2")
+    a.extra["addr_unsure"] = True
+    p.segments = [Segment(0, 0.4, "你想吃什么？", "Em muốn ăn gì?", "S1"), a]
+    p.save()
+    win = MainWindow()
+    win.show()
+    win.open_project(p.id)
+    pp = win.project_page
+    assert pp.spk_table.columnCount() == 5 and pp.spk_table.rowCount() == 2
+    row = next(r for r in range(2) if pp.spk_table.item(r, 0).text() == "S2")
+    gc = pp.spk_table.cellWidget(row, 1)
+    assert isinstance(gc, QComboBox) and isinstance(pp.spk_table.cellWidget(row, 3), QComboBox)
+    gc.setCurrentIndex(gc.findData("female"))
+    app.processEvents()
+    assert Project(p.id).data["speaker_gender"]["S2"] == {"g": "female", "by": "user", "src": "user"}
+    pp._update_voice_note()
+    assert "S2:" in pp.d_voice_note.text()
+    # bản dịch chưa chắc: màu + tooltip + nút tích
+    idx = pp.model.index(1, C_VI)
+    assert pp.model.data(idx, Qt.ItemDataRole.ForegroundRole).name().upper() == ADDR_COLOR.upper()
+    assert "Xưng hô chưa chắc" in pp.model.data(idx, Qt.ItemDataRole.ToolTipRole)
+    pp._pick_addr()
+    assert pp.model.selected == [1] or sorted(pp.model.selected) == [1]
+    # sửa tay bản dịch -> bỏ cờ
+    pp.model.setData(idx, "Tùy anh.")
+    assert not pp.model.segs[1].extra.get("addr_unsure")
+    # 2 ô ở tab Tự động lưu Cài đặt
+    pp.a_addr.setCurrentIndex(pp.a_addr.findData("neutral"))
+    pp.a_spktag.setChecked(False)
+    app.processEvents()
+    st = load_settings()
+    assert st["addr_unsure"] == "neutral" and st["translate_speakers"] is False
+    pp.a_addr.setCurrentIndex(pp.a_addr.findData("drop"))
+    pp.a_spktag.setChecked(True)
+    sp = win.settings_page if hasattr(win, "settings_page") else None
+    if sp is not None:
+        sp.load()
+        assert sp.addr_unsure.currentData() == "drop" and sp.spk_tags.isChecked()
+        d = sp.collect()
+        assert d["addr_unsure"] == "drop" and d["translate_speakers"] is True
+    win.close()
+    p.delete()

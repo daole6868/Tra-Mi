@@ -843,24 +843,58 @@ def has_dub(p: Project) -> bool:
     return bool(wav and Path(wav).exists() and any(s.extra.get("tts_file") for s in p.segments))
 
 
-def speaker_genders(p: Project, audio: str | None = None) -> dict:
-    """{người nói: {"g": male/female/"", "conf", "f0", "by"}} – lưu p.data["speaker_gender"]. Chạy CPU, vài giây."""
+def measure_genders(p: Project, audio: str | None = None, segs: list | None = None) -> dict:
+    """{người nói: {"g": male/female/"", "conf", "f0", "by"}} đo từ giọng – KHÔNG đọc lại / lưu dự án. Nam / nữ do Gemini
+    thấy trên hình (2.1.25) hoặc bạn tự chọn ở bảng người nói (2.4.0) được giữ, không đoán lại theo giọng."""
     from .asr_funasr import load_wav16k
     from .gender import speaker_gender
 
     old = dict(p.data.get("speaker_gender") or {})
-    wav = load_wav16k(audio or stems(p).get("vocals") or str(p.source))
     spans: dict[str, list] = {}
-    for s in p.segments:
+    for s in (segs if segs is not None else p.segments):
         if not s.extra.get("song"):
             spans.setdefault(s.speaker or "S1", []).append((s.start, s.end))
-    # Gemini đã thấy mặt người nói khi dịch có nhìn hình (2.1.25) -> giữ, không đoán lại theo cao độ giọng
-    out = {spk: (old[spk] if (old.get(spk) or {}).get("src") == "gemini" else speaker_gender(wav, sp))
-           for spk, sp in spans.items()}
+    keep = {k: v for k, v in old.items() if (v or {}).get("src") in ("gemini", "user")}
+    if all(k in keep for k in spans):
+        return {**old, **{k: keep[k] for k in spans}}
+    wav = load_wav16k(audio or stems(p).get("vocals") or str(p.source))
+    return {spk: (keep[spk] if spk in keep else speaker_gender(wav, sp)) for spk, sp in spans.items()}
+
+
+def speaker_genders(p: Project, audio: str | None = None) -> dict:
+    """{người nói: {"g": male/female/"", "conf", "f0", "by"}} – lưu p.data["speaker_gender"]. Chạy CPU, vài giây."""
+    out = measure_genders(p, audio)
     p.reload()
     p.data["speaker_gender"] = out
     p.save()
     return out
+
+
+def set_speaker_gender(p: Project, spk: str, g: str) -> None:
+    """Bạn tự chọn nam / nữ cho 1 người nói (bảng người nói tab Lồng tiếng, 2.4.0): "" = để tool đo lại theo giọng."""
+    p.reload()
+    cur = dict(p.data.get("speaker_gender") or {})
+    if g in ("male", "female"):
+        cur[spk] = {**(cur.get(spk) or {}), "g": g, "by": "user", "src": "user"}
+    else:
+        cur.pop(spk, None)
+    p.data["speaker_gender"] = cur
+    p.save()
+
+
+def speaker_tags(p: Project, settings: dict, segs: list | None = None) -> list[str] | None:
+    """Nhãn người nói + nam / nữ từng câu ("S2 · nữ") gửi cho AI (dịch / kiểm tra bản dịch, 2.4.0); None khi tắt hoặc
+    phim < 2 người nói."""
+    from .translate import speaker_tag
+
+    segs = segs if segs is not None else p.segments
+    if not settings.get("translate_speakers", True):
+        return None
+    if len({(x.speaker or "S1") for x in segs if x.text.strip()}) < 2:
+        return None
+    g = {k: (v or {}).get("g", "") for k, v in (p.data.get("speaker_gender") or {}).items()}
+    lang = target_lang(p, settings)
+    return [speaker_tag(x.speaker or "S1", g.get(x.speaker or "S1", ""), lang) for x in segs]
 
 
 def use_qwen_align(engine: str, settings: dict) -> bool:
@@ -3989,7 +4023,7 @@ def ai_review(p: Project, settings: dict | None = None, engine: str | None = Non
     """Kỹ năng 3: AI kiểm tra bản dịch (sai nghĩa, xưng hô / tên không thống nhất, quá dài, còn chữ Hán…) và sửa. Câu bạn
     sửa tay không đụng tới. Bản cũ giữ ở extra["trans_before_review"], lý do ở extra["review_note"]. Trả về câu đã sửa."""
     from . import langs, skills
-    from .translate import LLMClient, engine_parallel, length_marker
+    from .translate import LLMClient, addr_mode, engine_parallel, length_marker
 
     settings = settings or load_settings()
     eng = ai_engine(settings, engine)
@@ -4010,7 +4044,8 @@ def ai_review(p: Project, settings: dict | None = None, engine: str | None = Non
                                 skills.skill_text(settings), src, L["name"].lower(), L["unit_vi"], target,
                                 progress, cancel, ctx=[(x.text, x.trans) for x in segs],
                                 genre=genres.form(settings.get("translate_style"), target, settings),
-                                parallel=engine_parallel(settings, eng))
+                                parallel=engine_parallel(settings, eng), who=speaker_tags(p, settings, segs),
+                                addr=addr_mode(settings))
     for i, (new, why) in fixes.items():
         segs[i].extra["trans_before_review"] = segs[i].trans
         segs[i].extra["review_note"] = why
@@ -4028,7 +4063,7 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
     """Dịch phụ đề. rows: chỉ các câu này (dịch LẠI: bỏ bản dịch nhớ sẵn của chúng để ra bản mới). split False: không
     tự tách câu dài ở cuối (chạy tự động tách ở bước riêng `auto_split_long`). fresh: bản dịch đang có chỉ là bản dịch
     nháp lúc đang nghe (vừa tách vừa dịch) -> vẫn chạy AI sửa lỗi nghe / lọc lời bài hát như dịch cả phim lần đầu."""
-    from .translate import BUDGET_RE, Translator, cache_line, glossary_text, parse_glossary, untranslated
+    from .translate import Translator, cache_text, glossary_text, parse_glossary, untranslated
 
     settings = settings or load_settings()
     target = target_lang(p, settings)
@@ -4042,7 +4077,7 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
     if rows is not None and not only_empty:   # dịch lại câu chọn: không lấy lại bản dịch cũ đã nhớ
         texts = {segs[i].text for i in rows if 0 <= i < len(segs)}
         for key in list(cache):
-            if BUDGET_RE.sub("", cache_line(key)).strip() in texts:
+            if cache_text(key) in texts:
                 del cache[key]
     gkey = glossary_key(target)
     old_lang = trans_lang(p)
@@ -4121,6 +4156,21 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
     tr = Translator(settings, engine, style, parse_glossary(p.data.get(gkey, "")), cache, target=target,
                     source=source_lang(p), skill=skills.skill_text(settings) if is_ai else "")
     tr.video = video_source(p, settings, eng)   # dịch có nhìn hình (Gemini xem khúc video của từng lô, 2.1.25)
+    # người nói + nam / nữ từng câu gửi kèm cho AI (2.4.0) – chưa đo nam / nữ thì đo theo giọng (CPU, vài giây)
+    spks = {(x.speaker or "S1") for x in segs if x.text.strip()}
+    if is_ai and settings.get("translate_speakers", True) and len(spks) >= 2:
+        sg = p.data.get("speaker_gender") or {}
+        if not all(k in sg for k in spks) and p.data.get("source") and not source_missing(p):
+            if progress:
+                progress(a0, "Đang nghe giọng từng người nói (nam / nữ) để AI chọn đúng xưng hô…")
+            try:
+                sg = measure_genders(p, segs=segs)
+                p.data["speaker_gender"] = sg
+            except (ff.Cancelled, net.NetworkDown):
+                raise
+            except Exception:  # noqa: BLE001 – không đo được thì nhãn "?" (AI vẫn biết ai nói với ai)
+                log_error("Đo nam / nữ người nói trước khi dịch")
+        tr.genders = {k: (v or {}).get("g", "") for k, v in sg.items()}
 
     last_save = [time.time()]
     tr_prog = _sub(progress, a0, 0.85 if do_review else 1.0)
@@ -4150,6 +4200,11 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
         if note:
             p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + note
     new_rows = [i for i, x in enumerate(segs) if x.trans.strip() and x.trans != before[i]]   # câu vừa có bản dịch mới
+    n_addr = sum(1 for i in new_rows if segs[i].extra.get("addr_unsure"))
+    if n_addr:   # luật 5f (2.4.0): AI không chắc ai nói với ai -> đã bỏ đại từ / dùng cặp trung tính
+        p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + \
+            (f"{n_addr} câu xưng hô chưa chắc (AI đã bỏ đại từ / dùng cặp trung tính) – tab Phụ đề → Công cụ → Sửa câu "
+             "→ Tích câu xưng hô chưa chắc để soát")
     # câu dịch thiếu vế so với chỗ nhân vật ngắt hơi -> AI sửa cho đủ vế (2.1.3)
     if is_ai and new_rows and settings.get("trans_clause_match", True):
         try:
@@ -5824,6 +5879,7 @@ def apply_translation(segs: list, cues: list, stats: dict | None = None) -> list
             x.trans = t
             x.extra["trans_user"] = True     # bản dịch người dùng đưa vào: AI không tự rút gọn
             x.extra.pop("fit", None)
+            x.extra.pop("addr_unsure", None)
             return True
         return False
 

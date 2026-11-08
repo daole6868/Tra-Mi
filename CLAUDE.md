@@ -335,6 +335,32 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (`_LOOP4_RE`); `align.restarts` (vế trước trùng / là đầu vế sau) -> `match_clauses` không ép đủ vế; luật dịch 11 (Việt +
   tiếng khác) + `REVIEW_PROMPT` mục 7: nói vấp / lặp vô nghĩa dịch 1 lần, lặp nhấn mạnh giữ.
 - Xưng hô theo dòng gốc (2.3.4): luật 5 của `translate.SYSTEM_PROMPT` (bản tiếng khác cùng ý) – dòng gốc ghi rõ đại từ / cách gọi (他 / 她 / 它, 哥 / 姐 / 弟 / 妹, 师兄 / 师姐, 爸 / 妈, 您, ngôi 我 / 你 / 他 + số ít / nhiều) -> giữ đúng giới tính, vai vế, ngôi; ngữ cảnh chỉ chọn sắc thái (anh ấy / anh ta / hắn); không ghi rõ (bỏ chủ ngữ, chỉ 我 / 你) mới chọn theo ngữ cảnh, giữ cặp xưng hô giữa 2 người; form thể loại / hồ sơ phim / kỹ năng / hình video chỉ là gợi ý cho trường hợp đó. Luật 7: đại từ / cách gọi không coi là nghe nhầm. `GENRE_HEAD_VI/EN` (tiêu đề form thể loại ghi rõ chỉ cho dòng không ghi rõ), `address_tail(target)` = `ADDRESS_TAIL_VI/EN` gắn CUỐI `Translator.system()` (sau form + kỹ năng), `shorten`, `match_clauses`, `skills.review_lines`; `skills.with_skill`: kỹ năng không đè luật xưng hô; STD_SKILL / BUILTIN meme, cổ trang; REVIEW_PROMPT mục 2 "XƯNG HÔ SAI VAI" (sửa về đúng câu gốc, không đổi xưng hô câu gốc đã ghi rõ để khớp hồ sơ phim); SHORTEN / CLAUSE (vi + en) không đổi nam / nữ, anh / em, ngôi; VIDEO_RULE_VI/EN hình chỉ cho dòng không ghi rõ; PROFILE_PROMPT xung_ho + `analyze` relations theo 他 / 她 / 哥 / 姐 của kịch bản. Google / Hy-MT2 không nhận lời nhắc.
+- Xưng hô theo người nói (2.4.0): người dùng – nữ nói 随你 với nam mà tool dịch "Tùy em". Nguyên nhân: dịch bằng chữ chỉ gửi
+  chữ Trung (AI không biết ai nói), bộ nhớ bản dịch nhớ theo chữ Trung (随你 của nam dùng lại cho nữ), không có luật khi
+  không chắc. Luật 5e/5f (`SYSTEM_PROMPT` + bản tiếng khác): e) mục "NGƯỜI NÓI TỪNG DÒNG" (S1 · nam / S2 · nữ / ? – nam /
+  nữ đo từ giọng có thể sai, đại từ dòng gốc + cặp đã rõ ưu tiên), người nghe = người nói khác ở dòng trước / sau; f) không
+  chắc -> theo Cài đặt `addr_unsure` (`translate.ADDR_MODES` / `ADDR_LABELS` / `ADDR_RULE_VI/EN`, `addr_mode`): "drop"
+  (mặc định: bỏ đại từ nếu câu vẫn tự nhiên – 随你 -> "Tùy thôi."; không bỏ được – 你炼体我画符修炼 – thì cặp trung tính:
+  hiện đại cậu – tớ, cổ trang ngươi – ta, bề trên ngài – tôi) / "neutral" (luôn cặp trung tính – "Tùy cậu.") / "guess"
+  (AI đoán như cũ); dòng làm theo f) trả thêm "xh": "?" (tiếng khác "addr") -> `_addr_flags` -> đánh dấu `XH_MARK` đầu bản
+  dịch trong lúc dịch (giữ cả trong bộ nhớ dịch) -> `Translator.addr_flags` -> `extra["addr_unsure"]` (bảng câu chữ bản
+  dịch vàng cam `subs_model.ADDR_COLOR` + tooltip; sửa tay / nạp SRT / sửa từ điện thoại bỏ cờ). `system_prompt(..., addr)`,
+  `address_tail(target, addr)` (+ `ADDR_TAIL_VI/EN`) cho dịch / rút gọn / sửa vế / kiểm tra. Gửi người nói (Cài đặt
+  `translate_speakers`, mặc định bật): `Translator.speaker_tags(segs)` (chỉ AI, phim ≥ 2 người nói; `Translator.genders`
+  {người nói: male/female} do `pipeline.translate` đặt từ `p.data["speaker_gender"]`, chưa có thì `measure_genders` – đo
+  giọng KHÔNG reload / lưu dự án; `speaker_genders` = đo + lưu) -> `translate_lines(who=, pos=, near=)`: `_llm_batch` thêm
+  mục NGƯỜI NÓI TỪNG DÒNG, ngữ cảnh trước / sau có nhãn [S1 · nam], chỉ lấy dòng LIỀN NHAU thật trong phim (`pos`); dịch 1
+  phần phim (câu đã tích / dòng trống) -> `_near` = dòng liền trước / sau thật (+ bản dịch) của câu không nằm cạnh nó trong
+  danh sách -> mục "NGỮ CẢNH QUANH TỪNG DÒNG" (trước: AI coi câu đã tích bên cạnh là dòng trước). Dịch có nhìn hình: VIDEO
+  TIMES dùng nhãn có nam / nữ. Bộ nhớ bản dịch: khoá + đuôi " ⟦M⟧" / " ⟦F⟧" (`_gkey`, `GENDER_KEY_RE`; `cache_text` bỏ
+  đuôi khi xoá bản nhớ câu dịch lại). `pipeline.set_speaker_gender` (src "user", giữ khi đo lại như "gemini"),
+  `speaker_tags(p, settings)` -> `skills.review_lines(who=, addr=)` ("nguoi_noi" mỗi câu + nhãn ở NGỮ CẢNH; REVIEW_PROMPT
+  mục 2: sửa "Tùy em" khi nữ nói với nam, câu trung tính để nguyên khi chưa chắc). Thông báo dịch "N câu xưng hô chưa chắc".
+  GUI: tab Tự động nhóm 2 `a_spktag` "Gửi người nói + nam / nữ cho AI" + `a_addr` "Khi không chắc xưng hô" (lưu qua
+  `_ai_switch_changed`, `sync_engine`, mờ khi Google / Hy-MT2); Cài đặt → Dịch thuật `spk_tags` / `addr_unsure`; bảng người
+  nói tab Lồng tiếng 5 cột (Người nói | Nam / nữ ô chọn `_set_gender` | Số câu | Giọng lồng | ▶ – cột giọng là 3); tab
+  Phụ đề → Công cụ → Sửa câu hàng "Xưng hô" nút "Tích câu xưng hô chưa chắc" (`_pick_addr`). Kỹ năng "Dịch chuẩn" mặc định
+  thêm 2 dòng xưng hô; bản đã lưu y nguyên nội dung mặc định cũ (`skills.OLD_STD_SHA`, `_sha`) tự dùng bản mới.
 - Form dịch AI (2.1.13): `translate.SYSTEM_PROMPT` / `system_prompt(target, source, fill, genre)` – luật 1 đúng số dòng
   (không gộp / tách / bỏ / để trống / chuyển ý sang dòng khác), 2 đọc ≥ 2 dòng trước + 2 dòng sau, 3 sát nghĩa KHÔNG thêm
   từ / từ đệm / ý, 8 độ dài (⟪M–N⟫ chỉ khi Cài đặt `translate_fill` – mặc định TẮT từ 2.1.13, `FILL_RULE_VI/EN`), 13 JSON
@@ -937,7 +963,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (328 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (330 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -2901,7 +2927,21 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   lỗi nghe trước khi dịch" / "AI nối câu trước khi dịch" (tab Tự động + hộp Thiết lập…), bật riêng / cùng lúc (xem Cấu trúc
   "AI trước khi dịch"). Cài đặt cũ đang bật vẫn bật cả 2. Thử với AI giả: chỉ sửa -> sửa chữ không gộp dòng; chỉ nối -> gộp
   rồi lọc lời hát riêng, Hoàn tác về trước cả 2; cả 2 -> 1 lượt như cũ.
+- 2.4.0: "nữ nói 随你 với nam mà tool cứ dịch 'tùy em' – câu không chắc dùng 'cậu' cho khỏi lệch vai, form cho AI biết
+  trước" -> tư vấn trước (người dùng duyệt A–G): luật xưng hô khi không chắc (bỏ đại từ / cặp trung tính / AI đoán), gửi
+  người nói + nam / nữ từng câu, bộ nhớ bản dịch tách theo nam / nữ, cờ "xưng hô chưa chắc" + nút tích, chọn tay nam / nữ
+  người nói, Dịch câu đã tích kèm dòng liền trước / sau thật, kỹ năng Dịch chuẩn mới (xem Cấu trúc "Xưng hô theo người
+  nói"). Thử với AI giả: 随你 (S2 · nữ sau S1 · nam) có mục người nói, câu 你去哪？ được đánh dấu, 随你 của nam không lấy bản
+  nhớ của nữ, giao diện offscreen. Chưa dịch thử bằng API thật (sandbox). Trước đó (không đổi code): tìm hiểu giọng đọc "ừm"
+  -> "mây mơ", "vi" -> "sáu" – không phải VieNeu 3.8.3 (sea-g2p 0.10 đọc đúng "ừm", tên "Vi"; chỉ "VI" HOA sau tập / chương
+  / thế kỷ -> "sáu"); VieNeu đọc sai "Mm" (mi li mét), "Hm" (tiếng Anh), "Hehe / Hihi / Haha" (tiếng Anh), "Aaa" (ây ây ây),
+  "Ừmmm" (ừm mờ mờ) – đề xuất đổi về cách viết tiếng Việt trước khi đọc (chưa làm, chờ người dùng).
 ## Vấn đề đang mở
+- 2.4.0: chờ người dùng chép file, tab Lồng tiếng mục 2 xem cột Nam / nữ từng người nói (sai thì chọn lại), dịch lại 1 tập
+  (hoặc tích câu sai xưng hô → Dịch câu đã tích): câu nữ nói với nam còn "em" không, câu chữ vàng cam (xưng hô chưa chắc)
+  nhiều không – Tích câu xưng hô chưa chắc để soát; kỹ năng "Dịch chuẩn" đã sửa tay thì bản sửa giữ (luật chung vẫn áp) –
+  muốn luật mới trong kỹ năng: hộp Kỹ năng dịch AI → Về mặc định. Đợt 2 (chưa làm): nam / nữ từng câu theo giọng, Gemini xem
+  5–10 s video quanh câu chưa chắc.
 - 2.3.9: chờ người dùng chép file, tab Tự động → bước 2 Dịch: bật / tắt riêng "AI sửa lỗi nghe" / "AI nối câu" rồi dịch cả
   phim lần đầu – thông báo có "AI sửa N câu" / "nối N câu bị cắt"; nối sai -> tab Phụ đề → Hoàn tác sửa.
 - 2.3.8: chờ người dùng chép file, mở phim đã lồng có đoạn nói dồn: tab Lồng tiếng → mục 3 → khối "Giãn video ở đoạn nói

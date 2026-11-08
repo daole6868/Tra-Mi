@@ -11,6 +11,7 @@ from .player import fmt
 
 COLS = ["#", "Bắt đầu", "Kết thúc", "Người", "Tiếng Trung", "Tiếng Việt", "🎵", "Bỏ lồng", "Độ vừa", "Chọn", "Giọng"]
 C_N, C_START, C_END, C_SPK, C_ZH, C_VI, C_SONG, C_NODUB, C_FIT, C_SEL, C_VOICE = range(11)
+ADDR_COLOR = "#F2B868"   # bản dịch AI không chắc xưng hô (2.4.0)
 VOICE_DEFAULT = "(Theo người nói)"
 FIT_TEXT = {"ok": "✓", "fast": "⚡", "long": "⚠"}
 FIT_COLOR = {"ok": "#4ADE80", "fast": "#F5B841", "long": "#F87171"}
@@ -386,6 +387,8 @@ class SubsModel(QAbstractTableModel):
                 return QColor("#E8C26A" if s.extra.get("src_unsure") else "#C3CAD6")   # vàng = AI sửa mà chưa chắc
             if c == C_FIT:
                 return QColor(FIT_COLOR.get(s.extra.get("fit"), theme.MUTED))
+            if c == C_VI and s.extra.get("addr_unsure"):
+                return QColor(ADDR_COLOR)          # vàng cam = AI không chắc xưng hô (luật 5f, 2.4.0)
         if role == Qt.ItemDataRole.BackgroundRole:
             if idx.row() == self.active:
                 return QColor("#2B1E22")
@@ -401,6 +404,10 @@ class SubsModel(QAbstractTableModel):
                     (" – hơi nhanh, khó đọc kịp" if cps > 20 else "")
                 if s.extra.get("review_note") and s.extra.get("trans_before_review") is not None:
                     tip += f"\nAI kiểm tra đã sửa: {s.extra['review_note']}\nTrước khi sửa: {s.extra['trans_before_review']}"
+                if s.extra.get("addr_unsure"):
+                    tip += ("\n⚠ Xưng hô chưa chắc: AI không rõ ai nói với ai / nam hay nữ nên đã bỏ đại từ hoặc dùng cặp "
+                            "trung tính (cậu – tớ, ngươi – ta). Sửa tay câu này, hoặc sửa nam / nữ người nói (bảng người "
+                            "nói tab Lồng tiếng) rồi Dịch câu đã tích")
                 return tip
             if c == C_ZH and s.extra.get("noise"):
                 return f"⚠ Nghi nghe nhầm: {s.extra['noise']}\nNghe lại câu này – đúng là nhạc / tiếng động thì Xoá"
@@ -474,6 +481,7 @@ class SubsModel(QAbstractTableModel):
                 s.trans = " ".join(v.split())
                 s.extra.pop("fit", None)   # bản dịch đổi -> cần tạo lại bản lồng để đo lại
                 s.extra["trans_user"] = True   # người dùng tự sửa: AI không tự rút gọn câu này
+                s.extra.pop("addr_unsure", None)   # bạn đã soát xưng hô câu này
             elif c == C_VOICE:
                 if v.strip():
                     s.extra["voice"] = v.strip()

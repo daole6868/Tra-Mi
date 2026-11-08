@@ -247,6 +247,8 @@ DEFAULT_SETTINGS: dict = {
     "pitch_check": True,              # khi nghe: đánh dấu câu nghi là nhạc / tiếng động bị chép thành lời (cao độ giọng)
     "pitch_tol": 4.0,                 #   lệch cao độ cho phép ngoài khoảng giọng thường của người nói (nửa cung)
     "pitch_trim": True,               #   thu đầu / cuối câu thừa sang nhạc / tiếng động theo đoạn có giọng thật
+    "addr_unsure": "drop",            # không chắc xưng hô: drop bỏ đại từ / neutral cặp trung tính / guess AI đoán (2.4.0)
+    "translate_speakers": True,       # gửi người nói + nam / nữ từng câu cho AI dịch (2.4.0)
     "translate_fill": False,          # dịch AI: câu ngắn hơn hẳn chỗ trống -> nói đầy đủ hơn (2.1.13: mặc định tắt – không thêm từ)
     # Xoá phụ đề
     "inpaint_backend": "lama",        # lama (AI, đẹp) / opencv (nhanh)

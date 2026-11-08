@@ -838,6 +838,22 @@ class ProjectPage(QWidget):
                             "Dịch bằng AI: câu dịch ngắn hơn hẳn thời gian nhân vật nói thì dùng câu đủ thành phần "
                             "(chủ ngữ, xưng hô, từ nối) – vẫn KHÔNG thêm ý, không thêm từ đệm / tiếng cảm thán. Tắt "
                             "(mặc định) = dịch sát nghĩa, chỉ giới hạn độ dài tối đa")
+        # 2.4.0 xưng hô: gửi người nói + nam / nữ cho AI; câu không chắc ai nói với ai -> bỏ đại từ / cặp trung tính
+        from ..translate import ADDR_LABELS, ADDR_MODES
+
+        self.a_spktag = f.row("Gửi người nói + nam / nữ cho AI", Switch(bool(s.get("translate_speakers", True))),
+                              "Mỗi câu gửi kèm người nói (S1, S2… theo giọng) và nam / nữ (tool đo từ giọng – sửa được ở "
+                              "bảng người nói tab Lồng tiếng) để AI biết ai đang nói với ai mà chọn đúng xưng hô: nữ nói "
+                              "随你 với nam -> 'Tùy anh', không phải 'Tùy em'. Cần phim có ≥ 2 người nói (bật Phân biệt "
+                              "người nói)")
+        self.a_addr = f.row("Khi không chắc xưng hô", combo([(m, ADDR_LABELS[m]) for m in ADDR_MODES],
+                                                            s.get("addr_unsure", "drop")),
+                            "Câu gốc chỉ có 你 / 我 mà chưa rõ ai nói với ai, nam hay nữ, ai lớn hơn: bỏ đại từ nếu câu "
+                            "vẫn tự nhiên (随你 -> 'Tùy thôi.'), không bỏ được thì dùng cặp trung tính (hiện đại cậu – "
+                            "tớ, cổ trang ngươi – ta) – không đoán bừa anh / em. Câu AI phải làm vậy được đánh dấu: tab "
+                            "Phụ đề → Công cụ → Sửa câu → 'Tích câu xưng hô chưa chắc'")
+        self.a_spktag.toggled.connect(self._ai_switch_changed)
+        self.a_addr.currentIndexChanged.connect(self._ai_switch_changed)
         # 2.1.10: các mục AI chỉ chạy khi Công cụ dịch là AI – chọn Google / Hy-MT2 thì làm mờ + ghi rõ (trước: công tắc
         # vẫn bật mà không có tác dụng gì, người dùng tưởng tool bỏ sót bước)
         self.a_ai_note = label("Các mục AI ở trên chỉ chạy khi Công cụ dịch là AI (Gemini / DeepSeek / Claude / GPT / "
@@ -1108,6 +1124,11 @@ class ProjectPage(QWidget):
                  button("Sửa dấu câu", "wand", "Câu đã tích (hoặc cả phim): bỏ dấu phẩy chen giữa 1 cụm từ / tên riêng "
                         "(\"một món, đồ tốt\", \"Thiên Kiếm, Tông\"), thêm dấu câu cuối theo câu gốc (? ! . ,) – bản dịch "
                         "trước 2.1.11 bị bỏ dấu chấm cuối câu. Không gọi AI, Ctrl+Z hoàn tác", on_click=self._fix_punct)),
+            _Row("Xưng hô",
+                 button("Tích câu xưng hô chưa chắc", "check", "Bản dịch chữ vàng cam: AI không rõ ai nói với ai / nam hay "
+                        "nữ nên đã bỏ đại từ hoặc dùng cặp trung tính (cậu – tớ, ngươi – ta). Tích để soát: sửa tay, "
+                        "hoặc sửa nam / nữ người nói (bảng người nói tab Lồng tiếng) rồi 'Dịch câu đã tích'",
+                        flat=True, on_click=self._pick_addr)),
             _Row("Giờ câu",
                  button("Dời giờ", "clock", "Dời giờ mọi câu (hoặc các câu đã tích) sớm / muộn đi vài giây",
                         on_click=self._shift),
@@ -2885,18 +2906,21 @@ class ProjectPage(QWidget):
                                on_click=self.run_diarize),
                         button("Tự gán giọng khác nhau", "wand", "Mỗi người nói 1 giọng, nam / nữ theo giọng gốc",
                                on_click=self._auto_voices))
-        self.spk_table = QTableWidget(0, 4)
-        self.spk_table.setHorizontalHeaderLabels(["Người nói", "Số câu", "Giọng lồng", ""])
+        # 2.4.0: cột Nam / nữ chọn tay được – AI dịch dùng để chọn xưng hô, Tự gán giọng dùng để chọn giọng nam / nữ
+        self.spk_table = QTableWidget(0, 5)
+        self.spk_table.setHorizontalHeaderLabels(["Người nói", "Nam / nữ", "Số câu", "Giọng lồng", ""])
         self.spk_table.verticalHeader().hide()
         self.spk_table.verticalHeader().setDefaultSectionSize(44)
         hh = self.spk_table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
-        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self.spk_table.setColumnWidth(0, 100)
-        self.spk_table.setColumnWidth(1, 70)
-        self.spk_table.setColumnWidth(3, 54)
+        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        self.spk_table.setColumnWidth(0, 76)
+        self.spk_table.setColumnWidth(1, 104)
+        self.spk_table.setColumnWidth(2, 62)
+        self.spk_table.setColumnWidth(4, 54)
         self.spk_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         g_voice.add(self.spk_table)
         spk.add(g_voice)
@@ -4360,6 +4384,8 @@ class ProjectPage(QWidget):
             self.a_review.setChecked(bool(st.get("ai_review_after_translate", False)))
             self.a_songai.setChecked(bool(st.get("ai_song_filter", True)))
             self.a_fill.setChecked(bool(st.get("translate_fill", False)))
+            self.a_spktag.setChecked(bool(st.get("translate_speakers", True)))
+            set_combo(self.a_addr, st.get("addr_unsure", "drop"))
             on = bool(st.get("split_long_trans", True))
             self.a_split_long.setChecked(on)
             self.s_split.setChecked(on)
@@ -4511,7 +4537,9 @@ class ProjectPage(QWidget):
                                        "ai_join_before_translate": self.a_join.isChecked(),
                                        "ai_review_after_translate": self.a_review.isChecked(),
                                        "ai_song_filter": self.a_songai.isChecked(),
-                                       "translate_fill": self.a_fill.isChecked()})
+                                       "translate_fill": self.a_fill.isChecked(),
+                                       "translate_speakers": self.a_spktag.isChecked(),
+                                       "addr_unsure": self.a_addr.currentData() or "drop"})
 
     def _edit_genres(self):
         from .genres_dialog import GenresDialog
@@ -4844,7 +4872,7 @@ class ProjectPage(QWidget):
 
         eng = self.a_engine.currentData()
         ai = eng not in LOCAL_ENGINES and eng != pipeline.NO_TRANSLATE
-        for name in ("a_skill", "a_clean", "a_join", "a_songai", "a_review", "a_fill", "s_skill"):
+        for name in ("a_skill", "a_clean", "a_join", "a_songai", "a_review", "a_fill", "a_spktag", "a_addr", "s_skill"):
             w = getattr(self, name, None)
             if w is not None:
                 w.setEnabled(ai)
@@ -6348,14 +6376,16 @@ class ProjectPage(QWidget):
         gend = p.data.get("speaker_gender") or {}
         for r, s in enumerate(spks):
             gi = gend.get(s["speaker"]) or {}
-            tag = {"male": " · nam", "female": " · nữ"}.get(gi.get("g", ""), "")
-            it = QTableWidgetItem(s["speaker"] + tag)
+            it = QTableWidgetItem(s["speaker"])
+            tip = ""
             if gi:
-                it.setToolTip(f"Chất giọng: {('nam' if gi.get('g') == 'male' else 'nữ' if gi.get('g') == 'female' else 'chưa rõ')}"
-                              + (f" · cao độ ~{gi['f0']:.0f} Hz" if gi.get("f0") else "")
-                              + (" · theo mô hình + cao độ" if gi.get("by") == "model+pitch" else " · theo cao độ giọng"
-                                 if gi.get("by") == "pitch" else " · Gemini thấy trên hình" if gi.get("by") == "gemini"
-                                 else "") + (f" · {gi['name']}" if gi.get("name") else ""))
+                tip = (f"Chất giọng: {('nam' if gi.get('g') == 'male' else 'nữ' if gi.get('g') == 'female' else 'chưa rõ')}"
+                       + (f" · cao độ ~{gi['f0']:.0f} Hz" if gi.get("f0") else "")
+                       + (" · theo mô hình + cao độ" if gi.get("by") == "model+pitch" else " · theo cao độ giọng"
+                          if gi.get("by") == "pitch" else " · Gemini thấy trên hình" if gi.get("by") == "gemini"
+                          else " · bạn tự chọn" if gi.get("by") == "user" else "")
+                       + (f" · {gi['name']}" if gi.get("name") else ""))
+                it.setToolTip(tip)
             it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             from .subs_model import spk_color
             from PySide6.QtGui import QColor
@@ -6363,18 +6393,27 @@ class ProjectPage(QWidget):
             it.setForeground(QColor(spk_color(s["speaker"])))
             it.setFont(theme.font(10, QFont.Weight.Bold))
             self.spk_table.setItem(r, 0, it)
+            gc = QComboBox()
+            for val, txt in (("", "? chưa rõ"), ("male", "Nam"), ("female", "Nữ")):
+                gc.addItem(txt, val)
+            set_combo(gc, gi.get("g", "") if gi.get("g") in ("male", "female") else "")
+            gc.setToolTip((tip + "\n" if tip else "") + "Nam / nữ của người nói này: AI dịch dùng để chọn xưng hô (nữ "
+                          "nói 随你 với nam -> 'Tùy anh'), Tự gán giọng dùng để chọn giọng nam / nữ. Tool đo từ giọng có "
+                          "thể sai – chọn lại ở đây rồi 'Dịch câu đã tích' / 'Dịch lại tất cả'")
+            gc.currentIndexChanged.connect(lambda _i, spk=s["speaker"], c=gc: self._set_gender(spk, c.currentData()))
+            self.spk_table.setCellWidget(r, 1, gc)
             n = QTableWidgetItem(str(s["lines"]))
             n.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.spk_table.setItem(r, 1, n)
+            self.spk_table.setItem(r, 2, n)
             cb = QComboBox()
             cb.addItem("(Mặc định của bộ đọc)", "")
             _add_voices(cb, voices)
             set_combo(cb, s["voice"])
             cb.currentIndexChanged.connect(lambda _i, spk=s["speaker"], c=cb: self._set_voice(spk, c.currentData()))
-            self.spk_table.setCellWidget(r, 2, cb)
+            self.spk_table.setCellWidget(r, 3, cb)
             b = IconButton("play", "Nghe thử giọng này", 32)
             b.clicked.connect(lambda _=False, c=cb, spk=s["speaker"]: self._preview_voice(c.currentData(), spk))
-            self.spk_table.setCellWidget(r, 3, wrap(hbox(b)))
+            self.spk_table.setCellWidget(r, 4, wrap(hbox(b)))
         self._update_voice_note()
 
     def _fill_auto_voices(self, voices: list[dict]):
@@ -6446,17 +6485,27 @@ class ProjectPage(QWidget):
             self._save_segs_now()
         self._update_voice_note()
 
+    def _set_gender(self, spk: str, g: str):
+        """Bạn tự chọn nam / nữ người nói (2.4.0) – AI dịch / Tự gán giọng dùng; '? chưa rõ' = để tool đo lại theo giọng."""
+        if self.loading or not self.p:
+            return
+        pipeline.set_speaker_gender(self.p, spk, g)
+        n = sum(1 for x in self.model.segs if (x.speaker or "S1") == spk and x.trans.strip())
+        self.win.toast(f"{spk}: {'nam' if g == 'male' else 'nữ' if g == 'female' else 'để tool đo theo giọng'}"
+                       + (f" – {n} câu đã dịch của {spk}: tích rồi 'Dịch câu đã tích' để dịch lại theo xưng hô mới"
+                          if n else ""), "ok")
+
     def _update_voice_note(self):
         """Mục 3 ghi rõ giọng sẽ dùng: bộ đọc + giọng từng người nói (chọn ở mục 2)."""
         parts = []
         for r in range(self.spk_table.rowCount()):
-            it, cb = self.spk_table.item(r, 0), self.spk_table.cellWidget(r, 2)
+            it, cb = self.spk_table.item(r, 0), self.spk_table.cellWidget(r, 3)
             if it and isinstance(cb, QComboBox):
                 parts.append(f"{it.text().split(' ·')[0]}: {cb.currentText()}")
         own = sum(1 for x in self.model.segs if x.extra.get("voice"))
         n_spk = self.spk_table.rowCount()
-        defaults = sum(1 for r in range(n_spk) if isinstance(self.spk_table.cellWidget(r, 2), QComboBox)
-                       and not self.spk_table.cellWidget(r, 2).currentData())
+        defaults = sum(1 for r in range(n_spk) if isinstance(self.spk_table.cellWidget(r, 3), QComboBox)
+                       and not self.spk_table.cellWidget(r, 3).currentData())
         hint = ""
         va = pipeline.voice_all(self.p, self.settings) if self.p else ""
         if va and va != "@auto":
@@ -7410,6 +7459,19 @@ class ProjectPage(QWidget):
         tr = any(self.model.segs[i].trans.strip() for i in done if i < len(self.model.segs))
         self.win.toast(f"Đã về chữ OCR cho {len(done)} câu" + (" – bấm 'Dịch câu đã tích' để dịch lại" if tr else ""),
                        "ok")
+
+    def _pick_addr(self):
+        """Tích các câu AI báo không chắc xưng hô (luật 5f, 2.4.0)."""
+        segs = self.model.segs
+        rows = [i for i, x in enumerate(segs) if x.extra.get("addr_unsure") and x.trans.strip()]
+        if not rows:
+            return self.win.toast("Không có câu nào AI báo xưng hô chưa chắc (chỉ có ở câu dịch bằng AI từ bản 2.4.0)",
+                                  "ok")
+        self.model.set_picked(range(len(segs)), False)
+        self.model.set_picked(rows)
+        self._select_line(rows[0], seek=False)
+        self.win.toast(f"Đã tích {len(rows)} câu xưng hô chưa chắc – sửa tay, hoặc sửa nam / nữ người nói rồi 'Dịch câu "
+                       "đã tích'", "ok")
 
     def _pick_gemini(self):
         segs = self.model.segs

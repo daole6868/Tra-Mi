@@ -749,6 +749,7 @@ class SettingsPage(QWidget):
         ("spk_n", "diarize_speakers", "i"), ("spk_thr", "diarize_threshold", "f"),
         ("engine", "translate_engine", "c"), ("style", "translate_style", "c"), ("ai_join", "ai_join_engine", "c"),
         ("breath_marks", "breath_marks", "b"), ("clause_match", "trans_clause_match", "b"),
+        ("spk_tags", "translate_speakers", "b"), ("addr_unsure", "addr_unsure", "c"),
         ("target", "target_lang", "c"),
         ("ds_model", "deepseek_model", "t"), ("oa_base", "openai_base_url", "t"), ("oa_model", "openai_model", "t"),
         ("an_model", "anthropic_model", "t"), ("ge_model", "gemini_model", "t"),
@@ -947,6 +948,17 @@ class SettingsPage(QWidget):
         self.clause_match = f.row("AI sửa câu dịch cho đủ vế", Switch(),
                                   "Dịch bằng AI: câu dịch gộp mất vế so với chỗ nhân vật ngắt hơi -> AI viết lại cho đủ vế "
                                   "(cùng ý, cùng độ dài). Tốn thêm 1 lần gọi AI cho các câu đó")
+        from ..translate import ADDR_LABELS, ADDR_MODES
+
+        self.spk_tags = f.row("Gửi người nói + nam / nữ cho AI", Switch(),
+                              "Mỗi câu gửi kèm người nói (S1, S2…) và nam / nữ đo từ giọng để AI biết ai nói với ai mà "
+                              "chọn đúng xưng hô (nữ nói 随你 với nam -> 'Tùy anh'). Cần phim có ≥ 2 người nói. Nam / nữ "
+                              "sửa tay ở bảng người nói tab Lồng tiếng")
+        self.addr_unsure = f.row("Khi không chắc xưng hô", combo([(m, ADDR_LABELS[m]) for m in ADDR_MODES]),
+                                 "Câu gốc chỉ có 你 / 我 mà chưa rõ ai nói với ai, nam hay nữ: bỏ đại từ nếu câu vẫn tự "
+                                 "nhiên, không bỏ được thì cặp trung tính (hiện đại cậu – tớ, cổ trang ngươi – ta) – "
+                                 "không đoán bừa anh / em. Câu như vậy được đánh dấu để soát (tab Phụ đề → Công cụ → Sửa "
+                                 "câu → Tích câu xưng hô chưa chắc)")
         t.add(f)
         t.add(label("API key, số câu mỗi lần gửi, giới hạn gói miễn phí: chỉnh riêng ở khung từng công cụ bên dưới. "
                     "Kỹ năng dịch chung (giữ đúng số câu, tên riêng chuẩn) sửa ở tab Tự động → 'Kỹ năng dịch AI' → "

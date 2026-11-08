@@ -66,11 +66,21 @@ Luật bắt buộc:
       người già; 你: anh / chị / cậu / ngươi / mày theo quan hệ) – KHÔNG dùng ngữ cảnh để đổi nam ↔ nữ, trên ↔ dưới,
       anh ↔ em, ngôi 1 ↔ 2 ↔ 3 mà dòng gốc đã ghi.
    c) Chỉ khi dòng gốc KHÔNG có đại từ / cách gọi (tiếng Trung hay bỏ chủ ngữ) hoặc chỉ có 我 / 你 (không rõ nam nữ, trên
-      dưới) mới chọn xưng hô theo ngữ cảnh, quan hệ, tuổi tác, địa vị (THỂ LOẠI PHIM, THÔNG TIN PHIM) – giữ ĐÚNG cặp xưng
-      hô các dòng trước đã dùng giữa đúng 2 người đó, nhất quán cả phim; tự xưng và gọi người nghe trong cùng 1 câu phải
-      cùng 1 cặp (哥，你去哪？ -> Anh, anh đi đâu? – không phải "Anh, em đi đâu?").
+      dưới) mới chọn xưng hô theo người nói (e), ngữ cảnh, quan hệ, tuổi tác, địa vị (THỂ LOẠI PHIM, THÔNG TIN PHIM) – giữ
+      ĐÚNG cặp xưng hô các dòng trước đã dùng giữa đúng 2 người đó, nhất quán cả phim; tự xưng và gọi người nghe trong
+      cùng 1 câu phải cùng 1 cặp (哥，你去哪？ -> Anh, anh đi đâu? – không phải "Anh, em đi đâu?"). Vẫn chưa đủ để biết
+      chắc thì làm theo f).
    d) THỂ LOẠI PHIM, THÔNG TIN PHIM, KỸ NĂNG, hình ảnh video chỉ là gợi ý cho trường hợp c); trái với đại từ / cách gọi
       ghi trong dòng gốc thì theo dòng gốc.
+   e) NGƯỜI NÓI: mục "NGƯỜI NÓI TỪNG DÒNG" (nếu có) ghi người nói mỗi dòng (S1, S2… phân biệt theo giọng) kèm nam / nữ
+      tool đo từ giọng ("?" = chưa rõ); dòng NGỮ CẢNH cũng có nhãn [S1 · nam]. Dùng nó để biết ai đang nói với ai: người
+      nghe thường là người nói KHÁC ở dòng ngay trước / sau. Ví dụ dòng trước [S1 · nam] hỏi, dòng này S2 · nữ đáp 随你 ->
+      nữ nói với nam -> "Tùy anh." (KHÔNG phải "Tùy em."); 你炼体我画符修炼 do sư muội nói với sư huynh -> "Huynh luyện
+      thể, muội vẽ phù tu luyện.". Nam / nữ đo từ giọng có thể sai: đại từ ghi trong dòng gốc (a) và cặp xưng hô đã rõ ở
+      các dòng trước giữa đúng 2 người đó được ưu tiên hơn.
+   f) KHÔNG CHẮC XƯNG HÔ – dòng gốc chỉ có 你 / 我 hoặc bỏ chủ ngữ, mà chưa rõ người nói / người nghe là nam hay nữ, ai lớn
+      hơn, và các dòng trước chưa có cặp xưng hô chắc chắn giữa đúng 2 người đó: {addr}
+      Dòng nào phải làm theo f) thì thêm "xh": "?" vào mục JSON của dòng đó (luật 13).
 6. Tên người, địa danh, tổ chức, chiêu thức: phiên âm Hán Việt chuẩn (李逍遥 -> Lý Tiêu Dao); địa danh có tên tiếng Việt quen
    dùng thì dùng tên đó (北京 -> Bắc Kinh); thương hiệu / người nước ngoài: tên quốc tế (微信 -> WeChat). Một tên chỉ một cách
    dịch. Tuân thủ tuyệt đối BẢNG THUẬT NGỮ. Thuật ngữ trong THỂ LOẠI PHIM chỉ dùng khi dòng gốc có đúng chữ đó.
@@ -98,7 +108,56 @@ Luật bắt buộc:
    sau) thì kết thúc bằng ",". Dấu câu cuối giúp giọng lồng lên / xuống giọng đúng.
 13. Chỉ trả về JSON hợp lệ, không giải thích: {"1": {"dau": "…", "dich": "bản dịch"}, "2": {"dau": "…", "dich": "…"}, …}
    đủ MỌI số dòng được yêu cầu. "dau" = chép y nguyên 3 ký tự đầu của dòng gốc đó (bỏ dấu câu, khoảng trắng) – để kiểm
-   tra bản dịch nằm đúng dòng."""
+   tra bản dịch nằm đúng dòng. Dòng phải dùng cách ở luật 5f (không chắc xưng hô) thêm "xh": "?" – {"dau": "…", "dich":
+   "…", "xh": "?"}; dòng khác không ghi "xh"."""
+
+# Luật 5f – khi KHÔNG CHẮC xưng hô (2.4.0, Cài đặt addr_unsure). Người dùng: "随你 nữ nói với nam mà tool dịch 'tùy em';
+# câu không chắc thì dùng 'cậu' cho khỏi lệch vai" -> mặc định bỏ đại từ khi câu vẫn tự nhiên, không bỏ được thì cặp
+# trung tính theo thể loại phim.
+ADDR_MODES = ("drop", "neutral", "guess")
+ADDR_LABELS = {"drop": "Bỏ đại từ, không được thì dùng cặp trung tính",
+               "neutral": "Luôn dùng cặp trung tính (cậu – tớ / ngươi – ta)",
+               "guess": "Để AI tự đoán theo ngữ cảnh (như cũ)"}
+_NEUTRAL_VI = ("cặp TRUNG TÍNH không lộ nam / nữ, trên / dưới: phim hiện đại / đời thường / học đường \"cậu – tớ\"; cổ trang "
+               "/ tiên hiệp / kiếm hiệp / huyền huyễn \"ngươi – ta\" (你炼体我画符修炼 -> \"Ngươi luyện thể, ta vẽ phù tu "
+               "luyện.\"); người nghe rõ là bề trên / được kính trọng (您, sư phụ, cấp trên, người già) \"ngài – tôi\" (cổ "
+               "trang: \"ngài – ta\")")
+ADDR_RULE_VI = {
+    "drop": ("ƯU TIÊN BỎ đại từ nếu câu tiếng Việt vẫn tự nhiên, đủ ý (随你 -> \"Tùy thôi.\" / \"Sao cũng được.\"; 你去哪？ -> "
+             "\"Đi đâu thế?\"; 我不知道 -> \"Không biết nữa.\"). Câu không bỏ được đại từ (đối lập \"你… 我…\", phải nói rõ ai "
+             "làm gì) thì dùng " + _NEUTRAL_VI + ". KHÔNG đoán bừa anh / em, chị / em, chàng / nàng."),
+    "neutral": ("dùng " + _NEUTRAL_VI + " (随你 -> \"Tùy cậu.\"). KHÔNG đoán bừa anh / em, chị / em, chàng / nàng."),
+    "guess": "chọn cặp xưng hô hợp nhất theo ngữ cảnh, quan hệ, tuổi tác, THỂ LOẠI PHIM (như c).",
+}
+ADDR_RULE_EN = {
+    "drop": ("PREFER leaving the pronoun / form of address out when the sentence stays natural and complete in {lang} "
+             "(随你 -> \"Whatever works.\" style). When it cannot be left out (a contrast \"你… 我…\" that must say who does "
+             "what), use the most NEUTRAL form – one that implies no gender and no seniority{neutral}. NEVER guess a "
+             "gendered / ranked form."),
+    "neutral": "use the most NEUTRAL form – one that implies no gender and no seniority{neutral}. NEVER guess a gendered / "
+               "ranked form.",
+    "guess": "choose the most likely form of address from context, relationship, age and FILM GENRE (as in c).",
+}
+_NEUTRAL_EN = {"en": "", "th": " (e.g. คุณ / ฉัน; the polite particle ครับ / ค่ะ follows the SPEAKER's gender when it is known)",
+               "ja": " (Japanese usually drops pronouns; otherwise あなた / 私)",
+               "ko": " (Korean usually drops pronouns; otherwise polite forms without 오빠 / 형 / 누나 / 언니)"}
+ADDR_TAIL_VI = {"drop": " Không chắc (chỉ có 你 / 我, chưa rõ ai nói với ai, nam hay nữ, ai lớn hơn): bỏ đại từ nếu câu vẫn "
+                        "tự nhiên, không bỏ được thì dùng cặp trung tính (hiện đại cậu – tớ, cổ trang ngươi – ta) – KHÔNG "
+                        "đoán bừa anh / em, chị / em.",
+                "neutral": " Không chắc (chỉ có 你 / 我, chưa rõ ai nói với ai, nam hay nữ, ai lớn hơn): dùng cặp trung "
+                           "tính (hiện đại cậu – tớ, cổ trang ngươi – ta) – KHÔNG đoán bừa anh / em, chị / em.",
+                "guess": ""}
+ADDR_TAIL_EN = {"drop": " When unsure (only 你 / 我, unclear who speaks to whom, gender or seniority): leave the form of "
+                        "address out if natural, otherwise use the most neutral form – never guess a gendered / ranked one.",
+                "neutral": " When unsure (only 你 / 我, unclear who speaks to whom, gender or seniority): use the most "
+                           "neutral form of address – never guess a gendered / ranked one.",
+                "guess": ""}
+
+
+def addr_mode(settings: dict | None) -> str:
+    """Cách xử lý khi không chắc xưng hô (Cài đặt addr_unsure)."""
+    m = str((settings or {}).get("addr_unsure") or "drop")
+    return m if m in ADDR_MODES else "drop"
 
 FILL_RULE_VI = """
    Ký hiệu ⟪M–N tiếng⟫: nhân vật nói lâu – bản dịch nên dài khoảng M tới N tiếng; nếu bản dịch sát nghĩa ngắn hơn hẳn M
@@ -140,21 +199,29 @@ seniority, person and number; context only picks the tone, never switch he ↔ s
 Only lines without such a word get their form of address from context, consistently."""
 
 
-def address_tail(target: str) -> str:
-    """Câu nhắc luật xưng hô theo dòng gốc – gắn CUỐI mọi lời nhắc dịch / sửa bản dịch (sau form thể loại, kỹ năng)."""
-    return ADDRESS_TAIL_VI if langs.norm(target) == "vi" else ADDRESS_TAIL_EN
+def address_tail(target: str, addr: str = "drop") -> str:
+    """Câu nhắc luật xưng hô theo dòng gốc – gắn CUỐI mọi lời nhắc dịch / sửa bản dịch (sau form thể loại, kỹ năng). addr:
+    cách làm khi không chắc xưng hô (2.4.0)."""
+    addr = addr if addr in ADDR_MODES else "drop"
+    if langs.norm(target) == "vi":
+        return ADDRESS_TAIL_VI + ADDR_TAIL_VI[addr]
+    return ADDRESS_TAIL_EN + ADDR_TAIL_EN[addr]
 
 
-def system_prompt(target: str, source: str = "zh", fill: bool = False, genre: str = "") -> str:
+def system_prompt(target: str, source: str = "zh", fill: bool = False, genre: str = "", addr: str = "drop") -> str:
     """Lời nhắc hệ thống cho AI theo ngôn ngữ đích. fill: có ký hiệu ⟪M–N⟫ (Cài đặt "Câu ngắn nói đầy đủ hơn…"); genre:
-    form thể loại phim (genres.form) gắn cuối."""
+    form thể loại phim (genres.form) gắn cuối; addr: cách làm khi không chắc xưng hô (luật 5f, ADDR_MODES)."""
     target = langs.norm(target)
+    addr = addr if addr in ADDR_MODES else "drop"
     src_vi, src_en = SRC_NAMES.get(source, SRC_NAMES["zh"])
     if target == "vi":
         sp = SYSTEM_PROMPT.replace("từ tiếng Trung sang", f"từ {src_vi} sang", 1).replace("{fill}", FILL_RULE_VI if fill else "")
+        sp = sp.replace("{addr}", ADDR_RULE_VI[addr])
         return sp + (f"\n\n{GENRE_HEAD_VI}:\n{genre.strip()}" if (genre or "").strip() else "")
     L = langs.INFO[target]
     fill_en = FILL_RULE_EN.format(unit=L["unit_ai"]) if fill else ""
+    addr_rule = ADDR_RULE_EN[addr].format(lang=L["english"], neutral=_NEUTRAL_EN.get(target, ""))
+    thai_note = " Thai: the polite particle ครับ / ค่ะ follows the SPEAKER's gender." if target == "th" else ""
     sp = f"""You are an expert film subtitle translator with 15+ years of experience, translating {src_en} dialogue into {L['english']}.
 The translation is used for subtitles and for DUBBING.
 Mandatory rules:
@@ -181,10 +248,20 @@ Mandatory rules:
    b) Context (rule 2) only picks the tone within that same role{_ADDRESS[target]} – never use it to switch male ↔
       female, older ↔ younger, senior ↔ junior or 1st ↔ 2nd ↔ 3rd person that the source states.
    c) Only when the source line has no pronoun / term (Chinese often drops the subject) or only 我 / 你 (no gender or
-      rank) choose the form of address from context, relationship, age and status (FILM GENRE, FILM NOTES), keeping the
-      same pair the earlier lines used between the same two people, consistently for the whole film.
+      rank) choose the form of address from the speakers (e), context, relationship, age and status (FILM GENRE, FILM
+      NOTES), keeping the same pair the earlier lines used between the same two people, consistently for the whole
+      film. If that is still not enough to be sure, follow f).
    d) FILM GENRE, FILM NOTES, the user's SKILL and the video are only hints for case c); if they contradict a pronoun /
       term written in the source line, follow the source line.
+   e) SPEAKERS: the section "SPEAKER OF EACH LINE" (when present) gives the speaker of each line (S1, S2… told apart by
+      voice) with the gender measured from the voice ("?" = unknown); CONTEXT lines carry the same tag [S1 · male]. Use
+      it to know who talks to whom: the listener is usually the OTHER speaker of the line right before / after. The
+      measured gender can be wrong: a pronoun written in the source line (a) and a pair of address already clear in
+      earlier lines between the same two people come first.{thai_note}
+   f) UNSURE FORM OF ADDRESS – the source line has only 你 / 我 or no subject, and it is unclear whether the speaker /
+      listener is male or female or who is older, and earlier lines have no settled pair between the same two people:
+      {addr_rule}
+      For every line handled by f) add "addr": "?" to that line's JSON entry (rule 13).
 6. Names of people, places, organizations and techniques: use {_NAMES[target]}. One name, one rendering. ALWAYS follow
    the GLOSSARY. Terms listed in the FILM GENRE apply only when the source line contains that exact term.
 7. Source lines may contain speech-recognition errors (homophones): use the context (rule 2) to get the intended meaning.
@@ -212,7 +289,8 @@ Mandatory rules:
    final mark lets the dubbed voice rise / fall correctly{" (Thai: no full stop, keep ? and !)" if target == "th" else ""}.
 13. Return ONLY valid JSON, no explanation: {{"1": {{"head": "…", "text": "translation"}}, "2": {{"head": "…", "text": "…"}}, …}}
    with EVERY requested line number. "head" = copy exactly the first 3 characters of that source line (without
-   punctuation or spaces) – used to check that each translation sits on the right line."""
+   punctuation or spaces) – used to check that each translation sits on the right line. A line handled by rule 5f also
+   gets "addr": "?" – {{"head": "…", "text": "…", "addr": "?"}}; other lines have no "addr"."""
     return sp + (f"\n\n{GENRE_HEAD_EN}:\n{genre.strip()}" if (genre or "").strip() else "")
 
 
@@ -1221,6 +1299,39 @@ def shifted_lines(heads: list[str], lines: list[str]) -> set[int]:
     return bad
 
 
+XH_MARK = "\ue05f"   # dòng AI báo "không chắc xưng hô" (luật 5f) – đánh dấu đầu bản dịch trong lúc dịch, bỏ ở cuối
+GENDER_KEY_RE = re.compile(r"\s*⟦[MF]⟧$")   # đuôi khoá bộ nhớ bản dịch theo nam / nữ người nói (2.4.0)
+
+
+def _addr_flags(d: dict, n: int) -> list[bool]:
+    """JSON của AI -> dòng nào có "xh" / "addr": "?" (không chắc xưng hô, luật 5f)."""
+    out = []
+    for i in range(n):
+        v = d.get(str(i + 1))
+        x = v.get("xh", v.get("addr")) if isinstance(v, dict) else None
+        out.append(x is True or (isinstance(x, str) and x.strip().lower() in ("?", "khong_chac", "không chắc", "unsure")))
+    return out
+
+
+def speaker_tag(spk: str, gender: str, target: str = "vi") -> str:
+    """Nhãn người nói gửi cho AI: "S2 · nữ" / "S1 · nam" / "S3 · ?" (tiếng khác: male / female)."""
+    if langs.norm(target) == "vi":
+        g = {"male": "nam", "female": "nữ"}.get(gender or "", "?")
+    else:
+        g = {"male": "male", "female": "female"}.get(gender or "", "?")
+    return f"{spk or 'S1'} · {g}"
+
+
+def _tag_gender(tag: str) -> str:
+    g = (tag or "").rsplit("·", 1)[-1].strip()
+    return "F" if g in ("nữ", "female") else "M" if g in ("nam", "male") else ""
+
+
+def cache_text(key: str) -> str:
+    """Câu gốc (bỏ ký hiệu độ dài ⟪⟫ và đuôi nam / nữ ⟦M⟧ / ⟦F⟧) trong 1 khoá bộ nhớ bản dịch."""
+    return BUDGET_RE.sub("", GENDER_KEY_RE.sub("", cache_line(key))).strip()
+
+
 def _runs(idx: list[int]) -> list[list[int]]:
     """[2, 3, 7] -> [[2, 3], [7]]"""
     out: list[list[int]] = []
@@ -1254,6 +1365,10 @@ class Translator:
         # câu ngắn hơn hẳn chỗ trống -> nói đầy đủ hơn (2.1.13: mặc định TẮT – người dùng không muốn AI tự thêm từ)
         self.fill_short = bool(settings.get("translate_fill", False))
         self.genre = genres.form(self.style, self.target, settings)   # form thể loại phim (sửa được) -> lời nhắc hệ thống
+        self.addr = addr_mode(settings)   # không chắc xưng hô: bỏ đại từ / cặp trung tính / AI tự đoán (luật 5f, 2.4.0)
+        # nam / nữ từng người nói (p.data["speaker_gender"], pipeline đặt) -> gửi kèm mỗi dòng cho AI biết ai nói với ai
+        self.genders: dict[str, str] = {}
+        self.addr_flags: list[bool] = []   # translate_lines: dòng AI báo "không chắc xưng hô" (luật 5f)
         self.fallback_lines = 0   # số câu AI trả lỗi định dạng, phải dùng Google bù
         # dịch có nhìn hình (2.1.25): gemvideo.VideoSource – mỗi lô gửi kèm khúc video của chính các dòng đó (chỉ Gemini)
         self.video = None
@@ -1290,13 +1405,59 @@ class Translator:
         kw = {}
         if self.video is not None and self.llm is not None and self.engine == "gemini":
             kw["times"] = [(segs[i].start, segs[i].end, segs[i].speaker or "") for i in idx]
-        results = self.translate_lines(texts, progress, cancel, summary=summary, **kw)
-        for i, t in zip(idx, results):
+        tags = self.speaker_tags(segs)
+        who = [tags[i] for i in idx] if tags else None
+        near = self._near(segs, idx, tags) if self.llm else None
+        results = self.translate_lines(texts, progress, cancel, summary=summary, who=who, pos=idx, near=near, **kw)
+        flags = self.addr_flags
+        for n, (i, t) in enumerate(zip(idx, results)):
             segs[i].trans = BUDGET_RE.sub(" ", t or "").strip()
             segs[i].extra.pop("trans_user", None)
+            if self.llm:   # AI báo không chắc xưng hô (luật 5f) -> tô màu ở bảng câu, nút "Tích câu xưng hô chưa chắc"
+                if n < len(flags) and flags[n] and segs[i].trans:
+                    segs[i].extra["addr_unsure"] = True
+                else:
+                    segs[i].extra.pop("addr_unsure", None)
             if segs[i].trans and not untranslated(segs[i].trans, self.target):   # nhớ theo câu gốc -> không tốn API
-                self.cache.setdefault(cache_key(self.engine, self.style, self.target, segs[i].text), segs[i].trans)
+                f = n < len(flags) and flags[n]
+                self.cache.setdefault(cache_key(self.engine, self.style, self.target,
+                                                segs[i].text + self._gkey(who[n] if who else "")),
+                                      (XH_MARK if f else "") + segs[i].trans)
         return segs
+
+    def speaker_tags(self, segs: list[Segment]) -> list[str] | None:
+        """Nhãn người nói + nam / nữ từng câu ("S2 · nữ") – chỉ khi dịch bằng AI và phim có ≥ 2 người nói (1 người nói
+        = chưa phân biệt người nói: nhãn chỉ làm AI tưởng cả phim 1 người tự nói)."""
+        if not self.llm or not self.s.get("translate_speakers", True):
+            return None
+        spks = {(x.speaker or "S1") for x in segs if x.text.strip()}
+        if len(spks) < 2:
+            return None
+        return [speaker_tag(x.speaker or "S1", self.genders.get(x.speaker or "S1", ""), self.target) for x in segs]
+
+    def _near(self, segs: list[Segment], idx: list[int], tags: list[str] | None) -> list | None:
+        """Dịch 1 phần phim (câu đã tích / dòng trống): dòng liền trước / sau TRONG PHIM của mỗi câu mà không nằm ngay
+        cạnh nó trong danh sách gửi đi -> mục "NGỮ CẢNH QUANH TỪNG DÒNG" (trước 2.4.0 AI coi câu đã tích bên cạnh là
+        dòng trước / sau thật -> hiểu sai ai nói với ai)."""
+        def show(j: int) -> str:
+            x = segs[j]
+            if not x.text.strip():
+                return ""
+            t = (f"[{tags[j]}] " if tags else "") + x.text.strip()
+            return t + (f" => {x.trans.strip()}" if x.trans.strip() else "")
+
+        out, any_ = [], False
+        for n, i in enumerate(idx):
+            b = "" if (n and idx[n - 1] == i - 1) or i == 0 else show(i - 1)
+            a = "" if (n + 1 < len(idx) and idx[n + 1] == i + 1) or i + 1 >= len(segs) else show(i + 1)
+            out.append((b, a) if (b or a) else None)
+            any_ = any_ or bool(b or a)
+        return out if any_ and len(idx) < len(segs) else None
+
+    def _gkey(self, tag: str) -> str:
+        """Đuôi khoá bộ nhớ bản dịch theo nam / nữ người nói: "随你" của nam và của nữ dịch riêng (2.4.0)."""
+        g = _tag_gender(tag) if (self.llm and tag) else ""
+        return f" ⟦{g}⟧" if g else ""
 
     def _shorten_call(self, items: list[tuple[str, str, int]], info: list, prev: list | None = None) -> list[list[str]]:
         """1 lần gửi AI rút gọn: trả mỗi mục các bản AI viết (đã làm sạch, bỏ bản còn chữ Hán). prev = bản lần trước
@@ -1336,7 +1497,7 @@ class Translator:
             sysp = SHORTEN_PROMPT_EN.format(lang=L["english"], unit=L["unit_ai"])
             head = SHORTEN_RETRY_EN if prev else "SHORTEN THESE TRANSLATIONS:"
         user = head + "\n" + json.dumps(payload, ensure_ascii=False, indent=0)
-        d = _extract_json(self.llm.chat(with_skill(sysp, self.skill) + address_tail(self.target), user))
+        d = _extract_json(self.llm.chat(with_skill(sysp, self.skill) + address_tail(self.target, self.addr), user))
         out = []
         for k in range(len(items)):
             v = d.get(str(k + 1)) if isinstance(d, dict) else None
@@ -1417,7 +1578,7 @@ class Translator:
             sysp = CLAUSE_PROMPT_EN.format(lang=L["english"])
             user = "FIX THE CLAUSES OF THESE TRANSLATIONS:\n" + json.dumps(payload, ensure_ascii=False, indent=0)
         try:
-            d = _extract_json(self.llm.chat(with_skill(sysp, self.skill) + address_tail(self.target), user))
+            d = _extract_json(self.llm.chat(with_skill(sysp, self.skill) + address_tail(self.target, self.addr), user))
         except (Cancelled, net.NetworkDown):
             raise
         except Exception:  # noqa: BLE001
@@ -1431,13 +1592,19 @@ class Translator:
 
     def translate_lines(self, lines: list[str], progress: ProgressCB | None = None,
                         cancel: Callable[[], bool] | None = None, summary: str = "",
-                        times: list[tuple[float, float, str]] | None = None) -> list[str]:
+                        times: list[tuple[float, float, str]] | None = None, who: list[str] | None = None,
+                        pos: list[int] | None = None, near: list | None = None) -> list[str]:
         """times: (đầu, cuối, người nói) từng dòng – có thì mỗi lô gửi kèm khúc video của chính các dòng đó (dịch có nhìn
-        hình, 2.1.25): lô gom theo cả số câu lẫn độ dài khúc video (≤ VIDEO_WIN)."""
+        hình, 2.1.25): lô gom theo cả số câu lẫn độ dài khúc video (≤ VIDEO_WIN). who: nhãn người nói + nam / nữ từng dòng
+        ("S2 · nữ", 2.4.0); pos: vị trí từng dòng trong phim (ngữ cảnh trước / sau chỉ lấy dòng liền nhau thật); near:
+        dòng liền trước / sau trong phim của dòng không nằm cạnh nó trong danh sách. Sau khi chạy: self.addr_flags = dòng
+        AI báo không chắc xưng hô (luật 5f)."""
         out: list[str | None] = [None] * len(lines)
+        keys = [cache_key(self.engine, self.style, self.target, l + self._gkey(who[i] if who else ""))
+                for i, l in enumerate(lines)]
         todo = []
         for i, l in enumerate(lines):
-            hit = self.cache.get(cache_key(self.engine, self.style, self.target, l))
+            hit = self.cache.get(keys[i])
             if hit and not untranslated(hit, self.target):   # bản dịch rỗng / còn chữ Hán (lần trước lỗi) -> dịch lại
                 out[i] = hit
             else:
@@ -1448,33 +1615,49 @@ class Translator:
             for gi, r in zip(todo, res):
                 out[gi] = r
                 if r and not untranslated(r, self.target):
-                    self.cache[cache_key(self.engine, self.style, self.target, lines[gi])] = r
+                    self.cache[keys[gi]] = r
         elif self.engine == "google":
             batches = self._google_batches([lines[i] for i in todo])
-            pos = 0
+            pos_ = 0
             for chunk in batches:
                 if cancel and cancel():
                     raise Cancelled()
                 res = self._google(chunk)
                 for j, r in enumerate(res):
-                    gi = todo[pos + j]
+                    gi = todo[pos_ + j]
                     out[gi] = r
                     if r:
-                        self.cache[cache_key(self.engine, self.style, self.target, lines[gi])] = r
-                pos += len(chunk)
+                        self.cache[keys[gi]] = r
+                pos_ += len(chunk)
                 done += len(chunk)
                 if progress:
                     progress(done / len(lines), f"Đang dịch {done}/{len(lines)} câu (Google)")
         else:
-            def one(ids):
-                ctx_before = [(lines[k], out[k] or "") for k in range(max(0, ids[0] - CTX_BEFORE), ids[0])]
-                ctx_after = [lines[k] for k in range(ids[-1] + 1, min(len(lines), ids[-1] + 1 + CTX_AFTER))]
-                return self._llm_batch([lines[i] for i in ids], ctx_before, ctx_after, summary,
-                                       vt=[times[i] for i in ids] if times else None)
+            def tagged(k: int) -> str:
+                return f"[{who[k]}] {lines[k]}" if who else lines[k]
 
-            def take(pos: int) -> list[int]:
-                """Lô tiếp theo từ vị trí pos: ≤ số câu mỗi lần gửi; dịch có nhìn hình thì khúc video ≤ VIDEO_WIN."""
-                ids = todo[pos:pos + self._size()]
+            def one(ids):
+                # ngữ cảnh = các dòng ngay trước / sau trong danh sách – chỉ khi chúng liền nhau thật trong phim (pos)
+                kb = []
+                k = ids[0] - 1
+                while k >= 0 and len(kb) < CTX_BEFORE and (pos is None or pos[k] == pos[k + 1] - 1):
+                    kb.insert(0, k)
+                    k -= 1
+                ka = []
+                k = ids[-1] + 1
+                while k < len(lines) and len(ka) < CTX_AFTER and (pos is None or pos[k] == pos[k - 1] + 1):
+                    ka.append(k)
+                    k += 1
+                ctx_before = [(tagged(k), out[k] or "") for k in kb]
+                ctx_after = [tagged(k) for k in ka]
+                return self._llm_batch([lines[i] for i in ids], ctx_before, ctx_after, summary,
+                                       vt=[times[i] for i in ids] if times else None,
+                                       who=[who[i] for i in ids] if who else None,
+                                       near=[near[i] for i in ids] if near else None)
+
+            def take(at: int) -> list[int]:
+                """Lô tiếp theo từ vị trí at: ≤ số câu mỗi lần gửi; dịch có nhìn hình thì khúc video ≤ VIDEO_WIN."""
+                ids = todo[at:at + self._size()]
                 if times and ids:
                     a = times[ids[0]][0]
                     k = 1
@@ -1487,7 +1670,7 @@ class Translator:
                 for gi, r in zip(ids, res):
                     out[gi] = r
                     if r and not untranslated(r, self.target):
-                        self.cache[cache_key(self.engine, self.style, self.target, lines[gi])] = r
+                        self.cache[keys[gi]] = r
             size = self._size()
             if self.parallel and (len(todo) > size or times):
                 # gửi tất cả cùng lúc: các lô đi song song; lô sau chưa có bản dịch của lô trước -> ngữ cảnh chỉ có câu gốc
@@ -1508,17 +1691,23 @@ class Translator:
                             progress(done / len(lines), f"AI đang dịch {done}/{len(lines)} câu – gửi cùng lúc "
                                                         f"({self.engine})")
             else:
-                pos = 0
-                while pos < len(todo):
+                at = 0
+                while at < len(todo):
                     if cancel and cancel():
                         raise Cancelled()
-                    ids = take(pos)   # model trả lời ngắn hơn lô (đã biết) -> lô sau nhỏ lại
+                    ids = take(at)   # model trả lời ngắn hơn lô (đã biết) -> lô sau nhỏ lại
                     keep(ids, one(ids))
-                    pos += len(ids)
+                    at += len(ids)
                     done += len(ids)
                     if progress:
                         progress(done / len(lines), f"AI đang dịch {done}/{len(lines)} câu ({self.engine})")
-        return [self._post(o or "", BUDGET_RE.sub(" ", lines[k])) for k, o in enumerate(out)]
+        flags, res = [], []
+        for k, o in enumerate(out):
+            o = o or ""
+            flags.append(o.startswith(XH_MARK))
+            res.append(self._post(o.replace(XH_MARK, ""), BUDGET_RE.sub(" ", lines[k])))
+        self.addr_flags = flags
+        return res
 
     # ------------------------------------------------------------- AI
     def analyze(self, texts: list[str]) -> str:
@@ -1581,16 +1770,21 @@ class Translator:
 
     def system(self) -> str:
         """Lời nhắc hệ thống khi dịch: luật chung + form thể loại phim + kỹ năng của bạn."""
-        return with_skill(system_prompt(self.target, self.source, self.fit_dub and self.fill_short, self.genre),
-                          self.skill) + address_tail(self.target)
+        return with_skill(system_prompt(self.target, self.source, self.fit_dub and self.fill_short, self.genre, self.addr),
+                          self.skill) + address_tail(self.target, self.addr)
 
     def _llm_batch(self, lines: list[str], ctx_before, ctx_after, summary: str, depth: int = 0,
-                   vt: list[tuple[float, float, str]] | None = None, win: tuple[float, float] | None = None) -> list[str]:
+                   vt: list[tuple[float, float, str]] | None = None, win: tuple[float, float] | None = None,
+                   who: list[str] | None = None, near: list | None = None) -> list[str]:
         """Dịch 1 lô. ctx_before: [(câu gốc, bản dịch)] các dòng ngay trước lô; ctx_after: [câu gốc] các dòng ngay sau.
         Dòng thiếu / còn chữ Hán / bị LỆCH DÒNG ("dau" khớp dòng bên cạnh) được hỏi lại KÈM 2+ dòng trước / sau của chính
         nó (2.1.13 – trước đây hỏi lại 1 dòng lẻ với ngữ cảnh của cả lô, mất nghĩa)."""
         gl = {k: v for k, v in self.glossary.items() if any(k in l for l in lines)}
         vi = self.target == "vi"
+
+        def tg(j: int) -> str:     # dòng trong lô dùng làm ngữ cảnh khi hỏi lại -> kèm nhãn người nói
+            return f"[{who[j]}] {lines[j]}" if who and who[j] else lines[j]
+
         lab = (("THÔNG TIN PHIM", "BẢNG THUẬT NGỮ (bắt buộc dùng)",
                 "NGỮ CẢNH TRƯỚC (các dòng ngay trước, đã dịch – chỉ để hiểu nghĩa, KHÔNG dịch lại)",
                 "NGỮ CẢNH SAU (các dòng ngay sau – chỉ để hiểu nghĩa, KHÔNG dịch)") if vi else
@@ -1603,10 +1797,29 @@ class Translator:
         if gl:
             parts.append(f"{lab[1]}:\n" + glossary_text(gl))
         if ctx_before:   # gửi cùng lúc: dòng trước chưa dịch xong -> chỉ có câu gốc
-            parts.append(f"{lab[2]}:\n" + "\n".join(f"- {BUDGET_RE.sub(' ', a).strip()}" + (f" => {b}" if b else "")
+            parts.append(f"{lab[2]}:\n" + "\n".join(f"- {BUDGET_RE.sub(' ', a).strip()}"
+                                                     + (f" => {b.replace(XH_MARK, '')}" if b else "")
                                                      for a, b in ctx_before))
         if ctx_after:
             parts.append(f"{lab[3]}:\n" + "\n".join(f"- {BUDGET_RE.sub(' ', a).strip()}" for a in ctx_after))
+        if near and any(near):   # dịch 1 phần phim: dòng liền trước / sau thật của từng dòng (2.4.0)
+            rows = []
+            for k, nb in enumerate(near):
+                if nb:
+                    b, a = nb
+                    rows.append(f"{k + 1}: " + " | ".join(
+                        x for x in ((("trước: " if vi else "before: ") + BUDGET_RE.sub(" ", b).strip()) if b else "",
+                                    (("sau: " if vi else "after: ") + BUDGET_RE.sub(" ", a).strip()) if a else "") if x))
+            parts.append(("NGỮ CẢNH QUANH TỪNG DÒNG (dòng liền trước / sau trong phim của dòng cần dịch – chỉ để hiểu ai nói "
+                          "với ai, nghĩa, xưng hô; KHÔNG dịch):\n" if vi else
+                          "CONTEXT AROUND EACH LINE (the film line right before / after it – only to know who speaks to "
+                          "whom, meaning, forms of address; do NOT translate):\n") + "\n".join(rows))
+        if who and any(who):     # người nói + nam / nữ từng dòng (2.4.0) – AI biết ai nói với ai mà chọn xưng hô
+            parts.append(("NGƯỜI NÓI TỪNG DÒNG (S1, S2… = người nói phân biệt theo giọng; nam / nữ tool đo từ giọng, có "
+                          "thể sai; ? = chưa rõ – xem luật 5e):\n" if vi else
+                          "SPEAKER OF EACH LINE (S1, S2… told apart by voice; gender measured from the voice, may be "
+                          "wrong; ? = unknown – see rule 5e):\n") + "\n".join(f"{k + 1}: {w or '?'}"
+                                                                                for k, w in enumerate(who)))
         payload = {str(i + 1): l for i, l in enumerate(lines)}
         n = len(lines)
         if vt and self.video is not None:     # dịch có nhìn hình: khúc video của chính các dòng trong lô
@@ -1615,7 +1828,8 @@ class Translator:
             a = win[0]
             parts.append(("THỜI ĐIỂM TRONG VIDEO (giây tính từ đầu khúc video gửi kèm | người nói):\n" if vi else
                           "VIDEO TIMES (seconds from the start of the attached clip | speaker):\n") +
-                         "\n".join(f"{k + 1}: {max(0.0, t0 - a):.1f}–{max(0.0, t1 - a):.1f} | {sp or '?'}"
+                         "\n".join(f"{k + 1}: {max(0.0, t0 - a):.1f}–{max(0.0, t1 - a):.1f} | "
+                                    f"{(who[k] if who and who[k] else sp) or '?'}"
                                     for k, (t0, t1, sp) in enumerate(vt)))
         ask = (f"DỊCH {n} DÒNG SAU sang tiếng Việt – đúng {n} dòng, trả về JSON với đủ các khoá 1..{n}:" if vi else
                f"TRANSLATE THE FOLLOWING {n} LINES into {langs.INFO[self.target]['english']} – exactly {n} lines, "
@@ -1646,6 +1860,8 @@ class Translator:
             if win is not None:
                 self._keep_speakers(d)
             res, heads = _answers(d, n)
+            xh = _addr_flags(d, n)
+            res = [XH_MARK + r if (xh[i] and r) else r for i, r in enumerate(res)]   # không chắc xưng hô (luật 5f)
             bad = shifted_lines(heads, lines)
             miss = [i for i, r in enumerate(res)
                     if lines[i].strip() and (i in bad or not r or untranslated(r, self.target))]
@@ -1661,20 +1877,24 @@ class Translator:
                 # hỏi lại từng cụm dòng thiếu, kèm các dòng ngay trước / sau của cụm; phần sau chỗ bị cắt = 1 lô ngắn hơn
                 for grp in _runs(head) + ([list(range(k, n))] if k < n else []):
                     a, b = grp[0], grp[-1]
-                    cb = (list(ctx_before) + [(lines[j], res[j]) for j in range(a)])[-CTX_BEFORE:]
-                    ca = ([lines[j] for j in range(b + 1, n)] + list(ctx_after))[:CTX_AFTER]
+                    cb = (list(ctx_before) + [(tg(j), res[j]) for j in range(a)])[-CTX_BEFORE:]
+                    ca = ([tg(j) for j in range(b + 1, n)] + list(ctx_after))[:CTX_AFTER]
                     sub = depth if a == k else depth + 1
                     for i, f in zip(grp, self._llm_batch([lines[i] for i in grp], cb, ca, summary, sub,
-                                                         [vt[i] for i in grp] if vt else None, win)):
+                                                         [vt[i] for i in grp] if vt else None, win,
+                                                         [who[i] for i in grp] if who else None,
+                                                         [near[i] for i in grp] if near else None)):
                         res[i] = f
                 return res
         # lỗi hoặc thiếu nhiều dòng -> chia đôi lô rồi thử lại (mỗi nửa vẫn có ngữ cảnh của nửa kia)
         if n > 1 and depth < 4:
             mid = n // 2
-            a = self._llm_batch(lines[:mid], ctx_before, (lines[mid:] + list(ctx_after))[:CTX_AFTER], summary, depth + 1,
-                                vt[:mid] if vt else None, win)
-            b = self._llm_batch(lines[mid:], (list(ctx_before) + list(zip(lines[:mid], a)))[-CTX_BEFORE:], ctx_after,
-                                summary, depth + 1, vt[mid:] if vt else None, win)
+            a = self._llm_batch(lines[:mid], ctx_before, ([tg(j) for j in range(mid, n)] + list(ctx_after))[:CTX_AFTER],
+                                summary, depth + 1, vt[:mid] if vt else None, win, who[:mid] if who else None,
+                                near[:mid] if near else None)
+            b = self._llm_batch(lines[mid:], (list(ctx_before) + [(tg(j), a[j]) for j in range(mid)])[-CTX_BEFORE:],
+                                ctx_after, summary, depth + 1, vt[mid:] if vt else None, win,
+                                who[mid:] if who else None, near[mid:] if near else None)
             return a + b
         # cuối cùng dùng Google để không bị trống (đếm lại để cảnh báo người dùng)
         try:

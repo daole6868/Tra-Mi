@@ -62,7 +62,13 @@ STD_SKILL = {"id": STD_ID, "name": "Dịch chuẩn – giữ đúng số câu, t
     "- Một tên dịch MỘT cách trong cả phim; theo đúng bảng thuật ngữ và hồ sơ phim nếu có.\n"
     "- XƯNG HÔ THEO ĐÚNG DÒNG GỐC: đại từ / cách gọi trong dòng gốc đã rõ (他 = nam, 她 = nữ, 哥 = anh, 姐 = chị, 弟 / 妹 "
     "= em…) thì giữ đúng giới tính, vai vế, ngôi – ngữ cảnh chỉ để chọn sắc thái (anh ấy / anh ta / hắn), KHÔNG đổi anh "
-    "thành em, anh ta thành cô ta. Dòng gốc không ghi rõ mới chọn theo quan hệ, tuổi tác, địa vị và giữ nhất quán.\n"
+    "thành em, anh ta thành cô ta.\n"
+    "- Dòng gốc chỉ có 你 / 我 hoặc bỏ chủ ngữ: xem người nói từng dòng (S1 · nam, S2 · nữ…) và các dòng trước – sau để "
+    "biết ai nói với ai, dùng ĐÚNG cặp xưng hô 2 người đó đã dùng ở các dòng trước, nhất quán cả phim (nữ nói 随你 với "
+    "nam -> \"Tùy anh.\", không phải \"Tùy em.\").\n"
+    "- KHÔNG chắc ai nói với ai, nam hay nữ, ai lớn hơn: làm theo luật 5f – bỏ đại từ nếu câu vẫn tự nhiên, không bỏ được "
+    "thì dùng cặp trung tính (hiện đại cậu – tớ, cổ trang / tu tiên ngươi – ta: 你炼体我画符修炼 -> \"Ngươi luyện thể, ta "
+    "vẽ phù tu luyện.\"). KHÔNG đoán bừa anh / em, chị / em.\n"
     "- Dịch SÁT NGHĨA: không thêm từ, tiếng cảm thán, từ đệm, chú thích, ngoặc, giải thích; không bỏ ý; không thêm ý.")}
 
 FILTER_RULES = """LỌC CHỮ KHÔNG PHẢI LỜI THOẠI – máy nghe chép cả nhạc nền, tiếng hát, tiếng động thành chữ. Chỉ dựa vào NỘI DUNG
@@ -150,7 +156,11 @@ từng câu, không gộp / chuyển ý sang câu khác:
    câu gốc -> bỏ phần thêm; câu vắt qua 2 dòng đọc không liền mạch.
 2. XƯNG HÔ SAI VAI: bản dịch đổi giới tính / vai vế / ngôi so với đại từ, cách gọi ghi trong câu gốc (他 thành cô ta,
    她 thành anh ta, 哥 thành em, 姐 thành anh, câu nói VỀ người khác thành câu nói VỚI người nghe…) -> sửa về đúng câu gốc.
-   Câu gốc không ghi rõ đại từ / cách gọi thì xưng hô phải thống nhất với HỒ SƠ PHIM / các câu khác giữa đúng 2 người đó.
+   Câu gốc không ghi rõ đại từ / cách gọi thì xưng hô phải thống nhất với HỒ SƠ PHIM / các câu khác giữa đúng 2 người đó;
+   "nguoi_noi" (S1, S2… + nam / nữ tool đo từ giọng, có thể sai; ? = chưa rõ) và nhãn [S1 · nam] ở NGỮ CẢNH cho biết ai
+   đang nói với ai (người nghe thường là người nói khác ở câu trước / sau): nữ nói với nam mà bản dịch gọi người nghe là
+   "em" (随你 -> "Tùy em") -> sửa ("Tùy anh"). Vẫn KHÔNG chắc ai nói với ai, nam hay nữ, ai lớn hơn thì câu đang bỏ đại từ
+   / dùng cặp trung tính (cậu – tớ, ngươi – ta) để nguyên – KHÔNG đổi sang anh / em, chị / em khi chưa chắc.
    KHÔNG đổi xưng hô mà câu gốc đã ghi rõ chỉ để khớp hồ sơ phim / thể loại. Tên riêng, thuật ngữ không thống nhất với
    HỒ SƠ PHIM / các câu khác -> sửa.
 3. Độ dài: đếm số tiếng (âm tiết; số đếm theo cách đọc). Dài hơn N -> rút gọn, giữ ý (bỏ từ thừa, dùng từ ngắn hơn).
@@ -165,6 +175,16 @@ từng câu, không gộp / chuyển ý sang câu khác:
 Chỉ trả về JSON: {{"<số>": {{"sua": "bản dịch mới", "ly_do": "lý do ngắn bằng tiếng Việt"}}}}. Câu đã ổn thì KHÔNG ghi."""
 
 
+# nội dung mặc định của "Dịch chuẩn" ở các bản trước (sha1 16 ký tự) – bản lưu y nguyên thì coi như chưa sửa
+OLD_STD_SHA = {"e556f8bdae999f2d", "4dfe30bbd5ddbd34", "a33ee43fb842248f"}
+
+
+def _sha(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha1((text or "").strip().encode()).hexdigest()[:16]
+
+
 def all_skills(settings: dict) -> list[dict]:
     """Kỹ năng có sẵn + kỹ năng của bạn (Cài đặt `translate_skills`)."""
     own = [dict(x, builtin=False) for x in (settings.get("translate_skills") or [])
@@ -173,7 +193,10 @@ def all_skills(settings: dict) -> list[dict]:
         if not isinstance(x.get("name"), str) or not x["name"].strip():
             x["name"] = "Kỹ năng mới"
         x["id"] = str(x["id"])
-    std = next((x for x in own if x["id"] == STD_ID), None) or dict(STD_SKILL, builtin=False)   # đã sửa -> bản của bạn
+    std = next((x for x in own if x["id"] == STD_ID), None)   # đã sửa -> bản của bạn
+    if std is not None and _sha(std["text"]) in OLD_STD_SHA:
+        std = None    # bản lưu y nguyên nội dung mặc định cũ (bấm Lưu mà không sửa) -> dùng bản mặc định mới (2.4.0)
+    std = std or dict(STD_SKILL, builtin=False)
     return [std] + BUILTIN + [x for x in own if x["id"] != STD_ID]
 
 
@@ -425,13 +448,14 @@ REVIEW_CTX = 2     # mỗi câu kiểm tra kèm 2 câu trước / sau (câu khô
 def review_lines(llm, items: list[tuple[int, str, str, int | str]], profile: str, skill: str, src_name: str,
                  target_name: str, unit: str, lang: str = "vi", progress=None, cancel=None,
                  ctx: list[tuple[str, str]] | None = None, genre: str = "",
-                 parallel: bool = False) -> dict[int, tuple[str, str]]:
+                 parallel: bool = False, who: list[str] | None = None,
+                 addr: str = "drop") -> dict[int, tuple[str, str]]:
     """items: (chỉ số câu, câu gốc, bản dịch, độ dài: số tối đa hoặc chữ "M–N tiếng"). ctx: (câu gốc, bản dịch) của MỌI
     câu trong phim – câu ±2 quanh câu kiểm tra mà không có trong lô được gửi kèm làm ngữ cảnh. genre: form thể loại phim.
-    parallel: gửi tất cả các lô cùng lúc ("Gửi tất cả cùng lúc" của công cụ dịch, 2.1.23). Trả về {chỉ số: (bản dịch mới,
-    lý do)}."""
+    parallel: gửi tất cả các lô cùng lúc ("Gửi tất cả cùng lúc" của công cụ dịch, 2.1.23). who: nhãn người nói + nam / nữ
+    MỌI câu trong phim ("S2 · nữ", 2.4.0); addr: cách làm khi không chắc xưng hô. Trả về {chỉ số: (bản dịch mới, lý do)}."""
     from .ffmpeg import Cancelled
-    from .translate import ADDRESS_TAIL_VI, GENRE_HEAD_VI, punct_fix, run_parallel
+    from .translate import GENRE_HEAD_VI, address_tail, punct_fix, run_parallel
 
     out: dict[int, tuple[str, str]] = {}
     sysp = REVIEW_PROMPT.format(src=src_name, lang=target_name)
@@ -441,7 +465,8 @@ def review_lines(llm, items: list[tuple[int, str, str, int | str]], profile: str
     def one(a: int) -> dict[int, tuple[str, str]]:
         chunk = items[a:a + REVIEW_CHUNK]
         by_no = {i + 1: (i, zh, tr, mx) for i, zh, tr, mx in chunk}   # khoá = số thứ tự câu trong phim
-        payload = {str(i + 1): {"goc": zh, "dich": tr, "do_dai": mx if isinstance(mx, str) else f"≤{mx} {unit}"}
+        payload = {str(i + 1): {"goc": zh, "dich": tr, "do_dai": mx if isinstance(mx, str) else f"≤{mx} {unit}",
+                                **({"nguoi_noi": who[i]} if who and i < len(who) else {})}
                    for i, zh, tr, mx in chunk}
         near = []
         if ctx:
@@ -451,10 +476,12 @@ def review_lines(llm, items: list[tuple[int, str, str, int | str]], profile: str
         user = (("HỒ SƠ PHIM:\n" + profile + "\n\n") if profile else "")
         if near:
             user += ("NGỮ CẢNH (câu trước / sau – chỉ để hiểu nghĩa, KHÔNG sửa):\n"
-                     + "\n".join(f"{j + 1}: {ctx[j][0]} => {ctx[j][1]}" for j in near) + "\n\n")
+                     + "\n".join(f"{j + 1}: " + (f"[{who[j]}] " if who and j < len(who) else "")
+                                 + f"{ctx[j][0]} => {ctx[j][1]}" for j in near) + "\n\n")
         user += "KIỂM TRA CÁC CÂU SAU:\n" + json.dumps(payload, ensure_ascii=False, indent=0)
         try:
-            d = _json(llm.chat(with_skill(sysp, skill) + ADDRESS_TAIL_VI, user, max_tokens=8000, temperature=0.2))
+            d = _json(llm.chat(with_skill(sysp, skill) + address_tail("vi", addr), user, max_tokens=8000,
+                               temperature=0.2))
         except ValueError:
             d = {}
         got: dict[int, tuple[str, str]] = {}

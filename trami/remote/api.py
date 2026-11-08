@@ -514,6 +514,7 @@ def edit_line(pid: str, i: int, text: str | None, trans: str) -> dict:
         r = _check_rows(p, [i], [text])[0]
         segs[r].trans = trans
         segs[r].extra["trans_user"] = True
+        segs[r].extra.pop("addr_unsure", None)
         p.segments = segs
         p.save()
         return {"message": f"Đã lưu câu #{r + 1}"}
