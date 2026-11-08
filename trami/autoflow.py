@@ -85,6 +85,11 @@ def summary(settings: dict | None = None) -> str:
                 ai.append("kiểm tra bản dịch")
             if ai:
                 parts.append("AI " + ", ".join(ai))
+        if langs.norm(o["target"]) == "vi":    # 2.4.3: tên pinyin -> Hán Việt / từ lóng (mặc định tắt)
+            vi = (["đổi tên pinyin"] if st.get("trans_name_fix") else []) + (["hiểu từ lóng"] if st.get("trans_slang")
+                                                                               else [])
+            if vi:
+                parts.append(", ".join(vi))
         if st.get("split_long_trans", True):
             parts.append("tách câu dài")
     if o["hardsub_mode"] != "none":

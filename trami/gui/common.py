@@ -66,6 +66,14 @@ VIDEO_TRANSLATE_HELP = ("Chỉ khi Công cụ dịch = Gemini: mỗi lô câu g�
                         "hiểu câu ngắn theo hành động trên hình, đọc chữ trên màn hình; ghi lại giới tính từng người nói "
                         "(Tự gán giọng nam / nữ dùng). Luật dịch / form thể loại / kỹ năng giữ nguyên. Lô gửi video lỗi -> "
                         "dịch chỉ bằng chữ như thường. Chậm hơn dịch thường (tải video lên), tốn thêm token video")
+NAME_FIX_HELP = ("Chỉ khi dịch sang tiếng Việt, mọi công cụ dịch (Google, Hy-MT2, AI): tên người, địa danh, môn phái, đồ "
+                 "vật, chiêu thức… máy dịch để nguyên pinyin (\"Lin Fan\", \"Tianjian Zong\", \"jianghu\") -> đổi theo "
+                 "chữ Hán của câu gốc (\"Lâm Phàm\", \"Thiên Kiếm Tông\", \"giang hồ\"). Không tốn API. Tên trong Bảng "
+                 "thuật ngữ dùng đúng bản trong bảng. Tắt = dịch như cũ. Dự án đã dịch: tab Phụ đề → Công cụ → Sửa câu → "
+                 "Sửa tên pinyin")
+SLANG_HELP = ("Chỉ khi dịch sang tiếng Việt: câu gốc có từ lóng / tiếng mạng (躺平, 内卷, 吃瓜群众, yyds, 社恐…) -> gửi kèm "
+              "nghĩa quen dùng cho AI (AI tự xét câu dùng nghĩa lóng hay nghĩa đen); Google / Hy-MT2 thay trước các từ "
+              "chắc chắn là lóng. Tắt = dịch như cũ. Từ riêng của bạn thêm vào Bảng thuật ngữ")
 LANG_CHECK_HELP = ("Khúc bộ nghe (Qwen3-ASR) không chắc -> nghe lại không ép tiếng Trung xem có phải câu tiếng Anh / Nhật… "
                    "không; ra tiếng khác mà chắc hơn thì dùng bản đó. Tắt nếu phim chỉ có tiếng Trung mà thấy câu tiếng "
                    "Anh / Nhật lạ ở đoạn nhạc (bộ nghe đoán lời bài hát thành tiếng nước ngoài)")

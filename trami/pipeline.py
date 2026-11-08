@@ -4304,7 +4304,7 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
     if do_review:
         try:
             fixed = ai_review(p, settings, eng, _sub(progress, 0.85, 1.0), cancel, rows=rev_rows)
-            if fixed and target == "vi" and settings.get("trans_name_fix", True):
+            if fixed and target == "vi" and settings.get("trans_name_fix", False):
                 # AI kiểm tra viết lại câu mà để tên dạng pinyin -> đổi sang Hán Việt như lúc dịch (2.4.2)
                 rs = p.segments
                 if hanviet.fix_segments(rs, tr.glossary, [k for k in fixed if 0 <= k < len(rs)])[0]:

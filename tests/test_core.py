@@ -1964,6 +1964,19 @@ def test_perf_fixes_2110(sample_video, monkeypatch):
         assert "Lin Fan → Lâm Phàm" in pp.model.data(pp.model.index(0, C_VI), Qt.ItemDataRole.ToolTipRole)
         pp.undo()
         assert pp.model.segs[0].trans == "Lin Fan đến rồi."
+    # 2.4.3: công tắc "Đổi tên pinyin" / "Hiểu từ lóng" – tab Tự động ↔ khung Dịch tab Phụ đề, 1 cài đặt chung
+    from trami.config import load_settings, save_settings
+
+    pp.settings = save_settings({"trans_name_fix": False, "trans_slang": False})
+    pp.sync_engine()
+    assert not any(w.isChecked() for w in (pp.a_namefix, pp.s_namefix, pp.a_slang, pp.s_slang))
+    pp.s_namefix.setChecked(True)
+    assert pp.a_namefix.isChecked() and load_settings()["trans_name_fix"] is True and not pp.a_slang.isChecked()
+    pp.a_slang.setChecked(True)
+    assert pp.s_slang.isChecked() and load_settings()["trans_slang"] is True
+    pp.settings = save_settings({"trans_name_fix": False, "trans_slang": False})   # (như Cài đặt → Lưu)
+    pp.sync_engine()
+    assert not any(w.isChecked() for w in (pp.a_namefix, pp.s_namefix, pp.a_slang, pp.s_slang))
     win.timer.stop()
     pp.p = None
     win.close()
@@ -6519,6 +6532,10 @@ def test_ai_steps_run_with_live_drafts(monkeypatch):
     sm = autoflow.summary({**st_, "ai_clean_before_translate": False})
     assert "AI lọc lời hát, kiểm tra bản dịch" in sm
     assert "AI " not in autoflow.summary({**st_, "translate_engine": "google"})
+    # 2.4.3: tên pinyin / từ lóng ghi vào tóm tắt khi bật (chỉ dịch sang tiếng Việt)
+    assert "đổi tên pinyin" not in sm
+    sm = autoflow.summary({**st_, "trans_name_fix": True, "trans_slang": True, "target_lang": "vi"})
+    assert "đổi tên pinyin, hiểu từ lóng" in sm
 
 
 # ------------------------------------------------------------------ 2.0.92: âm thanh theo giờ của hình
@@ -15264,13 +15281,16 @@ def test_slang_242(monkeypatch):
 
     sent = []
     monkeypatch.setattr(tr.Translator, "_gt_one", lambda self, text: (sent.append(text), text)[1])
-    t = tr.Translator({}, "google", target="vi", source="zh")
+    t0 = tr.Translator({}, "google", target="vi", source="zh")      # 2.4.3: mặc định tắt = dịch như cũ
+    t0._google(["他躺平了。"])
+    assert sent[-1] == "他躺平了。" and not t0.name_fix and not t0.slang_on
+    t = tr.Translator({"trans_slang": True}, "google", target="vi", source="zh")
     t._google(["他躺平了。"])
     assert "buông xuôi mặc kệ" in sent[-1]
     t2 = tr.Translator({"trans_slang": False}, "google", target="vi", source="zh")
     t2._google(["他躺平了。"])
     assert sent[-1] == "他躺平了。"
-    t3 = tr.Translator({}, "google", target="en", source="zh")
+    t3 = tr.Translator({"trans_slang": True}, "google", target="en", source="zh")
     t3._google(["他躺平了。"])
     assert sent[-1] == "他躺平了。"
 
@@ -15281,7 +15301,8 @@ def test_slang_242(monkeypatch):
         payload = json.loads(user[user.rindex("{"):])
         return json.dumps({k: "Lin Fan nằm im mặc kệ." for k in payload}, ensure_ascii=False)
     monkeypatch.setattr(tr.LLMClient, "chat", fake_chat)
-    t4 = tr.Translator({"translate_engine": "openai", "openai_api_key": "x"}, target="vi")
+    t4 = tr.Translator({"translate_engine": "openai", "openai_api_key": "x", "trans_name_fix": True,
+                        "trans_slang": True}, target="vi")
     out = t4.translate_lines(["林凡躺平了，吃瓜群众都在看。"])
     assert any("TỪ LÓNG" in c and "躺平 = buông xuôi mặc kệ" in c and "吃瓜群众 = dân hóng drama" in c for c in calls)
     assert out[0].startswith("Lâm Phàm ")                                  # AI để pinyin -> đổi sang Hán Việt
@@ -15321,7 +15342,8 @@ def test_fix_names_pipeline_242(monkeypatch):
         p.save()
         monkeypatch.setattr(tr.Translator, "_gt_one", lambda self, text: "\n".join(
             "Lin Fan nằm im rồi." if "林凡" in x else "Wang Wu đến rồi." for x in text.split("\n")))
-        pipeline.translate(p, engine="google", settings={"translate_engine": "google"})
+        pipeline.translate(p, engine="google", settings={"translate_engine": "google", "trans_name_fix": True,
+                                                         "trans_slang": True})
         assert [x.trans for x in p.segments] == ["Lâm Phàm nằm im rồi.", "Vương Ngũ đến rồi."]
         note = p.data.get("skill_note", "")
         assert "đổi 2 tên còn để pinyin" in note and "躺平" in note

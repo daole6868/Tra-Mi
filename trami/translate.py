@@ -1379,8 +1379,8 @@ class Translator:
         self._spk_lock = threading.Lock()
         # 2.4.2: tên / thuật ngữ còn để pinyin -> âm Hán Việt (hanviet.py, mọi công cụ dịch) + từ lóng / tiếng mạng
         # (slang.py: AI nhận nghĩa trong lời nhắc, Google / Hy-MT2 thay trước từ chắc chắn là lóng) – chỉ tiếng Việt
-        self.name_fix = self.target == "vi" and bool(settings.get("trans_name_fix", True))
-        self.slang_on = self.target == "vi" and bool(settings.get("trans_slang", True))
+        self.name_fix = self.target == "vi" and bool(settings.get("trans_name_fix", False))
+        self.slang_on = self.target == "vi" and bool(settings.get("trans_slang", False))
         self.name_pairs: list[tuple[str, str]] = []   # (pinyin, Hán Việt) đã đổi
         self.name_lines = 0
         self.slang_hits: list[str] = []

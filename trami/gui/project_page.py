@@ -190,6 +190,10 @@ class _Forms:
 _HfwBox = HfwBox    # 2.1.35: khung chứa thẻ có hàng nút tự xuống dòng (dùng chung widgets.HfwBox từ 2.1.39)
 
 
+# 2.4.3: công tắc tên pinyin / từ lóng – mỗi cài đặt có 1 công tắc ở tab Tự động + 1 ở khung Dịch tab Phụ đề
+TRANS_FIX = {"trans_name_fix": ("a_namefix", "s_namefix"), "trans_slang": ("a_slang", "s_slang")}
+
+
 class ProjectPage(QWidget):
     def __init__(self, win):
         super().__init__()
@@ -859,6 +863,13 @@ class ProjectPage(QWidget):
         self.a_ai_note = label("Các mục AI ở trên chỉ chạy khi Công cụ dịch là AI (Gemini / DeepSeek / Claude / GPT / "
                                "Ollama) – Google / Hy-MT2 bỏ qua.", "muted", wrap=True)
         f.addRow(self.a_ai_note)
+        # 2.4.3: tên pinyin -> Hán Việt + từ lóng (2.4.2) – mọi công cụ dịch, chỉ dịch sang tiếng Việt; tắt = dịch như cũ.
+        # Cùng 1 cài đặt với 2 công tắc ở khung Dịch tab Phụ đề + Cài đặt → Dịch thuật
+        self.a_namefix = f.row("Đổi tên pinyin sang Hán Việt", Switch(bool(s.get("trans_name_fix", False))),
+                               C.NAME_FIX_HELP)
+        self.a_slang = f.row("Hiểu từ lóng / tiếng mạng", Switch(bool(s.get("trans_slang", False))), C.SLANG_HELP)
+        self.a_namefix.toggled.connect(lambda on: self._trans_fix_changed("trans_name_fix", on))
+        self.a_slang.toggled.connect(lambda on: self._trans_fix_changed("trans_slang", on))
         # = công tắc "Tự tách câu dịch dài" ở tab Phụ đề (1 cài đặt chung split_long_trans, 2 công tắc luôn giống nhau)
         self.a_split_long = f.row("Tách câu dịch dài", Switch(bool(s.get("split_long_trans", True))),
                                   "Dịch xong cả phim -> câu dịch dài hơn mức đặt ở tab Phụ đề (mặc định 14 tiếng) được "
@@ -1080,6 +1091,15 @@ class ProjectPage(QWidget):
         self.s_vtrans.toggled.connect(self._vtrans_changed)
         tr_card.add(flow(self.s_vtrans, label("Dịch có nhìn hình – Gemini xem khúc video của từng lô câu (xưng hô theo "
                                               "người nói / người nghe, giới tính người nói)", "muted", wrap=True)))
+        self.s_namefix = Switch(bool(self.settings.get("trans_name_fix", False)))
+        self.s_namefix.setToolTip(C.NAME_FIX_HELP)
+        self.s_namefix.toggled.connect(lambda on: self._trans_fix_changed("trans_name_fix", on))
+        self.s_slang = Switch(bool(self.settings.get("trans_slang", False)))
+        self.s_slang.setToolTip(C.SLANG_HELP)
+        self.s_slang.toggled.connect(lambda on: self._trans_fix_changed("trans_slang", on))
+        tr_card.add(flow(self.s_namefix, label("Đổi tên pinyin sang Hán Việt (\"Lin Fan\" -> \"Lâm Phàm\")", "muted",
+                                               wrap=True),
+                         self.s_slang, label("Hiểu từ lóng / tiếng mạng (躺平, yyds…)", "muted", wrap=True)))
         self.s_tr_card = tr_card
         # ---- các trang của khung "Công cụ" (mỗi lúc hiện 1 trang)
         self.s_snap_ct = Switch(False)
@@ -4432,6 +4452,13 @@ class ProjectPage(QWidget):
             self.a_gemrev.setChecked(bool(st.get("asr_gemini_review", False)))
             for w in (self.s_vtrans, self.a_vtrans):
                 w.setChecked(bool(st.get("translate_video", False)))
+            for key, ws in TRANS_FIX.items():
+                for name in ws:
+                    w = getattr(self, name, None)
+                    if w is not None:
+                        w.blockSignals(True)
+                        w.setChecked(bool(st.get(key, False)))
+                        w.blockSignals(False)
             for w in (self.s_conf, self.a_conf):
                 w.setValue(float(st.get("asr_pick_conf", 0.7) or 0.7))
             self.a_drop.setChecked(bool(st.get("asr_drop_unsure", False)))
@@ -4531,6 +4558,19 @@ class ProjectPage(QWidget):
         if on and not self.settings.get("gemini_api_key") and not self.settings.get("gemini_api_keys"):
             self.win.toast("Dịch có nhìn hình cần API key Gemini (Cài đặt → Công cụ dịch → khung Gemini) và Công cụ "
                            "dịch = Gemini", "warn")
+
+    def _trans_fix_changed(self, key: str, on: bool):
+        for name in TRANS_FIX[key]:
+            w = getattr(self, name, None)
+            if w is not None and w.isChecked() != bool(on):
+                w.blockSignals(True)
+                w.setChecked(bool(on))
+                w.blockSignals(False)
+        if getattr(self, "loading", True):
+            return
+        self._save_setting(key, bool(on))
+        if on and pipeline.target_lang(self.p, self.settings) != "vi":
+            self.win.toast("Đổi tên pinyin / hiểu từ lóng chỉ dùng khi dịch sang tiếng Việt", "warn")
 
     def _ai_switch_changed(self, *_):
         if getattr(self, "loading", True):

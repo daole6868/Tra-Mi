@@ -22,6 +22,7 @@ DONE = ("done", "error", "cancelled")
 SETTING_KEYS = {
     "translate_engine": str, "translate_style": str, "translate_skill": str, "target_lang": str,
     "ai_review_after_translate": bool, "split_long_trans": bool, "translate_video": bool,
+    "trans_name_fix": bool, "trans_slang": bool,
     "tts_engine": str, "tts_rate": str, "dub_overflow": str, "tts_max_speedup": float, "dub_subs_follow": bool,
     "dub_auto_shorten": bool, "dub_voice_all": str,
     "ocr_color": bool, "ocr_eq": bool, "dl_quality": str,

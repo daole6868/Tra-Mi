@@ -218,8 +218,11 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   âm -> giữ cả tên. `fix_segments` (`extra["name_fixed"]` -> tooltip bản dịch), `note`. `trami/slang.py`: `SLANG`
   (~200 từ lóng / tiếng mạng / cảm thán: 躺平, 内卷, 吃瓜群众, yyds, xswl, 社恐…; `strict` = hầu như không dùng nghĩa đen),
   `found(lines, skip=glossary, strict=)` (từ dài trước, chữ Latin khớp nguyên từ không phân biệt hoa thường), `apply_src`,
-  `note`. Nối vào `Translator` (chỉ tiếng Việt; Cài đặt `trans_name_fix` / `trans_slang` mặc định bật – Cài đặt → Dịch
-  thuật 2 công tắc): `_post` đổi tên trước khi viết hoa + `punct_fix` (`name_pairs`, `name_lines`); `_llm_batch` mục "TỪ
+  `note`. Nối vào `Translator` (chỉ tiếng Việt; Cài đặt `trans_name_fix` / `trans_slang` MẶC ĐỊNH TẮT từ 2.4.3 – tắt = dịch
+  như trước 2.4.2; công tắc ở tab Tự động bước 2 `a_namefix` / `a_slang` + khung Dịch tab Phụ đề `s_namefix` / `s_slang`
+  (`TRANS_FIX`, `_trans_fix_changed` – 1 cài đặt chung, `sync_engine` nạp lại) + Cài đặt → Dịch thuật + hộp Thiết lập tự
+  động + điện thoại (`api.SETTING_KEYS`); `C.NAME_FIX_HELP` / `SLANG_HELP`; `autoflow.summary` "đổi tên pinyin, hiểu từ
+  lóng"; nút "Sửa tên pinyin" làm tay luôn dùng được): `_post` đổi tên trước khi viết hoa + `punct_fix` (`name_pairs`, `name_lines`); `_llm_batch` mục "TỪ
   LÓNG / CÁCH NÓI MẠNG" (từ có trong lô); `_apply_glossary_src` (Google) + `_slang_terms` (Hy-MT2) chỉ từ strict;
   `translate_lines` ghi `slang_hits`. `pipeline.translate` -> `skill_note` ("đổi N tên còn để pinyin…", "gặp N từ lóng…"),
   câu AI kiểm tra sửa cũng đổi tên; `pipeline.fix_pinyin_names` + nút "Sửa tên pinyin" (tab Phụ đề → Công cụ → Sửa câu hàng Chữ,
@@ -2987,7 +2990,12 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Google nhận câu đã thay từ lóng, tắt công tắc / tiếng đích khác không đụng; giao diện (nút, tooltip, Ctrl+Z).
   Lỗi tìm ra khi chạy cả bộ test: hàm của nút mới trùng tên `_fix_names` của nút "Sửa tên theo âm đọc" (2.1.0) ->
   đè mất nút cũ -> đổi thành `_fix_pinyin` / `pipeline.fix_pinyin_names` (kiểm không còn hàm trùng tên trong lớp).
+- 2.4.3: "cái mới này làm thành công tắc chỗ dịch – bật thì dùng, không bật cứ dùng cách cũ" -> 2 công tắc "Đổi tên pinyin
+  sang Hán Việt" / "Hiểu từ lóng / tiếng mạng" ngay chỗ dịch (tab Tự động bước 2 + khung Dịch tab Phụ đề, cùng 1 cài đặt
+  với Cài đặt → Dịch thuật, hộp Thiết lập…, điện thoại), MẶC ĐỊNH TẮT (2.4.2 bật sẵn) – tắt = dịch y như trước 2.4.2.
 ## Vấn đề đang mở
+- 2.4.3: chờ người dùng chép file, bật 2 công tắc ở tab Phụ đề → khung Dịch (hoặc tab Tự động bước 2) rồi dịch / dịch
+  lại thử; không bật thì dịch như cũ.
 - 2.4.2: chờ người dùng chép file, mở dự án đã dịch bằng Google / Hy-MT2 → tab Phụ đề → Công cụ → Sửa câu → "Sửa tên
   pinyin" (hoặc dịch lại): xem thông báo "Đã đổi N tên…", tên nào đổi sai (âm Hán Việt sai / chọn sai cách đọc) -> gửi
   câu gốc + bản dịch để sửa bảng âm; tên nên giữ pinyin (thương hiệu, tên nước ngoài) bị đổi -> báo để thêm vào danh sách
