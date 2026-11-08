@@ -2936,6 +2936,10 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   -> "mây mơ", "vi" -> "sáu" – không phải VieNeu 3.8.3 (sea-g2p 0.10 đọc đúng "ừm", tên "Vi"; chỉ "VI" HOA sau tập / chương
   / thế kỷ -> "sáu"); VieNeu đọc sai "Mm" (mi li mét), "Hm" (tiếng Anh), "Hehe / Hihi / Haha" (tiếng Anh), "Aaa" (ây ây ây),
   "Ừmmm" (ừm mờ mờ) – đề xuất đổi về cách viết tiếng Việt trước khi đọc (chưa làm, chờ người dùng).
+  Kiểm thử: chạy cả bộ theo thứ tự bài 1–320 chỉ còn lỗi cũ test_subtitle_line_fit_and_rounded_box; 41 bài cuối (290–330)
+  chạy riêng đều qua. Chạy cả bộ thì các bài giao diện cuối (click_every_button_237, dense_gui_238) RẤT chậm (> 30 phút /
+  bài – cửa sổ MainWindow của các bài trước còn sống, processEvents chậm dần) – không phải treo; nên chạy nhóm bài giao
+  diện riêng. Sửa test phụ thuộc Cài đặt dùng chung (ai_join_before_translate do bài giao diện lưu).
 ## Vấn đề đang mở
 - 2.4.0: chờ người dùng chép file, tab Lồng tiếng mục 2 xem cột Nam / nữ từng người nói (sai thì chọn lại), dịch lại 1 tập
   (hoặc tích câu sai xưng hô → Dịch câu đã tích): câu nữ nói với nam còn "em" không, câu chữ vàng cam (xưng hô chưa chắc)
