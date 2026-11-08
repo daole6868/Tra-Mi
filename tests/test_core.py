@@ -1956,7 +1956,7 @@ def test_perf_fixes_2110(sample_video, monkeypatch):
         pp.model.segs[0].text, pp.model.segs[0].trans = "林凡来了。", "Lin Fan đến rồi."
         pp._undo_mark()
         pp.model.set_picked(range(len(pp.model.segs)), False)
-        pp._fix_names()
+        pp._fix_pinyin()
         assert pp.model.segs[0].trans == "Lâm Phàm đến rồi." and 0 in pp.model.selected
         from PySide6.QtCore import Qt
 
@@ -15294,7 +15294,7 @@ def test_slang_242(monkeypatch):
 
 
 def test_fix_names_pipeline_242(monkeypatch):
-    """Dự án đã dịch (2.4.2): pipeline.fix_names đổi tên pinyin ở câu đã tích / cả phim, ghi name_fixed; bản dịch
+    """Dự án đã dịch (2.4.2): pipeline.fix_pinyin_names đổi tên pinyin ở câu đã tích / cả phim, ghi name_fixed; bản dịch
     tiếng khác không đụng; pipeline.translate ghi số tên đã đổi + từ lóng vào thông báo."""
     pytest.importorskip("pypinyin")
     from trami import pipeline
@@ -15307,14 +15307,14 @@ def test_fix_names_pipeline_242(monkeypatch):
                 Segment(2, 3, "好的。", trans="Được.")]
         p.data["trans_lang"] = "vi"
         p.data["glossary"] = "苏梅=Tô My"
-        changed, pairs = pipeline.fix_names(p, segs, [0, 2], {})
+        changed, pairs = pipeline.fix_pinyin_names(p, segs, [0, 2], {})
         assert changed == [0] and segs[0].trans == "Lâm Phàm đến rồi." and segs[1].trans == "Su Mei đâu?"
         assert segs[0].extra["name_fixed"] == [["Lin Fan", "Lâm Phàm"]]
-        changed, pairs = pipeline.fix_names(p, segs, None, {})
+        changed, pairs = pipeline.fix_pinyin_names(p, segs, None, {})
         assert changed == [1] and segs[1].trans == "Tô My đâu?"            # bảng thuật ngữ dự án được ưu tiên
         p.data["trans_lang"] = "en"
         segs[2].trans = "Lin Fan is here"
-        assert pipeline.fix_names(p, segs, None, {}) == ([], [])
+        assert pipeline.fix_pinyin_names(p, segs, None, {}) == ([], [])
 
         p.data["trans_lang"] = "vi"
         p.segments = [Segment(0, 1, "林凡躺平了。"), Segment(1, 2, "王五来了。")]

@@ -222,8 +222,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   thuật 2 công tắc): `_post` đổi tên trước khi viết hoa + `punct_fix` (`name_pairs`, `name_lines`); `_llm_batch` mục "TỪ
   LÓNG / CÁCH NÓI MẠNG" (từ có trong lô); `_apply_glossary_src` (Google) + `_slang_terms` (Hy-MT2) chỉ từ strict;
   `translate_lines` ghi `slang_hits`. `pipeline.translate` -> `skill_note` ("đổi N tên còn để pinyin…", "gặp N từ lóng…"),
-  câu AI kiểm tra sửa cũng đổi tên; `pipeline.fix_names` + nút "Sửa tên pinyin" (tab Phụ đề → Công cụ → Sửa câu hàng Chữ,
-  `project_page._fix_names`: câu đã tích / cả phim, tích sẵn câu đổi, Ctrl+Z; dùng cả cho SRT dịch ở ngoài).
+  câu AI kiểm tra sửa cũng đổi tên; `pipeline.fix_pinyin_names` + nút "Sửa tên pinyin" (tab Phụ đề → Công cụ → Sửa câu hàng Chữ,
+  `project_page._fix_pinyin`: câu đã tích / cả phim, tích sẵn câu đổi, Ctrl+Z; dùng cả cho SRT dịch ở ngoài).
 - `trami/sitelogin.py` – tải video từ link: `extract_url` (link / dòng chia sẻ của app / mã BV), `normalize_url`
   (link điện thoại / rút gọn -> dạng yt-dlp có bộ tải riêng), đăng nhập Bilibili
   bằng mã QR (`bili_qr_start/poll/status`, cookie Netscape `data/cookies/bilibili.txt`), `BROWSERS` cho cookie
@@ -2985,6 +2985,8 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   thuật ngữ viết thường; giữ "Xin lỗi", "Hai người", "Ta lai", "Fan của anh ấy", "Anna", "Xiaomi", "Xin chào" 新潮), 3.000
   câu ghép chữ ngẫu nhiên: không đổi nhầm câu thường, ~1 ms / câu; Google / AI giả: tên đổi, lời nhắc có mục từ lóng,
   Google nhận câu đã thay từ lóng, tắt công tắc / tiếng đích khác không đụng; giao diện (nút, tooltip, Ctrl+Z).
+  Lỗi tìm ra khi chạy cả bộ test: hàm của nút mới trùng tên `_fix_names` của nút "Sửa tên theo âm đọc" (2.1.0) ->
+  đè mất nút cũ -> đổi thành `_fix_pinyin` / `pipeline.fix_pinyin_names` (kiểm không còn hàm trùng tên trong lớp).
 ## Vấn đề đang mở
 - 2.4.2: chờ người dùng chép file, mở dự án đã dịch bằng Google / Hy-MT2 → tab Phụ đề → Công cụ → Sửa câu → "Sửa tên
   pinyin" (hoặc dịch lại): xem thông báo "Đã đổi N tên…", tên nào đổi sai (âm Hán Việt sai / chọn sai cách đọc) -> gửi

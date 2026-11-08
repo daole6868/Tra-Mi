@@ -6042,7 +6042,7 @@ def fix_punct(p: Project, segs: list, rows=None, settings: dict | None = None) -
     return changed
 
 
-def fix_names(p: Project, segs: list, rows=None, settings: dict | None = None) -> tuple[list[int], list]:
+def fix_pinyin_names(p: Project, segs: list, rows=None, settings: dict | None = None) -> tuple[list[int], list]:
     """Đổi tên / thuật ngữ còn để pinyin trong bản dịch đã có sang âm Hán Việt theo chữ Hán của câu gốc (2.4.2, không
     gọi AI – nút "Sửa tên pinyin"; bản dịch nạp từ SRT dịch ở ngoài cũng sửa được). Chỉ bản dịch tiếng Việt. Bảng
     thuật ngữ (Cài đặt + dự án) được ưu tiên. Trả (chỉ số câu đổi lời, [(cũ, mới)])."""
