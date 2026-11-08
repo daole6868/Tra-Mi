@@ -3553,13 +3553,17 @@ class ProjectPage(QWidget):
             if a.get("wave"):
                 import numpy as np
 
-                self.tracks.set_wave(np.load(a["wave"]).astype(np.float32), a["hop"])
+                try:
+                    wave = np.load(a["wave"]).astype(np.float32)
+                except OSError:     # dự án vừa bị xoá / đệm vừa bị dọn trong lúc tạo ở nền
+                    return
+                self.tracks.set_wave(wave, a["hop"])
         run_async(lambda: pipeline.timeline_assets(Project(pid)), done, lambda m: None)
 
     def _media_source(self, hs: dict | None = None) -> str:
         """Video cho trình phát: bản đã xoá phụ đề bằng AI (nếu đã chạy với đúng vùng hiện tại) / bản xem trước / gốc."""
         p = self.p
-        if not p or not p.data.get("source"):
+        if not p or not p.data.get("source") or not p.dir.is_dir():   # thư mục dự án đã bị xoá
             return ""
         if self.hs_viewclean.isChecked():
             try:
