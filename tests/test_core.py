@@ -15038,3 +15038,128 @@ def test_address_gui_240(sample_video, monkeypatch):
         assert d["addr_unsure"] == "drop" and d["translate_speakers"] is True
     win.close()
     p.delete()
+
+
+def test_dl_quality_241(tmp_path, monkeypatch):
+    """2.4.1: ô "Chất lượng tải" – yt-dlp chọn bản cao nhất ≤ mức (không có thì bản gần nhất thấp hơn), cùng cỡ H.264
+    trước; lời nhắc khi chọn 2K / 4K mà chỉ có ≤ 1080p; điện thoại đổi được (chỉ giá trị hợp lệ); ô ở Trang chủ /
+    Hàng loạt lưu chung 1 Cài đặt."""
+    yt_dlp = pytest.importorskip("yt_dlp")
+    from trami import pipeline
+    from trami.config import load_settings, save_settings
+    from trami.remote import api
+
+    assert pipeline.dl_quality_id({}) == "1080" and pipeline.dl_quality_id({"dl_quality": "abc"}) == "1080"
+    assert pipeline.dl_format_sort({}) == ["res:1080", "vcodec:h264", "acodec:aac"]
+    assert pipeline.dl_format_sort({"dl_quality": "720"})[0] == "res:720"
+    assert pipeline.dl_format_sort({"dl_quality": "best"})[0] == "res" and pipeline.dl_quality({"dl_quality": "best"}) == 0
+
+    def fmt(fid, h, vc, ext="mp4"):
+        return {"format_id": fid, "url": f"http://127.0.0.1:9/{fid}.{ext}", "ext": ext, "protocol": "https",
+                "height": h, "width": h * 16 // 9, "vcodec": vc, "acodec": "none", "tbr": h * 3}
+
+    formats = [fmt("v360", 360, "avc1.4d401e"), fmt("v480", 480, "avc1.4d401f"), fmt("v720", 720, "avc1.64001f"),
+               fmt("v720h", 720, "hev1.1.6.L93", ), fmt("v1080", 1080, "avc1.640028"), fmt("v1080a", 1080, "av01.0.08M.08"),
+               fmt("v2160", 2160, "vp09.00.50.08", "webm"),
+               {"format_id": "a", "url": "http://127.0.0.1:9/a.m4a", "ext": "m4a", "protocol": "https",
+                "vcodec": "none", "acodec": "mp4a.40.2", "abr": 128}]
+
+    def pick(q, fm=formats):
+        st = {"dl_quality": q} if q else {}
+        with yt_dlp.YoutubeDL({"format": "bv*+ba/b", "format_sort": pipeline.dl_format_sort(st), "quiet": True,
+                               "no_warnings": True, "simulate": True}) as ydl:
+            info = ydl.process_ie_result({"id": "x", "title": "x", "formats": [dict(f) for f in fm],
+                                          "extractor": "generic", "webpage_url": "http://127.0.0.1:9/"}, download=False)
+        return [f["format_id"] for f in info.get("requested_formats") or [info]]
+
+    assert pick(None) == ["v1080", "a"]            # mặc định: 1080p H.264 (không lấy AV1 cùng cỡ)
+    assert pick("720") == ["v720", "a"] and pick("480") == ["v480", "a"] and pick("360") == ["v360", "a"]
+    assert pick("1440") == ["v1080", "a"]          # không có 1440p -> bản cao nhất thấp hơn
+    assert pick("best") == ["v2160", "a"]
+    assert pick("360", formats[4:]) == ["v1080", "a"]   # trang không có bản ≤ 360p -> bản nhỏ nhất có
+
+    assert "VIP" in pipeline.dl_quality_note(1080, 0, True, True)
+    assert "không có bản cao hơn" in pipeline.dl_quality_note(1080, 1440, False, False)
+    assert not pipeline.dl_quality_note(720, 1080, False, False) and not pipeline.dl_quality_note(2160, 0, False, False)
+    assert not pipeline.dl_quality_note(480, 0, True, False)    # chưa đăng nhập Bilibili: đã có lời nhắc đăng nhập
+    assert pipeline._codec_name("av01.0.08M.08") == "AV1" and pipeline._codec_name("hev1.1") == "HEVC"
+    assert pipeline._codec_name("avc1.64") == "H.264" and pipeline._codec_name("") == ""
+
+    # download_video truyền đúng format_sort + lời nhắc + dòng tiến độ có mã hình
+    seen = {}
+
+    class FakeYDL:
+        def __init__(self, opts):
+            seen["opts"] = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def extract_info(self, url, download=True):
+            out = tmp_path / "dl" / "v [x].mp4"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"0" * 10)
+            return {"id": "x", "title": "v", "height": 1080, "vcodec": "av01.0.08M.08", "ext": "mp4"}
+
+        def prepare_filename(self, info):
+            return str(tmp_path / "dl" / "v [x].mp4")
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYDL)
+    msgs, notes = [], []
+    pipeline.download_video("https://www.youtube.com/watch?v=abcdefghijk", tmp_path / "dl",
+                            lambda x, m: msgs.append(m), notes=notes,
+                            settings={"dl_quality": "best", "dl_connections": 1})
+    assert seen["opts"]["format_sort"][0] == "res" and "không có bản cao hơn" in notes[0]
+    assert msgs[-1] == "Đã tải xong video (1080p, AV1)"
+
+    # điện thoại: chỉ nhận giá trị trong danh sách
+    old = load_settings().get("dl_quality")
+    try:
+        assert any(q["id"] == "720" for q in api.options()["qualities"])
+        api.set_settings({"dl_quality": "720"})
+        assert load_settings()["dl_quality"] == "720" and api.options()["values"]["dl_quality"] == "720"
+        with pytest.raises(api.ApiError):
+            api.set_settings({"dl_quality": "9999"})
+    finally:
+        save_settings({"dl_quality": old or "1080"})
+
+
+def test_dl_quality_gui_241(tmp_path):
+    """Ô "Chất lượng tải" ở Trang chủ + Hàng loạt: đổi ô -> lưu Cài đặt, trang kia hiện đúng khi mở."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    try:
+        from PySide6.QtWidgets import QApplication
+    except ImportError as e:
+        pytest.skip(str(e))
+    from trami.config import load_settings, save_settings
+    from trami.gui import main as gm
+    from trami.gui import theme
+    from trami.gui.widgets import set_combo
+
+    app = QApplication.instance() or QApplication([])
+    theme.load_fonts()
+    app.setStyleSheet(theme.stylesheet())
+    old = load_settings().get("dl_quality")
+    win = gm.MainWindow()
+    win.show()
+    try:
+        home, batch = win.home, win.batch_page
+        assert home.dl_quality.count() == len(gm.pipeline.DL_QUALITIES) and "H.264" in home.dl_quality.toolTip()
+        set_combo(home.dl_quality, "480")
+        assert load_settings()["dl_quality"] == "480"
+        win.show_page("batch")
+        app.processEvents()
+        assert batch.dl_quality.currentData() == "480"
+        set_combo(batch.dl_quality, "best")
+        assert load_settings()["dl_quality"] == "best"
+        win.show_page("home")
+        app.processEvents()
+        assert home.dl_quality.currentData() == "best"
+    finally:
+        save_settings({"dl_quality": old or "1080"})
+        win.close()
+        win.deleteLater()

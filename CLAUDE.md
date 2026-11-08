@@ -195,6 +195,15 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   thử 1 MB đầu ở mỗi máy chủ cùng lúc, chọn nhanh nhất; máy chủ P2P (`_PCDN` mcdn.bilivideo / szbdyd…) xếp sau
   (`order_hosts`). Ghép FFmpeg `-c copy` (+faststart; không vào được mp4 -> mkv), dòng tiến độ "… · x MB/s · N luồng".
   Tải tiếp khi máy chủ từ chối giữa chừng (2.3.5): `fastdl.check_status` – 401/403/404/410 = `Expired`, 429 / ≥ 500 (Bilibili 567) = `Busy` (lớp con của Expired); `_multi` gặp Busy -> giảm một nửa số luồng (≤ 1 lần / `BUSY_CUT_SEC` 5 s, luồng bị cắt trả khúc vào hàng đợi) + chờ `BUSY_WAIT` 3…60 s mỗi khúc, hết lượt -> Busy (lưu bảng khúc); `_single` / `_retry` (probe) cũng chờ theo BUSY_WAIT; Huỷ thật = `halted` (luồng thấy Huỷ). File đang tải tên riêng `PART` ".svpart" + ".svpart.json" (`part_files`: file ".part" + ".part.json" của 2.1.30–2.3.4 tự đổi tên – trước đây TRÙNG tên file tạm của yt-dlp -> yt-dlp có thể nhận file dựng sẵn đủ cỡ có khúc trống), cỡ khúc lấy theo bảng cũ (đổi số luồng không mất phần đã tải), `partial_bytes`. `fetch` thử link dự phòng, còn Busy thì ném Busy. `pipeline._fast_fetch(refresh=)`: dòng đã tải xong ở lần trước dùng lại; lỗi giữa chừng mà đã có phần tải -> chờ `REFRESH_WAIT` 20 / 45 / 90 s, `refresh()` = `ydl.extract_info(url, download=False)` lấy link mới (theo format_id), tải tiếp đúng khúc thiếu; hết lượt -> `PartialDownload` (RuntimeError, phần đã tải GIỮ – không để yt-dlp tải lại từ đầu); chưa tải được gì + không Busy -> None (yt-dlp, xoá file tạm của tool). `_dl_error`: HTTP 429 / 5xx -> giải thích + 'Tải tiếp' (không còn nhắc Cập nhật trình tải). `autoflow._download`: lỗi mà có phần tải dở (`has_partial`: source/ có *.svpart / *.part / *.f<mã>.* ≥ 1 MB) -> `p.data["dl_partial"]`; `queue_links` ghi `dl_auto`; `resume_download(pid)` (= queue_links link cũ, state "retry" -> tải vào CHÍNH dự án đó); `queue_message` "tải tiếp N video…". GUI: `MainWindow._drop_empty_project` không xoá dự án tải dở; `JobRow.resume_b` "Tải tiếp" (việc download lỗi / huỷ, dự án còn, chưa có video, không có việc đang chạy – `_can_resume`); thẻ dự án "⚠ Tải dở – Tải tiếp" (`list_all` thêm `dl_partial`).
+- Chất lượng tải video từ link (2.4.1): Cài đặt `dl_quality` (`pipeline.DL_QUALITIES` 1080 mặc định / 720 / 480 / 360 /
+  1440 / best) -> `dl_format_sort` (yt-dlp `format_sort` ["res:N" | "res", "vcodec:h264", "acodec:aac"] = bản cao nhất ≤ N,
+  không có thì bản gần nhất thấp hơn, cùng cỡ H.264 trước) cho `download_video` (cả `_fast_fetch` / refresh – cùng opts);
+  `dl_quality_note` (chọn 2K / 4K mà chỉ có ≤ 1080p: Bilibili đã đăng nhập -> cần VIP, trang khác -> không có bản cao
+  hơn) vào `notes`; dòng xong "Đã tải xong video (1080p, AV1)" (`_codec_name`, chỉ ghi mã khác H.264). GUI ô "Chất lượng
+  tải" Trang chủ (dưới "Trang khác lấy đăng nhập từ") + Hàng loạt "Chất lượng tải (link)" = `main.quality_combo` /
+  `sync_quality` (showEvent – 1 giá trị chung), `QUALITY_TIP`; điện thoại: `api.SETTING_KEYS` dl_quality (chỉ nhận id trong
+  DL_QUALITIES), `options()["qualities"]`, sheet Thiết lập dịch tự động ô "Chất lượng tải video". Bilibili đăng nhập VIP ->
+  nhãn "tải được tới 4K".
 - `trami/sitelogin.py` – tải video từ link: `extract_url` (link / dòng chia sẻ của app / mã BV), `normalize_url`
   (link điện thoại / rút gọn -> dạng yt-dlp có bộ tải riêng), đăng nhập Bilibili
   bằng mã QR (`bili_qr_start/poll/status`, cookie Netscape `data/cookies/bilibili.txt`), `BROWSERS` cho cookie
@@ -963,7 +972,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (330 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (332 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -2940,7 +2949,15 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   chạy riêng đều qua. Chạy cả bộ thì các bài giao diện cuối (click_every_button_237, dense_gui_238) RẤT chậm (> 30 phút /
   bài – cửa sổ MainWindow của các bài trước còn sống, processEvents chậm dần) – không phải treo; nên chạy nhóm bài giao
   diện riêng. Sửa test phụ thuộc Cài đặt dùng chung (ai_join_before_translate do bài giao diện lưu).
+- 2.4.1: ảnh Trang chủ khung "Tải video từ link" + "chọn chất lượng video tải về được không" -> trước luôn lấy bản
+  cao nhất ≤ 1080p, H.264 trước (cố định). Thêm ô "Chất lượng tải" (Trang chủ, Hàng loạt, điện thoại – 1 Cài đặt chung):
+  ≤ 1080p (nên dùng) / ≤ 720p / ≤ 480p / ≤ 360p / ≤ 2K / Cao nhất có thể (xem Cấu trúc "Chất lượng tải video"). Áp cho
+  video tải SAU khi đổi. Thử: yt-dlp thật chọn định dạng trên danh sách giả (360 / 480 / 720 H.264 + HEVC / 1080 H.264 +
+  AV1 / 2160 VP9): đúng bản theo từng mức, 1440 -> 1080p, 360 khi không có -> bản nhỏ nhất; giao diện offscreen (Trang chủ
+  ↔ Hàng loạt), điện thoại từ chối giá trị lạ. Chưa thử với trang thật (sandbox chặn).
 ## Vấn đề đang mở
+- 2.4.1: chờ người dùng chép file, Trang chủ → "Chất lượng tải" chọn mức → dán link → Chỉ tải về: dòng xong ghi đúng
+  độ phân giải ("Đã tải xong video (720p)"); chọn 2K / 4K với Bilibili cần tài khoản VIP.
 - 2.4.0: chờ người dùng chép file, tab Lồng tiếng mục 2 xem cột Nam / nữ từng người nói (sai thì chọn lại), dịch lại 1 tập
   (hoặc tích câu sai xưng hô → Dịch câu đã tích): câu nữ nói với nam còn "em" không, câu chữ vàng cam (xưng hô chưa chắc)
   nhiều không – Tích câu xưng hô chưa chắc để soát; kỹ năng "Dịch chuẩn" đã sửa tay thì bản sửa giữ (luật chung vẫn áp) –

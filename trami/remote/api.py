@@ -24,7 +24,7 @@ SETTING_KEYS = {
     "ai_review_after_translate": bool, "split_long_trans": bool, "translate_video": bool,
     "tts_engine": str, "tts_rate": str, "dub_overflow": str, "tts_max_speedup": float, "dub_subs_follow": bool,
     "dub_auto_shorten": bool, "dub_voice_all": str,
-    "ocr_color": bool, "ocr_eq": bool,
+    "ocr_color": bool, "ocr_eq": bool, "dl_quality": str,
 }
 OVERFLOW = [("smart", "Tự động"), ("push", "Nối tiếp"), ("overlap", "Đọc đè"), ("early", "Đọc sớm"), ("cut", "Cắt bớt")]
 RATES = [("-10%", "Chậm"), ("+0%", "Bình thường"), ("+10%", "Nhanh"), ("+20%", "Rất nhanh")]
@@ -160,6 +160,7 @@ def options(pid: str | None = None) -> dict:
         "which": [{"id": k, "name": n} for k, n in C.which_choices(lang)],
         "aspects": [{"id": k, "name": n} for k, n in EXPORT_ASPECTS],
         "resolutions": [{"id": k, "name": n} for k, n in C.RESOLUTIONS], "crfs": [{"id": k, "name": n} for k, n in CRFS],
+        "qualities": [{"id": k, "name": n} for k, n in pipeline.DL_QUALITIES],
         "values": vals, "lang_name": langs.INFO[langs.norm(lang)]["name"],
     }
 
@@ -174,6 +175,8 @@ def set_settings(new: dict) -> dict:
             upd[k] = typ(v) if typ is not bool else bool(v)
         except (TypeError, ValueError):
             raise ApiError(f"Giá trị không hợp lệ: {k}") from None
+        if k == "dl_quality" and upd[k] not in dict(pipeline.DL_QUALITIES):
+            raise ApiError(f"Giá trị không hợp lệ: {k}")
     if upd:
         save_settings(upd)
     return {"saved": sorted(upd)}

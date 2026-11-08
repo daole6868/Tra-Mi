@@ -353,7 +353,8 @@ async function presetSheet() {
     select('Dịch sang', o.targets, v.target_lang, set('target_lang')),
     select('Thể loại phim', o.styles, v.translate_style, set('translate_style')),
     select('Bộ đọc', o.tts, v.tts_engine, set('tts_engine')),
-    voice);
+    voice,
+    o.qualities ? select('Chất lượng tải video', o.qualities, v.dl_quality || '1080', set('dl_quality')) : null);
 }
 
 // ================================================================== Dự án

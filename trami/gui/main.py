@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPixmap
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QSpinBox,
                                QStackedWidget, QVBoxLayout, QWidget)
 
@@ -333,6 +333,31 @@ class ProjectCard(QWidget):
                    f"{i.get('width', 0)}×{i.get('height', 0)} · {fmt(i.get('duration', 0), False)}" if i else "")
 
 
+QUALITY_TIP = ("Video tải từ link: tool lấy bản cao nhất KHÔNG QUÁ mức này (trang không có thì lấy bản gần nhất "
+               "thấp hơn), cùng cỡ thì ưu tiên H.264 (phát mượt, xuất nhanh).\n"
+               "1080p là vừa cho đăng Facebook / YouTube. 720p / 480p: file nhẹ, tải + nghe + xuất nhanh hơn.\n"
+               "2K / 4K: file nặng, mọi bước chậm hơn, thường là HEVC / AV1 / VP9 – tool tự tạo bản xem trước nhẹ để "
+               "phát mượt; Bilibili cần tài khoản VIP mới có 1080P+ / 4K.\nÁp cho video tải SAU khi đổi (video đã "
+               "tải giữ nguyên – muốn đổi thì xoá dự án rồi dán lại link).")
+
+
+def quality_combo(st: dict) -> QComboBox:
+    """Ô "Chất lượng tải" (Cài đặt dl_quality – 1 giá trị chung cho Trang chủ, Hàng loạt, điện thoại)."""
+    cb = combo(pipeline.DL_QUALITIES, pipeline.dl_quality_id(st))
+    cb.setToolTip(QUALITY_TIP)
+    cb.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)   # hiện đủ chữ "Tốt nhất ≤ 1080p…"
+    cb.currentIndexChanged.connect(lambda _i: save_settings({"dl_quality": cb.currentData() or "1080"}))
+    return cb
+
+
+def sync_quality(cb: QComboBox):
+    want = pipeline.dl_quality_id(load_settings())
+    if cb.currentData() != want:
+        cb.blockSignals(True)
+        set_combo(cb, want)
+        cb.blockSignals(False)
+
+
 class HomePage(QWidget):
     def __init__(self, win):
         super().__init__()
@@ -390,6 +415,8 @@ class HomePage(QWidget):
             "trên trình duyệt.\nBilibili dùng đăng nhập bằng mã QR ở trên.")
         self.dl_browser.currentIndexChanged.connect(self._browser_changed)
         c2.add(hbox(label("Trang khác lấy đăng nhập từ:", "muted"), self.dl_browser, None))
+        self.dl_quality = quality_combo(st)
+        c2.add(hbox(label("Chất lượng tải:", "muted"), self.dl_quality, None))
         self.dl_conns = QSpinBox()
         self.dl_conns.setRange(1, 32)
         self.dl_conns.setValue(int(st.get("dl_connections", 8) or 1))
@@ -462,6 +489,7 @@ class HomePage(QWidget):
     def showEvent(self, e):
         super().showEvent(e)
         self.refresh_preset()
+        sync_quality(self.dl_quality)
         v = pipeline.ytdlp_version()
         self.ytdlp_lbl.setText(f"Trình tải yt-dlp {v}" if v else "⚠ Chưa cài yt-dlp – bấm Cập nhật trình tải")
         from ..config import FROZEN
@@ -474,7 +502,8 @@ class HomePage(QWidget):
             if r.get("login"):
                 who = f" – {r['name']}" if r.get("name") else ""
                 vip = " (VIP)" if r.get("vip") else ""
-                self.bili_lbl.setText(f"Bilibili: ✓ đã đăng nhập{who}{vip} – tải được tới 1080p")
+                top = "4K" if r.get("vip") else "1080p"
+                self.bili_lbl.setText(f"Bilibili: ✓ đã đăng nhập{who}{vip} – tải được tới {top}")
                 self.bili_lbl.setStyleSheet("color: #4ADE80;")
             else:
                 self.bili_lbl.setText("Bilibili: " + ("phiên đăng nhập đã hết hạn" if r.get("expired") else
@@ -595,6 +624,7 @@ class BatchPage(QWidget):
                                "Tắt (mặc định): mỗi video làm tới lồng tiếng rồi DỪNG trước bước xuất – mở từng dự án kiểm "
                                "tra rồi bấm 'Xuất video'. Bật: tự xoá phụ đề cũ + ghép video luôn như trước")
         self.do_render.toggled.connect(lambda on: save_settings({"batch_render": bool(on)}))
+        self.dl_quality = f.row("Chất lượng tải (link)", quality_combo(s), QUALITY_TIP)
         o.add(f)
         go = GradientButton("Bắt đầu xử lý hàng loạt", "bolt", big=True)
         go.clicked.connect(self.run)
@@ -617,6 +647,7 @@ class BatchPage(QWidget):
     def showEvent(self, e):
         super().showEvent(e)
         self.refresh_preset()
+        sync_quality(self.dl_quality)
 
     def _edit_preset(self):
         from .auto_settings import AutoSettingsDialog

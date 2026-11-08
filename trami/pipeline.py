@@ -96,13 +96,56 @@ def _dl_error(e: BaseException, url: str, used_cookies: bool) -> str:
     return f"{msg[:400]}\nNếu trước đây tải được: {upd}."
 
 
+# Chất lượng tải video từ link (2.4.1, Cài đặt `dl_quality` – ô "Chất lượng tải" ở Trang chủ / Hàng loạt / điện thoại):
+# bản cao nhất KHÔNG QUÁ mức chọn (trang không có thì lấy bản gần nhất thấp hơn), cùng cỡ thì H.264 + AAC trước
+DL_QUALITIES = [("1080", "Tốt nhất ≤ 1080p (nên dùng)"), ("720", "≤ 720p – nhẹ, tải nhanh"), ("480", "≤ 480p"),
+                ("360", "≤ 360p – nhẹ nhất"), ("1440", "≤ 2K (1440p)"), ("best", "Cao nhất có thể (2K / 4K)")]
+DL_QUALITY_DEFAULT = "1080"
+
+
+def dl_quality_id(settings: dict | None) -> str:
+    q = str((settings or {}).get("dl_quality") or DL_QUALITY_DEFAULT)
+    return q if q in dict(DL_QUALITIES) else DL_QUALITY_DEFAULT
+
+
+def dl_quality(settings: dict | None) -> int:
+    """Chiều cao tối đa (720 / 1080…); 0 = không giới hạn (Cao nhất có thể)."""
+    q = dl_quality_id(settings)
+    return 0 if q == "best" else int(q)
+
+
+def dl_format_sort(settings: dict | None) -> list[str]:
+    q = dl_quality(settings)
+    return [f"res:{q}" if q else "res", "vcodec:h264", "acodec:aac"]
+
+
+def _codec_name(vcodec: str) -> str:
+    v = (vcodec or "").lower()
+    for key, name in (("avc", "H.264"), ("h264", "H.264"), ("hev", "HEVC"), ("hvc", "HEVC"), ("h265", "HEVC"),
+                      ("av01", "AV1"), ("av1", "AV1"), ("vp09", "VP9"), ("vp9", "VP9")):
+        if v.startswith(key):
+            return name
+    return ""
+
+
+def dl_quality_note(height: int, want: int, bili: bool, logged_in: bool) -> str:
+    """Lời nhắc khi bản tải về thấp hơn mức chọn (chỉ khi chọn > 1080p – mức ≤ 1080p vốn lấy bản gần nhất có sẵn)."""
+    if not height or (want and want <= 1080) or height > 1080:
+        return ""
+    if bili and logged_in:
+        return (f"Video tải về {height}p – Bilibili chỉ cho tài khoản đại hội viên (VIP) tải bản 1080P+ / 4K.")
+    if bili:
+        return ""      # chưa đăng nhập: đã có lời nhắc đăng nhập riêng
+    return f"Video tải về {height}p – trang không có bản cao hơn."
+
+
 def download_video(url: str, dest_dir: Path, progress: Prog | None = None, cancel=None,
                    notes: list | None = None, settings: dict | None = None, meta: dict | None = None) -> Path:
     """Tải video từ Douyin, Bilibili, YouTube, TikTok, Weibo, Xigua... bằng yt-dlp.
 
     `url` có thể là cả dòng chia sẻ của app ("【tên】 https://b23.tv/xx") – tự lấy link. Bilibili đã đăng nhập bằng mã QR
-    (sitelogin) -> tải 720p/1080p; trang khác dùng cookie trình duyệt / file cookies.txt ở Cài đặt. Chọn ≤ 1080p, ưu
-    tiên H.264 (trình phát + FFmpeg mở nhanh, không phải tạo bản xem trước như HEVC/AV1). Tiến độ gộp hình + tiếng
+    (sitelogin) -> tải 720p/1080p; trang khác dùng cookie trình duyệt / file cookies.txt ở Cài đặt. Chọn bản cao nhất ≤ mức
+    `dl_quality` (mặc định 1080p), ưu tiên H.264 (trình phát + FFmpeg mở nhanh, không phải tạo bản xem trước như HEVC/AV1). Tiến độ gộp hình + tiếng
     (Bilibili / YouTube tải 2 file rồi ghép). `notes` nhận lời nhắc (vd. chỉ 480p vì chưa đăng nhập).
     `meta` nhận tiêu đề / mô tả / thẻ / kênh của video (gợi ý tên riêng cho bộ nghe – names.context_text)."""
     import yt_dlp
@@ -174,8 +217,9 @@ def download_video(url: str, dest_dir: Path, progress: Prog | None = None, cance
     opts = {
         "outtmpl": str(dest_dir / "%(title).80s [%(id)s].%(ext)s"),
         "format": "bv*+ba/b",
-        # ≤ 1080p (4K làm mọi bước chậm mà đăng Facebook / YouTube không cần), cùng cỡ thì H.264 + AAC trước
-        "format_sort": ["res:1080", "vcodec:h264", "acodec:aac"],
+        # mặc định ≤ 1080p (4K làm mọi bước chậm mà đăng Facebook / YouTube không cần), cùng cỡ thì H.264 + AAC trước;
+        # đổi ở ô "Chất lượng tải" (Cài đặt dl_quality)
+        "format_sort": dl_format_sort(settings),
         "merge_output_format": "mp4",
         "noplaylist": True,
         "progress_hooks": [hook],
@@ -253,11 +297,17 @@ def download_video(url: str, dest_dir: Path, progress: Prog | None = None, cance
                      "description": str(info.get("description") or "")[:600],
                      "tags": [str(t)[:30] for t in (info.get("tags") or [])[:20]], "url": url})
     h = int(info.get("height") or 0)
-    if bili and h and h <= 480 and not cookie_opts and notes is not None:
+    want = dl_quality(settings)
+    if bili and h and h <= 480 and not cookie_opts and (not want or want > 480) and notes is not None:
         notes.append(f"Video chỉ {h}p vì chưa đăng nhập Bilibili – ở Trang chủ bấm 'Đăng nhập Bilibili (quét mã QR)' "
                      "rồi tải lại để có 720p / 1080p.")
+    qn = dl_quality_note(h, want, bili, bool(cookie_opts))
+    if qn and notes is not None:
+        notes.append(qn)
+    codec = _codec_name(str(info.get("vcodec") or ""))
     if progress:
-        progress(1.0, "Đã tải xong video" + (f" ({h}p)" if h else ""))
+        tag = ", ".join(x for x in (f"{h}p" if h else "", codec if codec and codec != "H.264" else "") if x)
+        progress(1.0, "Đã tải xong video" + (f" ({tag})" if tag else ""))
     return path
 
 
