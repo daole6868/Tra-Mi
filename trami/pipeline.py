@@ -4250,6 +4250,12 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
         if note:
             p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + note
     new_rows = [i for i, x in enumerate(segs) if x.trans.strip() and x.trans != before[i]]   # câu vừa có bản dịch mới
+    # 2.4.2: tên / thuật ngữ còn để pinyin đã đổi sang Hán Việt + từ lóng đã gửi nghĩa cho công cụ dịch
+    from . import hanviet, slang
+
+    for nt in (hanviet.note(tr.name_pairs, tr.name_lines), slang.note(tr.slang_hits)):
+        if nt:
+            p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + nt
     n_addr = sum(1 for i in new_rows if segs[i].extra.get("addr_unsure"))
     if n_addr:   # luật 5f (2.4.0): AI không chắc ai nói với ai -> đã bỏ đại từ / dùng cặp trung tính
         p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + \
@@ -4298,6 +4304,11 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
     if do_review:
         try:
             fixed = ai_review(p, settings, eng, _sub(progress, 0.85, 1.0), cancel, rows=rev_rows)
+            if fixed and target == "vi" and settings.get("trans_name_fix", True):
+                # AI kiểm tra viết lại câu mà để tên dạng pinyin -> đổi sang Hán Việt như lúc dịch (2.4.2)
+                rs = p.segments
+                if hanviet.fix_segments(rs, tr.glossary, [k for k in fixed if 0 <= k < len(rs)])[0]:
+                    p.segments = rs
             n_rev = len(rev_rows) if rev_rows is not None else sum(1 for x in p.segments if x.trans.strip())
             p.data["ai_reviewed"] = True
             p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + \
@@ -6029,6 +6040,21 @@ def fix_punct(p: Project, segs: list, rows=None, settings: dict | None = None) -
             x.trans = new
             changed.append(k)
     return changed
+
+
+def fix_names(p: Project, segs: list, rows=None, settings: dict | None = None) -> tuple[list[int], list]:
+    """Đổi tên / thuật ngữ còn để pinyin trong bản dịch đã có sang âm Hán Việt theo chữ Hán của câu gốc (2.4.2, không
+    gọi AI – nút "Sửa tên pinyin"; bản dịch nạp từ SRT dịch ở ngoài cũng sửa được). Chỉ bản dịch tiếng Việt. Bảng
+    thuật ngữ (Cài đặt + dự án) được ưu tiên. Trả (chỉ số câu đổi lời, [(cũ, mới)])."""
+    from . import hanviet
+    from .translate import parse_glossary
+
+    settings = settings if settings is not None else load_settings()
+    if trans_lang(p) != "vi":
+        return [], []
+    g = dict(parse_glossary(settings.get("glossary", "")))
+    g.update(parse_glossary(p.data.get(glossary_key("vi"), "")))
+    return hanviet.fix_segments(segs, g, rows)
 
 
 SONG_MARKS = ("♪", "♫", "♬", "🎵", "🎶")

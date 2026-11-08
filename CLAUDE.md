@@ -204,6 +204,26 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `sync_quality` (showEvent – 1 giá trị chung), `QUALITY_TIP`; điện thoại: `api.SETTING_KEYS` dl_quality (chỉ nhận id trong
   DL_QUALITIES), `options()["qualities"]`, sheet Thiết lập dịch tự động ô "Chất lượng tải video". Bilibili đăng nhập VIP ->
   nhãn "tải được tới 4K".
+- Tên / thuật ngữ pinyin -> Hán Việt + từ lóng (2.4.2): `trami/hanviet.py` (mã + luật tự viết; KHÔNG dùng hanviet.tsv /
+  mã iContent) + `hanviet_data.py` (bảng âm tự soạn ~3.940 chữ: 3.500 chữ thường gặp theo tần suất jieba + chữ trong
+  tên người / địa danh / họ hiếm / tên truyện; chữ nhiều cách đọc "长zhang=Trưởng/chang=Trường"; pinyin lấy bằng pypinyin
+  heteronym). `fix_line(trans, src, glossary)`: nhóm từ liền nhau cùng kiểu viết hoa / viết thường, mọi đoạn con dài ->
+  ngắn khớp các chữ Hán LIỀN NHAU của câu gốc (`_align` / `_match_word`: từ có dấu riêng tiếng Việt (`_VN_ONLY` / đ) chỉ
+  khớp âm Hán Việt; dấu sắc / huyền phải đúng dấu thanh pinyin; dấu ngang / ˇ / ü = pinyin; không dấu = pinyin không dấu,
+  viết liền ≤ `MAX_JOIN` 4 tiếng "Shimin"); cần ≥ 1 tiếng còn pinyin, khớp đúng 1 tên (nhiều tên khác nhau -> bỏ); 1 tiếng
+  chỉ khi họ `SURNAMES` / sau 老小阿 VÀ danh xưng trước (`TITLES_BEFORE` ông / anh / lão / tiểu…) / sau (`TITLES_AFTER`
+  tổng / tiên sinh…); viết thường (thuật ngữ "jianghu") ≥ 2 chữ, không từ chỉ có thể là tiếng Việt, phần lớn từ không thuộc
+  `VN_PLAIN` -> chữ thường; `KEEP` thương hiệu / tên nước ngoài (xiaomi, anna, linda…); tên trong bảng thuật ngữ > `WORDS`
+  (họ ghép 诸葛 Gia Cát, 曹操 Tào Tháo, 香港 Hồng Kông, 重庆 Trùng Khánh…) > âm từng chữ theo pinyin đã khớp; chữ không có
+  âm -> giữ cả tên. `fix_segments` (`extra["name_fixed"]` -> tooltip bản dịch), `note`. `trami/slang.py`: `SLANG`
+  (~200 từ lóng / tiếng mạng / cảm thán: 躺平, 内卷, 吃瓜群众, yyds, xswl, 社恐…; `strict` = hầu như không dùng nghĩa đen),
+  `found(lines, skip=glossary, strict=)` (từ dài trước, chữ Latin khớp nguyên từ không phân biệt hoa thường), `apply_src`,
+  `note`. Nối vào `Translator` (chỉ tiếng Việt; Cài đặt `trans_name_fix` / `trans_slang` mặc định bật – Cài đặt → Dịch
+  thuật 2 công tắc): `_post` đổi tên trước khi viết hoa + `punct_fix` (`name_pairs`, `name_lines`); `_llm_batch` mục "TỪ
+  LÓNG / CÁCH NÓI MẠNG" (từ có trong lô); `_apply_glossary_src` (Google) + `_slang_terms` (Hy-MT2) chỉ từ strict;
+  `translate_lines` ghi `slang_hits`. `pipeline.translate` -> `skill_note` ("đổi N tên còn để pinyin…", "gặp N từ lóng…"),
+  câu AI kiểm tra sửa cũng đổi tên; `pipeline.fix_names` + nút "Sửa tên pinyin" (tab Phụ đề → Công cụ → Sửa câu hàng Chữ,
+  `project_page._fix_names`: câu đã tích / cả phim, tích sẵn câu đổi, Ctrl+Z; dùng cả cho SRT dịch ở ngoài).
 - `trami/sitelogin.py` – tải video từ link: `extract_url` (link / dòng chia sẻ của app / mã BV), `normalize_url`
   (link điện thoại / rút gọn -> dạng yt-dlp có bộ tải riêng), đăng nhập Bilibili
   bằng mã QR (`bili_qr_start/poll/status`, cookie Netscape `data/cookies/bilibili.txt`), `BROWSERS` cho cookie
@@ -972,7 +992,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (332 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (336 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -2955,7 +2975,21 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   video tải SAU khi đổi. Thử: yt-dlp thật chọn định dạng trên danh sách giả (360 / 480 / 720 H.264 + HEVC / 1080 H.264 +
   AV1 / 2160 VP9): đúng bản theo từng mức, 1440 -> 1080p, 360 khi không có -> bản nhỏ nhất; giao diện offscreen (Trang chủ
   ↔ Hàng loạt), điện thoại từ chối giá trị lạ. Chưa thử với trang thật (sandbox chặn).
+- 2.4.2: người dùng xem `hanviet.tsv` + `icontent.zip` (iContent – ứng dụng đóng, chỉ học ý) rồi "làm mục 1": Google /
+  Hy-MT2 để nguyên tên chưa có trong bảng thuật ngữ dưới dạng pinyin ("Lin Fan", "Tianjian Zong") – trước đây chỉ AI tự
+  lập bảng tên (analyze / hồ sơ phim). Người dùng thêm: không chỉ tên người – cả địa danh, đồ vật, thuật ngữ, từ lóng.
+  Làm: bảng âm Hán Việt TỰ SOẠN đủ 3.941 chữ (không chép hanviet.tsv), đổi pinyin theo chữ Hán của câu gốc cho mọi công
+  cụ dịch (cả AI), thuật ngữ viết thường "jianghu" -> "giang hồ", bảng từ lóng gửi nghĩa cho AI / thay trước cho Google,
+  nút "Sửa tên pinyin" cho dự án đã dịch / SRT dịch ở ngoài (xem Cấu trúc "Tên / thuật ngữ pinyin -> Hán Việt"). Thử: 30
+  câu mẫu (tên cách nhau / viết liền / có dấu thanh / lẫn âm Hán Việt, họ ghép, chữ nhiều cách đọc, môn phái, địa danh,
+  thuật ngữ viết thường; giữ "Xin lỗi", "Hai người", "Ta lai", "Fan của anh ấy", "Anna", "Xiaomi", "Xin chào" 新潮), 3.000
+  câu ghép chữ ngẫu nhiên: không đổi nhầm câu thường, ~1 ms / câu; Google / AI giả: tên đổi, lời nhắc có mục từ lóng,
+  Google nhận câu đã thay từ lóng, tắt công tắc / tiếng đích khác không đụng; giao diện (nút, tooltip, Ctrl+Z).
 ## Vấn đề đang mở
+- 2.4.2: chờ người dùng chép file, mở dự án đã dịch bằng Google / Hy-MT2 → tab Phụ đề → Công cụ → Sửa câu → "Sửa tên
+  pinyin" (hoặc dịch lại): xem thông báo "Đã đổi N tên…", tên nào đổi sai (âm Hán Việt sai / chọn sai cách đọc) -> gửi
+  câu gốc + bản dịch để sửa bảng âm; tên nên giữ pinyin (thương hiệu, tên nước ngoài) bị đổi -> báo để thêm vào danh sách
+  giữ; từ lóng hay gặp còn dịch sai -> gửi để thêm (hoặc tự thêm vào Bảng thuật ngữ).
 - 2.4.1: chờ người dùng chép file, Trang chủ → "Chất lượng tải" chọn mức → dán link → Chỉ tải về: dòng xong ghi đúng
   độ phân giải ("Đã tải xong video (720p)"); chọn 2K / 4K với Bilibili cần tài khoản VIP.
 - 2.4.0: chờ người dùng chép file, tab Lồng tiếng mục 2 xem cột Nam / nữ từng người nói (sai thì chọn lại), dịch lại 1 tập

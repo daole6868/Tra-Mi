@@ -780,6 +780,7 @@ class SettingsPage(QWidget):
         ("spk_n", "diarize_speakers", "i"), ("spk_thr", "diarize_threshold", "f"),
         ("engine", "translate_engine", "c"), ("style", "translate_style", "c"), ("ai_join", "ai_join_engine", "c"),
         ("breath_marks", "breath_marks", "b"), ("clause_match", "trans_clause_match", "b"),
+        ("name_fix", "trans_name_fix", "b"), ("slang", "trans_slang", "b"),
         ("spk_tags", "translate_speakers", "b"), ("addr_unsure", "addr_unsure", "c"),
         ("target", "target_lang", "c"),
         ("ds_model", "deepseek_model", "t"), ("oa_base", "openai_base_url", "t"), ("oa_model", "openai_model", "t"),
@@ -979,6 +980,16 @@ class SettingsPage(QWidget):
         self.clause_match = f.row("AI sửa câu dịch cho đủ vế", Switch(),
                                   "Dịch bằng AI: câu dịch gộp mất vế so với chỗ nhân vật ngắt hơi -> AI viết lại cho đủ vế "
                                   "(cùng ý, cùng độ dài). Tốn thêm 1 lần gọi AI cho các câu đó")
+        self.name_fix = f.row("Đổi tên còn để pinyin sang Hán Việt", Switch(),
+                              "Dịch sang tiếng Việt (mọi công cụ: Google, Hy-MT2, AI): tên người, địa danh, môn phái, đồ "
+                              "vật, chiêu thức… máy dịch để nguyên pinyin (\"Lin Fan\", \"Tianjian Zong\", \"jianghu\") "
+                              "-> đổi theo chữ Hán của câu gốc (\"Lâm Phàm\", \"Thiên Kiếm Tông\", \"giang hồ\"). Không "
+                              "tốn API. Tên có trong Bảng thuật ngữ dùng đúng bản trong bảng. Dự án đã dịch: tab Phụ đề → "
+                              "Công cụ → Sửa câu → Sửa tên pinyin")
+        self.slang = f.row("Hiểu từ lóng / tiếng mạng", Switch(),
+                           "Câu gốc có từ lóng (躺平, 内卷, 吃瓜群众, yyds, 社恐…): gửi kèm nghĩa quen dùng cho AI (AI tự xét "
+                           "câu dùng nghĩa lóng hay nghĩa đen); Google / Hy-MT2 thay trước các từ chắc chắn là lóng. Từ "
+                           "riêng của bạn thêm vào Bảng thuật ngữ")
         from ..translate import ADDR_LABELS, ADDR_MODES
 
         self.spk_tags = f.row("Gửi người nói + nam / nữ cho AI", Switch(),

@@ -1123,7 +1123,11 @@ class ProjectPage(QWidget):
                         "đọc '对7' -> thay bằng '对了'). Ctrl+Z hoàn tác", on_click=self._replace),
                  button("Sửa dấu câu", "wand", "Câu đã tích (hoặc cả phim): bỏ dấu phẩy chen giữa 1 cụm từ / tên riêng "
                         "(\"một món, đồ tốt\", \"Thiên Kiếm, Tông\"), thêm dấu câu cuối theo câu gốc (? ! . ,) – bản dịch "
-                        "trước 2.1.11 bị bỏ dấu chấm cuối câu. Không gọi AI, Ctrl+Z hoàn tác", on_click=self._fix_punct)),
+                        "trước 2.1.11 bị bỏ dấu chấm cuối câu. Không gọi AI, Ctrl+Z hoàn tác", on_click=self._fix_punct),
+                 button("Sửa tên pinyin", "wand", "Câu đã tích (hoặc cả phim): tên / thuật ngữ máy dịch để nguyên pinyin "
+                        "(\"Lin Fan\", \"Tianjian Zong\", \"jianghu\") -> âm Hán Việt theo chữ Hán của câu gốc (\"Lâm "
+                        "Phàm\", \"Thiên Kiếm Tông\", \"giang hồ\"). Dùng cả cho bản dịch nạp từ SRT. Tên có trong Bảng "
+                        "thuật ngữ dùng đúng bản trong bảng. Không gọi AI, Ctrl+Z hoàn tác", on_click=self._fix_names)),
             _Row("Xưng hô",
                  button("Tích câu xưng hô chưa chắc", "check", "Bản dịch chữ vàng cam: AI không rõ ai nói với ai / nam hay "
                         "nữ nên đã bỏ đại từ hoặc dùng cặp trung tính (cậu – tớ, ngươi – ta). Tích để soát: sửa tay, "
@@ -7646,6 +7650,31 @@ class ProjectPage(QWidget):
             self.model.set_picked(range(len(segs)), False)
             self.model.set_picked(changed, True)
             msg += " – đã tích sẵn các câu này: bấm 'Tạo lại giọng các câu đã tích' để giọng lồng lên / xuống giọng theo dấu mới"
+        self.win.toast(msg, "ok")
+
+    def _fix_names(self):
+        """Đổi tên còn để pinyin sang Hán Việt (2.4.2, không AI): câu đã tích hoặc cả phim, tích sẵn câu đổi."""
+        if not self.p:
+            return
+        if pipeline.trans_lang(self.p) != "vi":
+            return self.win.toast("Chỉ dùng cho bản dịch tiếng Việt", "warn")
+        segs = self.model.segs
+        rows = [r for r in sorted(self.model.selected) if 0 <= r < len(segs)] or None
+        changed, pairs = pipeline.fix_names(self.p, segs, rows, self.settings)
+        if not changed:
+            return self.win.toast("Không thấy tên nào còn để pinyin" + (" ở các câu đã tích" if rows else ""), "ok")
+        self.model.dataChanged.emit(self.model.index(min(changed), 0),
+                                    self.model.index(max(changed), self.model.columnCount() - 1))
+        self._segs_edited()
+        ex = list(dict.fromkeys(f"{a} → {b}" for a, b in pairs))[:3]
+        more = ", …" if len(set(pairs)) > 3 else ""
+        msg = f"Đã đổi {len(pairs)} tên pinyin ở {len(changed)} câu ({', '.join(ex)}{more})"
+        self.model.set_picked(range(len(segs)), False)
+        self.model.set_picked(changed, True)
+        if pipeline.has_dub(self.p):
+            msg += " – đã tích sẵn các câu này: bấm 'Tạo lại giọng các câu đã tích' để giọng lồng đọc tên mới"
+        else:
+            msg += " – đã tích sẵn các câu này để xem lại"
         self.win.toast(msg, "ok")
 
     def _wf_words(self) -> list[str] | None:

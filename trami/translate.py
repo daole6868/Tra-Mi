@@ -1377,6 +1377,13 @@ class Translator:
         self.video_error = ""
         self.speakers: dict[str, dict] = {}   # người nói -> {"g": male / female, "name"} Gemini thấy trên hình
         self._spk_lock = threading.Lock()
+        # 2.4.2: tên / thuật ngữ còn để pinyin -> âm Hán Việt (hanviet.py, mọi công cụ dịch) + từ lóng / tiếng mạng
+        # (slang.py: AI nhận nghĩa trong lời nhắc, Google / Hy-MT2 thay trước từ chắc chắn là lóng) – chỉ tiếng Việt
+        self.name_fix = self.target == "vi" and bool(settings.get("trans_name_fix", True))
+        self.slang_on = self.target == "vi" and bool(settings.get("trans_slang", True))
+        self.name_pairs: list[tuple[str, str]] = []   # (pinyin, Hán Việt) đã đổi
+        self.name_lines = 0
+        self.slang_hits: list[str] = []
 
     # ------------------------------------------------------------- public
     def translate_segments(self, segs: list[Segment], progress: ProgressCB | None = None,
@@ -1707,6 +1714,11 @@ class Translator:
             flags.append(o.startswith(XH_MARK))
             res.append(self._post(o.replace(XH_MARK, ""), BUDGET_RE.sub(" ", lines[k])))
         self.addr_flags = flags
+        if getattr(self, "slang_on", False):
+            from . import slang
+
+            self.slang_hits += list(slang.found([BUDGET_RE.sub(" ", x) for x in lines], self.glossary,
+                                                strict=self.engine in LOCAL_ENGINES))
         return res
 
     # ------------------------------------------------------------- AI
@@ -1796,6 +1808,15 @@ class Translator:
             parts.append(f"{lab[0]}:\n{summary}")
         if gl:
             parts.append(f"{lab[1]}:\n" + glossary_text(gl))
+        # 2.4.2: từ lóng / tiếng mạng có trong lô -> nghĩa quen dùng (AI tự xét câu dùng nghĩa đen hay nghĩa lóng)
+        if getattr(self, "slang_on", False):
+            from . import slang
+
+            sl = slang.found([BUDGET_RE.sub(" ", x) for x in lines], self.glossary)
+            if sl:
+                parts.append("TỪ LÓNG / CÁCH NÓI MẠNG có trong các dòng (nghĩa quen dùng – dùng khi câu nói theo nghĩa "
+                             "này, KHÔNG dịch từng chữ; câu dùng nghĩa đen thì dịch nghĩa đen):\n"
+                             + "\n".join(f"{k} = {v}" for k, v in sl.items()))
         if ctx_before:   # gửi cùng lúc: dòng trước chưa dịch xong -> chỉ có câu gốc
             parts.append(f"{lab[2]}:\n" + "\n".join(f"- {BUDGET_RE.sub(' ', a).strip()}"
                                                      + (f" => {b.replace(XH_MARK, '')}" if b else "")
@@ -1969,7 +1990,8 @@ class Translator:
                 ids = todo[b:b + step]
                 items = [{"text": lines[i],
                           "context": [lines[k] for k in range(max(0, i - 3), i) if lines[k].strip()],
-                          "terms": [[k, v] for k, v in self.glossary.items() if k in lines[i]][:12]} for i in ids]
+                          "terms": ([[k, v] for k, v in self.glossary.items() if k in lines[i]]
+                                    + self._slang_terms(lines[i]))[:12]} for i in ids]
                 base = done0 + b
 
                 def pr(x: float, msg: str, base=base, n=len(ids)):
@@ -1986,10 +2008,24 @@ class Translator:
 
     # ------------------------------------------------------------- Google
     def _apply_glossary_src(self, text: str) -> str:
+        orig = text
         for k in sorted(self.glossary, key=len, reverse=True):
             if k in text:
                 text = text.replace(k, f" {self.glossary[k]} ")
+        if getattr(self, "slang_on", False):   # từ chắc chắn là lóng (躺平, yyds…) -> nghĩa tiếng Việt (2.4.2)
+            from . import slang
+
+            if slang.found(orig, self.glossary, strict=True):
+                text = slang.apply_src(text, self.glossary)
         return text
+
+    def _slang_terms(self, line: str) -> list[list[str]]:
+        """Từ chắc chắn là lóng trong 1 câu -> thuật ngữ gửi Hy-MT2 (2.4.2)."""
+        if not getattr(self, "slang_on", False):
+            return []
+        from . import slang
+
+        return [[k, v] for k, v in slang.found(line, self.glossary, strict=True).items()]
 
     def _google_batches(self, lines: list[str], limit: int = 4000) -> list[list[str]]:
         batches, cur, n = [], [], 0
@@ -2107,6 +2143,14 @@ class Translator:
         t = " ".join(t.replace("\n", " ").split())
         t = re.sub(r"\s+([,.!?;:])", r"\1", t)
         t = t.strip(" \"'“”")
+        if t and src and getattr(self, "name_fix", False):   # tên / thuật ngữ pinyin -> Hán Việt theo câu gốc (2.4.2)
+            from . import hanviet
+
+            t2, pairs = hanviet.fix_line(t, src, self.glossary)
+            if pairs:
+                t = t2
+                self.name_pairs += pairs
+                self.name_lines += 1
         if t:
             t = t[0].upper() + t[1:]
         return punct_fix(t, src, self.target, self.names())

@@ -404,6 +404,10 @@ class SubsModel(QAbstractTableModel):
                     (" – hơi nhanh, khó đọc kịp" if cps > 20 else "")
                 if s.extra.get("review_note") and s.extra.get("trans_before_review") is not None:
                     tip += f"\nAI kiểm tra đã sửa: {s.extra['review_note']}\nTrước khi sửa: {s.extra['trans_before_review']}"
+                nf = [x for x in (s.extra.get("name_fixed") or []) if isinstance(x, (list, tuple)) and len(x) == 2
+                      and str(x[1]) in s.trans]
+                if nf:
+                    tip += "\nĐã đổi tên pinyin sang Hán Việt: " + ", ".join(f"{a} → {b}" for a, b in nf)
                 if s.extra.get("addr_unsure"):
                     tip += ("\n⚠ Xưng hô chưa chắc: AI không rõ ai nói với ai / nam hay nữ nên đã bỏ đại từ hoặc dùng cặp "
                             "trung tính (cậu – tớ, ngươi – ta). Sửa tay câu này, hoặc sửa nam / nữ người nói (bảng người "

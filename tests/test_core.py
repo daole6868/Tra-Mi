@@ -1951,6 +1951,19 @@ def test_perf_fixes_2110(sample_video, monkeypatch):
     assert pp.model.segs[0].trans == "Ngươi đi đâu?"
     pp.undo()
     assert pp.model.segs[0].trans == "Ngươi đi đâu"
+    # 2.4.2: nút "Sửa tên pinyin" (không AI) – đổi tên còn để pinyin, tích sẵn câu đổi, Ctrl+Z hoàn tác
+    if importlib.util.find_spec("pypinyin"):
+        pp.model.segs[0].text, pp.model.segs[0].trans = "林凡来了。", "Lin Fan đến rồi."
+        pp._undo_mark()
+        pp.model.set_picked(range(len(pp.model.segs)), False)
+        pp._fix_names()
+        assert pp.model.segs[0].trans == "Lâm Phàm đến rồi." and 0 in pp.model.selected
+        from PySide6.QtCore import Qt
+
+        from trami.gui.subs_model import C_VI
+        assert "Lin Fan → Lâm Phàm" in pp.model.data(pp.model.index(0, C_VI), Qt.ItemDataRole.ToolTipRole)
+        pp.undo()
+        assert pp.model.segs[0].trans == "Lin Fan đến rồi."
     win.timer.stop()
     pp.p = None
     win.close()
@@ -15163,3 +15176,154 @@ def test_dl_quality_gui_241(tmp_path):
         save_settings({"dl_quality": old or "1080"})
         win.close()
         win.deleteLater()
+
+
+def test_hanviet_name_fix_242():
+    """Tên / thuật ngữ còn để pinyin (2.4.2) -> âm Hán Việt theo chữ Hán của câu gốc; câu thường không bị đổi nhầm."""
+    pytest.importorskip("pypinyin")
+    from trami import hanviet as h
+
+    def fx(t, s, g=None):
+        return h.fix_line(t, s, g)[0]
+    # tên người, mọi kiểu viết pinyin (cách nhau, viết liền, có dấu thanh, lẫn âm Hán Việt)
+    assert fx("Lin Fan đến rồi.", "林凡来了。") == "Lâm Phàm đến rồi."
+    assert fx("Lín Fán ở đâu?", "林凡在哪？") == "Lâm Phàm ở đâu?"
+    assert fx("Lâm Fan à?", "林凡吗？") == "Lâm Phàm à?"
+    assert fx("Shimin, con đi đâu?", "世民，你去哪？") == "Thế Dân, con đi đâu?"
+    assert fx("Bá chủ Ye Fan!", "霸主叶凡！") == "Bá chủ Diệp Phàm!"
+    assert fx("Anh Lin, Wang Wu đâu?", "林哥，王五呢？") == "Anh Lâm, Vương Ngũ đâu?"
+    # họ ghép / tên quen đọc khác / chữ nhiều cách đọc theo pinyin đã khớp
+    assert fx("Zhuge Liang rất thông minh.", "诸葛亮很聪明。") == "Gia Cát Lượng rất thông minh."
+    assert fx("Cha đi Changsha rồi.", "爸爸去长沙了。") == "Cha đi Trường Sa rồi."
+    assert fx("Zhang Laosan đến.", "长老三到。") == "Trưởng Lão Tam đến."
+    assert fx("Tôi đã đến Chongqing.", "我去过重庆。") == "Tôi đã đến Trùng Khánh."
+    # địa danh, môn phái, đồ vật, thuật ngữ viết thường
+    assert fx("Đệ tử Tianjian Zong gặp người của jianghu.", "天剑宗弟子遇到江湖中人。") == \
+        "Đệ tử Thiên Kiếm Tông gặp người của giang hồ."
+    assert fx("Hắn là đệ tử của Shaolin.", "他是少林弟子。") == "Hắn là đệ tử của Thiếu Lâm."
+    assert fx("Đan điền của hắn có dantian khí.", "他的丹田有丹田气。") == "Đan điền của hắn có đan điền khí."
+    # 1 tiếng: chỉ khi là họ + danh xưng, hoặc 老 / 小 / 阿
+    assert fx("Ông Lin, mời ngồi.", "林先生，请坐。") == "Ông Lâm, mời ngồi."
+    assert fx("Lin tổng đến rồi.", "林总来了。") == "Lâm tổng đến rồi."
+    assert fx("Xiao Ming, lại đây!", "小明，过来！") == "Tiểu Minh, lại đây!"
+    assert fx("Lão Wang đâu rồi?", "老王呢？") == "Lão Vương đâu rồi?"
+    # không đổi nhầm: câu tiếng Việt trùng vần pinyin, tên nước ngoài, thương hiệu, chữ có dấu khác thanh
+    for t, s in [("Xin lỗi, ông Tân.", "辛先生，对不起。"), ("Hai người vẫn chưa đến.", "两个人还没来。"),
+                 ("Anna và Linda đi chơi.", "安娜和琳达去玩了。"), ("Xiaomi ra điện thoại mới.", "小米出新手机了。"),
+                 ("Ta lai đây.", "他来这里。"), ("Lin đến rồi.", "林来了。"), ("Fan của anh ấy đông lắm.", "他的粉丝凡多。"),
+                 ("Lâm Phàm đến rồi.", "林凡来了。"), ("Xin chào!", "新潮！"), ("Bá vương", "霸王"),
+                 ("Lin Fan đến rồi.", "林汎来了。")]:
+        assert fx(t, s) == t, (t, s)
+    # chữ chưa có trong bảng âm -> giữ cả tên; câu gốc không có chữ Hán -> giữ
+    assert fx("Lin Fan đến rồi.", "Lin Fan来了") == "Lin Fan đến rồi."
+    # bảng thuật ngữ được ưu tiên
+    assert fx("Lin Fan đến rồi.", "林凡来了。", {"林凡": "Lâm Phiên"}) == "Lâm Phiên đến rồi."
+    new, pairs = h.fix_line("Lin Fan gặp Su Mei.", "林凡见到苏梅。")
+    assert new == "Lâm Phàm gặp Tô Mai." and pairs == [("Lin Fan", "Lâm Phàm"), ("Su Mei", "Tô Mai")]
+    assert "Lin Fan → Lâm Phàm" in h.note(pairs, 1)
+
+
+def test_hanviet_table_242():
+    """Bảng âm Hán Việt tự soạn: đủ chữ thường gặp + họ, âm đã chuẩn hoá NFC, chữ nhiều cách đọc khớp pinyin."""
+    pytest.importorskip("pypinyin")
+    import unicodedata
+
+    from pypinyin import Style, pinyin
+
+    from trami import hanviet as h
+
+    t = h.table()
+    assert len(t) >= 3800
+    assert not [c for c in h.SURNAMES if c not in t]
+    for ch, rds in t.items():
+        for py, rd in rds:
+            assert rd == unicodedata.normalize("NFC", rd) and rd[0].isupper(), (ch, rd)
+            if py:
+                assert py in pinyin(ch, style=Style.NORMAL, heteronym=True)[0], (ch, py)
+    assert h.reading("长", "chang") == "Trường" and h.reading("长", "zhang") == "Trưởng" and h.reading("长") == "Trưởng"
+    assert h.reading("单", "shan") == "Thiện" and h.reading("曾", "zeng") == "Tăng" and h.reading("乐", "yue") == "Nhạc"
+    assert h.reading("𠀀") is None
+    for k, v in h.WORDS.items():
+        assert all(c in t for c in k) and v[0].isupper(), k
+
+
+def test_slang_242(monkeypatch):
+    """Từ lóng / tiếng mạng (2.4.2): AI nhận nghĩa trong lời nhắc, Google thay trước từ chắc chắn là lóng, bảng thuật
+    ngữ được ưu tiên, tắt / tiếng đích khác không đụng."""
+    from trami import slang
+    from trami import translate as tr
+
+    got = slang.found(["他在吃瓜", "吃瓜群众都在看", "YYDS", "666"], {})
+    assert got["吃瓜群众"] == "dân hóng drama" and got["yyds"] and "吃瓜" in got and "666" in got
+    assert "吃瓜" not in slang.found("吃瓜群众", {})                      # từ dài trước, không đếm 2 lần
+    assert slang.found("他在吃瓜", {}, strict=True) == {}                  # có thể là ăn dưa thật -> Google không thay
+    assert slang.found("他躺平了", {"躺平": "nằm im"}) == {}                # bảng thuật ngữ ưu tiên
+    assert "yyds" not in slang.found("abyydsx", {})                       # chữ Latin chỉ khớp nguyên từ
+    assert slang.apply_src("他躺平了，yyds！", {}) == "他 buông xuôi mặc kệ 了， đỉnh nhất mọi thời đại ！"
+    assert "từ lóng" in slang.note(["躺平", "yyds"])
+
+    sent = []
+    monkeypatch.setattr(tr.Translator, "_gt_one", lambda self, text: (sent.append(text), text)[1])
+    t = tr.Translator({}, "google", target="vi", source="zh")
+    t._google(["他躺平了。"])
+    assert "buông xuôi mặc kệ" in sent[-1]
+    t2 = tr.Translator({"trans_slang": False}, "google", target="vi", source="zh")
+    t2._google(["他躺平了。"])
+    assert sent[-1] == "他躺平了。"
+    t3 = tr.Translator({}, "google", target="en", source="zh")
+    t3._google(["他躺平了。"])
+    assert sent[-1] == "他躺平了。"
+
+    calls = []
+
+    def fake_chat(self, system, user, max_tokens=8000, temperature=0.3):
+        calls.append(user)
+        payload = json.loads(user[user.rindex("{"):])
+        return json.dumps({k: "Lin Fan nằm im mặc kệ." for k in payload}, ensure_ascii=False)
+    monkeypatch.setattr(tr.LLMClient, "chat", fake_chat)
+    t4 = tr.Translator({"translate_engine": "openai", "openai_api_key": "x"}, target="vi")
+    out = t4.translate_lines(["林凡躺平了，吃瓜群众都在看。"])
+    assert any("TỪ LÓNG" in c and "躺平 = buông xuôi mặc kệ" in c and "吃瓜群众 = dân hóng drama" in c for c in calls)
+    assert out[0].startswith("Lâm Phàm ")                                  # AI để pinyin -> đổi sang Hán Việt
+    assert t4.name_pairs == [("Lin Fan", "Lâm Phàm")] and t4.name_lines == 1 and "躺平" in t4.slang_hits
+    t5 = tr.Translator({"translate_engine": "openai", "openai_api_key": "x", "trans_name_fix": False,
+                        "trans_slang": False}, target="vi")
+    n = len(calls)
+    out = t5.translate_lines(["林凡躺平了，吃瓜群众都在看啊。"])
+    assert out[0].startswith("Lin Fan ") and not t5.name_pairs and "TỪ LÓNG" not in calls[n]
+
+
+def test_fix_names_pipeline_242(monkeypatch):
+    """Dự án đã dịch (2.4.2): pipeline.fix_names đổi tên pinyin ở câu đã tích / cả phim, ghi name_fixed; bản dịch
+    tiếng khác không đụng; pipeline.translate ghi số tên đã đổi + từ lóng vào thông báo."""
+    pytest.importorskip("pypinyin")
+    from trami import pipeline
+    from trami import translate as tr
+    from trami.project import Project
+
+    p = Project.create("hv242")
+    try:
+        segs = [Segment(0, 1, "林凡来了。", trans="Lin Fan đến rồi."), Segment(1, 2, "苏梅呢？", trans="Su Mei đâu?"),
+                Segment(2, 3, "好的。", trans="Được.")]
+        p.data["trans_lang"] = "vi"
+        p.data["glossary"] = "苏梅=Tô My"
+        changed, pairs = pipeline.fix_names(p, segs, [0, 2], {})
+        assert changed == [0] and segs[0].trans == "Lâm Phàm đến rồi." and segs[1].trans == "Su Mei đâu?"
+        assert segs[0].extra["name_fixed"] == [["Lin Fan", "Lâm Phàm"]]
+        changed, pairs = pipeline.fix_names(p, segs, None, {})
+        assert changed == [1] and segs[1].trans == "Tô My đâu?"            # bảng thuật ngữ dự án được ưu tiên
+        p.data["trans_lang"] = "en"
+        segs[2].trans = "Lin Fan is here"
+        assert pipeline.fix_names(p, segs, None, {}) == ([], [])
+
+        p.data["trans_lang"] = "vi"
+        p.segments = [Segment(0, 1, "林凡躺平了。"), Segment(1, 2, "王五来了。")]
+        p.save()
+        monkeypatch.setattr(tr.Translator, "_gt_one", lambda self, text: "\n".join(
+            "Lin Fan nằm im rồi." if "林凡" in x else "Wang Wu đến rồi." for x in text.split("\n")))
+        pipeline.translate(p, engine="google", settings={"translate_engine": "google"})
+        assert [x.trans for x in p.segments] == ["Lâm Phàm nằm im rồi.", "Vương Ngũ đến rồi."]
+        note = p.data.get("skill_note", "")
+        assert "đổi 2 tên còn để pinyin" in note and "躺平" in note
+    finally:
+        p.delete()
