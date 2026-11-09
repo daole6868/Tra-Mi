@@ -257,9 +257,9 @@ class ProjectPage(QWidget):
         self.undo_btn.clicked.connect(self.undo)
         self.redo_btn = IconButton("redo", "Làm lại (Ctrl+Y)", 34)
         self.redo_btn.clicked.connect(self.redo)
-        self._undo: list[str] = []      # ảnh chụp danh sách câu TRƯỚC mỗi thao tác (json)
-        self._redo: list[str] = []
-        self._undo_cur: str | None = None   # ảnh chụp trạng thái hiện tại
+        self._undo: list[bytes] = []    # ảnh chụp danh sách câu TRƯỚC mỗi thao tác (json nén zlib – 2.4.8)
+        self._redo: list[bytes] = []
+        self._undo_cur: bytes | None = None   # ảnh chụp trạng thái hiện tại
         self._undo_t = 0.0
         self._undo_busy = False
         # 2.2.0: tên + trạng thái lưu xếp 2 dòng, giữa là thanh tiến độ 4 bước (bấm = mở bước đó ở tab Tự động)
@@ -4022,9 +4022,29 @@ class ProjectPage(QWidget):
     # ------------------------------------------------------------------ hoàn tác / làm lại
     UNDO_MAX = 60
     UNDO_JOIN = 0.8     # các thay đổi liền nhau trong 0,8 s (gõ chữ, kéo nhiều câu) = 1 bước hoàn tác
+    UNDO_BYTES = 120 * 1024 * 1024   # 2.4.8: cả lịch sử hoàn tác + làm lại tối đa ~120 MB RAM (bỏ bước cũ nhất)
 
-    def _snap(self) -> str:
+    @staticmethod
+    def _unsnap(snap) -> dict | list:
+        """Ảnh chụp hoàn tác -> dữ liệu (2.4.8 nén zlib; bản chuỗi JSON cũ vẫn đọc)."""
         import json
+        import zlib
+
+        return json.loads(zlib.decompress(snap).decode("utf-8") if isinstance(snap, bytes) else snap)
+
+    def _undo_trim(self):
+        """Giữ tổng lịch sử hoàn tác / làm lại ≤ UNDO_BYTES (phim 2–3 giờ: mỗi bước ~0,3–1 MB sau khi nén)."""
+        total = sum(len(x) for x in self._undo) + sum(len(x) for x in self._redo)
+        while total > self.UNDO_BYTES and len(self._undo) > 1:
+            total -= len(self._undo.pop(0))
+        while total > self.UNDO_BYTES and len(self._redo) > 1:
+            total -= len(self._redo.pop(0))
+
+    def _snap(self) -> bytes:
+        """Ảnh chụp trạng thái để hoàn tác – nén zlib (2.4.8): chuỗi JSON của phim 2.600 câu có mốc từng chữ / giọng lồng
+        ~3–8 MB, 60 bước hoàn tác + 60 bước làm lại từng giữ ~0,4–1 GB RAM; nén mức 1 còn ~1/6, nhanh."""
+        import json
+        import zlib
 
         # không dùng to_dict (asdict chép sâu từng câu – 2.600 câu ~55 ms); json tự chép phần extra.
         # Kèm đoạn cắt + lớp phủ -> Ctrl+Z hoàn tác được cả "Áp dụng cắt" và sửa chữ / logo
@@ -4035,9 +4055,9 @@ class ProjectPage(QWidget):
         ex = {"trim": {"start": round(self.e_start.value(), 3), "end": round(self.e_end.value(), 3)},
               "vsplits": ed.get("vsplits") or [], "inserts": ed.get("inserts") or [],
               "mute_spans": ed.get("mute_spans") or [], "warp": self._warp_state()}
-        return json.dumps({"s": [{"start": s.start, "end": s.end, "text": s.text, "trans": s.trans,
-                                  "speaker": s.speaker, "extra": s.extra} for s in self.model.segs],
-                           "c": cuts, "l": self._layers, "e": ex})
+        return zlib.compress(json.dumps({"s": [{"start": s.start, "end": s.end, "text": s.text, "trans": s.trans,
+                                                "speaker": s.speaker, "extra": s.extra} for s in self.model.segs],
+                                         "c": cuts, "l": self._layers, "e": ex}).encode("utf-8"), 1)
 
     def _undo_reset(self):
         """Mở dự án: bắt đầu lịch sử hoàn tác mới."""
@@ -4061,6 +4081,7 @@ class ProjectPage(QWidget):
         self._undo_t = now if join else 0.0
         self._undo_cur = snap
         self._redo.clear()
+        self._undo_trim()
         self._update_undo_btns()
 
     def _update_undo_btns(self):
@@ -4093,7 +4114,7 @@ class ProjectPage(QWidget):
         dst.append(cur)
         old = {(round(s.start, 3), round(s.end, 3), s.text, s.trans, json.dumps(s.extra, sort_keys=True))
                for s in self.model.segs}
-        snap_d = json.loads(snap)
+        snap_d = self._unsnap(snap)
         if isinstance(snap_d, list):      # ảnh chụp kiểu cũ (chỉ danh sách câu)
             snap_d = {"s": snap_d, "c": None, "l": None}
         segs = [Segment.from_dict(d) for d in snap_d["s"]]

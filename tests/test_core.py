@@ -4128,6 +4128,132 @@ def test_one_voice_for_all_applies_to_every_dub_button(monkeypatch):
     assert spoken == ["vi-VN-HoaiMyNeural", "vi-VN-NamMinhNeural"]
 
 
+def test_gpu_holders_248(monkeypatch):
+    """2.4.8 ai đang chiếm card: sau MỌI việc GPU tắt bộ nghe / Hy-MT2 (nút nghe lại / dọn câu từng để Qwen3 sống tới khi
+    tắt tool), bộ nghe để không 2 phút tự tắt, bộ đọc OCR trên card để không thì bỏ; đọc bảng bộ nhớ từng tiến trình của
+    Windows (card chính), gắn tên (Subvideo / tiến trình phụ còn sót / trình duyệt…), nút Trả bộ nhớ card."""
+    import os
+    import threading
+    import time as _t
+
+    from trami import asr_qwen, gpu, ocr_engine, translate, tts
+
+    class FakeProc:
+        def __init__(self, pid):
+            self.alive, self.pid = True, pid
+
+        def poll(self):
+            return None if self.alive else 0
+
+    class QwenAsrWorker:
+        def __init__(self, pid):
+            self.proc, self.lock, self.last_used, self.stopped = FakeProc(pid), threading.Lock(), _t.time(), 0
+
+        def stop(self):
+            self.stopped += 1
+            self.proc.alive = False
+
+    class VieneuWorker(QwenAsrWorker):
+        pass
+
+    qw, vn = QwenAsrWorker(9001), VieneuWorker(9002)
+    monkeypatch.setattr(asr_qwen, "_worker", qw)
+    monkeypatch.setattr(tts, "_vn_model", vn)
+    monkeypatch.setattr(tts, "_omni_model", None)
+    monkeypatch.setattr(translate, "_hymt", None)
+    gpu.after_job("dual")                            # nghe lại câu đã tích xong -> tắt Qwen3, giữ VieNeu
+    assert qw.stopped == 1 and vn.stopped == 0
+    qw.proc.alive, qw.last_used = True, _t.time() - gpu.IDLE_STOP_AI - 5
+    vn.last_used = _t.time() - gpu.IDLE_STOP_AI - 5  # VieNeu chưa quá 10 phút -> giữ
+    assert gpu.reap_idle() == 1 and qw.stopped == 2 and vn.stopped == 0
+
+    class Eng:
+        def __init__(self, dev):
+            self.device = dev
+    monkeypatch.setattr(ocr_engine, "_ENGINES", {("v6_small", "auto"): Eng("CPU")})
+    ocr_engine._LAST_USE[0] = _t.time() - 999
+    assert not ocr_engine.release_idle(120) and ocr_engine._ENGINES   # chạy CPU: không chiếm card -> giữ
+    ocr_engine._ENGINES[("v6_small", "auto")] = Eng("card (CUDA)")
+    ocr_engine._LAST_USE[0] = _t.time()
+    assert not ocr_engine.release_idle(120)                           # vừa dùng -> giữ
+    ocr_engine._LAST_USE[0] = _t.time() - 999
+    assert ocr_engine.release_idle(120) and not ocr_engine._ENGINES   # để không trên card -> bỏ
+    ocr_engine._ENGINES[("v6_small", "auto")] = Eng("card (CUDA)")
+    gpu.drop_local_models()
+    assert not ocr_engine._ENGINES
+
+    me = os.getpid()
+    mb = 1024 * 1024
+    text = "\n".join([
+        f"G\t{me}\t0x0_0xA\t{500 * mb}\tpythonw.exe\t1\t1\tpythonw TraMi.py",
+        f"G\t9002\t0x0_0xA\t{2600 * mb}\tpython.exe\t{me}\t1\tpython TraMi.py --vieneu-worker v3turbo",
+        f"G\t7777\t0x0_0xA\t{4600 * mb}\tpython.exe\t5555\t0\tC:\\Subvideo\\TraMi.py --qwen-asr-worker x",
+        f"G\t8888\t0x0_0xA\t{400 * mb}\tchrome.exe\t1\t1\tchrome.exe --type=gpu-process",
+        f"G\t8888\t0x0_0xB\t{50 * mb}\tchrome.exe\t1\t1\tchrome.exe --type=gpu-process",   # card Intel tích hợp
+        "G\t4444\t0x0_0xA\t0\tnotepad.exe\t1\t1\t",
+        "rác không đúng dạng"])
+    rows = gpu.parse_ps(text)
+    assert [r["pid"] for r in rows] == [7777, 9002, me, 8888]          # chỉ card chính, bỏ tiến trình 0 MB
+    assert rows[-1]["mb"] == 400 and rows[0]["name"] == "python"
+    vn.proc.alive, vn.last_used = True, _t.time() - 300
+    desc = {r["pid"]: r for r in gpu.describe(rows)}
+    assert desc[me]["kind"] == "ours" and "cửa sổ chính" in desc[me]["who"]
+    assert desc[9002]["kind"] == "ours" and "VieNeu" in desc[9002]["who"] and "5 phút" in desc[9002]["who"]
+    assert desc[7777]["kind"] == "orphan" and "Qwen3-ASR" in desc[7777]["who"]
+    assert desc[8888]["kind"] == "app" and "Chrome" in desc[8888]["who"]
+    txt = gpu.report_text({"total": 8192, "used": 5939, "rows": list(desc.values())})
+    assert "5.8 / 8.0 GB" in txt and "Qwen3-ASR" in txt
+    killed = []
+    monkeypatch.setattr(gpu, "kill_orphans", lambda rs: len([killed.append(r["pid"]) for r in rs
+                                                             if r.get("kind") == "orphan"]))
+    vn.last_used = _t.time()
+    done = gpu.release_all(list(desc.values()))
+    assert killed == [7777] and vn.stopped == 1 and "VieneuWorker" not in " ".join(done)
+    assert any("VieNeu" in d for d in done) and any("còn sót" in d for d in done)
+    with vn.lock:                                    # đang đọc dở -> không tắt ngang
+        vn.proc.alive = True
+        assert gpu.release_all([]) == []
+    rep = gpu.usage_report()                         # máy thử: không có card / nvidia-smi -> vẫn trả kết quả
+    assert set(rep) >= {"total", "used", "rows", "ok", "why"}
+
+    # mô hình nạp trong cửa sổ chính ngoài việc GPU (Xem thử 1 khung = LaMa) -> để không quá 2 phút thì bỏ
+    from trami import lama
+    monkeypatch.setattr(asr_qwen, "_worker", None)
+    monkeypatch.setattr(tts, "_vn_model", None)
+    monkeypatch.setattr(lama, "_model", object())
+    gpu._LOCAL_SEEN[0] = 0.0
+    gpu.reap_idle()                                  # lần đầu thấy -> chỉ ghi giờ
+    assert lama._model is not None and gpu._LOCAL_SEEN[0]
+    gpu._LOCAL_SEEN[0] = _t.time() - gpu.IDLE_STOP_AI - 5
+    assert gpu.reap_idle() == 1 and lama._model is None and not gpu._LOCAL_SEEN[0]
+
+
+def test_jobs_release_fn_after_done_248():
+    """2.4.8: việc xong / huỷ khi đang chờ -> bỏ hàm việc (giữ dự án, danh sách câu, mảng âm thanh…); danh sách việc đã
+    xong giữ tối đa KEEP_DONE việc."""
+    import time as _t
+
+    from trami import jobs
+
+    m = jobs.JobManager.__new__(jobs.JobManager)
+    import threading
+    m.jobs, m.queue, m.running, m.cv = {}, [], set(), threading.Condition()
+    big = bytearray(10)
+    j = m.submit("tool", "x", lambda job: {"n": len(big)}, gpu=False)
+    m.queue.remove(j.id)
+    m._run(j)
+    assert j.status == "done" and j._fn is not None   # _run không bỏ – vòng _worker bỏ sau khi chạy
+    j._fn = None
+    q = m.submit("tool", "y", lambda job: None, gpu=False)
+    assert m.cancel(q.id) and q.status == "cancelled" and q._fn is None
+    for i in range(jobs.KEEP_DONE + 30):
+        k = jobs.Job(id=f"d{i}", kind="tool", title="", status="done", finished=_t.time() + i)
+        m.jobs[k.id] = k
+    m.submit("tool", "z", lambda job: None, gpu=False)
+    done = [x for x in m.jobs.values() if x.status in ("done", "error", "cancelled")]
+    assert len(done) == jobs.KEEP_DONE and "d0" not in m.jobs and f"d{jobs.KEEP_DONE + 29}" in m.jobs
+
+
 def test_gpu_memory_released_between_jobs(monkeypatch):
     """Card đồ hoạ: trước việc GPU tắt tiến trình AI việc đó không dùng (đang đọc dở thì để nguyên), sau việc GPU bỏ mô
     hình trong tiến trình giao diện; tiến trình đọc giọng để lâu tự tắt; xuất video còn phải xoá phụ đề AI là việc GPU."""
@@ -4573,6 +4699,53 @@ def test_vieneu_worker_vram_guard(monkeypatch):
     assert out["vram_free"] == 0.375
     eng._fused[(1, 512)] = 1
     assert vw._vram_guard(tts_obj) == {"vram_free": 0.375} and eng._fused   # còn nhiều chỗ: giữ đồ thị (nhanh)
+    # 2.4.8: tiến trình giữ thêm > 1,5 GB ngoài mô hình (card 8 GB) -> dọn dù cả card còn chỗ
+    state["res"] = 3.0 * 2 ** 30
+    cuda.memory_reserved = lambda: state["res"]
+    assert vw._vram_guard(tts_obj, base=int(2.4 * 2 ** 30)) == {"vram_free": 0.375} and eng._fused   # +0,6 GB: giữ
+    state["res"] = 4.2 * 2 ** 30
+    out = vw._vram_guard(tts_obj, base=int(2.4 * 2 ** 30))
+    assert out["freed_graphs"] == 1 and not eng._fused and state["emptied"] == 2
+    eng._fused[(1, 512)] = 1
+    out = vw._vram_guard(tts_obj, base=int(2.4 * 2 ** 30), force=True)   # lệnh "trim" sau việc lồng tiếng
+    assert out["freed_graphs"] == 1 and state["emptied"] == 3
+
+
+def test_tts_worker_trim_after_dub_248(monkeypatch):
+    """2.4.8: việc lồng tiếng / tự động xong -> bảo tiến trình đọc giọng trả phần đã phình (giữ mô hình); tiến trình
+    đang đọc dở thì bỏ qua; bản cũ không hiểu lệnh -> tắt hẳn."""
+    import io
+    import threading
+
+    from trami import gpu, tts
+
+    class P:
+        def __init__(self):
+            self.stdin, self.pid = io.StringIO(), 1
+
+        def poll(self):
+            return None
+    w = tts.VieneuWorker("v3turbo")
+    w.proc = P()
+    replies = [{"ok": True, "vram_free": 0.55}]
+    monkeypatch.setattr(w, "_read", lambda *a, **k: replies.pop(0))
+    assert w.trim() and '"cmd": "trim"' in w.proc.stdin.getvalue() and w.vram_free == 0.55
+    with w.lock:                                   # đang đọc dở -> không gửi
+        assert not w.trim()
+    stopped = []
+    monkeypatch.setattr(w, "stop", lambda: stopped.append(1))
+    monkeypatch.setattr(w, "_read", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("bản cũ")))
+    assert not w.trim() and stopped == [1]
+    calls = []
+    monkeypatch.setattr(gpu, "_workers", lambda kinds=None: [("tts", type("W", (), {
+        "trim": lambda self: calls.append(1) or True, "proc": None, "lock": threading.Lock()})())]
+        if kinds is None or "tts" in kinds else [])
+    gpu.after_job("recognize")
+    assert calls == []
+    gpu.after_job("redub")
+    gpu.after_job("auto")
+    assert calls == [1, 1]
+    assert gpu.IDLE_STOP == 300.0
 
 
 def test_redub_resumes_after_cancel(monkeypatch):

@@ -763,6 +763,24 @@ class VieneuWorker:
             return    # không tính câu chậm vào tốc độ thường
         self._times = (self._times + [dt / max(chars, 10)])[-40:]
 
+    def trim(self) -> bool:
+        """2.4.8: việc lồng tiếng xong -> bảo tiến trình trả phần đồ thị CUDA / Whisper / bộ nhớ đệm đã phình ra (mô hình
+        vẫn nạp sẵn để 'Tạo lại giọng' vài câu không phải chờ nạp). Đang đọc dở / tiến trình đã tắt -> bỏ qua."""
+        if not self.proc or self.proc.poll() is not None or not self.lock.acquire(blocking=False):
+            return False
+        try:
+            assert self.proc.stdin
+            self.proc.stdin.write(json.dumps({"cmd": "trim"}) + "\n")
+            self.proc.stdin.flush()
+            r = self._read(stall=60.0)
+            self.vram_free = r.get("vram_free", self.vram_free)
+            return bool(r.get("ok"))
+        except Exception:  # noqa: BLE001 – tiến trình bản cũ / lỗi: tắt hẳn cho chắc trả card
+            self.stop()
+            return False
+        finally:
+            self.lock.release()
+
     def stop(self):
         p, self.proc = self.proc, None
         if p and p.poll() is None:

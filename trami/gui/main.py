@@ -1748,6 +1748,21 @@ class JobsPage(QWidget):
         self.cards: dict[str, SectionCard] = {}
         self.boxes: dict[str, QVBoxLayout] = {}
         self.empty: dict[str, QLabel] = {}
+        # 2.4.8: ai đang chiếm bộ nhớ card (cả chương trình khác) + trả bộ nhớ card
+        g = SectionCard("Card đồ hoạ (GPU)", "cpu")
+        self.gpu_lb = label("Bấm 'Xem ai đang chiếm card' để biết chương trình nào đang giữ bộ nhớ card.", "muted",
+                            wrap=True)
+        self.gpu_lb.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        g.add(self.gpu_lb)
+        self.gpu_check_b = button("Xem ai đang chiếm card", "search", flat=True, on_click=self._gpu_check)
+        self.gpu_free_b = button("Trả bộ nhớ card", "trash", flat=True, on_click=self._gpu_free)
+        self.gpu_check_b.setToolTip("Đo bộ nhớ card đang dùng + từng chương trình đang giữ (Subvideo, trình duyệt, game…)")
+        self.gpu_free_b.setToolTip("Tắt các bộ AI của Subvideo đang để không (VieNeu / OmniVoice / bộ nghe / Hy-MT2), bỏ "
+                                   "mô hình nạp tạm trong cửa sổ chính, tắt tiến trình phụ Subvideo còn sót. Lần sau dùng "
+                                   "tool tự nạp lại (vài giây).")
+        g.add(flow(self.gpu_check_b, self.gpu_free_b))
+        v.addWidget(g)
+        self._gpu_rows: list[dict] = []
         for key, title, ic in self.GROUPS:
             c = SectionCard(title, ic)
             box = QVBoxLayout()
@@ -1771,6 +1786,50 @@ class JobsPage(QWidget):
     def _clear(self):
         manager.clear_finished()
         self.update_jobs(manager.list())
+
+    def _gpu_check(self, after: str = ""):
+        from .. import gpu
+
+        self.gpu_check_b.setEnabled(False)
+        self.gpu_lb.setText("Đang đo card…")
+
+        def done(rep):
+            self.gpu_check_b.setEnabled(True)
+            self._gpu_rows = rep.get("rows", [])
+            text = gpu.report_text(rep) or "Không đo được card."
+            orphans = sum(r.get("kind") == "orphan" for r in self._gpu_rows)
+            if orphans:
+                text += f"\n⚠ {orphans} tiến trình phụ Subvideo còn sót – bấm 'Trả bộ nhớ card' để tắt."
+            self.gpu_lb.setText((after + "\n" if after else "") + text)
+
+        def fail(m):
+            self.gpu_check_b.setEnabled(True)
+            self.gpu_lb.setText("Không đo được card: " + m)
+        run_async(gpu.usage_report, done, fail)
+
+    def _gpu_free(self):
+        from .. import gpu
+
+        busy = manager.gpu_busy()
+        if busy:
+            self.win.toast(f"Đang có việc dùng card ({busy}) – chờ xong rồi bấm lại", "warn")
+            return
+        self.gpu_free_b.setEnabled(False)
+
+        def work():
+            return gpu.release_all(gpu.describe(gpu._win_processes() or []))   # đo lại ngay (không dùng kết quả cũ)
+
+        def done(names):
+            self.gpu_free_b.setEnabled(True)
+            msg = ("Đã trả bộ nhớ card: tắt " + ", ".join(names)) if names else \
+                "Subvideo không còn bộ AI nào đang giữ card (đã bỏ mô hình nạp tạm)"
+            self.win.toast(msg, "ok")
+            self._gpu_check(msg)
+
+        def fail(m):
+            self.gpu_free_b.setEnabled(True)
+            self.win.toast("Không trả được bộ nhớ card: " + m, "warn")
+        run_async(work, done, fail)
 
     def _cancel_queued(self):
         n = 0

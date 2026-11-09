@@ -15,6 +15,7 @@ import importlib.util
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -596,12 +597,14 @@ class Engine:
 
 _ENGINES: dict = {}
 _LOCK = threading.Lock()
+_LAST_USE = [0.0]
 
 
 def get(settings: dict | None = None) -> Engine:
     st = settings or {}
     key = (str(st.get("ocr_model") or "v6_small"), str(st.get("ocr_device") or "auto"))
     with _LOCK:
+        _LAST_USE[0] = time.time()
         if key not in _ENGINES:
             _ENGINES.clear()            # chỉ giữ 1 bộ đọc (đổi mô hình ở Cài đặt -> bỏ bộ cũ)
             _ENGINES[key] = Engine(*key)
@@ -611,3 +614,15 @@ def get(settings: dict | None = None) -> Engine:
 def release() -> None:
     with _LOCK:
         _ENGINES.clear()
+
+
+def release_idle(max_idle: float) -> bool:
+    """2.4.8: bộ đọc chạy trên card (onnxruntime CUDA giữ vùng nhớ riêng, không tự trả) để không quá max_idle giây ->
+    bỏ (lần sau dùng nạp lại ~1 s). Bộ đọc chạy CPU giữ nguyên (không chiếm card)."""
+    with _LOCK:
+        if not _ENGINES or time.time() - _LAST_USE[0] < max_idle:
+            return False
+        if not any(str(getattr(e, "device", "")).startswith("card") for e in _ENGINES.values()):
+            return False
+        _ENGINES.clear()
+    return True

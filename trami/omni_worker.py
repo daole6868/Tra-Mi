@@ -2,6 +2,7 @@
 
   vào : {"text": "...", "out": "x.wav", "ref_audio": "mau.wav", "ref_text": "lời trong file mẫu" | ""}
   ra  : @@TRAMI@@{"ok": true, "sr": 24000} | {"error": "..."} | {"progress": 0.5, "msg": "..."}
+  vào {"cmd": "trim"} (2.4.8): bỏ Whisper nghe file mẫu + bộ nhớ đệm, giữ mô hình
 """
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ import json
 import os
 import sys
 
-from .vieneu_worker import _reply, _seed
+from .vieneu_worker import _reply, _seed, mem_guard, reserved
 
 # OmniVoice định trước độ dài file theo số chữ rồi mới đọc; câu ước lượng < 50 khung (~2 s) bị kéo dài thêm theo hàm mũ
 # 1/3 -> "Được thôi" (~0,56 s) thành 1,3 s, mô hình đọc lặp lời cho đủ ("được thôi được thôi"). Giữ phần nới cho câu
@@ -90,12 +91,26 @@ def main(repo: str = "k2-fsa/OmniVoice") -> None:
     _reply(proto, {"ready": True, "sr": sr})
 
     prompts: dict = {}   # (file mẫu, lời) -> VoiceClonePrompt, mã hoá giọng mẫu 1 lần dùng cho mọi câu
+    base = reserved()    # bộ nhớ card của riêng mô hình (lúc vừa nạp)
+
+    def drop_asr() -> int:
+        """Bỏ Whisper (~1,6 GB trên card) OmniVoice nạp để nghe lời file mẫu – giọng mẫu đã mã hoá xong (prompts)."""
+        if getattr(model, "_asr_pipe", None) is None:
+            return 0
+        try:
+            model._asr_pipe = None
+        except Exception:  # noqa: BLE001
+            return 0
+        return 1
     for line in sys.stdin:
         line = line.strip()
         if not line:
             continue
         try:
             req = json.loads(line)
+            if req.get("cmd") == "trim":    # việc lồng tiếng xong: trả bộ nhớ đệm, giữ mô hình
+                _reply(proto, dict({"ok": True}, **mem_guard(base, drop_asr, True, "OmniVoice")))
+                continue
             gen = {"text": req["text"], "language": req.get("language") or "vi"}   # vi / en / th / ja / ko
             ref = req.get("ref_audio")
             if ref:
@@ -107,6 +122,8 @@ def main(repo: str = "k2-fsa/OmniVoice") -> None:
                                            download="Đang tải Whisper (nghe lời file mẫu)"):
                             model.load_asr_model()
                     prompts[key] = model.create_voice_clone_prompt(ref_audio=ref, ref_text=key[1] or None)
+                    if drop_asr():   # 2.4.8: Whisper chỉ cần lúc mã hoá giọng mẫu -> trả card ngay
+                        mem_guard(base, None, True, "OmniVoice")
                 gen["voice_clone_prompt"] = prompts[key]
             elif req.get("instruct"):
                 gen["instruct"] = req["instruct"]
@@ -120,6 +137,6 @@ def main(repo: str = "k2-fsa/OmniVoice") -> None:
             except TypeError:       # bản OmniVoice cũ không có tham số này
                 audio = model.generate(**gen)
             write_wav(req["out"], audio[0], sr)
-            _reply(proto, {"ok": True, "sr": sr})
+            _reply(proto, dict({"ok": True, "sr": sr}, **mem_guard(base, None, False, "OmniVoice")))
         except Exception as e:  # noqa: BLE001
             _reply(proto, {"error": f"{type(e).__name__}: {e}"})

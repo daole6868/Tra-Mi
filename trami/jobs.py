@@ -59,6 +59,7 @@ class Job:
 
 
 MAX_RUNNING = 4
+KEEP_DONE = 200   # giữ tối đa N việc đã xong / lỗi / huỷ trong danh sách (cũ hơn tự bỏ – không giữ RAM mãi)
 _limit_cache = [0.0, 1]
 
 
@@ -142,8 +143,18 @@ class JobManager:
         with self.cv:
             self.jobs[job.id] = job
             self.queue.append(job.id)
+            self._prune()
             self.cv.notify_all()
         return job
+
+    def _prune(self):
+        """Bỏ việc đã xong cũ nhất khi danh sách quá KEEP_DONE (gọi trong khoá)."""
+        done = [j for j in self.jobs.values() if j.status in ("done", "error", "cancelled")]
+        if len(done) <= KEEP_DONE:
+            return
+        done.sort(key=lambda j: j.finished or j.created)
+        for j in done[:len(done) - KEEP_DONE]:
+            self.jobs.pop(j.id, None)
 
     def cancel(self, jid: str) -> bool:
         job = self.jobs.get(jid)
@@ -154,6 +165,7 @@ class JobManager:
             if jid in self.queue:
                 self.queue.remove(jid)
                 job.status, job.message, job.finished = "cancelled", "Đã huỷ", time.time()
+                job._fn = None   # hàm việc giữ dự án / dữ liệu -> nhả ngay
         return True
 
     def list(self, project_id: str | None = None) -> list[dict]:
@@ -231,6 +243,7 @@ class JobManager:
                 if not job._cancel.is_set():
                     self._run(job)
             finally:
+                job._fn = None   # việc xong: bỏ hàm việc (giữ dự án, danh sách câu, mảng âm thanh…) -> RAM được trả
                 with self.cv:
                     self.running.discard(job.id)
                     self.cv.notify_all()

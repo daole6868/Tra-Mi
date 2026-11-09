@@ -106,7 +106,24 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   chỉ refs + snapshots, file thật) -> <data>/models/hf; KHÔNG chép settings / accounts / cookies / browser / voices /
   projects. `config`: có data/models/hf (và chưa đặt HF_HUB_CACHE / HF_HOME) -> `HF_HUB_CACHE` = đó.
   `trami/stream.py` – `LivePipeline` (tab Tự động "Vừa tách vừa dịch"); `trami/gpu.py` – trả bộ nhớ card giữa các
-  việc (`before_job` / `after_job` trong `jobs._run`, `reap_idle` tắt VieNeu/Omni để không 10 phút); `trami/gui/*` –
+  việc (`before_job` / `after_job` trong `jobs._run`; 2.4.8: `after_job` MỌI việc GPU tắt bộ nghe / Hy-MT2
+  `stop_workers({"asr","mt"})`, việc lồng tiếng -> `trim_workers` = lệnh "trim" cho VieNeu / OmniVoice (bỏ đồ thị CUDA,
+  Whisper của Omni, empty_cache – giữ mô hình); `drop_local_models` bỏ cả bộ đọc OCR + Bandit; `reap_idle` (luồng 30 s khi
+  không có việc GPU): VieNeu / Omni để không `IDLE_STOP` 5 phút, bộ nghe / Hy-MT2 / OCR trên card `IDLE_STOP_AI` 2 phút
+  (`ocr_engine.release_idle`), mô hình nạp trong cửa sổ chính ngoài việc GPU (LaMa Xem thử 1 khung, ECAPA, fa-zh, FunASR,
+  Whisper, Bandit – `_local_loaded`, `_LOCAL_SEEN`) quá 2 phút -> bỏ. Ai đang chiếm card (2.4.8): `usage_report` – Windows
+  đọc bộ nhớ card từng tiến trình qua PowerShell CIM `GPUProcessMemory` + `Win32_Process` (`_PS`, `parse_ps`: chỉ card
+  chính = luid nhiều MB nhất), không thì nvidia-smi; `describe` gắn tên: cửa sổ chính / tiến trình phụ của tool (+ "không
+  dùng N phút") / tiến trình phụ CÒN SÓT (cha đã tắt – `orphan`) / Subvideo khác / trình duyệt… `KNOWN_APPS`;
+  `report_text`, `kill_orphans`, `release_all` (tắt tiến trình phụ đang không đọc dở + bỏ mô hình cửa sổ chính + giết
+  tiến trình sót) -> trang Việc đang làm khung "Card đồ hoạ (GPU)" nút "Xem ai đang chiếm card" / "Trả bộ nhớ card"
+  (`JobsPage._gpu_check` / `_gpu_free`, đang có việc GPU thì không trả). VieNeu / Omni worker (2.4.8): `vieneu_worker.
+  mem_guard(base, drop, force)` – đo `memory_reserved` sau khi nạp (`base`), mỗi câu: card còn < 15 % HOẶC tiến trình giữ
+  quá `GRAPH_BUDGET_SMALL` 1,5 GB (card < 11 GB) / `GRAPH_BUDGET` 4 GB trên mức nạp -> bỏ đồ thị CUDA `_drop_graphs` +
+  empty_cache; `omni_worker.drop_asr` bỏ Whisper (`model._asr_pipe` ~1,6 GB) ngay sau khi làm mẫu nhái giọng;
+  `tts.VieneuWorker.trim()`. Hàng đợi (2.4.8): việc xong / huỷ khi chờ -> `job._fn = None` (hàm việc giữ dự án / mảng
+  âm thanh), giữ tối đa `jobs.KEEP_DONE` 200 việc đã xong (`_prune`). Hoàn tác (2.4.8): ảnh chụp nén zlib, tổng ≤
+  `project_page.UNDO_BYTES` 120 MB (`_undo_trim`, `_unsnap` đọc cả dạng chuỗi cũ); `trami/gui/*` –
   giao diện (QPainter), `common.run_async`,
   `WheelGuard` (lăn chuột không đổi ô chọn khi chưa bấm vào). Trang dự án bố cục 2.2.0 (người dùng duyệt bản thiết kế
   trước khi code): thanh đầu = tên + "Đã lưu" (2 dòng) · `widgets.FlowStepper` `flow_steps` (4 bước Nghe & tách câu /
@@ -1022,7 +1039,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (340 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (343 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -3054,7 +3071,23 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   nhiều dấu phẩy (OmniVoice nhái theo nhịp câu mẫu), hiệu ứng ngắt / ấm / rõ chữ / phòng thu nhẹ áp sau khi đọc (không
   áp lên câu mẫu; đổi hiệu ứng chỉ đọc lại câu của giọng đó). Thử với bộ đọc giả (VieNeu / OmniVoice thật chưa chạy –
   sandbox chặn HF): chỗ ngắt dài đúng, tiếng nói không mất, câu mẫu đúng vai, xem trước có hiệu ứng.
+- 2.4.8: ảnh Task Manager (bộ nhớ GPU chuyên dụng 5,8 / 8 GB khi không làm gì) "cái gì liên tục chiếm GPU" + "xem cả phần
+  tạo giọng lồng tiếng" + "soát toàn bộ tool: chạy xong / bấm Huỷ mà không tự xả RAM / GPU". Tìm ra: (1) các nút dùng bộ
+  nghe ngoài "1. Nghe & tách câu" (nghe lại câu đã tích, dọn câu bịa, OCR không đạt, 2 bộ nghe, căn mép, tách theo đoạn…)
+  để tiến trình Qwen3-ASR (~4,6 GB) sống tới khi tắt tool (chỉ việc lồng tiếng mới tắt nó); (2) VieNeu giữ đồ thị CUDA
+  mỗi kiểu câu, chỉ dọn khi CẢ card còn < 15 % -> 1 tiến trình phình 3–5 GB; (3) OmniVoice nạp Whisper (~1,6 GB) để chép
+  lời câu mẫu rồi giữ luôn; (4) bộ đọc OCR chạy card giữ vùng nhớ onnxruntime tới khi tắt tool; (5) tiến trình đọc giọng
+  để không 10 phút mới tắt; LaMa của "Xem thử 1 khung" giữ tới việc GPU sau; (6) tiến trình phụ còn sót khi cửa sổ tool
+  sập (không ai tắt). RAM: hàng đợi giữ hàm việc (dự án, mảng âm thanh) của mọi việc đã xong; hoàn tác giữ 60 ảnh chụp
+  JSON cả danh sách câu (phim 3.000 câu ~30–60 MB / bước). Sửa: xem Cấu trúc `gpu.py`. Đã rà (không lỗi): FFmpeg bấm Huỷ
+  bị giết (`ff.run`), OCR `_scan` giết bộ giải mã trong finally, xoá phụ đề giết 2 bộ giải mã, tách giọng bỏ mô hình +
+  free_cache cả khi lỗi / huỷ, Bandit release trong finally, Hy-MT2 tắt trong finally, LivePipeline dừng trong finally
+  của `auto`. Phần còn lại ~0,3–0,5 GB là ngữ cảnh CUDA của cửa sổ chính (chỉ trả khi tắt tool). Thử bằng tiến trình /
+  torch giả (sandbox không có card): tắt đúng tiến trình, đọc dở thì không tắt, bảng bộ nhớ Windows giả đúng tên + MB.
 ## Vấn đề đang mở
+- 2.4.8: chờ người dùng chép file, mở lại tool, để không 2–5 phút rồi xem Task Manager; trang Việc đang làm → "Xem ai
+  đang chiếm card" (gửi ảnh danh sách nếu vẫn cao), "Trả bộ nhớ card". Windows không đọc được bộ nhớ từng tiến trình
+  (PowerShell bị chặn) -> danh sách trống -> báo để dùng cách khác.
 - 2.4.7: chờ người dùng chép file, tab Lồng tiếng mục 2 (hoặc "Giọng cho tất cả") chọn giọng 🎬 Phim HK… -> bấm ▶
   nghe thử từng vai (OmniVoice: lần đầu tạo câu mẫu ~vài giây); giọng nào ngắt quá dài / quá chậm (câu ⚡ nhiều hơn) hay
   chưa đủ cảm xúc -> báo tên giọng để chỉnh `pause` / `tempo` / temperature hoặc câu mẫu.

@@ -8,6 +8,7 @@ Giao thức (mỗi dòng 1 JSON, UTF-8):
   vào : {"text": "...", "out": "đường/dẫn.wav", "voice": "Tên giọng" | null, "ref_audio": "mẫu.wav" | null,
          "params": {"temperature": 0.6, ...} (tuỳ chọn, kiểu đọc), "seed": số | null (đọc lại khi câu trước hỏng)}
   ra  : @@TRAMI@@{"ok": true, "sr": 48000}   hoặc   @@TRAMI@@{"error": "..."}
+  vào {"cmd": "trim"} (2.4.8, sau mỗi việc lồng tiếng): bỏ đồ thị CUDA + bộ nhớ đệm, giữ mô hình -> {"ok": true, …}
 Dòng đầu tiên sau khi nạp mô hình: @@TRAMI@@{"ready": true}
 """
 from __future__ import annotations
@@ -33,8 +34,33 @@ def _small_card() -> bool:
         return False
 
 
-def _vram_guard(tts) -> dict:
-    """Sau mỗi câu: card gần đầy -> bỏ các đồ thị CUDA đã chụp (VieNeu chụp lại khi cần, ~0,5 s) + trả bộ nhớ đệm."""
+GRAPH_BUDGET_SMALL = 1.5 * 1024 ** 3   # 2.4.8: card < 11 GB – đồ thị CUDA + bộ nhớ đệm giữ thêm tối đa 1,5 GB ngoài
+GRAPH_BUDGET = 4 * 1024 ** 3           # mô hình (trước chỉ dọn khi CẢ card còn < 15 % -> 8 GB bị chiếm tới ~6,8 GB)
+
+
+def reserved() -> int:
+    """Bộ nhớ card tiến trình này đang giữ (mô hình + đồ thị CUDA + bộ nhớ đệm của PyTorch); 0 = không đo được."""
+    torch = sys.modules.get("torch")
+    try:
+        return int(torch.cuda.memory_reserved()) if torch is not None and torch.cuda.is_available() else 0
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _drop_graphs(tts) -> int:
+    eng = getattr(tts, "_batch_engine", None)
+    n = 0
+    for name in ("_fused", "_graphs"):
+        d = getattr(eng, name, None)
+        if isinstance(d, dict):
+            n += len(d)
+            d.clear()
+    return n
+
+
+def mem_guard(base: int = 0, drop=None, force: bool = False, label: str = "") -> dict:
+    """Sau mỗi câu / lệnh "trim": CẢ card còn trống < LOW_FREE, hoặc tiến trình này giữ thêm > GRAPH_BUDGET ngoài mô
+    hình (base = bộ nhớ lúc vừa nạp xong), hoặc force -> drop() (bỏ đồ thị CUDA / Whisper…) + trả bộ nhớ đệm."""
     torch = sys.modules.get("torch")
     try:
         if torch is None or not torch.cuda.is_available():
@@ -43,15 +69,11 @@ def _vram_guard(tts) -> dict:
     except Exception:  # noqa: BLE001
         return {}
     out = {"vram_free": round(free / max(total, 1), 3)}
-    if free / max(total, 1) >= LOW_FREE:
+    extra = reserved() - base if base else 0
+    budget = GRAPH_BUDGET_SMALL if total < 11 * 1024 ** 3 else GRAPH_BUDGET
+    if not force and free / max(total, 1) >= LOW_FREE and extra <= budget:
         return out
-    eng = getattr(tts, "_batch_engine", None)
-    n = 0
-    for name in ("_fused", "_graphs"):
-        d = getattr(eng, name, None)
-        if isinstance(d, dict):
-            n += len(d)
-            d.clear()
+    n = drop() if drop else 0
     import gc
 
     gc.collect()
@@ -63,9 +85,17 @@ def _vram_guard(tts) -> dict:
     except Exception:  # noqa: BLE001
         pass
     out["freed_graphs"] = n
-    print(f"[Subvideo] card gần đầy – bỏ {n} đồ thị CUDA đã chụp, giờ còn trống {out['vram_free']:.0%}",
+    why = "trả bộ nhớ sau khi lồng tiếng" if force else (
+        "card gần đầy" if free / max(total, 1) < LOW_FREE else f"giữ thêm {extra / 1024 ** 3:.1f} GB ngoài mô hình")
+    print(f"[Subvideo] {label or 'VieNeu'}: {why} – bỏ {n} mục đã chụp / nạp tạm, card còn trống {out['vram_free']:.0%}",
           file=sys.stderr, flush=True)
     return out
+
+
+def _vram_guard(tts, base: int = 0, force: bool = False) -> dict:
+    """VieNeu: bỏ các đồ thị CUDA đã chụp (VieNeu chụp lại khi cần, ~0,5 s) + trả bộ nhớ đệm khi card gần đầy / giữ quá
+    nhiều / được yêu cầu (lệnh "trim" sau mỗi việc lồng tiếng – mô hình vẫn nạp sẵn cho lần tạo lại giọng sau)."""
+    return mem_guard(base, lambda: _drop_graphs(tts), force, "VieNeu")
 
 
 def _seed(n: int) -> None:
@@ -173,12 +203,16 @@ def main(mode: str = "v3turbo") -> None:
         print("[Subvideo] VieNeu: câu ≤ 4 tiếng dùng trần số khung thấp (chống đọc lặp lời)", file=sys.stderr, flush=True)
     _reply(proto, {"ready": True, "sr": sr})
     one_chunk = {"batch_size": 1} if _small_card() else {}
+    base = reserved()     # bộ nhớ card của riêng mô hình (lúc vừa nạp)
     for line in sys.stdin:
         line = line.strip()
         if not line:
             continue
         try:
             req = json.loads(line)
+            if req.get("cmd") == "trim":    # việc lồng tiếng xong: trả phần đồ thị / bộ nhớ đệm, giữ mô hình
+                _reply(proto, dict({"ok": True}, **_vram_guard(tts, base, force=True)))
+                continue
             kw = {}
             if req.get("ref_audio"):
                 kw["ref_audio"] = req["ref_audio"]
@@ -197,7 +231,7 @@ def main(mode: str = "v3turbo") -> None:
                         raise
                     one_chunk = {}
             write_wav(req["out"], wav, sr)
-            _reply(proto, dict({"ok": True, "sr": sr}, **_vram_guard(tts)))
+            _reply(proto, dict({"ok": True, "sr": sr}, **_vram_guard(tts, base)))
         except Exception as e:  # noqa: BLE001
             _reply(proto, {"error": f"{type(e).__name__}: {e}"})
 

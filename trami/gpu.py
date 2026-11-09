@@ -16,7 +16,8 @@ import sys
 import threading
 import time
 
-IDLE_STOP = 600.0            # tiến trình đọc giọng (VieNeu / OmniVoice) không dùng 10 phút -> tắt, trả card
+IDLE_STOP = 300.0            # tiến trình đọc giọng (VieNeu / OmniVoice) không dùng 5 phút -> tắt, trả card (2.4.8: 10 -> 5)
+IDLE_STOP_AI = 120.0         # bộ nghe (Qwen3 / FireRed), dịch trên máy (Hy-MT2), OCR trên card: không dùng 2 phút -> tắt
 TTS_KINDS = {"dub", "redub"}  # việc dùng tiến trình đọc giọng
 
 
@@ -55,6 +56,13 @@ def drop_local_models() -> None:
         c = getattr(m, name, None) if m is not None else None
         if isinstance(c, dict):
             c.clear()
+    for mod in ("trami.ocr_engine", "trami.bandit"):   # bộ đọc OCR (onnxruntime trên card giữ vùng nhớ riêng), Bandit
+        m = sys.modules.get(mod)
+        if m is not None and hasattr(m, "release"):
+            try:
+                m.release()
+            except Exception:  # noqa: BLE001
+                pass
     free_cache()
 
 
@@ -105,9 +113,25 @@ def before_job(kind: str) -> None:
 
 
 def after_job(kind: str) -> None:
-    """Sau 1 việc GPU: bỏ mô hình nạp trong tiến trình giao diện + trả bộ nhớ đệm (tiến trình đọc giọng giữ lại để
-    'Tạo lại giọng' vài câu không phải nạp lại – quá IDLE_STOP giây không dùng thì tự tắt)."""
+    """Sau 1 việc GPU: bỏ mô hình nạp trong tiến trình giao diện + trả bộ nhớ đệm + tắt bộ nghe / Hy-MT2 (2.4.8: các nút
+    nghe lại / dọn câu / soát OCR từng để tiến trình Qwen3 ~4,6 GB sống tới khi tắt tool). Tiến trình đọc giọng giữ lại
+    để 'Tạo lại giọng' vài câu không phải nạp lại (2.4.8: nhưng trả phần đồ thị CUDA / Whisper đã phình ra) – quá IDLE_STOP
+    giây không dùng thì tự tắt."""
+    stop_workers({"asr", "mt"})
+    if kind in TTS_KINDS or kind == "auto":   # đọc giọng xong: tiến trình đọc giọng trả đồ thị CUDA / Whisper / bộ nhớ đệm, giữ mô hình
+        trim_workers()
     drop_local_models()
+
+
+def trim_workers() -> int:
+    n = 0
+    for _, w in _workers({"tts"}):
+        if hasattr(w, "trim"):
+            try:
+                n += bool(w.trim())
+            except Exception:  # noqa: BLE001
+                pass
+    return n
 
 
 # ------------------------------------------------------------------ chương trình KHÁC đang chiếm card
@@ -258,13 +282,255 @@ def wait_for_vram(kind: str, report=None, cancel=None, settings: dict | None = N
             time.sleep(0.2)
 
 
-def reap_idle(max_idle: float = IDLE_STOP) -> int:
+def reap_idle(max_idle: float = IDLE_STOP, max_idle_ai: float = IDLE_STOP_AI) -> int:
+    """Tắt tiến trình AI để không lâu (đọc giọng max_idle, bộ nghe / Hy-MT2 max_idle_ai) + bỏ bộ đọc OCR trên card để
+    không max_idle_ai. Chỉ gọi khi không có việc GPU nào đang chạy."""
     n = 0
     now = time.time()
-    for _, w in _workers({"tts"}):
-        if getattr(w, "proc", None) and w.proc.poll() is None and now - getattr(w, "last_used", now) > max_idle:
+    for k, w in _workers():
+        lim = max_idle if k == "tts" else max_idle_ai
+        if getattr(w, "proc", None) and w.proc.poll() is None and now - getattr(w, "last_used", now) > lim:
             n += _stop_if_idle(w)
+    oe = sys.modules.get("trami.ocr_engine")
+    if oe is not None and hasattr(oe, "release_idle"):
+        try:
+            n += int(oe.release_idle(max_idle_ai))
+        except Exception:  # noqa: BLE001
+            pass
+    # mô hình nạp trong cửa sổ chính ngoài việc GPU (Xem thử 1 khung xoá chữ = LaMa, nghe thử…) -> để không quá
+    # max_idle_ai thì bỏ (trước đây giữ tới khi có việc GPU kế tiếp / tắt tool)
+    if _local_loaded():
+        if not _LOCAL_SEEN[0]:
+            _LOCAL_SEEN[0] = now
+        elif now - _LOCAL_SEEN[0] > max_idle_ai:
+            drop_local_models()
+            _LOCAL_SEEN[0] = 0.0
+            n += 1
+    else:
+        _LOCAL_SEEN[0] = 0.0
     return n
+
+
+_LOCAL_SEEN = [0.0]   # lúc reaper thấy có mô hình nạp trong cửa sổ chính (0 = không có)
+
+
+def _local_loaded() -> bool:
+    """Có mô hình AI nào đang nạp trong tiến trình giao diện không (LaMa, ECAPA, fa-zh, FunASR, Whisper, Bandit)."""
+    for mod, n in (("trami.lama", "_model"), ("trami.diarize", "_enc"), ("trami.align", "_fa_model")):
+        m = sys.modules.get(mod)
+        if m is not None and getattr(m, n, None) is not None:
+            return True
+    for mod, n in (("trami.asr_funasr", "_cache"), ("trami.asr", "_model_cache")):
+        m = sys.modules.get(mod)
+        if m is not None and getattr(m, n, None):
+            return True
+    b = sys.modules.get("trami.bandit")
+    return bool(b is not None and getattr(b, "_model", None) is not None)
+
+
+# ------------------------------------------------------------------ ai đang chiếm card (2.4.8)
+WORKER_FLAGS = {"--vieneu-worker": "VieNeu (đọc giọng)", "--omni-worker": "OmniVoice (đọc giọng)",
+                "--qwen-asr-worker": "Qwen3-ASR (bộ nghe)", "--firered-worker": "FireRedASR2 (bộ nghe)",
+                "--hymt-worker": "Hy-MT2 (dịch trên máy)", "--hf-download": "tải mô hình"}
+WORKER_CLASS = {"VieneuWorker": "VieNeu (đọc giọng)", "OmniWorker": "OmniVoice (đọc giọng)",
+                "QwenAsrWorker": "Qwen3-ASR (bộ nghe)", "FireRedWorker": "FireRedASR2 (bộ nghe)",
+                "HymtWorker": "Hy-MT2 (dịch trên máy)"}
+KNOWN_APPS = {"chrome": "trình duyệt Chrome", "msedge": "trình duyệt Edge", "firefox": "trình duyệt Firefox",
+              "brave": "trình duyệt Brave", "opera": "trình duyệt Opera", "browser": "trình duyệt Cốc Cốc",
+              "coccoc": "trình duyệt Cốc Cốc", "dwm": "Windows – vẽ màn hình", "explorer": "Windows Explorer",
+              "capcut": "CapCut", "jianyingpro": "CapCut (Jianying)", "obs64": "OBS", "zalo": "Zalo",
+              "discord": "Discord", "steam": "Steam", "steamwebhelper": "Steam", "premiere": "Premiere",
+              "adobe premiere pro": "Premiere", "afterfx": "After Effects", "photoshop": "Photoshop",
+              "nvcontainer": "NVIDIA (phần mềm card)", "nvidia overlay": "NVIDIA overlay",
+              "searchhost": "Windows – tìm kiếm", "widgets": "Windows – tiện ích", "textinputhost": "Windows – bàn phím",
+              "msedgewebview2": "Windows WebView (Teams / Widgets…)"}
+_PS = r"""
+$ErrorActionPreference='SilentlyContinue'
+[Console]::OutputEncoding=[Text.Encoding]::UTF8
+$procs=@{}
+foreach($p in Get-CimInstance Win32_Process){ $procs[[int]$p.ProcessId]=$p }
+foreach($m in Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory){
+  if($m.Name -match '^pid_(\d+)_luid_(0x[0-9A-Fa-f]+_0x[0-9A-Fa-f]+)'){
+    $id=[int]$Matches[1]; $p=$procs[$id]
+    $par=0; $alive=0; $n=''; $cl=''
+    if($p){ $par=[int]$p.ParentProcessId; $n=$p.Name; if($p.CommandLine){ $cl=($p.CommandLine -replace "[`t`r`n]",' ') } }
+    if($procs.ContainsKey($par)){ $alive=1 }
+    "G`t$id`t$($Matches[2])`t$($m.DedicatedUsage)`t$n`t$par`t$alive`t$cl"
+  }
+}
+"""
+
+
+def parse_ps(text: str) -> list[dict]:
+    """Kết quả _PS -> mỗi tiến trình 1 dòng {pid, name, mb, parent, parent_alive, cmd} trên card CHÍNH (card có bộ nhớ
+    riêng bị dùng nhiều nhất – máy laptop có thêm card Intel tích hợp). Thuần, test được."""
+    by_luid: dict[str, dict[int, dict]] = {}
+    for ln in (text or "").splitlines():
+        parts = ln.rstrip("\r").split("\t")
+        if len(parts) < 8 or parts[0] != "G":
+            continue
+        try:
+            pid, used = int(parts[1]), int(float(parts[3] or 0))
+            parent = int(parts[5] or 0)
+        except ValueError:
+            continue
+        name = parts[4].strip()
+        if name.lower().endswith(".exe"):
+            name = name[:-4]
+        row = by_luid.setdefault(parts[2], {}).setdefault(
+            pid, {"pid": pid, "name": name, "mb": 0, "parent": parent, "parent_alive": parts[6] == "1",
+                  "cmd": "\t".join(parts[7:]).strip()})
+        row["mb"] += used // (1024 * 1024)
+    if not by_luid:
+        return []
+    main = max(by_luid.values(), key=lambda d: sum(r["mb"] for r in d.values()))
+    return sorted((r for r in main.values() if r["mb"] > 0), key=lambda r: -r["mb"])
+
+
+def _win_processes() -> list[dict] | None:
+    import subprocess
+
+    if sys.platform != "win32":
+        return None
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", _PS],
+                           capture_output=True, timeout=25, creationflags=0x08000000)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return parse_ps(r.stdout.decode("utf-8", "replace"))
+
+
+def _smi_processes() -> list[dict]:
+    """Máy không phải Windows: nvidia-smi cho biết tiến trình + MB (dòng lệnh đọc /proc)."""
+    out = _smi(["--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader,nounits"]) or []
+    rows = []
+    for ln in out:
+        parts = [x.strip() for x in ln.split(",")]
+        try:
+            pid, mb = int(parts[0]), int(float(parts[2]))
+        except (ValueError, IndexError):
+            continue
+        cmd = ""
+        try:
+            cmd = open(f"/proc/{pid}/cmdline", "rb").read().replace(b"\0", b" ").decode("utf-8", "replace")
+        except OSError:
+            pass
+        rows.append({"pid": pid, "name": parts[1].replace("\\", "/").rsplit("/", 1)[-1], "mb": mb, "parent": 0,
+                     "parent_alive": True, "cmd": cmd})
+    return sorted(rows, key=lambda r: -r["mb"])
+
+
+def _ours() -> dict[int, tuple[str, object]]:
+    """{pid: (tên, tiến trình phụ | None)} các tiến trình của CHÍNH cửa sổ Subvideo này."""
+    import os
+
+    ours: dict[int, tuple[str, object]] = {os.getpid(): ("cửa sổ chính", None)}
+    for _, w in _workers():
+        if getattr(w, "proc", None) and w.proc.poll() is None:
+            ours[w.proc.pid] = (WORKER_CLASS.get(type(w).__name__, type(w).__name__), w)
+    return ours
+
+
+def _is_subvideo(cmd: str, name: str) -> bool:
+    c = cmd.lower()
+    return "trami.py" in c or "subvideo" in name.lower() or "subvideo.exe" in c or "-m trami" in c
+
+
+def describe(rows: list[dict], ours: dict | None = None, now: float | None = None) -> list[dict]:
+    """Gắn tên dễ hiểu + loại cho từng tiến trình: ours (của cửa sổ này) / orphan (tiến trình phụ Subvideo còn sót khi
+    cửa sổ đã tắt) / other_sv (cửa sổ Subvideo khác) / app."""
+    ours = _ours() if ours is None else ours
+    now = time.time() if now is None else now
+    out = []
+    for r in rows:
+        r = dict(r)
+        flag = next((lab for f, lab in WORKER_FLAGS.items() if f in r.get("cmd", "")), "")
+        if r["pid"] in ours:
+            lab, w = ours[r["pid"]]
+            r["kind"] = "ours"
+            if w is None:
+                r["who"] = ("Subvideo – cửa sổ chính (mô hình nạp tạm khi tách giọng / xoá phụ đề / OCR; ~0,3–0,5 GB "
+                            "vùng làm việc của card chỉ trả khi tắt tool)")
+            else:
+                idle = max(0.0, now - getattr(w, "last_used", now))
+                r["who"] = f"Subvideo – {lab}" + (f", không dùng {idle / 60:.0f} phút" if idle >= 60 else "")
+        elif flag and _is_subvideo(r.get("cmd", ""), r.get("name", "")):
+            if not r.get("parent_alive", True):
+                r["kind"], r["who"] = "orphan", f"Subvideo – {flag} còn sót (cửa sổ Subvideo mở nó đã tắt)"
+            else:
+                r["kind"], r["who"] = "other_sv", f"Cửa sổ Subvideo khác – {flag}"
+        elif _is_subvideo(r.get("cmd", ""), r.get("name", "")):
+            r["kind"], r["who"] = "other_sv", "Cửa sổ Subvideo khác đang mở"
+        else:
+            nm = (r.get("name") or "?").lower()
+            r["kind"] = "app"
+            r["who"] = KNOWN_APPS.get(nm, r.get("name") or f"tiến trình {r['pid']}")
+        out.append(r)
+    return out
+
+
+def usage_report() -> dict:
+    """Card đang bị dùng bao nhiêu + tiến trình nào đang chiếm (cả chương trình khác). {total, used, rows, ok, why}."""
+    info = vram_free()
+    rows = _win_processes()
+    why = ""
+    if rows is None:
+        rows = _smi_processes()
+        if not rows and info is not None:
+            why = "Máy này không cho biết từng chương trình dùng bao nhiêu – xem Trình quản lý tác vụ → Chi tiết"
+    rows = describe(rows)
+    total = info[1] if info else None
+    used = (info[1] - info[0]) if info else (sum(r["mb"] for r in rows) or None)
+    if info is None and not rows:
+        why = "Không đo được card (không có card NVIDIA / chưa cài driver có nvidia-smi)"
+    return {"total": total, "used": used, "rows": rows, "ok": bool(rows) or info is not None, "why": why}
+
+
+def report_text(rep: dict) -> str:
+    lines = []
+    if rep.get("total"):
+        lines.append(f"Card đang dùng {rep['used'] / 1024:.1f} / {rep['total'] / 1024:.1f} GB")
+    for r in rep.get("rows", [])[:12]:
+        lines.append(f"• {r['who']}: {r['mb'] / 1024:.1f} GB")
+    if rep.get("why"):
+        lines.append(rep["why"])
+    return "\n".join(lines)
+
+
+def kill_orphans(rows: list[dict]) -> int:
+    """Tắt tiến trình phụ Subvideo còn sót (cửa sổ mở nó đã tắt – không ai dùng nữa mà vẫn giữ mô hình trên card)."""
+    import os
+    import signal
+    import subprocess
+
+    n = 0
+    for r in rows:
+        if r.get("kind") != "orphan":
+            continue
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/PID", str(r["pid"]), "/F"], capture_output=True, timeout=10,
+                               creationflags=0x08000000)
+            else:
+                os.kill(r["pid"], signal.SIGTERM)
+            n += 1
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return n
+
+
+def release_all(rows: list[dict] | None = None) -> list[str]:
+    """Nút "Trả bộ nhớ card": tắt mọi tiến trình AI của tool đang để không (đang đọc / nghe dở thì để nguyên), bỏ mô
+    hình nạp trong cửa sổ chính, bỏ bộ đọc OCR, tắt tiến trình phụ còn sót. Trả danh sách đã tắt."""
+    done = []
+    for _, w in _workers():
+        if getattr(w, "proc", None) and w.proc.poll() is None and _stop_if_idle(w):
+            done.append(WORKER_CLASS.get(type(w).__name__, type(w).__name__))
+    drop_local_models()
+    k = kill_orphans(rows or [])
+    if k:
+        done.append(f"{k} tiến trình phụ còn sót")
+    return done
 
 
 _reaper: threading.Thread | None = None
