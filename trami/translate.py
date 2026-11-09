@@ -1379,10 +1379,15 @@ class Translator:
         self._spk_lock = threading.Lock()
         # 2.4.2: tên / thuật ngữ còn để pinyin -> âm Hán Việt (hanviet.py, mọi công cụ dịch) + từ lóng / tiếng mạng
         # (slang.py: AI nhận nghĩa trong lời nhắc, Google / Hy-MT2 thay trước từ chắc chắn là lóng) – chỉ tiếng Việt
-        self.name_fix = self.target == "vi" and bool(settings.get("trans_name_fix", False))
+        # 2.4.4: chọn loại được đổi – tên người / địa danh, môn phái, đồ vật / từ thường (tắt hết = như cũ)
+        from .hanviet import kinds_from
+
+        self.name_kinds = kinds_from(settings) if self.target == "vi" else set()
+        self.name_fix = bool(self.name_kinds)
         self.slang_on = self.target == "vi" and bool(settings.get("trans_slang", False))
         self.name_pairs: list[tuple[str, str]] = []   # (pinyin, Hán Việt) đã đổi
         self.name_lines = 0
+        self.name_skipped: list[dict] = []           # tên / từ còn pinyin không đổi vì loại đó đang tắt
         self.slang_hits: list[str] = []
 
     # ------------------------------------------------------------- public
@@ -2146,10 +2151,11 @@ class Translator:
         if t and src and getattr(self, "name_fix", False):   # tên / thuật ngữ pinyin -> Hán Việt theo câu gốc (2.4.2)
             from . import hanviet
 
-            t2, pairs = hanviet.fix_line(t, src, self.glossary)
-            if pairs:
+            t2, done, skipped = hanviet.fix_line_ex(t, src, self.glossary, getattr(self, "name_kinds", None))
+            self.name_skipped += skipped
+            if done:
                 t = t2
-                self.name_pairs += pairs
+                self.name_pairs += [(x["old"], x["new"]) for x in done]
                 self.name_lines += 1
         if t:
             t = t[0].upper() + t[1:]

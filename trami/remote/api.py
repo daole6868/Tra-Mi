@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .. import autoflow, pipeline
 from ..config import PROJECTS_DIR, load_settings, save_settings
+from ..hanviet import NAME_MODES
 from ..jobs import manager
 from ..project import Project
 
@@ -22,7 +23,7 @@ DONE = ("done", "error", "cancelled")
 SETTING_KEYS = {
     "translate_engine": str, "translate_style": str, "translate_skill": str, "target_lang": str,
     "ai_review_after_translate": bool, "split_long_trans": bool, "translate_video": bool,
-    "trans_name_fix": bool, "trans_slang": bool,
+    "trans_name_fix": bool, "trans_name_kinds": str, "trans_term_fix": bool, "trans_slang": bool,
     "tts_engine": str, "tts_rate": str, "dub_overflow": str, "tts_max_speedup": float, "dub_subs_follow": bool,
     "dub_auto_shorten": bool, "dub_voice_all": str,
     "ocr_color": bool, "ocr_eq": bool, "dl_quality": str,
@@ -162,6 +163,7 @@ def options(pid: str | None = None) -> dict:
         "aspects": [{"id": k, "name": n} for k, n in EXPORT_ASPECTS],
         "resolutions": [{"id": k, "name": n} for k, n in C.RESOLUTIONS], "crfs": [{"id": k, "name": n} for k, n in CRFS],
         "qualities": [{"id": k, "name": n} for k, n in pipeline.DL_QUALITIES],
+        "name_kinds": [{"id": k, "name": n} for k, n in NAME_MODES],
         "values": vals, "lang_name": langs.INFO[langs.norm(lang)]["name"],
     }
 
@@ -177,6 +179,8 @@ def set_settings(new: dict) -> dict:
         except (TypeError, ValueError):
             raise ApiError(f"Giá trị không hợp lệ: {k}") from None
         if k == "dl_quality" and upd[k] not in dict(pipeline.DL_QUALITIES):
+            raise ApiError(f"Giá trị không hợp lệ: {k}")
+        if k == "trans_name_kinds" and upd[k] not in dict(NAME_MODES):
             raise ApiError(f"Giá trị không hợp lệ: {k}")
     if upd:
         save_settings(upd)

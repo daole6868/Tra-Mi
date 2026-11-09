@@ -66,11 +66,18 @@ VIDEO_TRANSLATE_HELP = ("Chỉ khi Công cụ dịch = Gemini: mỗi lô câu g�
                         "hiểu câu ngắn theo hành động trên hình, đọc chữ trên màn hình; ghi lại giới tính từng người nói "
                         "(Tự gán giọng nam / nữ dùng). Luật dịch / form thể loại / kỹ năng giữ nguyên. Lô gửi video lỗi -> "
                         "dịch chỉ bằng chữ như thường. Chậm hơn dịch thường (tải video lên), tốn thêm token video")
-NAME_FIX_HELP = ("Chỉ khi dịch sang tiếng Việt, mọi công cụ dịch (Google, Hy-MT2, AI): tên người, địa danh, môn phái, đồ "
-                 "vật, chiêu thức… máy dịch để nguyên pinyin (\"Lin Fan\", \"Tianjian Zong\", \"jianghu\") -> đổi theo "
-                 "chữ Hán của câu gốc (\"Lâm Phàm\", \"Thiên Kiếm Tông\", \"giang hồ\"). Không tốn API. Tên trong Bảng "
-                 "thuật ngữ dùng đúng bản trong bảng. Tắt = dịch như cũ. Dự án đã dịch: tab Phụ đề → Công cụ → Sửa câu → "
-                 "Sửa tên pinyin")
+NAME_FIX_HELP = ("Chỉ khi dịch sang tiếng Việt, mọi công cụ dịch (Google, Hy-MT2, AI): TÊN RIÊNG máy dịch để nguyên pinyin "
+                 "(chữ viết hoa: \"Lin Fan\", \"Tianjian Zong\", \"Changsha\") -> đổi theo chữ Hán của câu gốc (\"Lâm "
+                 "Phàm\", \"Thiên Kiếm Tông\", \"Trường Sa\"). Ô bên cạnh chọn loại: cả tên người lẫn địa danh, môn "
+                 "phái, đồ vật / chỉ tên người / chỉ địa danh, môn phái, đồ vật (tool đoán loại theo chữ Hán: bắt đầu bằng "
+                 "họ = tên người; kết thúc bằng 宗 门 派 山 城 州 剑… = địa danh, môn phái, đồ vật). Từ viết thường "
+                 "(\"jianghu\") là công tắc riêng. Không tốn API. Tên trong Bảng thuật ngữ dùng đúng bản trong bảng. "
+                 "Tắt = dịch như cũ. Dự án đã dịch: tab Phụ đề → Công cụ → Sửa câu → Sửa tên pinyin (xem trước, chọn "
+                 "từng tên)")
+TERM_FIX_HELP = ("Chỉ khi dịch sang tiếng Việt: từ VIẾT THƯỜNG máy dịch để nguyên pinyin (\"jianghu\", \"dantian\", "
+                 "\"xiuxian\") -> âm Hán Việt viết thường theo chữ Hán của câu gốc (\"giang hồ\", \"đan điền\", \"tu "
+                 "tiên\"). Từ có thể là tiếng Việt không dấu (\"ta lai\", \"hai\") không bao giờ bị đổi. Tắt = để nguyên "
+                 "(mặc định – chỉ tên riêng mới đổi khi bật công tắc Tên riêng)")
 SLANG_HELP = ("Chỉ khi dịch sang tiếng Việt: câu gốc có từ lóng / tiếng mạng (躺平, 内卷, 吃瓜群众, yyds, 社恐…) -> gửi kèm "
               "nghĩa quen dùng cho AI (AI tự xét câu dùng nghĩa lóng hay nghĩa đen); Google / Hy-MT2 thay trước các từ "
               "chắc chắn là lóng. Tắt = dịch như cũ. Từ riêng của bạn thêm vào Bảng thuật ngữ")

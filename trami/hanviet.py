@@ -49,6 +49,66 @@ SURNAMES = set(
     "戈伏鹿薄邸雍辜羊乌母裘亓修邰赫杭况那宿鲜印逯隆茹诸战慕危玉银亢嵇公湛宾戎勾茅利於呼居揭干但尉冶斯元束檀衣信展"
     "阴昝智幸奉植衡富尧由萧沐楚霍凤")
 PREFIX_ZH = "老小阿"    # 老王 / 小李 / 阿明: chữ ngay sau là tên dù 1 tiếng
+
+# ---- loại tên (2.4.4): tên người / địa danh – môn phái – đồ vật / từ thường (viết thường) – đoán theo chữ Hán
+KINDS = ("person", "place", "term")
+KIND_LABEL = {"person": "Tên người", "place": "Địa danh, môn phái, đồ vật", "term": "Từ thường"}
+NOTE_LABEL = {"person": "tên người", "place": "tên địa danh / môn phái / đồ vật", "term": "từ thường"}
+NAME_MODES = [("all", "Tên người + địa danh, môn phái, đồ vật"), ("people", "Chỉ tên người"),
+              ("places", "Chỉ địa danh, môn phái, đồ vật")]
+# họ ghép / nhân vật trong WORDS là tên người, còn lại là địa danh
+PERSON_WORDS = {"诸葛", "欧阳", "司马", "上官", "慕容", "令狐", "东方", "西门", "南宫", "皇甫", "公孙", "宇文", "夏侯",
+                "轩辕", "长孙", "尉迟", "独孤", "端木", "百里", "呼延", "司徒", "司空", "澹台", "申屠", "赫连", "拓跋",
+                "钟离", "闻人", "单于", "万俟", "太史", "曹操", "貂蝉", "嫦娥", "释迦", "哪吒"}
+PLACE_WORDS = {"江南", "中原", "西域", "南疆", "北境", "东海", "南海", "西海", "北海", "京城", "皇城", "天庭", "地府",
+               "人间", "魔界", "仙界", "神界", "妖界", "九州", "中州", "东洲", "西洲", "南洲", "北洲"}
+# chữ cuối gần như chỉ có ở địa danh / môn phái / tổ chức / đồ vật / chiêu thức (tên người hiếm khi kết thúc bằng)
+PLACE_TAIL = set("宗门派州市县镇村乡府宫殿阁寺庙观庵岛国界域洞塔关桥街路堡寨营帮会盟教族团军馆店铺剑刀枪戟鞭扇珠鼎"
+                 "炉镜旗经诀谱功法拳掌阵谷岭坡崖家院堂楼局部司厅号舰街坊")
+# chữ cuối chỉ dòng họ / tổ chức / nơi chốn: họ + chữ này vẫn là địa danh / tổ chức (王家, 林府, 苏州)
+GROUP_TAIL = set("宗门派家族帮会盟教府宫殿阁寺庙观国州市县镇村乡堡寨营馆店铺")
+# chữ cuối hay gặp ở cả địa danh lẫn tên người (王海, 李江, 陈峰) – chỉ tính là địa danh khi chữ đầu không phải họ
+PLACE_TAIL_WEAK = set("山峰江河湖海林城园庄台池泉渊原星洲川溪泽")
+
+
+def name_kind(chars: str, prev: str = "", lower: bool = False) -> str:
+    """Đoán loại của tên theo chữ Hán: "term" (bản dịch viết thường), "person" (tên người) hoặc "place" (địa danh,
+    môn phái, tổ chức, đồ vật, chiêu thức…). prev = chữ Hán ngay trước tên trong câu gốc."""
+    if lower:
+        return "term"
+    if chars in PERSON_WORDS:
+        return "person"
+    if chars in PLACE_WORDS or chars in WORDS:
+        return "place"
+    if len(chars) == 1 or (prev and prev in PREFIX_ZH) or (chars.endswith("儿") and len(chars) <= 3):
+        return "person"     # tên 1 tiếng (đã có danh xưng đi kèm) / 老王 / 小李 / 婉儿
+    last = chars[-1]
+    if last in PLACE_TAIL:
+        # họ + 1 chữ: tên người (陈剑, 李军) – trừ chữ chỉ dòng họ / tổ chức / nơi chốn (王家, 林府, 苏州)
+        if chars[0] in SURNAMES and len(chars) == 2 and last not in GROUP_TAIL:
+            return "person"
+        return "place"
+    if any(chars.startswith(w) for w in PERSON_WORDS if len(w) == 2 and w in WORDS and len(chars) <= 4):
+        return "person"     # họ ghép: 诸葛亮, 欧阳锋, 东方不败
+    if chars[0] in SURNAMES and len(chars) <= 3:
+        return "person"
+    return "place"
+
+
+def kinds_from(settings: dict | None) -> set[str]:
+    """Các loại được đổi sang Hán Việt khi dịch theo Cài đặt: `trans_name_fix` (tên riêng) + `trans_name_kinds`
+    (all / people / places) + `trans_term_fix` (từ thường). Tắt hết -> tập rỗng = dịch như cũ."""
+    st = settings or {}
+    out: set[str] = set()
+    if st.get("trans_name_fix"):
+        mode = st.get("trans_name_kinds") or "all"
+        if mode in ("all", "people"):
+            out.add("person")
+        if mode in ("all", "places"):
+            out.add("place")
+    if st.get("trans_term_fix"):
+        out.add("term")
+    return out
 # danh xưng tiếng Việt đứng trước / sau tên 1 tiếng
 TITLES_BEFORE = {
     "ông", "bà", "anh", "chị", "cô", "chú", "bác", "cậu", "dì", "thím", "mợ", "em", "lão", "tiểu", "a", "cụ", "ngài",
@@ -255,15 +315,23 @@ def _build(chars: str, pys: list, glossary: dict | None) -> str | None:
     return " ".join(out)
 
 
-def fix_line(trans: str, src: str, glossary: dict | None = None) -> tuple[str, list[tuple[str, str]]]:
+def fix_line(trans: str, src: str, glossary: dict | None = None,
+             kinds=None) -> tuple[str, list[tuple[str, str]]]:
     """Đổi các tên còn để pinyin trong 1 câu dịch tiếng Việt sang Hán Việt theo chữ Hán của câu gốc.
-    Trả (câu mới, [(cũ, mới)])."""
+    kinds: các loại được đổi (None = mọi loại). Trả (câu mới, [(cũ, mới)])."""
+    out, done, _skip = fix_line_ex(trans, src, glossary, kinds)
+    return out, [(x["old"], x["new"]) for x in done]
+
+
+def fix_line_ex(trans: str, src: str, glossary: dict | None = None, kinds=None, pick=None):
+    """Như fix_line nhưng trả (câu mới, [đã đổi], [bỏ qua vì loại đang tắt]) – mỗi mục {old, new, zh, kind}.
+    pick(mục) -> chữ thay (hoặc None = để nguyên): người dùng chọn từng tên ở hộp xem trước (bỏ qua kinds)."""
     if not trans or not src or not _HAN.search(src) or not available():
-        return trans, []
+        return trans, [], []
     runs = _han_runs(src)
     words = list(_WORD.finditer(trans))
     if not words:
-        return trans, []
+        return trans, [], []
     # nhóm các từ liền nhau (chỉ cách nhau bằng khoảng trắng) cùng kiểu: viết hoa (tên người / địa danh / môn phái /
     # đồ vật…) hoặc viết thường (thuật ngữ Google để nguyên: "jianghu", "dantian")
     groups: list[list[int]] = []
@@ -274,7 +342,8 @@ def fix_line(trans: str, src: str, glossary: dict | None = None) -> tuple[str, l
             groups[-1].append(i)
         else:
             groups.append([i])
-    edits: list[tuple[int, int, str, str]] = []   # (đầu, cuối, chữ cũ, chữ mới) trong bản dịch
+    edits: list[tuple[int, int, dict]] = []   # (đầu, cuối, mục) trong bản dịch
+    skipped: list[dict] = []
     for g in groups:
         used = [False] * len(g)
         for size in range(len(g), 0, -1):
@@ -285,22 +354,22 @@ def fix_line(trans: str, src: str, glossary: dict | None = None) -> tuple[str, l
                 ws = [words[i].group() for i in idx]
                 if _strip("".join(ws)) in KEEP or any(_strip(w) in KEEP for w in ws):
                     continue
-                kinds = [_kind(w) for w in ws]
-                if all(k == "vi" for k in kinds):
+                wk = [_kind(w) for w in ws]
+                if all(k == "vi" for k in wk):
                     continue
                 lower = not ws[0][0].isupper()
                 if lower:
                     # viết thường: chỉ thuật ngữ rõ là pinyin – không từ nào chỉ có thể là tiếng Việt, phần lớn từ không
                     # phải từ tiếng Việt viết không dấu ("ta lai" giữ, "jiang hu" / "dantian" đổi)
-                    if "vi" in kinds:
+                    if "vi" in wk:
                         continue
                     nv = sum(1 for w in ws if _strip(w) not in VN_PLAIN)
                     if not nv or nv < len(ws) - nv:
                         continue
-                cands = set()
+                cands: dict[str, tuple[str, str]] = {}    # tên mới -> (chữ Hán, chữ Hán đứng trước)
                 for run in runs:
                     for j in range(len(run)):
-                        for n, pys, py_hit in _align(ws, kinds, list(run), j):
+                        for n, pys, py_hit in _align(ws, wk, list(run), j):
                             if not py_hit:
                                 continue
                             chars = run[j:j + n]
@@ -310,30 +379,39 @@ def fix_line(trans: str, src: str, glossary: dict | None = None) -> tuple[str, l
                             if new and lower and not (glossary and chars in glossary):
                                 new = new.lower()
                             if new:
-                                cands.add(new)
+                                cands.setdefault(new, (chars, run[j - 1] if j else ""))
                 if len(cands) != 1:
                     continue      # không khớp / khớp nhiều tên khác nhau -> để nguyên
-                new = cands.pop()
+                new, (zh, prev) = next(iter(cands.items()))
                 s, e = words[idx[0]].start(), words[idx[-1]].end()
                 old = trans[s:e]
                 if new.lower() == old.lower():
                     continue
-                edits.append((s, e, old, new))
+                item = {"old": old, "new": new, "zh": zh, "kind": name_kind(zh, prev, lower)}
                 for k in range(a, a + size):
-                    used[k] = True
+                    used[k] = True      # đã xét cụm này (đổi hoặc bỏ qua) – không đổi mẩu con của nó
+                if pick is not None:
+                    rep = pick(item)
+                    if not rep or rep == old:
+                        continue
+                    item = {**item, "new": rep}
+                elif kinds is not None and item["kind"] not in kinds:
+                    skipped.append(item)
+                    continue
+                edits.append((s, e, item))
     if not edits:
-        return trans, []
+        return trans, [], skipped
     out = trans
-    for s, e, _old, new in sorted(edits, reverse=True):
-        out = out[:s] + new + out[e:]
-    return out, [(o, n) for _s, _e, o, n in sorted(edits)]
+    for s, e, it in sorted(edits, key=lambda x: x[0], reverse=True):
+        out = out[:s] + it["new"] + out[e:]
+    return out, [it for _s, _e, it in sorted(edits, key=lambda x: x[0])], skipped
 
 
 def _single_ok(trans: str, words, idx: list[int], run: str, j: int) -> bool:
     """Tên 1 tiếng: chữ gốc là họ (hoặc 老 / 小 / 阿 đứng trước) VÀ bản dịch có danh xưng ngay trước / sau
     ("ông Lin", "Lin tổng", "Tiểu Ming")."""
     prev_zh = run[j - 1] if j > 0 else ""
-    if run[j] not in SURNAMES and prev_zh not in PREFIX_ZH:
+    if run[j] not in SURNAMES and not (prev_zh and prev_zh in PREFIX_ZH):
         return False
     first, last = idx[0], idx[-1]
     if first > 0:
@@ -347,27 +425,79 @@ def _single_ok(trans: str, words, idx: list[int], run: str, j: int) -> bool:
     return False
 
 
-def fix_segments(segs, glossary: dict | None = None, rows=None) -> tuple[list[int], list[tuple[str, str]]]:
+def fix_segments(segs, glossary: dict | None = None, rows=None,
+                 kinds=None) -> tuple[list[int], list[tuple[str, str]]]:
     """Sửa bản dịch các câu (dự án đã dịch – nút "Sửa tên pinyin"). Trả (câu đổi, [(cũ, mới)])."""
     changed, pairs = [], []
     for k in (range(len(segs)) if rows is None else rows):
         x = segs[k]
         if not (x.trans or "").strip():
             continue
-        new, ps = fix_line(x.trans, x.text, glossary)
+        new, ps = fix_line(x.trans, x.text, glossary, kinds)
         if ps and new != x.trans:
-            x.extra.setdefault("name_fixed", [])
-            x.extra["name_fixed"] = (x.extra["name_fixed"] + [list(p) for p in ps])[-6:]
+            mark(x, ps)
             x.trans = new
             changed.append(k)
             pairs += ps
     return changed, pairs
 
 
-def note(pairs: list[tuple[str, str]], lines: int) -> str:
-    """'đổi 5 tên còn để pinyin sang Hán Việt ở 4 câu (Lin Fan → Lâm Phàm, …)'"""
-    if not pairs:
-        return ""
-    ex = list(dict.fromkeys(f"{o} → {n}" for o, n in pairs))[:3]
-    return (f"đổi {len(pairs)} tên còn để pinyin sang Hán Việt ở {lines} câu (" + ", ".join(ex)
-            + (", …" if len(set(pairs)) > 3 else "") + ")")
+def mark(seg, pairs) -> None:
+    """Ghi các tên vừa đổi vào câu (tooltip bản dịch)."""
+    seg.extra["name_fixed"] = (list(seg.extra.get("name_fixed") or []) + [list(p) for p in pairs])[-6:]
+
+
+def candidates(segs, glossary: dict | None = None, rows=None) -> list[dict]:
+    """Hộp xem trước của nút "Sửa tên pinyin" (2.4.4): mọi tên / từ còn để pinyin trong các câu, gom theo (cũ, mới):
+    [{old, new, zh, kind, rows, count, example}] – nhiều câu trước."""
+    agg: dict[tuple[str, str], dict] = {}
+    for k in (range(len(segs)) if rows is None else rows):
+        x = segs[k]
+        if not (x.trans or "").strip():
+            continue
+        _out, done, _skip = fix_line_ex(x.trans, x.text, glossary)
+        for it in done:
+            key = (it["old"], it["new"])
+            c = agg.setdefault(key, {**it, "rows": [], "count": 0, "example": x.trans})
+            if k not in c["rows"]:
+                c["rows"].append(k)
+            c["count"] += 1
+    return sorted(agg.values(), key=lambda c: (-c["count"], c["old"].lower()))
+
+
+def apply_choice(segs, choice: dict, glossary: dict | None = None, rows=None):
+    """Đổi đúng các tên người dùng đã tích ở hộp xem trước. choice {(cũ, mới đề xuất): chữ thay (có thể đã sửa tay)}.
+    Trả (câu đổi, [(cũ, mới)])."""
+    changed, pairs = [], []
+
+    def pick(it):
+        return choice.get((it["old"], it["new"]))
+
+    for k in (range(len(segs)) if rows is None else rows):
+        x = segs[k]
+        if not (x.trans or "").strip():
+            continue
+        new, done, _skip = fix_line_ex(x.trans, x.text, glossary, pick=pick)
+        if done and new != x.trans:
+            ps = [(it["old"], it["new"]) for it in done]
+            mark(x, ps)
+            x.trans = new
+            changed.append(k)
+            pairs += ps
+    return changed, pairs
+
+
+def note(pairs: list[tuple[str, str]], lines: int, skipped=None, kinds=None) -> str:
+    """'đổi 5 tên còn để pinyin sang Hán Việt ở 4 câu (Lin Fan → Lâm Phàm, …) · bỏ qua 3 từ thường (đang tắt)'"""
+    parts = []
+    if pairs:
+        ex = list(dict.fromkeys(f"{o} → {n}" for o, n in pairs))[:3]
+        parts.append(f"đổi {len(pairs)} tên còn để pinyin sang Hán Việt ở {lines} câu (" + ", ".join(ex)
+                     + (", …" if len(set(pairs)) > 3 else "") + ")")
+    if skipped:
+        by: dict[str, int] = {}
+        for it in skipped:
+            by[it["kind"]] = by.get(it["kind"], 0) + 1
+        bits = [f"{n} {NOTE_LABEL[k]}" for k, n in sorted(by.items(), key=lambda kv: KINDS.index(kv[0]))]
+        parts.append("bỏ qua " + " và ".join(bits) + " còn để pinyin (loại này đang tắt)")
+    return " · ".join(parts)

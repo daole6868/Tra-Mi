@@ -191,7 +191,10 @@ _HfwBox = HfwBox    # 2.1.35: khung chứa thẻ có hàng nút tự xuống dò
 
 
 # 2.4.3: công tắc tên pinyin / từ lóng – mỗi cài đặt có 1 công tắc ở tab Tự động + 1 ở khung Dịch tab Phụ đề
-TRANS_FIX = {"trans_name_fix": ("a_namefix", "s_namefix"), "trans_slang": ("a_slang", "s_slang")}
+TRANS_FIX = {"trans_name_fix": ("a_namefix", "s_namefix"), "trans_term_fix": ("a_termfix", "s_termfix"),
+             "trans_slang": ("a_slang", "s_slang")}
+# 2.4.4: ô chọn loại tên riêng (tên người / địa danh, môn phái, đồ vật) – tab Tự động + khung Dịch tab Phụ đề
+NAME_KIND_COMBOS = ("a_namekind", "s_namekind")
 
 
 class ProjectPage(QWidget):
@@ -863,13 +866,21 @@ class ProjectPage(QWidget):
         self.a_ai_note = label("Các mục AI ở trên chỉ chạy khi Công cụ dịch là AI (Gemini / DeepSeek / Claude / GPT / "
                                "Ollama) – Google / Hy-MT2 bỏ qua.", "muted", wrap=True)
         f.addRow(self.a_ai_note)
-        # 2.4.3: tên pinyin -> Hán Việt + từ lóng (2.4.2) – mọi công cụ dịch, chỉ dịch sang tiếng Việt; tắt = dịch như cũ.
-        # Cùng 1 cài đặt với 2 công tắc ở khung Dịch tab Phụ đề + Cài đặt → Dịch thuật
-        self.a_namefix = f.row("Đổi tên pinyin sang Hán Việt", Switch(bool(s.get("trans_name_fix", False))),
-                               C.NAME_FIX_HELP)
+        # 2.4.3/2.4.4: tên pinyin -> Hán Việt (tên riêng + chọn loại / từ thường riêng) + từ lóng – mọi công cụ dịch,
+        # chỉ dịch sang tiếng Việt; tắt = dịch như cũ. Cùng cài đặt với khung Dịch tab Phụ đề + Cài đặt → Dịch thuật
+        from ..hanviet import NAME_MODES
+
+        self.a_namefix = Switch(bool(s.get("trans_name_fix", False)))
+        self.a_namekind = combo(NAME_MODES, s.get("trans_name_kinds", "all"))
+        self.a_namekind.setToolTip(C.NAME_FIX_HELP)
+        f.row("Tên riêng → Hán Việt", field(self.a_namefix, self.a_namekind, grow=False), C.NAME_FIX_HELP)
+        self.a_termfix = f.row("Từ thường còn pinyin → Hán Việt", Switch(bool(s.get("trans_term_fix", False))),
+                               C.TERM_FIX_HELP)
         self.a_slang = f.row("Hiểu từ lóng / tiếng mạng", Switch(bool(s.get("trans_slang", False))), C.SLANG_HELP)
         self.a_namefix.toggled.connect(lambda on: self._trans_fix_changed("trans_name_fix", on))
+        self.a_termfix.toggled.connect(lambda on: self._trans_fix_changed("trans_term_fix", on))
         self.a_slang.toggled.connect(lambda on: self._trans_fix_changed("trans_slang", on))
+        self.a_namekind.currentIndexChanged.connect(lambda _i: self._name_kind_changed(self.a_namekind))
         # = công tắc "Tự tách câu dịch dài" ở tab Phụ đề (1 cài đặt chung split_long_trans, 2 công tắc luôn giống nhau)
         self.a_split_long = f.row("Tách câu dịch dài", Switch(bool(s.get("split_long_trans", True))),
                                   "Dịch xong cả phim -> câu dịch dài hơn mức đặt ở tab Phụ đề (mặc định 14 tiếng) được "
@@ -1091,15 +1102,28 @@ class ProjectPage(QWidget):
         self.s_vtrans.toggled.connect(self._vtrans_changed)
         tr_card.add(flow(self.s_vtrans, label("Dịch có nhìn hình – Gemini xem khúc video của từng lô câu (xưng hô theo "
                                               "người nói / người nghe, giới tính người nói)", "muted", wrap=True)))
+        from ..hanviet import NAME_MODES
+
         self.s_namefix = Switch(bool(self.settings.get("trans_name_fix", False)))
         self.s_namefix.setToolTip(C.NAME_FIX_HELP)
         self.s_namefix.toggled.connect(lambda on: self._trans_fix_changed("trans_name_fix", on))
+        self.s_namekind = combo(NAME_MODES, self.settings.get("trans_name_kinds", "all"))
+        self.s_namekind.setToolTip(C.NAME_FIX_HELP)
+        self.s_namekind.currentIndexChanged.connect(lambda _i: self._name_kind_changed(self.s_namekind))
+        self.s_termfix = Switch(bool(self.settings.get("trans_term_fix", False)))
+        self.s_termfix.setToolTip(C.TERM_FIX_HELP)
+        self.s_termfix.toggled.connect(lambda on: self._trans_fix_changed("trans_term_fix", on))
         self.s_slang = Switch(bool(self.settings.get("trans_slang", False)))
         self.s_slang.setToolTip(C.SLANG_HELP)
         self.s_slang.toggled.connect(lambda on: self._trans_fix_changed("trans_slang", on))
-        tr_card.add(flow(self.s_namefix, label("Đổi tên pinyin sang Hán Việt (\"Lin Fan\" -> \"Lâm Phàm\")", "muted",
-                                               wrap=True),
+        lb_name = label("Tên riêng → Hán Việt (\"Lin Fan\" -> \"Lâm Phàm\")", "muted", wrap=True)
+        lb_name.setToolTip(C.NAME_FIX_HELP)
+        lb_term = label("Từ thường còn pinyin (\"jianghu\" -> \"giang hồ\")", "muted", wrap=True)
+        lb_term.setToolTip(C.TERM_FIX_HELP)
+        tr_card.add(flow(self.s_namefix, lb_name, self.s_namekind))
+        tr_card.add(flow(self.s_termfix, lb_term,
                          self.s_slang, label("Hiểu từ lóng / tiếng mạng (躺平, yyds…)", "muted", wrap=True)))
+        self._name_kind_enable()
         self.s_tr_card = tr_card
         # ---- các trang của khung "Công cụ" (mỗi lúc hiện 1 trang)
         self.s_snap_ct = Switch(False)
@@ -4463,6 +4487,13 @@ class ProjectPage(QWidget):
                         w.blockSignals(True)
                         w.setChecked(bool(st.get(key, False)))
                         w.blockSignals(False)
+            for name in NAME_KIND_COMBOS:
+                w = getattr(self, name, None)
+                if w is not None:
+                    w.blockSignals(True)
+                    set_combo(w, st.get("trans_name_kinds") or "all")
+                    w.blockSignals(False)
+            self._name_kind_enable()
             for w in (self.s_conf, self.a_conf):
                 w.setValue(float(st.get("asr_pick_conf", 0.7) or 0.7))
             self.a_drop.setChecked(bool(st.get("asr_drop_unsure", False)))
@@ -4570,11 +4601,34 @@ class ProjectPage(QWidget):
                 w.blockSignals(True)
                 w.setChecked(bool(on))
                 w.blockSignals(False)
+        self._name_kind_enable()
         if getattr(self, "loading", True):
             return
         self._save_setting(key, bool(on))
         if on and pipeline.target_lang(self.p, self.settings) != "vi":
             self.win.toast("Đổi tên pinyin / hiểu từ lóng chỉ dùng khi dịch sang tiếng Việt", "warn")
+
+    def _name_kind_enable(self):
+        """Ô chọn loại tên riêng chỉ dùng được khi công tắc "Tên riêng → Hán Việt" bật."""
+        sw = getattr(self, "a_namefix", None) or getattr(self, "s_namefix", None)
+        on = bool(sw.isChecked()) if sw is not None else False
+        for name in NAME_KIND_COMBOS:
+            w = getattr(self, name, None)
+            if w is not None:
+                w.setEnabled(on)
+
+    def _name_kind_changed(self, src):
+        """Loại tên riêng được đổi (2.4.4): 1 cài đặt chung `trans_name_kinds` cho tab Tự động + khung Dịch tab Phụ đề."""
+        val = src.currentData() or "all"
+        for name in NAME_KIND_COMBOS:
+            w = getattr(self, name, None)
+            if w is not None and w is not src and w.currentData() != val:
+                w.blockSignals(True)
+                set_combo(w, val)
+                w.blockSignals(False)
+        if getattr(self, "loading", True):
+            return
+        self._save_setting("trans_name_kinds", val)
 
     def _ai_switch_changed(self, *_):
         if getattr(self, "loading", True):
@@ -7697,22 +7751,43 @@ class ProjectPage(QWidget):
         self.win.toast(msg, "ok")
 
     def _fix_pinyin(self):
-        """Đổi tên còn để pinyin sang Hán Việt (2.4.2, không AI): câu đã tích hoặc cả phim, tích sẵn câu đổi."""
+        """Nút "Sửa tên pinyin" (2.4.2; 2.4.4 có hộp xem trước): tìm mọi tên / từ còn để pinyin trong bản dịch (câu đã tích
+        hoặc cả phim) -> hộp tích từng tên + sửa tay + lưu Bảng tên riêng -> chỉ đổi tên đã tích. Không AI, Ctrl+Z."""
         if not self.p:
             return
         if pipeline.trans_lang(self.p) != "vi":
             return self.win.toast("Chỉ dùng cho bản dịch tiếng Việt", "warn")
+        from .pinyin_dialog import PinyinDialog
+
         segs = self.model.segs
         rows = [r for r in sorted(self.model.selected) if 0 <= r < len(segs)] or None
-        changed, pairs = pipeline.fix_pinyin_names(self.p, segs, rows, self.settings)
-        if not changed:
+        self.p.data[pipeline.glossary_key(pipeline.target_lang(self.p, self.settings))] = self.glossary.toPlainText()
+        cands = pipeline.pinyin_candidates(self.p, segs, rows, self.settings)
+        if not cands:
             return self.win.toast("Không thấy tên nào còn để pinyin" + (" ở các câu đã tích" if rows else ""), "ok")
+        can_save = pipeline.target_lang(self.p, self.settings) == "vi"
+        dlg = PinyinDialog(self, cands, f"{len(rows)} câu đã tích" if rows else "cả phim", can_save)
+        self._pinyin_dlg = dlg      # (test đọc / bấm thay người dùng)
+        if dlg.exec() != 1:     # QDialog.Accepted
+            return
+        picks = dlg.picks()
+        if not picks:
+            return
+        changed, pairs, added = pipeline.apply_pinyin_choice(self.p, segs, picks, rows, self.settings,
+                                                             save_glossary=dlg.save_glossary())
+        if added and can_save:
+            self.glossary.setPlainText(self.p.data.get(pipeline.glossary_key("vi"), ""))
+        if not changed:
+            return self.win.toast("Không có câu nào đổi" + (f" – đã thêm {added} tên vào Bảng tên riêng" if added
+                                                             else ""), "ok")
         self.model.dataChanged.emit(self.model.index(min(changed), 0),
                                     self.model.index(max(changed), self.model.columnCount() - 1))
         self._segs_edited()
         ex = list(dict.fromkeys(f"{a} → {b}" for a, b in pairs))[:3]
         more = ", …" if len(set(pairs)) > 3 else ""
         msg = f"Đã đổi {len(pairs)} tên pinyin ở {len(changed)} câu ({', '.join(ex)}{more})"
+        if added:
+            msg += f" · thêm {added} tên vào Bảng tên riêng (lần dịch sau dùng luôn)"
         self.model.set_picked(range(len(segs)), False)
         self.model.set_picked(changed, True)
         if pipeline.has_dub(self.p):

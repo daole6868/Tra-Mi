@@ -218,11 +218,25 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   âm -> giữ cả tên. `fix_segments` (`extra["name_fixed"]` -> tooltip bản dịch), `note`. `trami/slang.py`: `SLANG`
   (~200 từ lóng / tiếng mạng / cảm thán: 躺平, 内卷, 吃瓜群众, yyds, xswl, 社恐…; `strict` = hầu như không dùng nghĩa đen),
   `found(lines, skip=glossary, strict=)` (từ dài trước, chữ Latin khớp nguyên từ không phân biệt hoa thường), `apply_src`,
-  `note`. Nối vào `Translator` (chỉ tiếng Việt; Cài đặt `trans_name_fix` / `trans_slang` MẶC ĐỊNH TẮT từ 2.4.3 – tắt = dịch
-  như trước 2.4.2; công tắc ở tab Tự động bước 2 `a_namefix` / `a_slang` + khung Dịch tab Phụ đề `s_namefix` / `s_slang`
-  (`TRANS_FIX`, `_trans_fix_changed` – 1 cài đặt chung, `sync_engine` nạp lại) + Cài đặt → Dịch thuật + hộp Thiết lập tự
-  động + điện thoại (`api.SETTING_KEYS`); `C.NAME_FIX_HELP` / `SLANG_HELP`; `autoflow.summary` "đổi tên pinyin, hiểu từ
-  lóng"; nút "Sửa tên pinyin" làm tay luôn dùng được): `_post` đổi tên trước khi viết hoa + `punct_fix` (`name_pairs`, `name_lines`); `_llm_batch` mục "TỪ
+  `note`. Nối vào `Translator` (chỉ tiếng Việt; MẶC ĐỊNH TẮT từ 2.4.3 – tắt = dịch như trước 2.4.2). Chọn theo loại
+  (2.4.4): `hanviet.name_kind(chữ Hán, chữ trước, lower)` -> "person" (bắt đầu bằng họ `SURNAMES` / họ ghép
+  `PERSON_WORDS`, 老小阿 trước, …儿, tên 1 tiếng) / "place" (địa danh, môn phái, tổ chức, đồ vật, chiêu thức: `PLACE_WORDS`,
+  `WORDS` địa danh, chữ cuối `PLACE_TAIL` 宗 门 派 州 剑…; họ + 1 chữ vẫn là người trừ `GROUP_TAIL` 家 府 州…; chữ cuối
+  `PLACE_TAIL_WEAK` 山 江 海… chỉ khi không bắt đầu bằng họ) / "term" (bản dịch viết thường); Cài đặt `trans_name_fix`
+  ("Tên riêng → Hán Việt") + `trans_name_kinds` (`NAME_MODES` all / people / places) + `trans_term_fix` ("Từ thường còn
+  pinyin → Hán Việt") -> `kinds_from(settings)` -> `Translator.name_kinds`; `fix_line_ex(…, kinds, pick)` trả (câu, đã đổi,
+  bỏ qua) mỗi mục {old, new, zh, kind} -> `name_skipped` -> `note(…, skipped)` "· bỏ qua N từ thường còn để pinyin (loại
+  này đang tắt)". Công tắc: tab Tự động bước 2 `a_namefix` + ô `a_namekind` / `a_termfix` / `a_slang`, khung Dịch tab Phụ
+  đề `s_namefix` + `s_namekind` / `s_termfix` / `s_slang` (`TRANS_FIX` + `NAME_KIND_COMBOS`, `_trans_fix_changed` /
+  `_name_kind_changed` / `_name_kind_enable` – ô loại mờ khi tắt Tên riêng; 1 cài đặt chung, `sync_engine` nạp lại) +
+  Cài đặt → Dịch thuật + hộp Thiết lập tự động + điện thoại (`api.SETTING_KEYS`, `options()["name_kinds"]`);
+  `C.NAME_FIX_HELP` / `TERM_FIX_HELP` / `SLANG_HELP`; `autoflow.summary` "tên riêng / tên người / địa danh, môn phái →
+  Hán Việt, từ thường → Hán Việt, hiểu từ lóng". Nút "Sửa tên pinyin" (2.4.4 có hộp xem trước `gui/pinyin_dialog.
+  PinyinDialog`): `pipeline.pinyin_candidates` (= `hanviet.candidates` gom theo cũ → mới: zh, kind, rows, count, example
+  + "on" tích sẵn theo `trans_name_kinds` / `trans_term_fix`) -> bảng ☑ / Bản dịch đang có / Đổi thành (sửa tay) / Chữ
+  gốc / Loại / Số câu / Ví dụ, nút Tích hết / Bỏ hết / Chỉ tên riêng / Chỉ tên người / Chỉ địa danh… / Chỉ từ thường, ô
+  "Lưu vào Bảng tên riêng" -> `pipeline.apply_pinyin_choice` (`hanviet.apply_choice` – chỉ tên đã tích, chữ sửa tay;
+  save_glossary thêm "chữ Hán=tên" chưa có vào glossary dự án -> `self.glossary` ô Bảng tên riêng): `_post` đổi tên trước khi viết hoa + `punct_fix` (`name_pairs`, `name_lines`); `_llm_batch` mục "TỪ
   LÓNG / CÁCH NÓI MẠNG" (từ có trong lô); `_apply_glossary_src` (Google) + `_slang_terms` (Hy-MT2) chỉ từ strict;
   `translate_lines` ghi `slang_hits`. `pipeline.translate` -> `skill_note` ("đổi N tên còn để pinyin…", "gặp N từ lóng…"),
   câu AI kiểm tra sửa cũng đổi tên; `pipeline.fix_pinyin_names` + nút "Sửa tên pinyin" (tab Phụ đề → Công cụ → Sửa câu hàng Chữ,
@@ -995,7 +1009,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (336 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (337 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -2993,7 +3007,20 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.4.3: "cái mới này làm thành công tắc chỗ dịch – bật thì dùng, không bật cứ dùng cách cũ" -> 2 công tắc "Đổi tên pinyin
   sang Hán Việt" / "Hiểu từ lóng / tiếng mạng" ngay chỗ dịch (tab Tự động bước 2 + khung Dịch tab Phụ đề, cùng 1 cài đặt
   với Cài đặt → Dịch thuật, hộp Thiết lập…, điện thoại), MẶC ĐỊNH TẮT (2.4.2 bật sẵn) – tắt = dịch y như trước 2.4.2.
+- 2.4.4: "có nút áp dụng cho tên riêng không – chỉ muốn tên riêng lấy ở đây, còn lại không lấy, có nút bật tắt rõ
+  ràng" -> lên ý tưởng A–D, người dùng chọn làm hết: A tách "Tên riêng → Hán Việt" / "Từ thường còn pinyin → Hán Việt"
+  (2.4.3 1 công tắc đổi cả 2), B ô chọn loại tên riêng (cả hai / chỉ tên người / chỉ địa danh, môn phái, đồ vật – đoán
+  theo chữ Hán), C nút "Sửa tên pinyin" có hộp xem trước (tích / sửa tay từng tên, lưu Bảng tên riêng), D thông báo dịch
+  ghi số tên / từ bị bỏ qua vì loại đang tắt. Lỗi tìm ra khi làm: `_single_ok` / phân loại so `prev in PREFIX_ZH` với
+  chữ đứng đầu đoạn (prev = "") -> "" luôn nằm trong chuỗi -> tên 1 tiếng đầu đoạn chữ Hán không cần là họ (đã sửa).
+  Thử: phân loại 16 tên mẫu (林凡 / 诸葛亮 / 陈剑 / 婉儿 = người, 天剑宗 / 苏州 / 林家 / 轩辕剑 / 九阳神功 = địa danh…), Google
+  giả chỉ tên người (địa danh / từ thường để nguyên + ghi bỏ qua), hộp xem trước (gom 2 câu cùng tên, tích sẵn theo loại,
+  sửa tay, lưu bảng không trùng), giao diện offscreen (2 ô gương, ô loại mờ khi tắt, chụp ảnh hộp + khung Dịch).
 ## Vấn đề đang mở
+- 2.4.4: chờ người dùng chép file, tab Phụ đề → khung Dịch: bật "Tên riêng → Hán Việt" + chọn loại (VD Chỉ tên người),
+  để tắt "Từ thường"; dịch lại thử – thông báo có "đổi N tên… · bỏ qua M …"; tên bị xếp nhầm loại (tên người thành địa
+  danh hoặc ngược lại) -> gửi chữ Hán để chỉnh luật. Dự án đã dịch: tab Phụ đề → Công cụ → Sửa câu → "Sửa tên pinyin" ->
+  hộp xem trước (tích / sửa / lưu Bảng tên riêng).
 - 2.4.3: chờ người dùng chép file, bật 2 công tắc ở tab Phụ đề → khung Dịch (hoặc tab Tự động bước 2) rồi dịch / dịch
   lại thử; không bật thì dịch như cũ.
 - 2.4.2: chờ người dùng chép file, mở dự án đã dịch bằng Google / Hy-MT2 → tab Phụ đề → Công cụ → Sửa câu → "Sửa tên

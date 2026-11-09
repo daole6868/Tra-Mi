@@ -668,7 +668,9 @@ async function translateScreen(pid) {
       select('Kỹ năng AI', o.skills, v.translate_skill || '', set('translate_skill'))),
     sw('AI kiểm tra lại bản dịch', v.ai_review_after_translate, set('ai_review_after_translate')),
     sw('Tách câu dịch dài', v.split_long_trans, set('split_long_trans')),
-    sw('Đổi tên pinyin sang Hán Việt', v.trans_name_fix, set('trans_name_fix')),
+    sw('Tên riêng → Hán Việt', v.trans_name_fix, set('trans_name_fix')),
+    select('Loại tên riêng được đổi', o.name_kinds || [], v.trans_name_kinds || 'all', set('trans_name_kinds')),
+    sw('Từ thường còn pinyin → Hán Việt', v.trans_term_fix, set('trans_term_fix')),
     sw('Hiểu từ lóng / tiếng mạng', v.trans_slang, set('trans_slang')),
     vt));
   const tmsg = h('div', { class: 'hidden' });

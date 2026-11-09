@@ -1953,17 +1953,42 @@ def test_perf_fixes_2110(sample_video, monkeypatch):
     assert pp.model.segs[0].trans == "Ngươi đi đâu"
     # 2.4.2: nút "Sửa tên pinyin" (không AI) – đổi tên còn để pinyin, tích sẵn câu đổi, Ctrl+Z hoàn tác
     if importlib.util.find_spec("pypinyin"):
-        pp.model.segs[0].text, pp.model.segs[0].trans = "林凡来了。", "Lin Fan đến rồi."
+        # 2.4.4: hộp xem trước – tích theo loại, sửa tay "Đổi thành", lưu Bảng tên riêng
+        from trami.gui.pinyin_dialog import C_NEW, C_ON, PinyinDialog
+
+        seen = []
+
+        def fake_exec(dlg):
+            seen.append([(c["old"], c["kind"], c["on"]) for c in dlg.cands])
+            return 1
+        monkeypatch.setattr(PinyinDialog, "exec", fake_exec)
+        pp.settings["trans_name_kinds"] = "all"
+        pp.settings["trans_term_fix"] = False
+        pp.model.segs[0].text, pp.model.segs[0].trans = "林凡来到江湖。", "Lin Fan đến jianghu."
+        pp.glossary.setPlainText("")
         pp._undo_mark()
         pp.model.set_picked(range(len(pp.model.segs)), False)
         pp._fix_pinyin()
-        assert pp.model.segs[0].trans == "Lâm Phàm đến rồi." and 0 in pp.model.selected
+        assert sorted(seen[-1]) == [("Lin Fan", "person", True), ("jianghu", "term", False)]   # từ thường không tích
+        assert pp.model.segs[0].trans == "Lâm Phàm đến jianghu." and 0 in pp.model.selected
+        assert "林凡=Lâm Phàm" in pp.glossary.toPlainText()                      # lưu vào Bảng tên riêng
+        dlg = pp._pinyin_dlg
+        dlg._tick({"term"})
+        assert [x["old"] for x in dlg.picks()] == ["jianghu"]
+        dlg._tick(None)
+        r = next(i for i, c in enumerate(dlg.cands) if c["old"] == "Lin Fan")
+        dlg.table.item(r, C_NEW).setText("Lâm Phạm")                            # sửa tay ô "Đổi thành"
+        assert {x["old"]: x["use"] for x in dlg.picks()} == {"Lin Fan": "Lâm Phạm", "jianghu": "giang hồ"}
+        assert dlg.ok.isEnabled() and "2 tên" in dlg.ok.text()
+        dlg._tick(set())
+        assert not dlg.ok.isEnabled() and dlg.table.item(0, C_ON) is not None
         from PySide6.QtCore import Qt
 
         from trami.gui.subs_model import C_VI
         assert "Lin Fan → Lâm Phàm" in pp.model.data(pp.model.index(0, C_VI), Qt.ItemDataRole.ToolTipRole)
         pp.undo()
-        assert pp.model.segs[0].trans == "Lin Fan đến rồi."
+        assert pp.model.segs[0].trans == "Lin Fan đến jianghu."
+        pp.glossary.setPlainText("")
     # 2.4.3: công tắc "Đổi tên pinyin" / "Hiểu từ lóng" – tab Tự động ↔ khung Dịch tab Phụ đề, 1 cài đặt chung
     from trami.config import load_settings, save_settings
 
@@ -1977,6 +2002,19 @@ def test_perf_fixes_2110(sample_video, monkeypatch):
     pp.settings = save_settings({"trans_name_fix": False, "trans_slang": False})   # (như Cài đặt → Lưu)
     pp.sync_engine()
     assert not any(w.isChecked() for w in (pp.a_namefix, pp.s_namefix, pp.a_slang, pp.s_slang))
+    # 2.4.4: ô loại tên riêng mờ khi tắt công tắc Tên riêng; 2 ô gương nhau; công tắc Từ thường riêng
+    assert not pp.a_namekind.isEnabled() and not pp.s_namekind.isEnabled()
+    pp.a_namefix.setChecked(True)
+    assert pp.a_namekind.isEnabled() and pp.s_namekind.isEnabled()
+    set_combo(pp.s_namekind, "people")
+    assert pp.a_namekind.currentData() == "people" and load_settings()["trans_name_kinds"] == "people"
+    pp.s_termfix.setChecked(True)
+    assert pp.a_termfix.isChecked() and load_settings()["trans_term_fix"] is True
+    from trami.hanviet import kinds_from
+    assert kinds_from(load_settings()) == {"person", "term"}
+    pp.settings = save_settings({"trans_name_fix": False, "trans_term_fix": False, "trans_name_kinds": "all"})
+    pp.sync_engine()
+    assert pp.a_namekind.currentData() == "all" and not pp.s_termfix.isChecked() and not pp.s_namekind.isEnabled()
     win.timer.stop()
     pp.p = None
     win.close()
@@ -6532,10 +6570,13 @@ def test_ai_steps_run_with_live_drafts(monkeypatch):
     sm = autoflow.summary({**st_, "ai_clean_before_translate": False})
     assert "AI lọc lời hát, kiểm tra bản dịch" in sm
     assert "AI " not in autoflow.summary({**st_, "translate_engine": "google"})
-    # 2.4.3: tên pinyin / từ lóng ghi vào tóm tắt khi bật (chỉ dịch sang tiếng Việt)
-    assert "đổi tên pinyin" not in sm
+    # 2.4.3 / 2.4.4: tên pinyin / từ lóng ghi vào tóm tắt khi bật (chỉ dịch sang tiếng Việt)
+    assert "Hán Việt" not in sm
     sm = autoflow.summary({**st_, "trans_name_fix": True, "trans_slang": True, "target_lang": "vi"})
-    assert "đổi tên pinyin, hiểu từ lóng" in sm
+    assert "tên riêng → Hán Việt, hiểu từ lóng" in sm
+    sm = autoflow.summary({**st_, "trans_name_fix": True, "trans_name_kinds": "people", "trans_term_fix": True,
+                           "target_lang": "vi"})
+    assert "tên người → Hán Việt, từ thường → Hán Việt" in sm
 
 
 # ------------------------------------------------------------------ 2.0.92: âm thanh theo giờ của hình
@@ -15312,6 +15353,80 @@ def test_slang_242(monkeypatch):
     n = len(calls)
     out = t5.translate_lines(["林凡躺平了，吃瓜群众都在看啊。"])
     assert out[0].startswith("Lin Fan ") and not t5.name_pairs and "TỪ LÓNG" not in calls[n]
+
+
+def test_hanviet_kinds_244(monkeypatch):
+    """2.4.4: tên pinyin -> Hán Việt chọn theo loại (tên người / địa danh, môn phái, đồ vật / từ thường); bỏ qua loại
+    đang tắt + thông báo; hộp xem trước (gom tên, tích sẵn theo Cài đặt, sửa tay, lưu Bảng tên riêng); điện thoại."""
+    pytest.importorskip("pypinyin")
+    from trami import hanviet as hv
+    from trami import pipeline
+    from trami import translate as tr
+    from trami.project import Project
+    from trami.remote import api
+
+    # phân loại theo chữ Hán
+    want = {"林凡": "person", "王海": "person", "张三丰": "person", "诸葛亮": "person", "欧阳锋": "person",
+            "陈剑": "person", "婉儿": "person", "天剑宗": "place", "苏州": "place", "江南": "place", "长安": "place",
+            "林家": "place", "王府": "place", "轩辕剑": "place", "九阳神功": "place", "青云山": "place"}
+    assert {z: hv.name_kind(z) for z in want} == want
+    assert hv.name_kind("明", "小") == "person" and hv.name_kind("江湖", lower=True) == "term"
+    # Cài đặt -> loại được đổi (tắt hết = rỗng = như cũ)
+    assert hv.kinds_from({}) == set()
+    assert hv.kinds_from({"trans_name_fix": True}) == {"person", "place"}
+    assert hv.kinds_from({"trans_name_fix": True, "trans_name_kinds": "people"}) == {"person"}
+    assert hv.kinds_from({"trans_name_fix": True, "trans_name_kinds": "places", "trans_term_fix": True}) == {
+        "place", "term"}
+    assert hv.kinds_from({"trans_term_fix": True}) == {"term"}
+    line, src = "Lin Fan đến Tianjian Zong học jianghu.", "林凡来到天剑宗学江湖。"
+    out, done, skip = hv.fix_line_ex(line, src, None, {"person"})
+    assert out == "Lâm Phàm đến Tianjian Zong học jianghu."
+    assert [x["kind"] for x in done] == ["person"] and sorted(x["kind"] for x in skip) == ["place", "term"]
+    assert hv.fix_line(line, src, None, {"place", "term"})[0] == "Lin Fan đến Thiên Kiếm Tông học giang hồ."
+    assert hv.fix_line(line, src)[0] == "Lâm Phàm đến Thiên Kiếm Tông học giang hồ."     # không chọn = mọi loại
+    nt = hv.note([("Lin Fan", "Lâm Phàm")], 1, skip)
+    assert "đổi 1 tên" in nt and "bỏ qua 1 tên địa danh / môn phái / đồ vật và 1 từ thường" in nt
+    assert "(loại này đang tắt)" in nt
+
+    # Translator: chỉ tên người -> địa danh / từ thường để nguyên + ghi bỏ qua
+    monkeypatch.setattr(tr.Translator, "_gt_one", lambda self, text: "\n".join(
+        "Lin Fan đến Tianjian Zong học jianghu." for _ in text.split("\n")))
+    t = tr.Translator({"trans_name_fix": True, "trans_name_kinds": "people"}, "google", target="vi", source="zh")
+    assert t.translate_lines([src])[0] == "Lâm Phàm đến Tianjian Zong học jianghu."
+    assert t.name_kinds == {"person"} and len(t.name_skipped) == 2
+    t0 = tr.Translator({}, "google", target="vi", source="zh")                         # tắt hết = như cũ
+    assert t0.translate_lines([src])[0] == line and not t0.name_fix and not t0.name_skipped
+
+    # hộp xem trước: gom tên, tích sẵn theo Cài đặt, áp dụng đúng tên đã tích (có sửa tay), lưu Bảng tên riêng
+    p = Project.create("hv244")
+    try:
+        segs = [Segment(0, 1, src, trans=line), Segment(1, 2, "林凡呢？", trans="Lin Fan đâu?"),
+                Segment(2, 3, "好的。", trans="Được.")]
+        p.data["trans_lang"] = "vi"
+        p.data["glossary"] = "苏梅=Tô My"
+        st = {"trans_name_kinds": "places", "trans_term_fix": True}
+        cands = pipeline.pinyin_candidates(p, segs, None, st)
+        by = {c["old"]: c for c in cands}
+        assert by["Lin Fan"]["rows"] == [0, 1] and by["Lin Fan"]["count"] == 2 and cands[0]["old"] == "Lin Fan"
+        assert {o: c["on"] for o, c in by.items()} == {"Lin Fan": False, "Tianjian Zong": True, "jianghu": True}
+        assert by["Tianjian Zong"]["zh"] == "天剑宗" and by["jianghu"]["kind"] == "term"
+        picks = [{**by["Lin Fan"], "use": "Lâm Phạm"}, by["Tianjian Zong"]]
+        changed, _pairs, added = pipeline.apply_pinyin_choice(p, segs, picks, None, st, save_glossary=True)
+        assert changed == [0, 1] and added == 2
+        assert [x.trans for x in segs[:2]] == ["Lâm Phạm đến Thiên Kiếm Tông học jianghu.", "Lâm Phạm đâu?"]
+        assert p.data["glossary"].splitlines() == ["苏梅=Tô My", "林凡=Lâm Phạm", "天剑宗=Thiên Kiếm Tông"]
+        assert segs[0].extra["name_fixed"][0] == ["Lin Fan", "Lâm Phạm"]
+        # lưu lần 2: tên đã có trong bảng giữ nguyên, không thêm trùng
+        assert pipeline.apply_pinyin_choice(p, segs, picks, None, st, save_glossary=True)[2] == 0
+        p.data["trans_lang"] = "en"
+        assert pipeline.pinyin_candidates(p, segs, None, st) == []
+    finally:
+        p.delete()
+
+    # điện thoại: chỉ nhận loại hợp lệ
+    assert {"id": "people", "name": "Chỉ tên người"} in api.options()["name_kinds"]
+    with pytest.raises(api.ApiError):
+        api.set_settings({"trans_name_kinds": "lung tung"})
 
 
 def test_fix_names_pipeline_242(monkeypatch):

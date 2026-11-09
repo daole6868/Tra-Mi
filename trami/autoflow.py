@@ -85,9 +85,21 @@ def summary(settings: dict | None = None) -> str:
                 ai.append("kiểm tra bản dịch")
             if ai:
                 parts.append("AI " + ", ".join(ai))
-        if langs.norm(o["target"]) == "vi":    # 2.4.3: tên pinyin -> Hán Việt / từ lóng (mặc định tắt)
-            vi = (["đổi tên pinyin"] if st.get("trans_name_fix") else []) + (["hiểu từ lóng"] if st.get("trans_slang")
-                                                                               else [])
+        if langs.norm(o["target"]) == "vi":    # 2.4.3/2.4.4: tên pinyin -> Hán Việt / từ lóng (mặc định tắt)
+            from .hanviet import kinds_from
+
+            kd = kinds_from(st)
+            vi = []
+            if "person" in kd and "place" in kd:
+                vi.append("tên riêng → Hán Việt")
+            elif "person" in kd:
+                vi.append("tên người → Hán Việt")
+            elif "place" in kd:
+                vi.append("địa danh, môn phái → Hán Việt")
+            if "term" in kd:
+                vi.append("từ thường → Hán Việt")
+            if st.get("trans_slang"):
+                vi.append("hiểu từ lóng")
             if vi:
                 parts.append(", ".join(vi))
         if st.get("split_long_trans", True):

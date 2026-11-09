@@ -173,7 +173,9 @@ DEFAULT_SETTINGS: dict = {
     "dub_by_clause": True,            # ... đọc TỪNG VẾ rồi ghép theo giờ gốc (chỗ nghỉ chắc chắn, vế dài đọc nhanh riêng)
     "breath_marks": True,             # chỗ nhân vật ngắt hơi mà câu gốc chưa có dấu câu -> thêm "，" (sau khi nghe / dịch)
     "trans_clause_match": True,       # AI dịch: câu dịch thiếu vế so với chỗ ngắt hơi -> AI sửa cho đủ vế
-    "trans_name_fix": False,          # tên / thuật ngữ còn để pinyin trong bản dịch -> âm Hán Việt (2.4.2)
+    "trans_name_fix": False,          # TÊN RIÊNG (viết hoa) còn để pinyin trong bản dịch -> âm Hán Việt (2.4.2/2.4.4)
+    "trans_name_kinds": "all",        # all / people (chỉ tên người) / places (chỉ địa danh, môn phái, đồ vật) – 2.4.4
+    "trans_term_fix": False,          # từ thường (viết thường) còn để pinyin "jianghu" -> "giang hồ" (2.4.4)
     "trans_slang": False,             # từ lóng / tiếng mạng (躺平, yyds…) -> gửi nghĩa quen dùng cho công cụ dịch (2.4.2)
     "dub_fit": True,                  # AI dịch vừa thời lượng câu (giới hạn số tiếng)
     "dub_auto_shorten": True,         # câu đọc vẫn quá dài -> AI rút gọn rồi đọc lại
