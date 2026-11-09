@@ -80,9 +80,9 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `translate.py` (`LLMClient` gọi HTTP: anthropic / OpenAI-compatible / gemini / deepseek / ollama; Google gtx;
   Hy-MT2 trên máy qua `hymt_worker.py`), `voicefix.py` (đọc số, phát hiện giọng AI hỏng, cân âm lượng),
   `gender.py` (đoán giọng nam/nữ mỗi người nói), `karaoke.py` (thời điểm từng từ cho phụ đề karaoke),
-  `omni_design.py` (23 giọng OmniVoice chọn sẵn tạo theo mô tả; `omni_worker.fix_short_duration` – câu ngắn
+  `omni_design.py` (33 giọng OmniVoice chọn sẵn tạo theo mô tả – 10 giọng 🎬 phim HK `STYLES`: câu mẫu riêng từng vai (`anchor_text(lang, pid)`, có cảm xúc + dấu phẩy) + hiệu ứng sau khi đọc `process` / `fx_key` -> `tts._omni_fx`, 2.4.7; `omni_worker.fix_short_duration` – câu ngắn
   không bị kéo dài / đọc lặp, 2.1.5; VieNeu đọc lặp câu ngắn: `tts.vn_cap_hit` + `synth_checked(cap_check=)`, 2.1.6; trần thấp `vieneu_worker.short_caps` + cắt phần lặp `voicefix.repeat_cut`, 2.1.7), `trend_voices.py` (20 giọng VieNeu theo trend
-  `vieneu:trend:<mã>` = giọng dựng sẵn + kiểu đọc + hiệu ứng) + `voicefx.py` (hiệu ứng giọng chỉ bằng numpy).
+  `vieneu:trend:<mã>` = giọng dựng sẵn + kiểu đọc + hiệu ứng; + 10 giọng 🎬 phim HK `group` "hk" `ICON_HK`, 2.4.7) + `voicefx.py` (hiệu ứng giọng chỉ bằng numpy; `pause` = `pauses`: chỗ lặng GIỮA câu ≥ 0,14 s dài thêm, ≤ `PAUSE_SHARE` 15 % câu).
 - `trami/audiomix.py` – quy tắc trộn âm thanh dùng chung cho xuất video (`video.build_and_render`) và bộ trộn trực tiếp
   `LiveMix` của trình phát (`player.LiveAudio` + `_Feeder` ở QThread riêng, QAudioSink); cài đặt ở `edit["audio"]`, tab `gui/audio_tab.py`.
   `decode_track` giải mã mỗi lớp 1 lần (`work/live/<lớp>_<mã>.raw`, 44,1 kHz 2 kênh – riêng "dub" 1 kênh từ 2.1.29); `patch_track` vá từng đoạn + `<lớp>_<mã mới>.ref`.
@@ -1022,7 +1022,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (339 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (340 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -3042,7 +3042,22 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   khung tìm lại trên ảnh "nền đen" (cả dải) THAY khung chữ -> đọc ra rác; vật chạm khung chữ = "chữ mới hiện thêm" -> cắt
   câu; khung dính vật cao hơn -> cỡ chữ phụ đề ước to -> câu khung vừa chữ bị bỏ như chữ nhỏ (+ lọc "chữ di chuyển" lấy
   khung dính vật làm bằng chứng). Sửa: xem Cấu trúc OCR (đoạn 2.4.6). Bản mới 6/6 lần đủ 3 câu, giờ ±0,08 s.
+- 2.4.7: "thêm 10 mẫu giọng VieNeu + 10 mẫu giọng OmniVoice, phải có ngắt + cảm xúc, kiểu giọng lồng tiếng phim Hồng
+  Kông ngày xưa – đọc hay, trung tính" -> 20 giọng 🎬 "Phim HK – …" đặt tên theo VAI (người dẫn truyện, nam chính, nữ
+  chính, hiệp khách, tiểu thư, sư phụ / lão gia, phu nhân / người mẹ, phản diện, thám tử / cảnh sát, nữ kể chuyện) – không
+  nhái giọng diễn viên lồng tiếng thật. Ngắt: hiệu ứng mới `voicefx.pauses` (chỗ bộ đọc tự ngắt giữa câu ≥ 0,14 s – dấu
+  phẩy / dấu chấm – dài thêm 0,14–0,24 s, hết câu ×1,4, tổng ≤ 15 % câu; không thêm lặng đầu / cuối; khe giữa chữ < 0,14 s
+  không đụng) + đọc chậm hơn 2–6 %. Cảm xúc: VieNeu không có tham số cảm xúc (3.8.3 bỏ token kiểu đọc) -> giọng gốc
+  kể chuyện / đọc truyện (6 giọng Nam: Thái Sơn, Đức Trí, Thục Đoan, Minh Triết, Kim Thanh, Mỹ Duyên; 4 giọng Bắc: Thanh
+  Bình, Thiền Tâm Đức, Xuân Vĩnh, Ngọc Linh – đọc từ voices_v3_turbo.json của gói) + kiểu đọc thả hơn (temperature
+  0,75 / vai nhiều cảm xúc 0,85); OmniVoice không có từ chỉ cảm xúc trong mô tả -> mỗi vai 1 CÂU MẪU riêng có cảm xúc +
+  nhiều dấu phẩy (OmniVoice nhái theo nhịp câu mẫu), hiệu ứng ngắt / ấm / rõ chữ / phòng thu nhẹ áp sau khi đọc (không
+  áp lên câu mẫu; đổi hiệu ứng chỉ đọc lại câu của giọng đó). Thử với bộ đọc giả (VieNeu / OmniVoice thật chưa chạy –
+  sandbox chặn HF): chỗ ngắt dài đúng, tiếng nói không mất, câu mẫu đúng vai, xem trước có hiệu ứng.
 ## Vấn đề đang mở
+- 2.4.7: chờ người dùng chép file, tab Lồng tiếng mục 2 (hoặc "Giọng cho tất cả") chọn giọng 🎬 Phim HK… -> bấm ▶
+  nghe thử từng vai (OmniVoice: lần đầu tạo câu mẫu ~vài giây); giọng nào ngắt quá dài / quá chậm (câu ⚡ nhiều hơn) hay
+  chưa đủ cảm xúc -> báo tên giọng để chỉnh `pause` / `tempo` / temperature hoặc câu mẫu.
 - 2.4.6: chờ người dùng quét lại (tab Tự động → "1. Nghe & tách câu", nguồn OCR, hoặc tách theo đoạn khoảng 00:55–00:58):
   câu "今日收你入门" phải có; so số câu với lần trước; thông báo thời gian OCR (tìm chữ / đọc chữ) có chậm thêm nhiều không
   (bước đọc thử mới chỉ chạy khi nghi có chữ mới / nét đổi).

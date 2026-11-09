@@ -1,4 +1,6 @@
-"""20 giọng VieNeu theo trend (review phim, cô gái dễ thương, kể chuyện ma, loa phường, robot…).
+"""20 giọng VieNeu theo trend (review phim, cô gái dễ thương, kể chuyện ma, loa phường, robot…) + 10 giọng 🎬 lồng
+tiếng phim Hồng Kông ngày xưa (người dẫn truyện, nam / nữ chính, hiệp khách, sư phụ… – đọc chậm rãi, rõ chữ, ấm,
+NGẮT NGHỈ rõ ở dấu phẩy / dấu chấm, biểu cảm hơn; đặt tên theo vai, không nhái giọng diễn viên lồng tiếng thật).
 
 Mỗi giọng = 1 giọng dựng sẵn của VieNeu (đọc tiếng Việt chuẩn, chạy offline) + kiểu đọc riêng (độ ngẫu nhiên khi lấy
 mẫu) + chuỗi hiệu ứng (trami/voicefx.py: cao độ, âm sắc, tốc độ, EQ, nén, vang, loa…). Mã giọng "vieneu:trend:<mã>".
@@ -15,10 +17,16 @@ import json
 
 PREFIX = "vieneu:trend:"
 ICON = "🔥"
+ICON_HK = "🎬"
 
 # kiểu đọc: "lively" = biểu cảm hơn (MC, hài), "steady" = đều, rõ (bản tin); không ghi = theo Cài đặt (Rõ ràng / Tự nhiên)
 _LIVELY = {"temperature": 0.85, "top_k": 30, "top_p": 0.95}
 _STEADY = {"temperature": 0.5, "top_k": 15, "top_p": 0.85}
+# lồng tiếng phim HK: rõ chữ nhưng có lên xuống giọng ("_HK"), vai nhiều cảm xúc (nữ chính, tiểu thư, phản diện) thả hơn.
+# VieNeu không có tham số cảm xúc -> cảm xúc = độ ngẫu nhiên khi đọc + giọng gốc kể chuyện; ngắt nghỉ = hiệu ứng "pause"
+_HK = {"temperature": 0.75, "top_k": 25, "top_p": 0.93}
+_HK_EMO = {"temperature": 0.85, "top_k": 30, "top_p": 0.95}
+_HK_ROOM = [0.4, 0.05]      # phòng thu lồng tiếng: vang rất nhẹ, không nghe như hang
 
 PRESETS: list[dict] = [
     {"id": "review_phim", "name": "Review phim – nam trầm cuốn", "gender": "male", "base": "Thiện Minh", "top": True,
@@ -86,6 +94,56 @@ PRESETS: list[dict] = [
     {"id": "dien_thoai", "name": "Gọi điện thoại", "gender": "female", "base": "Mỹ Duyên",
      "use": "nhân vật nói qua điện thoại, tin nhắn thoại",
      "fx": {"band": [320, 3400], "drive": 0.2, "comp": 0.5, "noise": -42}},
+    # --- 🎬 lồng tiếng phim Hồng Kông ngày xưa: chậm rãi, ấm (low +, high − nhẹ), rõ chữ (presence), giọng đều (nén
+    # nhẹ), ngắt nghỉ ở dấu câu dài thêm 0,14–0,24 s (pause: thêm, lặng từ, tổng tối đa)
+    {"id": "hk_dan_truyen", "name": "Phim HK – Người dẫn truyện, nam trầm ấm", "gender": "male", "base": "Thái Sơn",
+     "group": "hk", "region": "giọng Nam", "use": "lời dẫn truyện, thuyết minh phim bộ, kể chuyện chậm rãi",
+     "params": _HK,
+     "fx": {"tempo": 0.95, "pause": [0.22, 0.14, 0.7], "pitch": -0.5, "formant": -0.4, "low": 2.5, "presence": 1.5,
+            "high": -1, "comp": 0.35, "reverb": _HK_ROOM}},
+    {"id": "hk_nam_chinh", "name": "Phim HK – Nam chính, ấm áp hào hoa", "gender": "male", "base": "Đức Trí",
+     "group": "hk", "region": "giọng Nam", "use": "nam chính phim bộ, tình cảm, gia đình, hiện đại",
+     "params": _HK_EMO,
+     "fx": {"tempo": 0.97, "pause": [0.18, 0.14, 0.6], "low": 2, "presence": 2, "comp": 0.35, "reverb": _HK_ROOM}},
+    {"id": "hk_nu_chinh", "name": "Phim HK – Nữ chính, dịu dàng tình cảm", "gender": "female", "base": "Thục Đoan",
+     "group": "hk", "region": "giọng Nam", "use": "nữ chính, cảnh tình cảm, tâm sự, khóc",
+     "params": _HK_EMO,
+     "fx": {"tempo": 0.96, "pause": [0.2, 0.14, 0.6], "pitch": 0.5, "formant": 0.2, "low": 1.5, "high": -1,
+            "comp": 0.3, "reverb": _HK_ROOM}},
+    {"id": "hk_hiep_khach", "name": "Phim HK – Hiệp khách, nam rắn rỏi", "gender": "male", "base": "Minh Triết",
+     "group": "hk", "region": "giọng Nam", "use": "kiếm hiệp, võ hiệp, cảnh đối đầu, thề thốt",
+     "params": _HK,
+     "fx": {"tempo": 0.98, "pause": [0.16, 0.14, 0.5], "pitch": -1.0, "formant": -0.6, "low": 2.5, "presence": 2.5,
+            "comp": 0.45, "reverb": _HK_ROOM}},
+    {"id": "hk_tieu_thu", "name": "Phim HK – Tiểu thư, nữ trẻ trong trẻo", "gender": "female", "base": "Kim Thanh",
+     "group": "hk", "region": "giọng Nam", "use": "tiểu thư, cô gái trẻ, nhõng nhẽo, vui vẻ",
+     "params": _HK_EMO,
+     "fx": {"tempo": 0.98, "pause": [0.16, 0.14, 0.5], "pitch": 1.2, "formant": 0.6, "high": 1, "comp": 0.3,
+            "reverb": _HK_ROOM}},
+    {"id": "hk_su_phu", "name": "Phim HK – Sư phụ / lão gia, điềm đạm", "gender": "male", "base": "Thanh Bình",
+     "group": "hk", "region": "giọng Bắc", "use": "sư phụ, lão gia, trưởng bối dạy bảo, cổ trang",
+     "params": _HK,
+     "fx": {"tempo": 0.94, "pause": [0.24, 0.14, 0.8], "pitch": -1.5, "formant": -1.0, "low": 2.5, "high": -2,
+            "comp": 0.3, "reverb": [0.6, 0.07]}},
+    {"id": "hk_phu_nhan", "name": "Phim HK – Phu nhân / người mẹ, đằm thắm", "gender": "female", "base": "Mỹ Duyên",
+     "group": "hk", "region": "giọng Nam", "use": "phu nhân, người mẹ, bà chủ, cảnh gia đình",
+     "params": _HK,
+     "fx": {"tempo": 0.95, "pause": [0.2, 0.14, 0.6], "pitch": -0.8, "formant": -0.5, "low": 2, "high": -1,
+            "comp": 0.3, "reverb": _HK_ROOM}},
+    {"id": "hk_phan_dien", "name": "Phim HK – Phản diện, nam lạnh lùng", "gender": "male", "base": "Thiền Tâm Đức",
+     "group": "hk", "region": "giọng Bắc", "use": "phản diện, đại ca, kẻ âm mưu, cảnh đe doạ",
+     "params": _HK_EMO,
+     "fx": {"tempo": 0.94, "pause": [0.22, 0.14, 0.7], "pitch": -2.0, "formant": -1.4, "low": 3, "presence": 1,
+            "comp": 0.45, "reverb": [0.5, 0.06]}},
+    {"id": "hk_tham_tu", "name": "Phim HK – Thám tử / cảnh sát, dứt khoát", "gender": "male", "base": "Xuân Vĩnh",
+     "group": "hk", "region": "giọng Bắc", "use": "phim cảnh sát, hình sự, thám tử phá án, công sở",
+     "params": _HK,
+     "fx": {"tempo": 1.0, "pause": [0.14, 0.14, 0.5], "low": 1.5, "presence": 2.5, "comp": 0.45, "reverb": _HK_ROOM}},
+    {"id": "hk_nu_ke", "name": "Phim HK – Nữ kể chuyện, truyền cảm", "gender": "female", "base": "Ngọc Linh",
+     "group": "hk", "region": "giọng Bắc", "use": "lời dẫn nữ, hồi tưởng, kể chuyện tình cảm",
+     "params": _HK,
+     "fx": {"tempo": 0.95, "pause": [0.2, 0.14, 0.7], "low": 1.5, "presence": 1.5, "high": -1, "comp": 0.35,
+            "reverb": [0.5, 0.06]}},
 ]
 _BY_ID = {p["id"]: p for p in PRESETS}
 
@@ -97,8 +155,17 @@ def get(spec: str) -> dict | None:
 
 def voices() -> list[dict]:
     """Cho danh sách chọn giọng: {"id", "name", "gender", "tip"} (tip = hợp với loại video nào)."""
-    return [{"id": PREFIX + p["id"], "name": f"{ICON} {p['name']} (VieNeu)", "gender": p["gender"],
-             "tip": f"Hợp với: {p['use']}. Giọng gốc VieNeu: {p['base']} + hiệu ứng"} for p in PRESETS]
+    out = []
+    for p in PRESETS:
+        if p.get("group") == "hk":
+            tip = (f"Hợp với: {p['use']}. Kiểu lồng tiếng phim Hồng Kông ngày xưa: đọc chậm rãi, rõ chữ, ngắt nghỉ ở "
+                   f"dấu câu, biểu cảm. Giọng gốc VieNeu: {p['base']} ({p.get('region', '')})")
+            out.append({"id": PREFIX + p["id"], "name": f"{ICON_HK} {p['name']} (VieNeu)", "gender": p["gender"],
+                        "tip": tip})
+        else:
+            out.append({"id": PREFIX + p["id"], "name": f"{ICON} {p['name']} (VieNeu)", "gender": p["gender"],
+                        "tip": f"Hợp với: {p['use']}. Giọng gốc VieNeu: {p['base']} + hiệu ứng"})
+    return out
 
 
 def base_voice(spec: str, presets: list[dict] | None = None) -> str:

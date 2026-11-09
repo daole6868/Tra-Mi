@@ -5,7 +5,8 @@ Giọng cho từng người nói (S1, S2…) được ghi dạng chuỗi:
   - "vieneu:Ngọc Huyền"        : 25 giọng Việt dựng sẵn của VieNeu-TTS (chạy offline, GPU nhanh)
   - "vieneu:mau:<tên>"         : VieNeu nhái 6 giọng thu âm sạch có sẵn trong gói VieNeu (assets/samples)
   - "vieneu:lib:<id>"          : VieNeu nhái giọng từ thư viện giọng mẫu của bạn (trami/voices.py)
-  - "vieneu:trend:<mã>"        : 20 giọng VieNeu theo trend = giọng dựng sẵn + kiểu đọc + hiệu ứng (trami/trend_voices.py)
+  - "vieneu:trend:<mã>"        : 20 giọng VieNeu theo trend + 10 giọng 🎬 lồng tiếng phim HK = giọng dựng sẵn + kiểu đọc +
+                                 hiệu ứng (trami/trend_voices.py)
   - "clone"                    : NHÁI GIỌNG nhân vật gốc bằng VieNeu-TTS (lấy mẫu 5–12 giây từ chính video)
   - "omni:<id>"                : OmniVoice nhái giọng từ FILE GHI ÂM MẪU trong thư viện giọng mẫu (trami/voices.py)
   - "omniclone"                : OmniVoice nhái giọng nhân vật gốc (mẫu 3–10 giây cắt từ video + lời gốc)
@@ -981,6 +982,17 @@ def _loop_guard(worker, text: str, out: Path, a: np.ndarray, sr: int, watch: Rat
         report["long"] = 2 if still else 1
 
 
+def _omni_fx(spec: str, path: Path) -> None:
+    """Áp hiệu ứng của giọng OmniVoice chọn sẵn (🎬 phim HK) lên file vừa đọc, ghi đè cùng tần số."""
+    from . import omni_design
+
+    try:
+        a, sr = read_wav(path)
+    except (OSError, EOFError, wave.Error):
+        return
+    write_wav(path, omni_design.process(spec, a, sr), sr)
+
+
 def trend_synth(worker: VieneuWorker, spec: str, text: str, out: Path, params: dict,
                 presets: list[dict] | None = None, on_wait=None, cap_check: bool = False,
                 report: dict | None = None, watch: RateWatch | None = None, wkey: str = "") -> Path:
@@ -1829,7 +1841,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             sm = samples[spec[5:]]
             extra = f"{sm.get('text', '')}|{sm.get('file')}|{settings.get('omnivoice_model', '')}"
         if spec.startswith("omnid:"):  # đổi mô tả / mô hình -> câu mẫu mới -> đọc lại
-            extra = omni_design.key(spec, settings.get("omnivoice_model", ""), lg)
+            extra = omni_design.key(spec, settings.get("omnivoice_model", ""), lg) + omni_design.fx_key(spec)
         if spec.startswith(("omni:", "omniclone:", "omnid:")):
             extra += "|nofade"          # 2.0.34: bỏ đoạn nhỏ dần 0,1 s cuối câu (mất phụ âm cuối của câu ngắn)
             if lg != "vi":
@@ -2013,6 +2025,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                                   (base + n) / max(1, total_items) * 0.8,
                                   f"OmniVoice đang đọc {n + 1}/{len(omni_items)} – câu này đã {sec:.0f} s"))
                 sr = om.sr
+                if spec.startswith("omnid:") and omni_design.fx_key(spec):
+                    _omni_fx(spec, tmp)   # 🎬 giọng phim HK: ngắt nghỉ, ấm, rõ chữ
                 if abs(speed - 1) > 0.01:
                     write_wav(p, _decode(tmp, speed, sr), sr)
                     tmp.unlink(missing_ok=True)
@@ -2370,7 +2384,10 @@ def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,
             from . import omni_design
 
             ref, rtext = omni_design.ensure_anchor(om, spec, settings.get("omnivoice_model") or "k2-fsa/OmniVoice", lg)
-            return om.synth(text, out.with_suffix(".wav"), ref_audio=ref, ref_text=rtext, language=lg)
+            got = om.synth(text, out.with_suffix(".wav"), ref_audio=ref, ref_text=rtext, language=lg)
+            if omni_design.fx_key(spec):
+                _omni_fx(spec, Path(got or out.with_suffix(".wav")))
+            return got
         if spec.startswith("omni:"):
             from . import voices as vlib
 

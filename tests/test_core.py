@@ -2076,7 +2076,9 @@ def test_omnivoice_design_presets(monkeypatch, tmp_path):
     vocab = {"male", "female", "child", "teenager", "young adult", "middle-aged", "elderly", "very low pitch",
              "low pitch", "moderate pitch", "high pitch", "very high pitch", "whisper"}
     assert all(set(p[3].split(", ")) <= vocab for p in od.PRESETS)          # đúng từ OmniVoice hiểu
-    assert len({p[3] for p in od.PRESETS}) == len(od.PRESETS)               # không 2 giọng trùng mô tả
+    # không 2 giọng trùng mô tả + câu mẫu (giọng 🎬 phim HK cùng mô tả nhưng câu mẫu riêng của vai)
+    assert len({(p[3], od.anchor_text("vi", p[0])) for p in od.PRESETS}) == len(od.PRESETS)
+    assert len({p[3] for p in od.PRESETS if p[0] not in od.STYLES}) == len(od.PRESETS) - len(od.STYLES)
     assert len({p[4] for p in od.PRESETS}) == len(od.PRESETS)
     vs = od.voices()
     assert vs[0]["name"].startswith("⭐") and all(v["id"].startswith("omnid:") for v in vs)
@@ -4197,13 +4199,14 @@ def test_trend_voices_vieneu(monkeypatch, tmp_path):
         assert len(y) == len(a) and abs(f0(y) / f0(a) - 2 ** (p / 12)) < 0.04
     assert abs(len(fx.stretch(a, 1.15, sr)) - len(a) / 1.15) < 2 and abs(f0(fx.stretch(a, 0.9, sr)) / f0(a) - 1) < 0.02
     lv = tts.speech_level(a, sr)
-    for p in tv.PRESETS:   # mọi giọng: không vỡ tiếng, cùng độ to, đuôi vang ≤ 0,4 s
+    for p in tv.PRESETS:   # mọi giọng: không vỡ tiếng, cùng độ to, đuôi vang ≤ 0,4 s (+ ngắt nghỉ ≤ 15 % câu)
         y = tv.process(tv.PREFIX + p["id"], a, sr)
         assert np.isfinite(y).all() and np.abs(y).max() <= 0.891
         body = len(a) / p["fx"].get("tempo", 1.0)
-        assert body - 2 <= len(y) <= body + fx.TAIL_MAX * sr + 2
+        more = fx.PAUSE_SHARE * body if p["fx"].get("pause") else 0
+        assert body - 2 <= len(y) <= body + more + fx.TAIL_MAX * sr + 2
         assert abs(tts.speech_level(y, sr) / lv - 1) < 0.15 or np.abs(y).max() > 0.88
-    assert len(tv.PRESETS) == 20 and len({p["id"] for p in tv.PRESETS}) == 20
+    assert len(tv.PRESETS) == 30 and len({p["id"] for p in tv.PRESETS}) == 30
     assert tv.base_voice("vieneu:trend:robot", [{"id": "vieneu:X", "gender": "female"},
                                                 {"id": "vieneu:Y", "gender": "male"}]) == "Y"   # bản Nano: cùng nam
     assert pipeline.voice_label("vieneu:trend:robot") == "Robot AI (VieNeu)"
@@ -4257,6 +4260,118 @@ def test_trend_voices_vieneu(monkeypatch, tmp_path):
     assert [c[0] for c in calls[n:]] == ["Hôm nay vui quá"]            # đổi hiệu ứng: chỉ đọc lại giọng đó
     out = tts.preview_voice("vieneu:trend:soc_chuot", "Xin chào", tmp_path / "pv", {})
     assert out.exists() and tts.read_wav_rate(out) == 24000
+
+
+def test_hk_dub_voices_247(monkeypatch, tmp_path):
+    """10 giọng VieNeu + 10 giọng OmniVoice 🎬 lồng tiếng phim HK: chỗ bộ đọc tự ngắt GIỮA câu dài thêm (không thêm
+    lặng đầu / cuối, tổng ≤ 15 % câu, lặng dài ưu tiên), tiếng nói giữ nguyên; kiểu đọc biểu cảm riêng; OmniVoice câu
+    mẫu riêng từng vai + hiệu ứng áp sau khi đọc (đổi hiệu ứng chỉ đọc lại câu của giọng đó, câu mẫu giữ)."""
+    from trami import omni_design as od, trend_voices as tv, tts, voicefx as fx
+
+    sr = 24000
+    z = lambda sec: np.zeros(int(sec * sr), np.float32)   # noqa: E731
+    sp = lambda sec, seed=0: _speech_like(sr, sec, seed)    # noqa: E731
+    x = np.concatenate([z(0.1), sp(0.8), z(0.25), sp(0.7, 1), z(0.05), sp(0.5, 2), z(0.45), sp(0.9, 3), z(0.2)])
+
+    def gaps(a):
+        _fr, runs = fx._quiet_runs(a, sr, -35.0)
+        return [round((b - c) * 0.01, 2) for c, b in runs]
+    g0, y = gaps(x), fx.pauses(x, sr)
+    g1 = gaps(y)
+    assert len(g0) == len(g1) == 3 and abs(g1[1] - g0[1]) < 0.02          # khe 0,05 s (giữa chữ) không đụng
+    assert g1[0] >= g0[0] + 0.15 and g1[2] >= g0[2] + 0.2                 # dấu phẩy +0,18, hết câu +0,25
+    assert len(y) - len(x) <= fx.PAUSE_SHARE * len(x) + 2
+    lead = lambda a: int(np.flatnonzero(np.abs(a) > 1e-4)[0])            # noqa: E731
+    tail = lambda a: len(a) - int(np.flatnonzero(np.abs(a) > 1e-4)[-1])  # noqa: E731
+    assert lead(y) == lead(x) and tail(y) == tail(x)                      # lặng đầu / cuối giữ nguyên
+    assert abs(float(np.sum(y ** 2) / np.sum(x ** 2)) - 1) < 0.01         # tiếng nói không mất
+    one = sp(1.2)
+    assert len(fx.pauses(one, sr)) == len(one)                            # không có chỗ ngắt -> giữ nguyên
+    short = np.concatenate([sp(0.4), z(0.3), sp(0.4, 1)])
+    assert len(fx.pauses(short, sr)) - len(short) <= fx.PAUSE_SHARE * len(short) + 2   # câu ngắn: thêm ít
+    assert len(fx.apply(x, sr, {"pause": [0.2, 0.14, 0.5]})) > len(x) + 0.3 * sr
+    # VieNeu: 10 giọng 🎬, đọc biểu cảm hơn, có ngắt nghỉ, giọng gốc có trong bộ giọng VieNeu
+    hk = [p for p in tv.PRESETS if p.get("group") == "hk"]
+    assert len(hk) == 10 and len({p["id"] for p in hk}) == 10 and {p["gender"] for p in hk} == {"male", "female"}
+    assert all(p["params"]["temperature"] >= 0.75 and p["fx"].get("pause") for p in hk)
+    vs = {v["id"]: v for v in tv.voices()}
+    assert all(vs[tv.PREFIX + p["id"]]["name"].startswith("🎬 Phim HK") and "ngắt nghỉ" in vs[tv.PREFIX + p["id"]]["tip"]
+               for p in hk)
+    for p in hk:
+        o = tv.process(tv.PREFIX + p["id"], x, sr)
+        assert np.isfinite(o).all() and np.abs(o).max() <= 0.891
+        assert len(o) > len(x) / p["fx"].get("tempo", 1.0) + 0.25 * sr   # ngắt nghỉ dài ra thật
+    calls = []
+
+    class FakeVieneu:
+        sr = 48000
+
+        def ensure_started(self, progress=None, cancel=None):
+            pass
+
+        def synth(self, text, out, voice=None, params=None, **kw):
+            calls.append((text, voice, dict(params or {})))
+            return tts.write_wav(out, np.concatenate([_speech_like(48000, 0.8), np.zeros(14400, np.float32),
+                                                     _speech_like(48000, 0.8, 1)]), 48000)
+    presets = [{"id": f"vieneu:{p['base']}", "name": p["base"], "gender": p["gender"]} for p in hk]
+    monkeypatch.setattr(tts, "vieneu_available", lambda: True)
+    monkeypatch.setattr(tts, "vieneu_presets", lambda mode="v3turbo": presets)
+    monkeypatch.setattr(tts, "vieneu_sample_voices", lambda: [])
+    monkeypatch.setattr(tts, "_vieneu", lambda mode: FakeVieneu())
+    segs = [Segment(0, 3, "a", "Năm ấy, trời vừa vào thu.", "S1"), Segment(4, 7, "b", "Anh à, em biết rồi.", "S2")]
+    tts.synthesize_dub(segs, tmp_path / "dub.wav", 9.0, tmp_path / "t",
+                       voices={"S1": "vieneu:trend:hk_dan_truyen", "S2": "vieneu:trend:hk_nu_chinh"},
+                       settings={"dub_by_clause": False})
+    by = {c[0]: c for c in calls}
+    assert by["Năm ấy, trời vừa vào thu."][1] == "Thái Sơn" and by["Năm ấy, trời vừa vào thu."][2]["temperature"] == 0.75
+    assert by["Anh à, em biết rồi."][1] == "Thục Đoan" and by["Anh à, em biết rồi."][2]["temperature"] == 0.85
+    raw = 1.9 / 0.95
+    assert len(tts.read_wav(segs[0].extra["tts_file"])[0]) / tts.SR > raw + 0.15   # chỗ ngắt dài thêm
+    # OmniVoice: 10 giọng 🎬, mô tả đúng từ OmniVoice hiểu, câu mẫu có cảm xúc + dấu phẩy, không số
+    ohk = [p for p in od.PRESETS if p[0] in od.STYLES]
+    assert len(ohk) == 10 and len(od.STYLES) == 10 and len({p[4] for p in ohk}) == 10
+    anchors = [od.STYLES[p[0]]["anchor"] for p in ohk]
+    assert len(set(anchors)) == 10 and all(a.count(",") >= 2 and not re.search(r"\d", a) for a in anchors)
+    assert od.anchor_text("vi", "omnid:hk_su_phu") == od.STYLES["hk_su_phu"]["anchor"]
+    assert od.anchor_text("en", "omnid:hk_su_phu") == od.ANCHOR_TEXTS["en"]
+    assert od.anchor_text("vi", "omnid:nu_tre") == od.ANCHOR_TEXT
+    assert od.get("omnid:hk_nam_chinh")["instruct"] == od.get("nam_tre")["instruct"]
+    assert od.key("omnid:hk_nam_chinh", "r") != od.key("omnid:nam_tre", "r")
+    assert od.fx_key("omnid:nu_tre") == "" and od.fx_key("omnid:hk_nu_ke").startswith("|fx")
+    ov = {v["id"]: v for v in od.voices()}
+    assert ov["omnid:hk_phan_dien"]["name"].startswith("🎬") and ov["omnid:hk_phan_dien"].get("tip")
+    monkeypatch.setattr(od, "DESIGN_DIR", tmp_path / "design")
+    made = []
+
+    class FakeOmni:
+        sr = 24000
+
+        def ensure_started(self, progress=None, cancel=None):
+            pass
+
+        def synth(self, text, out, instruct=None, ref_audio=None, ref_text=None, **kw):
+            made.append((text, instruct, ref_text))
+            return tts.write_wav(out, np.concatenate([sp(0.8), z(0.3), sp(0.8, 1)]), 24000)
+    monkeypatch.setattr(tts, "omnivoice_available", lambda: True)
+    monkeypatch.setattr(tts, "_omni", lambda settings=None: FakeOmni())
+    segs = [Segment(0, 3, "a", "Em đừng lo, có anh đây.", "S1"), Segment(4, 7, "b", "Đi thôi, muộn rồi.", "S2")]
+    vo = {"S1": "omnid:hk_nam_chinh", "S2": "omnid:nu_tre"}
+    tts.synthesize_dub(segs, tmp_path / "dub2.wav", 9.0, tmp_path / "o", voices=vo, settings={"dub_by_clause": False})
+    anc = [m for m in made if m[1]]
+    assert {m[0] for m in anc} == {od.STYLES["hk_nam_chinh"]["anchor"], od.ANCHOR_TEXT}   # câu mẫu riêng của vai
+    line = {m[0]: m for m in made if not m[1]}
+    assert line["Em đừng lo, có anh đây."][2] == od.STYLES["hk_nam_chinh"]["anchor"]       # nhái câu mẫu của vai
+    hk_len = len(tts.read_wav(segs[0].extra["tts_file"])[0]) / 24000
+    plain_len = len(tts.read_wav(segs[1].extra["tts_file"])[0]) / 24000
+    assert hk_len > plain_len + 0.15                                       # giọng 🎬: ngắt nghỉ dài thêm
+    n = len(made)
+    monkeypatch.setitem(od.STYLES["hk_nam_chinh"], "fx", {"pause": [0.3, 0.14, 0.8]})
+    tts.synthesize_dub(segs, tmp_path / "dub3.wav", 9.0, tmp_path / "o", voices=vo, settings={"dub_by_clause": False})
+    assert [m[0] for m in made[n:]] == ["Em đừng lo, có anh đây."]          # đổi hiệu ứng: đọc lại câu đó, câu mẫu giữ
+    out = tts.preview_voice("omnid:hk_su_phu", "Xin chào", tmp_path / "pv", {})
+    assert Path(out).exists() and len(tts.read_wav(out)[0]) / 24000 > 1.9 + 0.15
+    names = [v["id"] for v in tts.list_voices({}, "vi")]
+    assert "omnid:hk_tham_tu" in names and "vieneu:trend:hk_tham_tu" in names
 
 
 @pytest.mark.parametrize("model", ["vocals_mel_band_roformer.ckpt", "htdemucs.yaml",

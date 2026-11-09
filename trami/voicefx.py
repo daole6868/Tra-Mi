@@ -6,7 +6,8 @@
   2. âm sắc cần khác cao độ (bé gái: cao độ +6, âm sắc +3,5) -> dời đường bao phổ (đo bằng cepstrum) từng khung 43 ms:
      chỉ đổi biên độ, giữ pha = 1 bộ lọc đổi dần theo thời gian, không sinh tiếng lạ.
 Hiệu ứng khác: EQ / lọc dải (nhân phổ cả câu, không lệch pha), nén, méo, rung giọng, run biên độ, điệp âm, tiếng vọng,
-vang phòng (tích chập với tiếng vang tổng hợp), robot (pha 0), thì thầm (đường bao phổ + pha ngẫu nhiên), tiếng rè.
+vang phòng (tích chập với tiếng vang tổng hợp), robot (pha 0), thì thầm (đường bao phổ + pha ngẫu nhiên), tiếng rè,
+ngắt nghỉ rõ hơn (kéo dài chỗ bộ đọc tự ngắt giữa câu – giọng lồng tiếng phim).
 Cuối cùng đưa về cùng độ to phần có tiếng nói như giọng gốc, đỉnh ≤ -1 dBFS.
 """
 from __future__ import annotations
@@ -340,6 +341,69 @@ def noise(x: np.ndarray, sr: int, db: float = -40.0, crackle: float = 0.0) -> np
     return y
 
 
+PAUSE_SHARE = 0.15    # ngắt nghỉ thêm tối đa 15 % độ dài câu (câu ngắn không bị kéo dài nhiều -> ít phải đọc nhanh)
+PAUSE_LONG = 0.35     # chỗ lặng ≥ 0,35 s (hết câu / dấu chấm) thêm nhiều hơn dấu phẩy
+PAUSE_FADE = 0.005
+
+
+def _quiet_runs(x: np.ndarray, sr: int, floor_db: float) -> tuple[np.ndarray, list[tuple[int, int]]]:
+    """(độ to từng khung 10 ms, [(khung đầu, khung cuối)] các chỗ lặng nằm GIỮA câu – không tính lặng đầu / cuối)."""
+    hop = max(1, int(sr * 0.01))
+    nf = len(x) // hop
+    if nf < 10:
+        return np.zeros(0), []
+    fr = np.sqrt((x[:nf * hop].reshape(nf, hop).astype(np.float64) ** 2).mean(axis=1))
+    top = float(np.percentile(fr, 95))
+    if top <= 0:
+        return fr, []
+    quiet = fr < top * 10 ** (floor_db / 20)
+    loud = np.flatnonzero(~quiet)
+    if len(loud) < 2:
+        return fr, []
+    q = quiet[loud[0]:loud[-1] + 1].astype(np.int8)
+    d = np.diff(np.concatenate([[0], q, [0]]))
+    starts, ends = np.flatnonzero(d == 1), np.flatnonzero(d == -1)
+    return fr, [(int(a + loud[0]), int(b + loud[0])) for a, b in zip(starts, ends)]
+
+
+def pauses(x: np.ndarray, sr: int, add: float = 0.18, min_gap: float = 0.14, max_total: float = 0.6,
+           floor_db: float = -35.0) -> np.ndarray:
+    """Ngắt nghỉ rõ hơn (kiểu giọng lồng tiếng phim): chỗ bộ đọc tự ngắt GIỮA câu (lặng ≥ min_gap – dấu phẩy, dấu chấm)
+    dài thêm `add` giây (chỗ lặng ≥ PAUSE_LONG thêm ×1,4). Tổng phần thêm ≤ max_total và ≤ PAUSE_SHARE độ dài câu;
+    chỗ lặng dài được ưu tiên. Không đổi tốc độ / cao độ phần có tiếng, không thêm lặng đầu / cuối câu. Chèn lặng ở
+    khung nhỏ nhất của chỗ lặng, mờ 5 ms 2 bên (chỗ đó vốn đã nhỏ hơn giọng ≥ 35 dB -> không nghe thấy chỗ nối)."""
+    x = _f32(x)
+    if add <= 0 or not len(x):
+        return x.copy()
+    fr, runs = _quiet_runs(x, sr, floor_db)
+    runs = [r for r in runs if (r[1] - r[0]) * 0.01 >= min_gap]
+    budget = min(max_total, PAUSE_SHARE * len(x) / sr)
+    hop = max(1, int(sr * 0.01))
+    cuts: list[tuple[int, int]] = []
+    used = 0.0
+    for a, b in sorted(runs, key=lambda r: r[0] - r[1]):      # chỗ lặng dài trước
+        extra = min(add * (1.4 if (b - a) * 0.01 >= PAUSE_LONG else 1.0), budget - used)
+        if extra < 0.03:
+            break
+        lo, hi = (a + 1, b - 1) if b - a > 2 else (a, b)
+        k = lo + int(np.argmin(fr[lo:hi]))
+        cuts.append((k * hop + hop // 2, round(extra * sr)))
+        used += extra
+    if not cuts:
+        return x.copy()
+    f = max(1, int(sr * PAUSE_FADE))
+    pieces, pos = [], 0
+    y = x.copy()
+    for p, n in sorted(cuts):
+        p = min(max(p, f), len(y) - f)
+        y[p - f:p] *= np.linspace(1.0, 0.0, f, dtype=np.float32)
+        y[p:p + f] *= np.linspace(0.0, 1.0, f, dtype=np.float32)
+        pieces += [y[pos:p], np.zeros(n, np.float32)]
+        pos = p
+    pieces.append(y[pos:])
+    return _f32(np.concatenate(pieces))
+
+
 def match_level(y: np.ndarray, ref: float, sr: int) -> np.ndarray:
     """Cùng độ to phần có tiếng nói với giọng gốc, đỉnh không quá -1 dBFS."""
     from .voicefix import speech_level
@@ -356,7 +420,7 @@ def match_level(y: np.ndarray, ref: float, sr: int) -> np.ndarray:
 
 # ------------------------------------------------------------------ chuỗi hiệu ứng
 
-FX_KEYS = ("tempo", "pitch", "formant", "robot", "whisper", "vibrato", "tremolo", "low", "high", "presence", "band",
+FX_KEYS = ("tempo", "pause", "pitch", "formant", "robot", "whisper", "vibrato", "tremolo", "low", "high", "presence", "band",
            "drive", "comp", "chorus", "echo", "reverb", "noise", "crackle")
 
 
@@ -368,7 +432,7 @@ def _args(v, default: tuple) -> list:
 
 def apply(x: np.ndarray, sr: int, fx: dict | None) -> np.ndarray:
     """Áp chuỗi hiệu ứng `fx` lên 1 câu (mảng float mono). Khoá trong fx (đều tuỳ chọn):
-    tempo (×tốc độ), pitch / formant (nửa cung), robot (Hz), whisper (0..1), vibrato (cent), tremolo (0..1),
+    tempo (×tốc độ), pause (thêm s, lặng từ s, tổng tối đa s – ngắt nghỉ rõ hơn), pitch / formant (nửa cung), robot (Hz), whisper (0..1), vibrato (cent), tremolo (0..1),
     low / high / presence (dB), band (thấp, cao Hz), drive (0..1), comp (0..1), chorus (0..1),
     echo (trễ s, giảm, số lần), reverb (t60 s, mức 0..1), noise (dB so với giọng), crackle (lần / s)."""
     x = _f32(x)
@@ -380,6 +444,9 @@ def apply(x: np.ndarray, sr: int, fx: dict | None) -> np.ndarray:
     y = x
     if fx.get("tempo") and abs(fx["tempo"] - 1) > 1e-3:
         y = stretch(y, float(fx["tempo"]), sr)
+    if fx.get("pause"):
+        add, gap, most = _args(fx["pause"], (0.18, 0.14, 0.6))
+        y = pauses(y, sr, float(add), float(gap), float(most))
     body = len(y)
     if fx.get("pitch") or fx.get("formant"):
         y = shift(y, sr, float(fx.get("pitch", 0.0)), fx.get("formant"))
