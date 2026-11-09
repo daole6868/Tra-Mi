@@ -12147,6 +12147,40 @@ def test_spans_merge_short_old_245():
     assert len(r["added"]) == 1 and r["skipped"] == 1
 
 
+def test_ocr_scene_shapes_245(tmp_path):
+    """2.4.5: vật sáng viền đen của cảnh (giáp, vòng sáng) chuyển động ngay sau dòng phụ đề – trước đây: khung tìm lại
+    trên ảnh "nền đen" (cả dải) thay khung chữ -> đọc ra rác, mất câu; vật chạm khung chữ bị coi là "chữ mới hiện thêm"
+    -> câu cắt đôi (mảnh 0,4 s); khung dính vật làm "cỡ chữ phụ đề" to lên -> câu đọc đúng bị bỏ như chữ nhỏ trong cảnh.
+    Giờ: đủ 3 câu đúng giờ, có / không lọc màu, vật chạy chậm / nhanh."""
+    _need_ocr3()
+    from trami import ocr
+
+    shape = next((x for x in ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "C:/Windows/Fonts/seguisym.ttf")
+                  if os.path.exists(x)), None)
+    if not shape:
+        pytest.skip("không có font vẽ hình tròn / vuông")
+    font = _cjk_font()
+    lines = [(0.6, 3.1, "好本君玄灵"), (3.12, 5.0, "今日收你入门"), (5.02, 9.0, "望你莫要坠了帝尊神炼法的威名")]
+    color = {"ocr_color": True, "ocr_colors": [{"fill": "#FFFFFF", "outline": "#000000"}], "ocr_color_tol": "mid"}
+    for speed, st in ((60, color), (120, {})):
+        f = ["noise=alls=30:allf=t"]
+        for k in range(4):
+            f.append(f"drawtext=fontfile='{shape}':text='◯▢':fontsize=110:fontcolor=0xF2F0E6:borderw=4:"
+                     f"bordercolor=black:x='mod({k * 260}+t*{speed}\\,1100)-120':y={390 + (k % 2) * 20}")
+        for a, b, t in lines:
+            f.append(f"drawtext=fontfile='{font}':text='{t}':fontsize=40:fontcolor=white:borderw=3:bordercolor=black:"
+                     f"x=(w-tw)/2:y=h-90:enable='gte(t,{a})*lt(t,{b})'")
+        v = tmp_path / f"v{speed}.mp4"
+        subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=0x806040:s=960x540:r=25:d=10",
+                        "-vf", ",".join(f), "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", str(v)],
+                       check=True)
+        out = ocr.extract_hardsubs(v, {"x": 0.0, "y": 0.7, "w": 1.0, "h": 0.3, "exact": True}, fps=4, settings=st)
+        assert len(out) == 3, (speed, [(s.start, s.end, s.text) for s in out])
+        for s, (a, b, t) in zip(out, lines):
+            assert ocr._similar(s.text, t) >= 0.8 and abs(s.start - a) <= 0.1 and abs(s.end - b) <= 0.1, \
+                (speed, s, a, b, t)
+
+
 def test_recognize_spans_ocr_2135(tmp_path, monkeypatch):
     """OCR chỉ quét các đoạn (đã nới PAD), dùng lại vùng quét của lần trước; câu mới chèn đúng giờ, câu cũ (bản dịch,
     giọng) giữ nguyên; thay câu cũ trong đoạn; khung chữ OCR gộp vào ocr_boxes.json; không đụng dữ liệu khác của dự án."""

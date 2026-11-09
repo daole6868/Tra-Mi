@@ -296,6 +296,7 @@ class _Span:
     frames: list
     n0: int = 0
     checks: int = 0
+    text: str | None = None      # chữ đọc thử của câu (chỉ khi cần xem có chữ mới hiện thêm thật không – 2.4.5)
 
     def add(self, img: np.ndarray) -> None:
         if len(self.frames) >= 2 * STACK:
@@ -316,8 +317,8 @@ class _Tracker:
     """Theo dõi 1 khúc video: chỉ chạy bước TÌM CHỮ khi nét ở dải quét đổi (nền chuyển động không làm tách câu – câu
     chỉ đổi khi chính các điểm ảnh nét chữ đổi). Giờ hiện / tắt chữ tìm bằng chia đôi các khung giữa 2 mốc (D)."""
 
-    def __init__(self, detect, emit, offset: int):
-        self.detect, self.emit, self.off = detect, emit, offset
+    def __init__(self, detect, emit, offset: int, read=None):
+        self.detect, self.emit, self.off, self.read = detect, emit, offset, read
         self.cur: _Span | None = None
         self.vsig = None            # dấu nét của khung đã kiểm tra bằng bộ tìm chữ gần nhất
         self.n_det = 0
@@ -351,6 +352,64 @@ class _Tracker:
             self.emit(_Span(sp.f0 + self.off, sp.f1 + self.off, sp.boxes, sp.idx, sp.ref, sp.frames))
         self.cur = None
 
+    def _really_new(self, sp: _Span, img: np.ndarray, boxes: list) -> bool:
+        """2.4.5: khung chữ tìm lại có thêm "nét" ngoài khung cũ – chữ mới hiện thêm thật, hay vật sáng viền tối của cảnh
+        (giáp, vòng sáng) chạy vào dính với khung chữ? Đọc thử: chỉ là chữ mới khi đọc ra chữ Hán (chữ / số khi câu cũ
+        không có chữ Hán) mà câu cũ không có. Trước đây không đọc -> vật trong cảnh chạm chữ là câu bị cắt đôi, mảnh sau
+        đọc thiếu chữ / ra rác (câu mất / câu 0,4 s)."""
+        if self.read is None:
+            return True
+        try:
+            if sp.text is None:
+                sp.text = self.read(sp.frames[0], sp.boxes) if sp.frames else ""
+            now = self.read(img, boxes)
+        except Exception:  # noqa: BLE001 – đọc thử lỗi: như trước (coi là chữ mới)
+            return True
+        old = sp.text or ""
+        han = bool(_CJK.search(old))
+        core = (lambda t: "".join(_CJK.findall(t))) if han else \
+            (lambda t: "".join(_CJK.findall(t) + _ALNUM.findall(t)).lower())
+        a, b = core(old), core(now)
+        if not b:
+            return False                 # khung mới không đọc ra chữ: chỉ là vật trong cảnh
+        if not a or (a in b and len(b) > len(a)):
+            return True                  # chữ hiện thêm sau câu cũ / dòng mới cạnh dòng cũ
+        # chữ không có trong câu cũ: ≥ 2 chữ mới là chữ mới thật (khung dính vật trong cảnh hay đọc sai 1 chữ: 你 -> 饮)
+        same = sum(m.size for m in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks())
+        return len(b) - same >= 2
+
+    def _same_text(self, sp: _Span, img: np.ndarray, sig, i: int) -> bool:
+        """2.4.5: nét đang theo dõi đổi nhưng có thể chỉ do NỀN – khung chữ lúc mở câu dính vật sáng viền tối của cảnh
+        (giáp, vòng sáng…) nên "nét chữ" có cả điểm của vật đó; vật chuyển động -> nét "đổi" -> câu bị cắt đôi (câu
+        0,4 s, mảnh câu đọc thiếu chữ). Tìm chữ lại trên khung này: nét chữ của khung này có y nguyên ở khung gần nhất
+        của câu (cùng chỗ, cùng độ sáng) -> vẫn câu đó: theo dõi tiếp bằng nét mới."""
+        if not sp.frames:
+            return False
+        boxes = self._det(img, sig)
+        if not boxes or not sp.boxes:
+            return False
+        # khung chữ chính bây giờ phải nằm ĐÚNG chỗ khung chữ chính của câu cũ (không phải chỉ còn watermark / chữ cảnh
+        # ở chỗ khác); khung cũ dính vật trong cảnh thì to hơn khung mới -> so phần chung với khung NHỎ hơn
+        def area(b):
+            x0, y0, x1, y1 = _bbox(b)
+            return max(0.0, x1 - x0) * max(0.0, y1 - y0)
+        bo, bn = max(sp.boxes, key=area), max(boxes, key=area)
+        (a0, b0, a1, b1), (c0, d0, c1, d1) = _bbox(bo), _bbox(bn)
+        inter = max(0.0, min(a1, c1) - max(a0, c0)) * max(0.0, min(b1, d1) - max(b0, d0))
+        if inter < 0.6 * max(1.0, min(area(bo), area(bn))):
+            return False
+        idx = _glyph_pixels(img, boxes)
+        if len(idx) < 40:
+            return False
+        ref = img.ravel()[idx].astype(np.int16)
+        if _persist(sp.frames[-1], idx, ref) < KEEP:
+            return False
+        sp.idx, sp.ref, sp.n0, sp.checks = idx, ref, len(idx), 0
+        sp.f1 = i
+        sp.add(img)
+        self.n_same = getattr(self, "n_same", 0) + 1
+        return True
+
     def check(self, i: int, img: np.ndarray, pend: list) -> None:
         sig = _text_signature(img)
         while True:
@@ -370,7 +429,8 @@ class _Tracker:
                     boxes = self._det(img, sig)
                     new = _glyph_pixels(img, boxes, skip=sp.boxes)
                     lh = float(np.median([_bbox(b)[3] - _bbox(b)[1] for b in sp.boxes])) if sp.boxes else 20.0
-                    if len(new) >= max(40.0, 0.25 * lh * lh):     # thêm ít nhất ~1 chữ (khung lệch vài điểm thì không)
+                    if len(new) >= max(40.0, 0.25 * lh * lh) and self._really_new(sp, img, boxes):
+                        # thêm ít nhất ~1 chữ (khung lệch vài điểm thì không)
                         f0 = self._start(pend, i, img, boxes, new)
                         self._close(f0 - 1)                       # (khung i có chữ mới: không vào câu cũ)
                         self._open(f0, i, img, boxes)
@@ -378,6 +438,8 @@ class _Tracker:
                 sp.f1 = i
                 sp.add(img)
                 sp.refine(img)
+                return
+            if self._same_text(sp, img, sig, i):
                 return
             # nét chữ đổi -> câu kết thúc ở khung cuối còn nét cũ (chia đôi), xét lại từ khung đầu tiên đổi
             lo, hi = -1, len(pend)
@@ -457,7 +519,8 @@ def preview_scan(src: str | Path, t: float, region: dict | None, settings: dict 
 
 
 def _scan(src: str, rect, size, fps: float, f0: int, count: int | None, step: int, hw: list, detect, emit,
-          stop: threading.Event, seen: list, pre: str = "", tm: dict | None = None, colorf=None) -> tuple[int, int]:
+          stop: threading.Event, seen: list, pre: str = "", tm: dict | None = None, colorf=None,
+          read=None) -> tuple[int, int]:
     """Giải mã 1 khúc video (từ khung f0, count khung) chỉ lấy dải phụ đề ảnh xám -> các câu (_Span, số khung tính từ
     đầu video). Trả (số khung đã đọc, số lần tìm chữ). pre: lọc ảnh làm rõ chữ (eq_filter) trước khi chuyển xám.
     colorf (2.1.44, ocrcolor.ColorFilter): giải mã ẢNH MÀU, mỗi khung chỉ giữ nét đúng màu chữ / viền đã chọn (còn lại
@@ -476,7 +539,7 @@ def _scan(src: str, rect, size, fps: float, f0: int, count: int | None, step: in
         cmd += ["-frames:v", str(count)]
     cmd += ["-f", "rawvideo", "-pix_fmt", "bgr24" if colorf is not None else "gray", "pipe:1"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=_NO_WINDOW)
-    tr = _Tracker(detect, emit, f0)
+    tr = _Tracker(detect, emit, f0, read)
     nbytes = ow * oh * (3 if colorf is not None else 1)
     pend, i = [], -1
     wait = 0.0
@@ -609,6 +672,7 @@ class _Reader:
         self.n = {"ocr": 0, "cleaned": 0, "spans": 0}
         self.weak: list = []         # [(chỉ số câu, [ảnh dòng chữ], khung)]
         self.t = 0.0
+        self.hs: list[float] = []    # chiều cao khung các dòng đọc rất chắc (2.4.5: nhận ra khung dính vật trong cảnh)
 
     def _keep(self, items: list) -> list:
         out = []
@@ -645,28 +709,49 @@ class _Reader:
         self.n["spans"] += 1
         img, raw, dark = _clean_image(sp.frames, self.clean)
         boxes = sp.boxes
+        reads = [(self._read(img, boxes), img, boxes)]
         if dark is not None:
             self.n["cleaned"] += 1
-            # nền đen: chữ cùng màu với nền chuyển động (khó thấy trên khung gốc) lộ ra -> tìm chữ lại, lấy khung rộng
-            # hơn nếu thấy thêm chữ
+            # nền đen: chữ cùng màu với nền chuyển động (khó thấy trên khung gốc) lộ ra -> tìm chữ lại; thấy khung rộng
+            # hơn thì đọc THÊM bằng khung đó rồi chọn bản tốt hơn. 2.4.5: trước đây khung mới THAY khung chữ – nền có vật
+            # sáng viền tối chuyển động (giáp, vòng sáng) làm bộ tìm chữ ra 1 khung cả dải -> đọc ra rác, mất cả câu
             cb = self.eng.detect(dark, SCAN_SIDE)
             if cb and _cover(cb) > 1.15 * _cover(boxes):
-                boxes = cb
+                reads.append((self._read(img, cb), img, cb))
                 self.n["redetect"] = self.n.get("redetect", 0) + 1
-        reads = [(self._read(img, boxes), img)]
+
+        def q(items):          # nhiều chữ + chắc chắn (bình phương: 1 bản dài mà kém chắc không thắng bản ngắn mà chắc);
+            # 2.4.5: tính theo chữ Hán (chữ / số Latin nửa) – khung sai đọc hình nền ra chuỗi ký hiệu "(())(…)()" / mẩu
+            # "C" "0" rời không thắng bản đọc đúng câu
+            return sum(max(0.25, len(_CJK.findall(t)) + 0.5 * len(_ALNUM.findall(t))) * s * s for _, t, s in items)
+        reads.sort(key=lambda r: q(r[0]), reverse=True)
+        # 2.4.5: khung chữ (tìm lúc câu mới hiện) dính vật sáng viền tối của cảnh -> cao hẳn dòng chữ thường gặp, đọc ra
+        # mẩu câu / chữ rác; hoặc đọc kém -> tìm chữ lại trên ẢNH SẠCH (vật chuyển động đã nhoè) rồi đọc thêm
+        med = float(np.median(self.hs)) if len(self.hs) >= 5 else 0.0
+        tall = med > 0 and any(_bbox(b)[3] - _bbox(b)[1] > 1.35 * med for b in boxes)
+        first = reads[0][0]
+        if img is not raw and (tall or not first or min(s for _, _, s in first) < WEAK):
+            cb = self.eng.detect(img, SCAN_SIDE)
+            if cb and abs(_cover(cb) - _cover(boxes)) > 0.15 * max(1.0, _cover(boxes)):
+                reads.append((self._read(img, cb), img, cb))
+                self.n["reclean"] = self.n.get("reclean", 0) + 1
+                reads.sort(key=lambda r: q(r[0]), reverse=True)
+        boxes = reads[0][2]
         weak = not reads[0][0] or min(s for _, _, s in reads[0][0]) < WEAK
         if img is not raw and (weak or boxes is not sp.boxes):
-            reads.append((self._read(raw, boxes), raw))      # đọc thêm khung gốc rồi chọn bản tốt hơn
+            reads.append((self._read(raw, boxes), raw, boxes))      # đọc thêm khung gốc rồi chọn bản tốt hơn
         elif weak and len(sp.frames) > 2:
-            reads.append((self._read(sp.frames[0], boxes), sp.frames[0]))
-
-        def q(items):          # nhiều chữ + chắc chắn (bình phương: 1 bản dài mà kém chắc không thắng bản ngắn mà chắc)
-            return sum(len(t) * s * s for _, t, s in items)
+            reads.append((self._read(sp.frames[0], boxes), sp.frames[0], boxes))
         reads.sort(key=lambda r: q(r[0]), reverse=True)
-        best, bimg = reads[0]
-        others = [t for r, _ in reads[1:] for _, t, _ in r]
+        best, bimg, boxes = reads[0]
+        others = [t for r, _, _ in reads[1:] for _, t, _ in r]
         # chữ kém chắc (< min_score) chỉ giữ khi lần đọc kia ra giống (chữ thật), không thì bỏ (rác thoáng qua)
         out = [it for it in best if it[2] >= self.min_score or any(_similar(it[1], o) >= 0.8 for o in others)]
+        for it in out:
+            if it[2] >= 0.9 and _CJK.search(it[1]):
+                self.hs.append(_bbox(it[0])[3] - _bbox(it[0])[1])
+        if len(self.hs) > 400:
+            self.hs = self.hs[-200:]
         if self.keep_weak and k >= 0 and len(self.weak) < BIG_MAX and boxes:
             low = min((min(c[1] for c in it.ch) if it.ch else it[2]) for it in out) if out else 0.0
             if low < BIG_BELOW:
@@ -796,6 +881,15 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
             tm["detect"] = tm.get("detect", 0.0) + _time.perf_counter() - t0
             return r
 
+    def read_text(img: np.ndarray, boxes: list) -> str:
+        """Đọc thử (bộ theo dõi xem có chữ mới hiện thêm thật không – 2.4.5): chữ các dòng đọc chắc ≥ 0,7."""
+        from .ocr_engine import _crop
+
+        t0 = _time.perf_counter()
+        recs = eng.recognize([_crop(img, b) for b in boxes]) if boxes else []
+        tm["verify"] = tm.get("verify", 0.0) + _time.perf_counter() - t0
+        return "".join(t for t, sc in recs if sc >= 0.7)
+
     def run():
         try:
             while not stop.is_set():
@@ -804,10 +898,11 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
                         return
                     f0, count = todo.pop(0)
                 got, nd = _scan(src, rect, size, F, f0, count, step, hw if used_hw[0] else [], detect, put, stop, seen,
-                                pre, tm, colorf)
+                                pre, tm, colorf, read_text)
                 if got == 0 and used_hw[0] and not stop.is_set():   # card không giải mã được file này -> giải mã CPU
                     used_hw[0] = False
-                    got, nd = _scan(src, rect, size, F, f0, count, step, [], detect, put, stop, seen, pre, tm, colorf)
+                    got, nd = _scan(src, rect, size, F, f0, count, step, [], detect, put, stop, seen, pre, tm, colorf,
+                                    read_text)
                 n_det[0] += nd
         except Exception as e:  # noqa: BLE001
             errs.append(e)
@@ -889,8 +984,12 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
         keep = []
         for it in items:
             b = _bbox(it[0])
-            tol = 0.2 * (b[3] - b[1])
-            same = [_bbox(o[0]) for j in range(lo, hi) if j != i for o in reads[j] if _similar(o[1], it[1]) >= 0.5]
+            hb = b[3] - b[1]
+            tol = 0.2 * hb
+            # 2.4.5: chỉ so với lần đọc có khung cao gần bằng – khung dính vật trong cảnh (cao hẳn) đọc ra mẩu câu không
+            # phải bằng chứng chữ đang di chuyển (trước đây làm mất cả câu đọc đúng bên cạnh)
+            same = [ob for j in range(lo, hi) if j != i for o in reads[j] if _similar(o[1], it[1]) >= 0.5
+                    for ob in [_bbox(o[0])] if 0.7 * hb <= ob[3] - ob[1] <= 1.4 * hb]
             if same and not any(abs(ob[1] - b[1]) <= tol and abs(ob[3] - b[3]) <= tol for ob in same):
                 continue
             keep.append(it)
@@ -905,7 +1004,7 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
     # chức năng logo chữ đã bỏ ở 2.1.42) + chữ nhỏ hơn hẳn chữ phụ đề (hoạ tiết áo đọc thành "米")
     marks = _static_marks_spans(times, reads, covered)
     # chiều cao chữ phụ đề = trung vị theo THỜI GIAN hiện (1 đoạn dài nặng hơn 1 đoạn ngắn – như khi đếm từng khung)
-    hw_ = [(_bbox(it[0])[3] - _bbox(it[0])[1], b - a) for (a, b), items in zip(times, reads) for it in items
+    hw_ = [(_line_h(it), b - a) for (a, b), items in zip(times, reads) for it in items
            if not _is_mark(it, marks) and _CJK.search(it[1])]
     h_sub = 0.0
     if len(hw_) >= 3 and sum(d for _, d in hw_) >= 2.0:
@@ -925,7 +1024,7 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
     kept = []
     for items in reads:
         keep = [it for it in items if not _is_mark(it, marks)
-                and (not h_sub or _bbox(it[0])[3] - _bbox(it[0])[1] >= 0.7 * h_sub)]
+                and (not h_sub or _line_h(it) >= 0.7 * h_sub)]
         han = [it for it in keep if _CJK.search(it[1])]
         keep = [it for it in keep if _CJK.search(it[1]) or _stray_ok(it, han, h_sub, band)]
         keep = _anchor_block(keep, anchor_y, line_h or h_sub)
@@ -1047,6 +1146,23 @@ def extract_hardsubs(src: str | Path, region=None, fps: float = 4.0, min_score: 
 
 CENTER_GAP = 1.5         # khoảng trống giữa 2 khối chữ > 1,5 cỡ chữ = khối riêng (biển hiệu / chữ cảnh)
 BOX_PAD = 0.75           # khung bộ tìm chữ có lề: cỡ chữ ≈ 0,75 × cao khung
+
+
+def _line_h(it) -> float:
+    """Chiều cao dòng chữ (theo cỡ khung bộ tìm chữ). 2.4.5: khung dính vật sáng viền tối của cảnh cao hẳn chữ -> có
+    vị trí từng chữ thì lấy khoảng cách giữa 2 chữ Hán liền nhau (≈ cỡ chữ) / BOX_PAD, lấy số nhỏ hơn – trước đây vài
+    câu khung dính cảnh làm "cỡ chữ phụ đề" to lên, câu đọc đúng (khung vừa chữ) bị coi là chữ nhỏ trong cảnh -> mất."""
+    x0, y0, x1, y1 = _bbox(it[0])
+    h = y1 - y0
+    ch = getattr(it, "ch", None)
+    if not ch or len(ch) != len(it[1]) or len(ch) < 3:
+        return h
+    w = max(1.0, x1 - x0)
+    cs = [x0 + float(c[2]) * w for c in ch if _CJK.match(c[0])]
+    if len(cs) < 3:
+        return h
+    pitch = float(np.median(np.diff(cs)))
+    return min(h, pitch / BOX_PAD) if pitch > 0 else h
 
 
 def _ink_parts(it) -> list[tuple[float, float, object]]:
