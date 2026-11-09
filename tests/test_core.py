@@ -12106,6 +12106,47 @@ def test_spans_core_2135():
                                                     "added": 1})
 
 
+def test_spans_merge_short_old_245():
+    """2.4.5: câu cũ NGẮN (OCR lần đầu cắt còn 0,4 s) nằm trong câu mới quét lại được – trước đây coi là "đã có" nên
+    câu đủ bị bỏ (cả khi câu cũ nằm giữa 2 đoạn). Cùng chữ -> sửa giờ câu cũ (giữ bản dịch); 1 mẩu của câu -> thay;
+    khác lời -> xén câu mới; câu mới nằm trong câu cũ dài -> vẫn bỏ."""
+    from trami import spans as spm
+    from trami.subtitle import Segment
+
+    sp = [(1475.3, 1481.5)]
+    old = [Segment(1468.4, 1469.2, "啊"), Segment(1474.9, 1475.3, "啊这这怎么可能啊", trans="Á, sao có thể chứ"),
+           Segment(1481.6, 1484.0, "娘子你你怎么做到的")]
+    new = [Segment(1474.9, 1481.4, "啊这这怎么可能啊", extra={"ct": [[1474.95, 1475.2]]})]
+    r = spm.merge(list(old), new, sp, "keep")
+    assert not r["added"] and r["retimed"] == [old[1]] and r["skipped"] == 0
+    o = r["segs"][1]
+    assert o is old[1] and (o.start, o.end) == (1474.9, 1481.4) and o.trans == "Á, sao có thể chứ"
+    assert o.extra["span_retimed"] == [1474.9, 1475.3] and o.extra["ct"] == [[1474.95, 1475.2]]
+    assert "sửa giờ 1 câu cũ bị cắt ngắn" in spm.note({"spans": 1, "secs": 6.2, "added": 0, "retimed": 1})
+    # câu cũ chỉ là 1 mẩu của câu (OCR đọc thiếu) -> thay bằng câu đủ
+    old = [Segment(1474.9, 1475.3, "啊这", trans="Á"), Segment(1481.6, 1484.0, "娘子")]
+    new = [Segment(1474.9, 1481.4, "啊这这怎么可能啊")]
+    r = spm.merge(list(old), new, sp, "keep")
+    assert [s.text for s in r["segs"]] == ["啊这这怎么可能啊", "娘子"] and r["replaced"] == 1 and r["removed"] == 1
+    assert "thay 1 câu cũ bị cắt ngắn / thiếu chữ" in spm.note({"spans": 1, "secs": 6.2, "added": 1, "removed": 1,
+                                                               "replaced": 1})
+    # khác lời (tiếng "嗯" ngắn ở đầu): giữ câu cũ, xén đầu câu mới; câu cũ nằm giữa -> giữ phần dài hơn
+    old = [Segment(1474.9, 1475.3, "嗯")]
+    r = spm.merge(list(old), [Segment(1474.9, 1481.4, "啊这这怎么可能啊")], sp, "keep")
+    assert [(s.start, s.end, s.text) for s in r["segs"]] == [(1474.9, 1475.3, "嗯"), (1475.32, 1481.4, "啊这这怎么可能啊")]
+    old = [Segment(1479.0, 1479.4, "嗯")]
+    r = spm.merge(list(old), [Segment(1475.0, 1481.4, "啊这这怎么可能啊")], sp, "keep")
+    assert [(s.start, s.end) for s in r["segs"]] == [(1475.0, 1478.98), (1479.0, 1479.4)]
+    # câu mới nằm gọn trong câu cũ dài -> đã có, bỏ (như trước)
+    old = [Segment(1474.0, 1482.0, "啊这这怎么可能啊娘子")]
+    r = spm.merge(list(old), [Segment(1475.0, 1480.0, "啊这这怎么可能啊")], sp, "keep")
+    assert r["skipped"] == 1 and not r["added"] and not r["retimed"]
+    assert "chọn 'Thay câu cũ trong đoạn'" in spm.note({"spans": 1, "secs": 6.2, "added": 0, "skipped": 1})
+    # 2 câu mới chồng nhau: câu sau bỏ (như trước)
+    r = spm.merge([], [Segment(1475.0, 1478.0, "啊这这"), Segment(1475.5, 1477.0, "啊这")], sp, "keep")
+    assert len(r["added"]) == 1 and r["skipped"] == 1
+
+
 def test_recognize_spans_ocr_2135(tmp_path, monkeypatch):
     """OCR chỉ quét các đoạn (đã nới PAD), dùng lại vùng quét của lần trước; câu mới chèn đúng giờ, câu cũ (bản dịch,
     giọng) giữ nguyên; thay câu cũ trong đoạn; khung chữ OCR gộp vào ocr_boxes.json; không đụng dữ liệu khác của dự án."""

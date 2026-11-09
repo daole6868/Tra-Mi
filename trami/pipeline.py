@@ -2448,9 +2448,11 @@ def recognize_spans(p: Project, spans, method: str | None = None, language: str 
     else:
         (p.work / "ocr_boxes_span.json").unlink(missing_ok=True)
     p.segments = res["segs"]
-    rows = [i for i, s in enumerate(res["segs"]) if any(s is a for a in res["added"])]
+    rows = [i for i, s in enumerate(res["segs"]) if any(s is a for a in res["added"] + res["retimed"])]
+    fresh = [i for i in rows if any(res["segs"][i] is a for a in res["added"])]
     stats = {"spans": len(sp), "secs": round(sum(b - a for a, b in sp), 1), "found": len(new),
-             "added": len(res["added"]), "removed": res["removed"], "skipped": res["skipped"], "method": method,
+             "added": len(res["added"]), "removed": res["removed"], "skipped": res["skipped"],
+             "retimed": len(res["retimed"]), "replaced": res["replaced"], "method": method,
              "mode": mode, "speaker": spk, "time": round(time.time() - t0, 1)}
     p.data["span_listen"] = stats
     if not p.data.get("sub_source"):
@@ -2460,8 +2462,8 @@ def recognize_spans(p: Project, spans, method: str | None = None, language: str 
     warn = [w for w in (sh.data.get("asr_warning"), sh.data.get("sep_warning")) if w and method != "ocr"]
     if method in ("ocr", "hybrid") and not new and sh.data.get("ocr_warning"):
         warn.append(sh.data["ocr_warning"])
-    return {**stats, "rows": rows, "warn": warn, "listen": listen_note(sh) if method != "ocr" else ocr_note(sh),
-            "relayout": bool(res["removed"]) and has_dub(p)}
+    return {**stats, "rows": rows, "new_rows": fresh, "warn": warn, "listen": listen_note(sh) if method != "ocr" else ocr_note(sh),
+            "relayout": bool(res["removed"] or res["retimed"]) and has_dub(p)}
 
 
 def _drop_char_times(p: Project) -> None:

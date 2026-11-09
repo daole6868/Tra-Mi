@@ -1813,23 +1813,24 @@ class ProjectPage(QWidget):
                                          j.cancelled, mode, o["asr_engine"], o["ocr_fps"], o["denoise"])
             from .. import spans as spm
 
-            rows = r["rows"]
+            rows = r["rows"]                      # câu mới + câu cũ được sửa giờ (tích sẵn)
+            fresh = r.get("new_rows", rows)         # chỉ câu mới: dịch + đọc giọng
             msg = "Tách theo đoạn: " + spm.note(r)
             if r.get("listen"):
                 msg += " · " + r["listen"]
-            if follow and rows and translated:
+            if follow and fresh and translated:
                 if eng == pipeline.NO_TRANSLATE:
                     msg += " · chọn công cụ dịch rồi bấm 'Dịch câu đã tích'"
                 else:
                     pipeline.translate(p, eng, sty, False, None, lambda x, m="": j.update(0.75 + 0.1 * x, m),
-                                       j.cancelled, rows=rows, split=False)
-                    left = sum(1 for k in rows if not p.segments[k].trans.strip())
-                    msg += f" · đã dịch {len(rows) - left} câu mới" + (f" (⚠ {left} câu chưa dịch được)" if left else "")
-            voiced = [k for k in rows if p.segments[k].trans.strip()]
+                                       j.cancelled, rows=fresh, split=False)
+                    left = sum(1 for k in fresh if not p.segments[k].trans.strip())
+                    msg += f" · đã dịch {len(fresh) - left} câu mới" + (f" (⚠ {left} câu chưa dịch được)" if left else "")
+            voiced = [k for k in fresh if p.segments[k].trans.strip()]
             if pipeline.has_dub(p) and follow and voiced:
                 pipeline.redub(p, voiced, rate, st, lambda x, m="": j.update(0.85 + 0.15 * x, m), j.cancelled, tts_eng)
                 msg += f" · đã đọc giọng {len(voiced)} câu mới vào bản lồng"
-            elif pipeline.has_dub(p) and r.get("relayout"):   # câu cũ bị thay: bỏ giọng của chúng khỏi bản lồng
+            elif pipeline.has_dub(p) and r.get("relayout"):   # câu cũ bị thay / sửa giờ: xếp lại bản lồng
                 pipeline.relayout(p, st, lambda x, m="": j.update(0.85 + 0.15 * x, m), j.cancelled)
                 msg += " · đã xếp lại bản lồng"
             elif rows and not translated:

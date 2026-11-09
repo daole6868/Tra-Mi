@@ -812,9 +812,14 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   tách lại Y HỆT "1. Nghe & tách câu" chỉ trong các đoạn. `spans.clean` (kẹp, bỏ < `MIN_SPAN` 0,4 s, gộp đoạn chồng),
   `padded` (nới `PAD` 1,5 s mỗi bên để câu vắt qua mép đoạn nghe / đọc trọn), `gaps(segs, total, lo, hi, skip_songs)`
   (khoảng không câu nào phủ – đầu / giữa / cuối video – dài lo..hi, hi 0 = không giới hạn; `pipeline.span_gaps`),
-  `inside` (điểm giữa câu trong đoạn), `merge(existing, new, spans, mode)` keep: câu mới trùng ≥ `SAME` 50 % thời lượng
-  câu cũ = đã có -> bỏ, chạm nhẹ -> xén mép (còn ≥ `MIN_LINE` 0,2 s, bỏ `ct` khi lệch) | replace: bỏ câu cũ trong đoạn;
-  câu cũ giữ nguyên đối tượng (bản dịch, giọng); `nearest_speaker`, `note`. `recognize_spans`: `_SpanProject` (bản sao
+  `inside` (điểm giữa câu trong đoạn), `merge(existing, new, spans, mode)` keep: câu mới nằm ≥ `SAME` 50 % trong 1 câu
+  cũ = đã có -> bỏ; câu cũ NGẮN nằm ≥ 50 % trong câu mới (2.4.5): cùng lời `same_words` (chữ giống ≥ `SIMILAR` 0,5 / là
+  mẩu của nhau) -> y hệt chữ: sửa giờ câu cũ theo câu mới (`retimed`, `extra["span_retimed"]` = giờ cũ, giữ bản dịch /
+  giọng, chép `ct`), khác chữ: thay câu cũ (`replaced`); khác lời -> xén; chạm nhẹ -> xén mép `_trim` (câu cũ ở giữa ->
+  giữ phần dài hơn; còn ≥ `MIN_LINE` 0,2 s, bỏ `ct` khi lệch) | replace: bỏ câu cũ trong đoạn (câu cũ ngoài đoạn xét như
+  keep); câu cũ giữ nguyên đối tượng (bản dịch, giọng); `nearest_speaker`, `note` (sửa giờ / thay câu cắt ngắn / bỏ câu
+  đã có + nhắc "Thay câu cũ trong đoạn"). `recognize_spans` trả rows (câu mới + câu sửa giờ – tích sẵn), new_rows (chỉ
+  câu mới: dịch + đọc giọng), relayout khi thay / sửa giờ. `recognize_spans`: `_SpanProject` (bản sao
   dữ liệu, cùng thư mục work, `save` không làm gì) -> `recognize(settings["_spans"] = đoạn đã nới, diarize tắt)`:
   `_listen_audio` thấy `_spans` -> `_span_wav` (work/span16k.wav: ngoài đoạn = lặng, giờ giữ nguyên -> mọi bước nghe /
   nghe lại đoạn sót / căn mốc / tách câu chỉ ra câu trong đoạn; cả hybrid / giờ kết hợp OCR); OCR: dùng lại đúng
@@ -1009,7 +1014,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (337 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (338 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -3016,7 +3021,16 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Thử: phân loại 16 tên mẫu (林凡 / 诸葛亮 / 陈剑 / 婉儿 = người, 天剑宗 / 苏州 / 林家 / 轩辕剑 / 九阳神功 = địa danh…), Google
   giả chỉ tên người (địa danh / từ thường để nguyên + ghi bỏ qua), hộp xem trước (gom 2 câu cùng tên, tích sẵn theo loại,
   sửa tay, lưu bảng không trùng), giao diện offscreen (2 ô gương, ô loại mờ khi tắt, chụp ảnh hộp + khung Dịch).
+- 2.4.5: ảnh hộp "Xem thử lọc màu chữ" (câu 啊这这怎么可能啊 lọc màu thấy rõ) + timeline đoạn ✓ #25 không có câu: "câu
+  này thấy quét ra mà không thêm vào phụ đề". Nguyên nhân: lần quét cả phim trước đó chỉ ghi câu này 0,4 s (khối nâu nhỏ
+  24:34,9–24:35,3 – nằm giữa 2 đoạn tự tìm); tách theo đoạn đọc được câu đủ ~6,5 s nhưng `spans.merge` coi "câu cũ nằm ≥
+  50 % trong câu mới" là ĐÃ CÓ -> bỏ câu mới (cả khi chọn "Thay câu cũ" vì câu cũ không nằm trong đoạn nào). Sửa: câu cũ
+  ngắn cùng lời -> sửa giờ / thay; khác lời -> xén câu mới (xem Cấu trúc "Tách phụ đề theo đoạn"). Thử: hiện chữ mờ dần
+  (fade 0,3 s) OCR vẫn ra đúng giờ – chưa rõ vì sao lần quét cả phim cắt câu còn 0,4 s.
 ## Vấn đề đang mở
+- 2.4.5: chờ người dùng chép file, tách lại đoạn #25 (bấm "Tìm" lại – đoạn tự tìm về chưa tách – hoặc bấm chỗ trống
+  24:36 trên dòng Phụ đề → "Tách đoạn này", rồi "Tách N đoạn"): khối nhỏ 24:35 phải dài ra thành câu đủ (thông báo "sửa
+  giờ 1 câu cũ bị cắt ngắn"); còn câu cũ ngắn nào khác -> gửi ảnh timeline + thông báo.
 - 2.4.4: chờ người dùng chép file, tab Phụ đề → khung Dịch: bật "Tên riêng → Hán Việt" + chọn loại (VD Chỉ tên người),
   để tắt "Từ thường"; dịch lại thử – thông báo có "đổi N tên… · bỏ qua M …"; tên bị xếp nhầm loại (tên người thành địa
   danh hoặc ngược lại) -> gửi chữ Hán để chỉnh luật. Dự án đã dịch: tab Phụ đề → Công cụ → Sửa câu → "Sửa tên pinyin" ->
