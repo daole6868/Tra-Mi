@@ -205,6 +205,7 @@ class ProjectPage(QWidget):
         self.loading = False
         self.settings = load_settings()
         self._dense: dict | None = None      # edit["dense"] – các đoạn nói nhanh đã giãn (2.3.8)
+        self._sync: dict | None = None       # edit["sync"] – tuỳ chọn khớp giọng đã áp (2.4.9)
         self._dn_found: dict | None = None
         self.cut_a: float | None = None
         self._mirrors: list[tuple[QComboBox, QComboBox]] = []   # ô chọn ở tab Phụ đề <-> ô gốc ở tab Tự động
@@ -2167,7 +2168,9 @@ class ProjectPage(QWidget):
                               "Chỉ khoảng nghỉ: chỉ giãn khoảng lặng giữa các câu – chỗ nhân vật nói và giọng lồng chạy "
                               "đúng ×1 (không rè, khớp khẩu hình); tiếng nền ở khoảng nghỉ giãn giữ cao độ. "
                               "– đều: mọi khoảng nghỉ đủ dài chậm cùng 1 tốc độ. – theo câu dài: chỉ giãn khoảng nghỉ "
-                              "ngay sau câu giọng lồng dài hơn chỗ trống, giãn vừa đủ số giây còn thiếu (cần bản lồng)")
+                              "ngay sau câu giọng lồng dài hơn chỗ trống, giãn vừa đủ số giây còn thiếu (cần bản lồng). "
+                              "Khớp giọng: giọng lồng đọc ×1,00, đoạn video lúc nhân vật nói chậm lại vừa đủ để miệng "
+                              "dài bằng giọng (đặt ở tab Lồng tiếng → mục 3 → khối 'Giãn video')")
         self.e_speed = f2.row("Tốc độ", SliderRow(0.5, 2, 0.05, 1, suffix="×"))
         self.e_grate = f2.row("Tốc độ khoảng nghỉ", SliderRow(0.3, 1.0, 0.05, 0.8, suffix="×"),
                               "Khoảng nghỉ giữa 2 câu chạy chậm chừng này (0,8× = dài thêm 25 %); chỗ có lời giữ ×1")
@@ -2272,8 +2275,9 @@ class ProjectPage(QWidget):
         f = self.frame_form
         for w, on in ((self.e_speed, m == "all"), (self.e_dubnat, m == "all"), (self.e_grate, m == "gaps"),
                       (self.e_gmin, m == "gaps"), (self.e_nrate, m == "need"), (self.e_nmax, m == "need"),
-                      (self.e_wnote, m != "all"), (self.e_dense_go, m == "dense")):
+                      (self.e_wnote, m != "all"), (self.e_dense_go, m in ("dense", "sync"))):
             f.setRowVisible(w, on)
+        self.e_dense_go.setText("Đặt khớp giọng…" if m == "sync" else "Đặt đoạn nói nhanh…")
         self._update_warp_note()
         self._dense_state()
 
@@ -3808,10 +3812,21 @@ class ProjectPage(QWidget):
         self.e_dubnat.setChecked(bool(e.get("dub_natural", True)))
         set_combo(self.e_smode, e.get("speed_mode") or "all")
         self._dense = e.get("dense") if isinstance(e.get("dense"), dict) else None
+        self._sync = e.get("sync") if isinstance(e.get("sync"), dict) else None
         self._dn_found = None
         if hasattr(self, "d_dn_table"):
-            self.d_dn_table.setRowCount(0)
-            self.d_dn_note.setText("Bấm 'Tìm đoạn' để xem các đoạn nói nhanh")
+            if (e.get("speed_mode") or "all") == "sync" and self._sync:   # dự án đang khớp giọng: hiện đúng tuỳ chọn đã áp
+                from ..timewarp import sync_params as _sp
+
+                q = _sp({"sync": self._sync})
+                self.d_sy_on.setChecked(True)
+                self.d_sy_speed.setValue(q["speed"])
+                self.d_sy_lag.setValue(q["lag"])
+                set_combo(self.d_sy_floor, f"{q['floor']:.2f}")
+                self.d_sy_min.setValue(q["min"])
+                self._dense_rows()
+            self._dense_reset_found("Bấm 'Xem trước' để xem mỗi câu phải làm chậm bao nhiêu" if
+                                    self.d_sy_on.isChecked() else "Bấm 'Tìm đoạn' để xem các đoạn nói nhanh")
         self.e_grate.set(float(e.get("gap_rate") or 0.8))
         self.e_gmin.set(float(e.get("gap_min") or 0.3))
         self.e_nrate.set(float(e.get("need_rate") or 0.6))
@@ -3860,7 +3875,7 @@ class ProjectPage(QWidget):
             "zoom": self.e_zoom.value(), "speed": self.e_speed.value(), "dub_natural": self.e_dubnat.isChecked(),
             "speed_mode": self.e_smode.currentData() or "all", "gap_rate": round(self.e_grate.value(), 3),
             "gap_min": round(self.e_gmin.value(), 3), "need_rate": round(self.e_nrate.value(), 3),
-            "need_max": round(self.e_nmax.value(), 3), "dense": self._dense,
+            "need_max": round(self.e_nmax.value(), 3), "dense": self._dense, "sync": self._sync,
             "color": {"brightness": self.e_bright.value(), "contrast": self.e_contrast.value(),
                       "saturation": self.e_sat.value(), "gamma": self.e_gamma.value(),
                       "sharpen": self.e_sharpen.isChecked(), "denoise": self.e_denoise.isChecked()},
@@ -4186,13 +4201,15 @@ class ProjectPage(QWidget):
         """Cách làm chậm đang chọn + đoạn nói nhanh đã giãn (đọc từ ô giao diện) – cho ảnh chụp hoàn tác."""
         if not hasattr(self, "e_smode"):
             return {}
-        return {"m": self.e_smode.currentData() or "all", "d": self._dense, "speed": round(self.e_speed.value(), 3),
+        return {"m": self.e_smode.currentData() or "all", "d": self._dense, "s": self._sync,
+                "speed": round(self.e_speed.value(), 3),
                 "gap_rate": round(self.e_grate.value(), 3), "gap_min": round(self.e_gmin.value(), 3),
                 "need_rate": round(self.e_nrate.value(), 3), "need_max": round(self.e_nmax.value(), 3)}
 
     def _warp_restore(self, w: dict):
         set_combo(self.e_smode, w.get("m") or "all")
         self._dense = w.get("d")
+        self._sync = w.get("s")
         for key, box in (("speed", self.e_speed), ("gap_rate", self.e_grate), ("gap_min", self.e_gmin),
                          ("need_rate", self.e_nrate), ("need_max", self.e_nmax)):
             if key in w:
@@ -7049,10 +7066,35 @@ class ProjectPage(QWidget):
 
         st = self.settings
         o = _dn.opts(st)
+        from .. import timewarp as _twm
+
         gd = Group("Giãn video ở đoạn nói nhanh", "film",
                    "Đoạn nhiều câu liền nhau mà giọng lồng phải đọc nhanh: cho video chạy chậm lại ở đúng đoạn đó để giọng "
-                   "có thêm chỗ. Cần đã có bản lồng tiếng. 'Tìm đoạn' chỉ xem trước – 'Áp dụng' mới đổi video (Ctrl+Z "
-                   "hoàn tác, dải vàng trên dòng Video của timeline)")
+                   "có thêm chỗ. Cần đã có bản lồng tiếng. 'Tìm đoạn' / 'Xem trước' chưa đổi gì – 'Áp dụng' mới đổi "
+                   "video (Ctrl+Z hoàn tác, dải vàng trên dòng Video của timeline)")
+        self.d_sy_on = gd.row("Khớp giọng", Switch(bool(st.get("dense_sync", False))),
+                              "Bật: giọng lồng đọc đúng tốc độ đặt ở dưới (×1,00) cho MỌI câu, đoạn video lúc nhân vật "
+                              "nói chạy chậm vừa đủ để miệng dài bằng giọng (giọng bắt đầu + kết thúc cùng lúc miệng). "
+                              "Các ô tìm đoạn / cách giãn / mức nghỉ bên dưới ẩn đi và không áp dụng. Không giới hạn số "
+                              "giây video dài thêm. Tự tính lại mỗi lần tạo / xếp lại bản lồng")
+        sq = {"speed": st.get("dense_sync_speed", _twm.SYNC_DEFAULTS["speed"]),
+              "lag": st.get("dense_sync_lag", _twm.SYNC_DEFAULTS["lag"]),
+              "floor": st.get("dense_sync_floor", _twm.SYNC_DEFAULTS["floor"]),
+              "min": st.get("dense_sync_min", _twm.SYNC_DEFAULTS["min"])}
+        sq = _twm.sync_params({"sync": sq})
+        self.d_sy_speed = gd.row("Giọng đọc", dspin(0.8, 1.5, 0.05, sq["speed"], "×", "",
+                                                     "Giọng lồng đọc đúng tốc độ này (×1,00 = tự nhiên); video chậm lại "
+                                                     "cho vừa"))
+        self.d_sy_lag = gd.row("Giọng dài hơn miệng tối đa", dspin(
+            0.0, 2.0, 0.05, sq["lag"], "", " s", "Giọng lồng được đọc lấn sang khoảng nghỉ sau khi nhân vật thôi nói "
+            "tối đa chừng này (người xem hầu như không nhận ra) trước khi phải làm chậm hình – 0 = khớp miệng tuyệt "
+            "đối. Không lấn sang câu sau"))
+        self.d_sy_floor = gd.row("Hình chậm nhất", combo([(f"{v:.2f}", t) for v, t in _twm.SYNC_FLOORS],
+                                                        f"{sq['floor']:.2f}"),
+                                 "Câu cần chậm hơn mức này chỉ giãn tới mức này (chậm quá ×0,6 nhìn rõ cử động chậm, "
+                                 "khung hình lặp) – phần còn thiếu giọng tự đọc nhanh hơn, báo để AI rút gọn")
+        self.d_sy_min = gd.row("Bỏ qua câu chênh dưới", dspin(0.0, 2.0, 0.05, sq["min"], "", " s",
+                                                               "Giọng chỉ dài hơn lúc nói chừng này thì không giãn"))
         self.d_dn_min = QSpinBox()
         self.d_dn_min.setRange(2, 30)
         self.d_dn_min.setValue(int(o["dense_min"]))
@@ -7060,7 +7102,8 @@ class ProjectPage(QWidget):
         self.d_dn_min.setToolTip("Đoạn có từ chừng này câu liền nhau trở lên phải đọc nhanh")
         self.d_dn_thr = dspin(1.0, 2.0, 0.05, o["dense_thr"], "×", "", "Câu phải đọc nhanh hơn mức này mới tính là "
                               "câu đọc nhanh (đo trên video chưa giãn, tốc độ tool tự tính)")
-        gd.row("Tìm đoạn", field(self.d_dn_min, label("liền nhau đọc nhanh hơn", "muted"), self.d_dn_thr, grow=False))
+        self.d_dn_find_row = gd.row("Tìm đoạn", field(self.d_dn_min, label("liền nhau đọc nhanh hơn", "muted"),
+                                                      self.d_dn_thr, grow=False))
         self.d_dn_mix = gd.row("Cho xen 1 câu bình thường", Switch(bool(o["dense_mix"])),
                                "Trong chuỗi câu đọc nhanh có 1 câu đọc bình thường xen giữa vẫn tính là cùng 1 đoạn")
         self.d_dn_how = gd.row("Cách giãn", combo(_dn.HOWS, o["dense_how"]),
@@ -7085,8 +7128,9 @@ class ProjectPage(QWidget):
             0.5, 0.99, 0.01, o["dense_block_floor"], "×", "", "Chậm hơn ~0,75× nhìn rõ là quay chậm (miệng nhép chậm)"))
         self.d_dn_cap = gd.row("Thêm tối đa mỗi đoạn", dspin(0.5, 60.0, 0.5, o["dense_cap"], "", " s",
                                                                "Mỗi đoạn video dài thêm nhiều nhất chừng này giây"))
-        gd.actions(button("Tìm đoạn", "search", "Tìm các đoạn nói nhanh + ước tính trước khi giãn (chưa đổi gì)",
-                          on_click=self._dense_find))
+        self.d_dn_find_b = button("Tìm đoạn", "search", "Tìm các đoạn nói nhanh + ước tính trước khi giãn (chưa đổi "
+                                  "gì)", on_click=self._dense_find)
+        gd.actions(self.d_dn_find_b)
         self.d_dn_table = QTableWidget(0, 7)
         self.d_dn_table.setHorizontalHeaderLabels(["", "#", "Từ – Đến", "Câu", "Tốc độ đọc", "Thêm", ""])
         self.d_dn_table.verticalHeader().hide()
@@ -7119,6 +7163,11 @@ class ProjectPage(QWidget):
         for w in (self.d_dn_how, self.d_dn_gap, self.d_dn_block):
             w.currentIndexChanged.connect(self._dense_opts_changed)
         self.d_dn_mix.toggledOn.connect(self._dense_opts_changed)
+        for w in (self.d_sy_speed, self.d_sy_lag, self.d_sy_min):
+            w.valueChanged.connect(self._sync_opts_changed)
+        self.d_sy_floor.currentIndexChanged.connect(self._sync_opts_changed)
+        self.d_sy_on.toggledOn.connect(self._sync_toggled)
+        self._sy_found = None
         self._dense_rows()
         return gd
 
@@ -7129,15 +7178,65 @@ class ProjectPage(QWidget):
 
     def _dense_rows(self):
         how = self.d_dn_how.currentData() or "gaps"
+        sy = self.d_sy_on.isChecked()     # khớp giọng (2.4.9): ô tìm đoạn / cách giãn ẩn + không áp dụng
         g = self._dense_g
-        for w, on in ((self.d_dn_gap_row, how in ("gaps", "both")), (self.d_dn_gap_floor, how in ("gaps", "both")),
-                      (self.d_dn_block_row, how in ("block", "both")),
-                      (self.d_dn_block_floor, how in ("block", "both"))):
+        for w, on in ((self.d_dn_find_row, not sy), (self.d_dn_mix, not sy), (self.d_dn_how, not sy),
+                      (self.d_dn_gap_row, not sy and how in ("gaps", "both")),
+                      (self.d_dn_gap_floor, not sy and how in ("gaps", "both")),
+                      (self.d_dn_block_row, not sy and how in ("block", "both")),
+                      (self.d_dn_block_floor, not sy and how in ("block", "both")), (self.d_dn_cap, not sy),
+                      (self.d_sy_speed, sy), (self.d_sy_lag, sy), (self.d_sy_floor, sy), (self.d_sy_min, sy)):
             f = g._form_of(w)
             if f is not None:
                 f.setRowVisible(w, on)
         self.d_dn_gap_add.setVisible(self.d_dn_gap.currentData() == "custom")
         self.d_dn_block_rate.setVisible(self.d_dn_block.currentData() == "custom")
+        self.d_dn_find_b.setText("Xem trước" if sy else "Tìm đoạn")
+        self.d_dn_find_b.setToolTip("Tính trước mỗi câu phải làm chậm bao nhiêu để giọng đọc đúng tốc độ (chưa đổi gì)"
+                                    if sy else "Tìm các đoạn nói nhanh + ước tính trước khi giãn (chưa đổi gì)")
+        self.d_dn_apply.setToolTip("Bật khớp giọng – xếp lại giọng lồng, video chậm ở lúc nhân vật nói (không đọc lại "
+                                   "câu nào)" if sy else "Giãn các đoạn đã tích – xếp lại giọng lồng theo chỗ mới (không "
+                                   "đọc lại câu nào)")
+        t = self.d_dn_table
+        t.setColumnHidden(0, sy)
+        t.setColumnHidden(6, sy)          # khớp giọng: bấm đúp 1 dòng để xem (hàng nghìn câu – không dựng nút)
+        t.setHorizontalHeaderLabels(["", "Câu", "Từ – Đến", "Hình", "Giọng / lúc nói", "Thêm", ""] if sy else
+                                    ["", "#", "Từ – Đến", "Câu", "Tốc độ đọc", "Thêm", ""])
+        for c, w_ in (((1, 48), (3, 74), (5, 72)) if sy else ((1, 28), (3, 40), (5, 64))):
+            t.setColumnWidth(c, w_)
+
+    def _sync_opts(self) -> dict:
+        return {"speed": round(self.d_sy_speed.value(), 3), "lag": round(self.d_sy_lag.value(), 3),
+                "floor": float(self.d_sy_floor.currentData() or 0), "min": round(self.d_sy_min.value(), 3)}
+
+    def _sync_opts_changed(self, *_a):
+        from ..config import save_settings
+
+        if self.loading:
+            return
+        o = self._sync_opts()
+        upd = {"dense_sync_speed": o["speed"], "dense_sync_lag": o["lag"], "dense_sync_floor": o["floor"],
+               "dense_sync_min": o["min"]}
+        save_settings(upd)
+        self.settings.update(upd)
+        self._dense_reset_found("Đã đổi tuỳ chọn – bấm 'Xem trước' lại")
+
+    def _sync_toggled(self, on: bool):
+        from ..config import save_settings
+
+        self._dense_rows()
+        if self.loading:
+            return
+        save_settings({"dense_sync": bool(on)})
+        self.settings["dense_sync"] = bool(on)
+        self._dense_reset_found("Bấm 'Xem trước' để xem mỗi câu phải làm chậm bao nhiêu" if on else
+                                "Bấm 'Tìm đoạn' để xem các đoạn nói nhanh")
+
+    def _dense_reset_found(self, msg: str):
+        self._dn_found = None
+        self._sy_found = None
+        self.d_dn_table.setRowCount(0)
+        self.d_dn_note.setText(msg)
 
     def _dense_opts(self) -> dict:
         return {"dense_min": int(self.d_dn_min.value()), "dense_thr": round(self.d_dn_thr.value(), 3),
@@ -7158,15 +7257,15 @@ class ProjectPage(QWidget):
         save_settings(o)
         self.settings.update(o)
         if self._dn_found is not None:      # kết quả tìm cũ không còn đúng tuỳ chọn mới
-            self._dn_found = None
-            self.d_dn_table.setRowCount(0)
-            self.d_dn_note.setText("Đã đổi tuỳ chọn – bấm 'Tìm đoạn' lại")
+            self._dense_reset_found("Đã đổi tuỳ chọn – bấm 'Tìm đoạn' lại")
 
     def _dense_find(self):
         if not self.p:
             return
         if not pipeline.has_dub(self.p):
             return self.win.toast("Chưa có bản lồng tiếng – bấm 'Tạo bản lồng tiếng' ở mục 3 trước", "warn")
+        if self.d_sy_on.isChecked():
+            return self._sync_preview()
         segs = [Segment(s.start, s.end, s.text, s.trans, s.speaker, dict(s.extra)) for s in self.model.segs]
         st = dict(self.settings, **self._dense_opts())
         p = self.p
@@ -7249,7 +7348,68 @@ class ProjectPage(QWidget):
             msg += " · chưa tách giọng nên chỗ nghỉ đo theo giờ phụ đề (tách giọng ở mục 1 để đo theo giọng thật)"
         self.d_dn_note.setText(msg)
 
+    def _sync_preview(self):
+        segs = [Segment(s.start, s.end, s.text, s.trans, s.speaker, dict(s.extra)) for s in self.model.segs]
+        o = self._sync_opts()
+        p = self.p
+        self.d_dn_note.setText("Đang tính…")
+
+        def done(res):
+            if self.p is not p:
+                return
+            self._sy_found = res
+            self._sync_fill()
+
+        def err(m):
+            self.d_dn_note.setText("Không tính được: " + m)
+            self.win.toast("Không tính được khớp giọng: " + m, "err")
+
+        run_async(lambda: pipeline.sync_preview(p, o, segs), done, err)
+
+    def _sync_fill(self):
+        from .. import timewarp as _twm
+
+        def mmss(t: float) -> str:
+            return f"{int(t // 60)}:{int(t % 60):02d}"
+
+        def vn(x: float) -> str:
+            return f"{x:.2f}".replace(".", ",")
+
+        f = self._sy_found or {}
+        rows = f.get("rows") or []
+        t = self.d_dn_table
+        t.blockSignals(True)
+        t.setRowCount(0)
+        t.setRowCount(len(rows))
+        for r, x in enumerate(rows):
+            tip = (f"Câu {x['k'] + 1}: nhân vật nói {vn(x['S'])} s, giọng ×{vn(f['opts']['speed'])} dài {vn(x['D'])} s "
+                   f"-> hình chạy ×{vn(x['r'])} (dài thêm {vn(x['add'])} s) · tốc độ đọc giọng lồng ×{vn(x['before'])} "
+                   f"→ ×{vn(x['after'])}")
+            if x.get("left", 0) > 0.02:
+                tip += (f"\n⚠ cần ×{vn(x['need'])} nhưng 'Hình chậm nhất' chặn ở ×{vn(x['r'])} – giọng còn dài hơn "
+                        f"{vn(x['left'])} s, phải đọc nhanh hơn (AI rút gọn)")
+            vals = ((1, str(x["k"] + 1)), (2, f"{mmss(x['a'])} – {mmss(x['b'])}"),
+                    (3, "×" + vn(x["r"]) + (" ⚠" if x.get("left", 0) > 0.02 else "")),
+                    (4, f"{vn(x['D'])} s / {vn(x['S'])} s"), (5, "+" + vn(x["add"]) + " s"))
+            for c, val in vals:
+                it = QTableWidgetItem(val)
+                it.setToolTip(tip)
+                t.setItem(r, c, it)
+        t.blockSignals(False)
+        msg = _twm.sync_note(f.get("summary"), f.get("opts", {}).get("speed", 1.0))
+        msg = (msg[:1].upper() + msg[1:]) if msg else "Không tính được"
+        if rows:
+            msg += " · bấm đúp 1 dòng để xem câu đó"
+        if not f.get("voice"):
+            msg += " · chưa tách giọng nên lúc nói đo theo giờ phụ đề (tách giọng ở mục 1 để khớp miệng chính xác)"
+        self.d_dn_note.setText(msg)
+
     def _dense_play(self, k: int):
+        if self.d_sy_on.isChecked():
+            rows = (self._sy_found or {}).get("rows") or []
+            if 0 <= k < len(rows):
+                self._play_line(int(rows[k]["k"]))
+            return
         runs = (self._dn_found or {}).get("runs") or []
         if 0 <= k < len(runs):
             a, b = float(runs[k]["a"]), float(runs[k]["b"])
@@ -7274,9 +7434,35 @@ class ProjectPage(QWidget):
         self._update_timeline()
         self._dense_state()
 
+    def _sync_apply(self):
+        from .. import timewarp as _twm
+
+        if not self.p:
+            return
+        if not pipeline.has_dub(self.p):
+            return self.win.toast("Chưa có bản lồng tiếng – bấm 'Tạo bản lồng tiếng' ở mục 3 trước", "warn")
+        cur = self.e_smode.currentData() or "all"
+        e = self.p.edit
+        if cur in ("gaps", "need", "dense") or (cur == "all" and abs(float(e.get("speed") or 1.0) - 1) > 1e-3):
+            name = self.e_smode.currentText()
+            if QMessageBox.question(self, "Đổi cách làm chậm", f"Đang dùng cách làm chậm '{name}' (tab Chỉnh sửa). "
+                                    "Khớp giọng sẽ thay cách đó. Tiếp tục?") != QMessageBox.StandardButton.Yes:
+                return
+        o = _twm.sync_params({"sync": self._sync_opts()})
+        self._sync = o
+        self._dense_set(self._dense, "sync")
+        sm = (self._sy_found or {}).get("summary") or {}
+        add = float(sm.get("added") or 0)
+        add_s = (f" – video dài thêm khoảng {add:.1f} s" if add < 120 else f" – video dài thêm khoảng {add / 60:.1f} phút") \
+            if sm.get("n") else ""
+        self.win.toast((f"Đã bật khớp giọng ×{o['speed']:.2f}" + add_s).replace(".", ",") +
+                       "; đang xếp lại giọng lồng (không đọc lại câu nào)", "ok")
+
     def _dense_apply(self):
         from .. import dense as _dn
 
+        if self.d_sy_on.isChecked():
+            return self._sync_apply()
         f = self._dn_found
         if not f or not f.get("runs"):
             return self.win.toast("Bấm 'Tìm đoạn' trước (chưa có đoạn nói nhanh nào để giãn)", "warn")
@@ -7297,13 +7483,24 @@ class ProjectPage(QWidget):
                        "lồng theo chỗ mới (không đọc lại)", "ok")
 
     def _dense_clear(self):
-        if not self._dense and (self.e_smode.currentData() or "all") != "dense":
+        cur = self.e_smode.currentData() or "all"
+        if not self._dense and cur not in ("dense", "sync"):
             return self.win.toast("Chưa giãn đoạn nào", "info")
-        self._dense_set(None, "all" if (self.e_smode.currentData() or "all") == "dense" else
-                        self.e_smode.currentData() or "all")
-        self.win.toast("Đã bỏ giãn đoạn nói nhanh – video về tốc độ gốc, giọng lồng xếp lại", "ok")
+        was_sync = cur == "sync"
+        self._dense_set(self._dense if was_sync else None, "all" if cur in ("dense", "sync") else cur)
+        self.win.toast("Đã tắt khớp giọng – video về tốc độ gốc, giọng lồng xếp lại" if was_sync else
+                       "Đã bỏ giãn đoạn nói nhanh – video về tốc độ gốc, giọng lồng xếp lại", "ok")
 
     def _dense_pick(self):
+        if (self.e_smode.currentData() or "all") == "sync":
+            sp = float((self._sync or {}).get("speed") or 1.0)
+            rows = pipeline.sync_left_rows(self.model.segs, sp)
+            if not rows:
+                return self.win.toast("Không còn câu nào phải đọc nhanh hơn tốc độ khớp giọng", "ok")
+            self.model.set_picked(range(len(self.model.segs)), False)
+            self.model.set_picked(rows)
+            return self.win.toast(f"Đã tích {len(rows)} câu vẫn đọc nhanh (chạm 'Hình chậm nhất' / nói đè) – bấm 'AI "
+                                  "rút gọn' ở mục 2", "ok")
         if (self.e_smode.currentData() or "all") != "dense" or not self._dense:
             return self.win.toast("Chưa áp giãn đoạn nào – bấm Tìm đoạn → Áp dụng trước", "warn")
         try:
@@ -7322,7 +7519,20 @@ class ProjectPage(QWidget):
 
         if not hasattr(self, "d_dn_state"):
             return
-        on = (self.e_smode.currentData() or "all") == "dense"
+        m = self.e_smode.currentData() or "all"
+        if m == "sync" and self.p:
+            from .. import timewarp as _twm
+
+            ed = dict(self.p.edit, speed_mode="sync", sync=self._sync)
+            d = ed.get("dub") or {}
+            sm = (self.p.data.get("dub_stats") or {}).get("sync") \
+                if (d.get("warp_sig") or "") == _twm.signature(ed) else None
+            sp = _twm.sync_params(ed)["speed"]
+            txt = _twm.sync_note(sm, sp) if sm else f"khớp giọng ×{sp:.2f}".replace(".", ",") + \
+                ": đang xếp lại giọng lồng…"
+            self.d_dn_state.setText("Đang " + txt)
+            return
+        on = m == "dense"
         self.d_dn_state.setText((_dn.applied_note(self._dense) or "Chưa áp đoạn nào") if on else "")
 
     def _pick_still_long(self):

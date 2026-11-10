@@ -553,6 +553,27 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   chèn video: câu sau dời, câu vắt qua chia 2 – như `video.build_and_render`), `timeline_changed`; `export_subs` bản dịch /
   song ngữ theo giờ xuất khi Cài đặt `srt_output_time` (mặc định bật, SRT gốc luôn giờ gốc), tab Phụ đề → Công cụ → Nhập –
   xuất SRT dòng "Giờ SRT" `s_srt_out`, `_export_sub`.
+- Khớp giọng ×1,00 (2.4.9, `speed_mode` "sync" – cách làm chậm thứ 5): giọng lồng đọc ĐÚNG tốc độ đặt (mặc định ×1,00)
+  mà vẫn khớp lúc nhân vật nói -> giãn video NGAY LÚC NÓI (cả hình + tiếng gốc + giọng lồng theo giờ giãn) ở câu giọng
+  dài hơn miệng. `timewarp.plan_sync(items, segs, total, speed, lag, floor, min_diff, lines, info)`: mỗi câu lồng (bỏ
+  câu khoá / tốc độ tay `lock` / `user`; 🎵 / bỏ lồng vốn không có item) D = độ dài giọng / speed, S = b − want (b = hết
+  miệng: `line_spans` = cụm có tiếng của giọng đã tách trong câu (`snap._floor` / `_thr` / `_clusters`), không thì giờ phụ
+  đề), lg = min(lag, chỗ tới giọng câu sau − max(GAP, pause) − b) = giọng được dài hơn miệng tối đa `lag` 0,3 s, need =
+  D − lg; need − S ≥ `min` 0,05 -> đoạn [want, b, r = max(S / need, floor)] (floor 0 = "Không giới hạn", `SYNC_FLOORS`
+  mặc định ×0,6; câu chạm floor -> `left` > 0 = vẫn dài -> AI rút gọn); đoạn chồng gộp lấy tốc độ chậm hơn (`_min_merge`);
+  KHÔNG giới hạn số giây mỗi đoạn / tổng. `SYNC_DEFAULTS`, `sync_params(edit)` (edit["sync"] {speed 0,8–1,5, lag 0–2,
+  floor, min}), `signature` "sync:speed,lag,floor,min", `sync_summary` {n, min, left, user, added}, `sync_note`. Lập trong
+  `tts.synthesize_dub` như "need" (mỗi lần lồng / đọc lại / xếp lại tự tính lại theo độ dài giọng thật; `stats["sync"]`
+  -> `dub_summary` / `warp_note`); `pipeline.warp_plan` gắn `sync`, `dub` gắn `wplan["lines"] = sync_lines(p, segs)`;
+  `plan_pauses(fwd=)` – chỗ nghỉ giữa câu đặt theo giờ giãn. `pipeline.sync_preview` (bộ xếp nháp `_dense_base` + plan_sync
+  + xếp lại không tốc độ tay -> mỗi câu r / D / S / thêm / tốc độ trước → sau), `sync_left_rows` (câu vẫn đọc nhanh hơn
+  speed). GUI tab Lồng tiếng mục 3 khối Giãn video: công tắc `d_sy_on` "Khớp giọng" (Cài đặt `dense_sync`) – bật thì ẩn mọi
+  ô đoạn nói nhanh (không áp, tránh xung đột) + hiện `d_sy_speed` "Giọng đọc" / `d_sy_lag` "Giọng dài hơn miệng tối đa" /
+  `d_sy_floor` "Hình chậm nhất" / `d_sy_min` "Bỏ qua câu chênh dưới" (Cài đặt `dense_sync_*`, `_sync_opts_changed`); nút
+  "Xem trước" (`_sync_preview` -> `_sync_fill`: bảng Câu / Từ – Đến / Hình ×r (⚠ chạm mức) / Giọng / lúc nói / Thêm, bấm
+  đúp = nghe câu), "Áp dụng" `_sync_apply` (cần bản lồng; cách khác đang dùng -> hỏi; `self._sync` -> `_dense_set(...,
+  "sync")` = xếp lại giọng, không đọc lại), "Bỏ giãn", "Tích câu vẫn còn nhanh" (`sync_left_rows`); edit["sync"] lưu,
+  hoàn tác qua `_warp_state` "s". Tab Chỉnh sửa: Làm chậm "Khớp giọng ×1,00" -> nút "Đặt khớp giọng…" (`_goto_dense`).
 - Tách phụ đề HIỂN THỊ (2.1.28, `trami/subsplit.py`) – khác "Tách câu dài" (`align.split_clauses`, tách hẳn câu + đọc lại
   giọng): câu / bản dịch / giọng lồng / karaoke giữ nguyên, chỉ chữ HIỆN thành nhiều mảnh nối nhau, mỗi mảnh hiện đúng lúc
   giọng đọc tới từ đầu mảnh (`karaoke.word_times` theo kv / kw; mảnh đầu từ đầu câu, mảnh cuối tới cuối câu). Cách
@@ -1039,7 +1060,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (343 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (346 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -3084,7 +3105,18 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   free_cache cả khi lỗi / huỷ, Bandit release trong finally, Hy-MT2 tắt trong finally, LivePipeline dừng trong finally
   của `auto`. Phần còn lại ~0,3–0,5 GB là ngữ cảnh CUDA của cửa sổ chính (chỉ trả khi tắt tool). Thử bằng tiến trình /
   torch giả (sandbox không có card): tắt đúng tiến trình, đọc dở thì không tắt, bảng bộ nhớ Windows giả đúng tên + MB.
+- 2.4.9: ảnh khối "Giãn video ở đoạn nói nhanh" + "thêm lựa chọn giãn giọng về ×1,00 – tool tự tính giãn; bật thì các ô
+  kia ẩn, không áp, tránh xung đột" -> tư vấn trước; người dùng: "giọng ×1,00 mà vẫn khớp câu nói gốc = phải giãn cả đoạn
+  đang nói (lồng tiếng + video), bỏ giới hạn thêm tối đa x giây mỗi đoạn" -> "Làm theo đề xuất": hình chậm nhất mặc định
+  ×0,6 (có "Không giới hạn"; câu chạm mức báo để AI rút gọn), giọng dài hơn miệng ≤ 0,3 s, mọi câu (không chỉ đoạn dồn),
+  tự tính lại mỗi lần lồng / xếp lại, bỏ qua câu 🎵 / bỏ lồng / tốc độ tự đặt, không giới hạn tổng số giây. Xem Cấu trúc
+  "Khớp giọng ×1,00". Thử: Edge giả câu 1,6 s / miệng 1,0 s -> giãn ×0,77, xếp lại không đọc lại câu nào, mọi câu đọc
+  ≤ ×1,01, giọng hết sau miệng ≈ 0,3 s (theo giờ giãn), xem trước = kết quả, Ctrl+Z / Ctrl+Y, mở lại dự án giữ thông số;
+  giao diện offscreen (bật / tắt ẩn đúng ô, bảng xem trước). Chưa xem trên phim thật (hình chậm ×0,6 có lộ không).
 ## Vấn đề đang mở
+- 2.4.9: chờ người dùng chép file, mở phim đã lồng (nên tách giọng trước – mục 1 – để đo lúc miệng thôi nói): tab Lồng
+  tiếng → mục 3 → khối Giãn video → bật "Khớp giọng" → Xem trước → Áp dụng; xem chỗ hình chậm có lộ không (tăng "Hình
+  chậm nhất" ×0,7–0,8 + AI rút gọn câu ⚠), giọng ×1,00 có khớp miệng không (lệch nhiều -> giảm "Giọng dài hơn miệng").
 - 2.4.8: chờ người dùng chép file, mở lại tool, để không 2–5 phút rồi xem Task Manager; trang Việc đang làm → "Xem ai
   đang chiếm card" (gửi ảnh danh sách nếu vẫn cao), "Trả bộ nhớ card". Windows không đọc được bộ nhớ từng tiến trình
   (PowerShell bị chặn) -> danh sách trống -> báo để dùng cách khác.

@@ -1614,7 +1614,7 @@ def _trim_start(a: np.ndarray, thr: float = 0.01) -> int:
 
 def plan_pauses(s: Segment, x: dict, runs: list, n1: int, speed: float, room: float, lang: str = "vi",
                 min_gap: float = PAUSE_MIN, part_speed: float = 1.0, max_speed: float = 1.5,
-                vspeed: float = 1.0) -> list[list[int]]:
+                vspeed: float = 1.0, fwd=None) -> list[list[int]]:
     """Khoảng nghỉ chèn vào giọng lồng 1 câu: phần sau chỗ nhân vật ngắt hơi bắt đầu đúng lúc nhân vật nói tiếp (tính
     từ lúc giọng câu bắt đầu như trong phim gốc), chỉ dùng chỗ trống `room` giây trước câu sau. runs: chỗ lặng của
     đoạn giọng ở ×1 (mẫu), n1: độ dài ×1. part_speed > 1 (đọc từng vế): vế trước dài hơn vế gốc -> đọc nhanh riêng
@@ -1645,7 +1645,8 @@ def plan_pauses(s: Segment, x: dict, runs: list, n1: int, speed: float, room: fl
         last_j = j
         mid = (a + b) / 2
         after = x["start"] + added + (b / speed) / SR * vspeed  # lúc giọng lồng nói tiếp nếu không chèn gì
-        target = x["start"] + (g1 - s.start)                    # lúc nhân vật nói tiếp
+        # lúc nhân vật nói tiếp (fwd: video có giãn – 2.4.9 khớp giọng làm chậm cả lúc nói -> chỗ ngắt hơi dời theo)
+        target = x["start"] + ((fwd(g1) - fwd(s.start)) if fwd else (g1 - s.start))
         f = 1.0
         if after - target > 0.05 and part_speed > 1.0:          # vế trước dài hơn vế gốc: đọc nhanh riêng vế đó
             dur = (a - prev) / speed / SR * vspeed
@@ -1769,7 +1770,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     lồng ghi theo giờ giãn; dub_at / layout vẫn giây gốc (đổi ngược). stats["warp"] = các đoạn giãn [[a, b, tốc độ]]."""
     settings = settings or {}
     vspeed = min(4.0, max(0.25, float(vspeed or 1.0)))
-    if warp and warp.get("mode") in ("gaps", "need", "dense"):
+    if warp and warp.get("mode") in ("gaps", "need", "dense", "sync"):
         vspeed = 1.0
     stats = stats if stats is not None else {}
     lang = langs.norm(lang)
@@ -2162,7 +2163,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     durs = {it["k"]: it["dur"] for it in items}
     user_min = {it["k"]: it["user"] for it in items if it["user"]}
     tw = None        # bản đồ giờ giãn khoảng nghỉ (2.1.27): mọi mốc xếp giọng theo giờ giãn, dub_at đổi ngược về giờ gốc
-    if warp and warp.get("mode") in ("gaps", "need", "dense"):
+    if warp and warp.get("mode") in ("gaps", "need", "dense", "sync"):
         from . import timewarp
 
         wp = timewarp.params(warp)
@@ -2170,10 +2171,17 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             spans = timewarp.plan_gaps(segs, total, wp["gap_rate"], wp["gap_min"])
         elif warp["mode"] == "dense":      # đoạn nói nhanh (2.3.8): các đoạn đã áp cố định khi bấm Áp dụng
             spans = warp.get("spans") or []
+        elif warp["mode"] == "sync":       # khớp giọng (2.4.9): làm chậm lúc nhân vật nói cho vừa giọng ×T
+            q = warp.get("sync") or timewarp.SYNC_DEFAULTS
+            sync_info: dict = {}
+            spans = timewarp.plan_sync(items, segs, total, q["speed"], q["lag"], q["floor"], q["min"],
+                                       warp.get("lines"), sync_info)
         else:
             spans = timewarp.plan_need(items, segs, total, wp["need_rate"], wp["need_max"],
                                        speech=warp.get("speech"))
         tw = timewarp.Warp.of(spans)
+        if warp["mode"] == "sync":
+            stats["sync"] = dict(timewarp.sync_summary(sync_info, tw), speed=float(q["speed"]))
         if tw:
             for it in items:
                 it["want"] = tw.fwd(it["want"])
@@ -2209,7 +2217,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             # câu khoá tốc độ (2.1.38): giữ đúng tốc độ đã đặt – không đọc nhanh riêng vế trước
             g = plan_pauses(s, x, meta.gaps(files[k]), meta.n(files[k]), spd, room,
                             langs.detect(s.trans or "", lang), min_gap, 1.0 if x.get("lock") else PART_SPEED,
-                            max_speedup, vspeed)
+                            max_speedup, vspeed, tw.fwd if tw else None)
             if g:
                 pauses[k] = g
     stats["pauses"] = sum(1 for v in pauses.values() for q in v if q[1] > 0)

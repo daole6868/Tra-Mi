@@ -22,8 +22,12 @@ import numpy as np
 SR = 44100
 MODES = [("all", "Cả phim (theo ô Tốc độ)"), ("gaps", "Chỉ khoảng nghỉ – đều"),
          ("need", "Chỉ khoảng nghỉ – theo câu dài"),
-         ("dense", "Đoạn nói nhanh (đặt ở tab Lồng tiếng)")]
-WARP_MODES = ("gaps", "need", "dense")     # các cách giãn theo đoạn (giọng lồng xếp theo giờ giãn)
+         ("dense", "Đoạn nói nhanh (đặt ở tab Lồng tiếng)"),
+         ("sync", "Khớp giọng ×1,00 – giãn cả lúc nói (đặt ở tab Lồng tiếng)")]
+WARP_MODES = ("gaps", "need", "dense", "sync")     # các cách giãn theo đoạn (giọng lồng xếp theo giờ giãn)
+# "Khớp giọng" (2.4.9): giọng lồng đọc đúng tốc độ T, đoạn video lúc nhân vật nói chạy chậm vừa đủ để miệng dài bằng giọng
+SYNC_DEFAULTS = {"speed": 1.0, "lag": 0.3, "floor": 0.6, "min": 0.05}
+SYNC_FLOORS = [(0.0, "Không giới hạn"), (0.5, "×0,5"), (0.6, "×0,6 (nên dùng)"), (0.7, "×0,7"), (0.8, "×0,8")]
 DEFAULTS = {"gap_rate": 0.8, "gap_min": 0.3, "need_rate": 0.6, "need_max": 1.5}
 PAD = 0.08            # giữ nguyên 0,08 s sát lời thoại (hơi thở, tiếng vang cuối câu)
 MIN_SPAN = 0.05       # đoạn giãn ngắn hơn: bỏ
@@ -57,6 +61,24 @@ def params(edit: dict | None) -> dict:
     return out
 
 
+def sync_params(edit: dict | None) -> dict:
+    """Tuỳ chọn "Khớp giọng" đã áp (edit["sync"]): speed = tốc độ giọng lồng, lag = giọng được dài hơn miệng tối đa
+    (giây, lấn vào khoảng nghỉ), floor = hình chậm nhất (0 = không giới hạn), min = bỏ qua câu chênh dưới (giây)."""
+    d = (edit or {}).get("sync")
+    d = d if isinstance(d, dict) else {}
+    out = {}
+    for k, v in SYNC_DEFAULTS.items():
+        try:
+            out[k] = float(d.get(k, v) if d.get(k) is not None else v)
+        except (TypeError, ValueError):
+            out[k] = v
+    out["speed"] = min(1.5, max(0.8, out["speed"]))
+    out["lag"] = min(2.0, max(0.0, out["lag"]))
+    out["floor"] = 0.0 if out["floor"] < 0.15 else min(0.95, out["floor"])
+    out["min"] = min(2.0, max(0.0, out["min"]))
+    return out
+
+
 def signature(edit: dict | None) -> str:
     """Cách giãn đang chọn (bản lồng xếp theo cách nào) – "" = không giãn khoảng nghỉ."""
     m = mode_of(edit)
@@ -65,6 +87,9 @@ def signature(edit: dict | None) -> str:
     if m == "dense":
         sp = dense_spans(edit)
         return "dense:" + (Warp(sp).key() if sp else "-")
+    if m == "sync":
+        q = sync_params(edit)
+        return "sync:" + ",".join(f"{q[k]:.3f}" for k in ("speed", "lag", "floor", "min"))
     p = params(edit)
     keys = ("gap_rate", "gap_min") if m == "gaps" else ("need_rate", "need_max")
     return m + ":" + ",".join(f"{p[k]:.3f}" for k in keys)
@@ -300,6 +325,128 @@ def plan_need(items: list[dict], segs, total: float, rate_min: float, max_extra:
         r = g / (g + ext)
         out += [[round(a, 3), round(b, 3), round(r, 4)] for a, b in free]
     return out
+
+
+def line_spans(segs, env=None, hop: float = 0.01) -> dict[int, tuple[float, float]]:
+    """Lúc nhân vật thật sự nói của từng câu (số thứ tự câu -> (đầu, cuối)): phần có tiếng của giọng đã tách nằm trong
+    giờ câu (env = độ to 10 ms của giọng đã tách); không đo được -> giờ câu."""
+    out: dict[int, tuple[float, float]] = {}
+    floor = None
+    if env is not None and len(env) >= 3:
+        from . import snap
+
+        env = np.asarray(env, np.float32)
+        floor = snap._floor(env)
+    for i, s in enumerate(segs):
+        a, b = float(s.start), float(s.end)
+        if b <= a:
+            continue
+        if floor is not None:
+            from . import snap
+
+            thr = snap._thr(env, hop, a, b, floor)
+            cl = snap._clusters(env, hop, a, b, thr) if thr is not None else []
+            if cl and cl[-1][1] - cl[0][0] >= 0.1:
+                a, b = max(a, cl[0][0]), min(b, cl[-1][1])
+        out[i] = (a, b)
+    return out
+
+
+def _min_merge(spans) -> list[list[float]]:
+    """Gộp các đoạn giãn chồng nhau (2 người nói đè nhau): chỗ chồng lấy tốc độ CHẬM hơn."""
+    sp = sorted((float(a), float(b), float(r)) for a, b, r in spans if b - a > 1e-3)
+    if not sp:
+        return []
+    pts = sorted({p for a, b, _r in sp for p in (a, b)})
+    out: list[list[float]] = []
+    active: list[tuple[float, float]] = []      # (cuối, tốc độ)
+    j = 0
+    for lo, hi in zip(pts, pts[1:]):
+        while j < len(sp) and sp[j][0] <= lo + 1e-9:
+            active.append((sp[j][1], sp[j][2]))
+            j += 1
+        active = [x for x in active if x[0] > lo + 1e-9]
+        if not active:
+            continue
+        r = min(x[1] for x in active)
+        if out and abs(out[-1][1] - lo) < 1e-9 and abs(out[-1][2] - r) < 1e-6:
+            out[-1][1] = hi
+        else:
+            out.append([lo, hi, r])
+    return [[round(a, 3), round(b, 3), round(r, 4)] for a, b, r in out if b - a > 1e-3]
+
+
+def plan_sync(items: list[dict], segs, total: float, speed: float = 1.0, lag: float = 0.3, floor: float = 0.6,
+              min_diff: float = 0.05, lines: dict | None = None, info: dict | None = None) -> list[list[float]]:
+    """Cách "Khớp giọng" (2.4.9): giọng lồng mỗi câu đọc đúng tốc độ `speed` (độ dài D = dur / speed). Lúc nhân vật nói
+    (lines[k] = (đầu, cuối) theo giọng thật, không có thì giờ câu) dài S < D -> đoạn video từ lúc giọng lồng bắt đầu
+    (want) tới lúc nhân vật thôi nói chạy chậm r = S / (D − lấn) để miệng dài đúng bằng giọng; lấn = giọng được dài hơn
+    miệng tối đa `lag` giây nếu khoảng nghỉ sau đó còn chỗ (không lấn sang câu lồng tiếp theo). r ≥ floor (0 = không giới
+    hạn) – thiếu thì phần còn lại bộ xếp giọng tự tính (đọc nhanh hơn / AI rút gọn). Câu đặt tốc độ tay / khoá tốc độ
+    không giãn. info[k] = {"r", "need", "add", "left", "S", "D"} (để báo / xem trước). Trả [[a, b, r]] giây gốc."""
+    its = sorted(items, key=lambda x: (float(x["want"]), int(x["k"])))
+    speed = max(0.5, float(speed or 1.0))
+    spans: list[list[float]] = []
+    for i, x in enumerate(its):
+        k = int(x["k"])
+        if x.get("lock") or float(x.get("user") or 0) > 0:
+            if info is not None:
+                info[k] = {"skip": "user"}
+            continue
+        s = segs[k]
+        w = float(x["want"])
+        a, b = (lines or {}).get(k) or (float(s.start), float(s.end))
+        b = float(b)
+        if b - w < 0.1:          # giọng bị kéo tay ra sau lúc nhân vật nói / câu quá ngắn
+            continue
+        dur = float(x["dur"]) / speed
+        nx = its[i + 1] if i + 1 < len(its) else None
+        lim = (float(nx["want"]) - max(GAP, float(nx.get("pause") or 0))) if nx else max(float(total), b)
+        lg = max(0.0, min(float(lag), lim - b))      # lim đã chừa GAP trước giọng câu sau
+        need = dur - lg              # đoạn [want, cuối lời] phải dài chừng này sau khi giãn
+        S = b - w
+        if need - S < max(0.0, float(min_diff)) or need <= 0:
+            continue
+        r_need = S / need
+        r = max(r_need, float(floor)) if floor and floor > 0 else r_need
+        r = max(0.05, min(1.0, r))
+        if r > 0.999:
+            continue
+        spans.append([w, b, r])
+        if info is not None:
+            got = S / r
+            info[k] = {"r": round(r, 4), "need": round(r_need, 4), "add": round(got - S, 3),
+                       "left": round(max(0.0, need - got), 3), "S": round(S, 3), "D": round(dur, 3)}
+    return _min_merge(spans)
+
+
+def sync_summary(info: dict, warp: "Warp | None") -> dict:
+    """Tóm tắt cách "Khớp giọng" để báo: số câu giãn, hình chậm nhất, số câu chạm "hình chậm nhất", giây dài thêm."""
+    rs = [v for v in info.values() if "r" in v]
+    return {"n": len(rs), "min": round(min((v["r"] for v in rs), default=1.0), 3),
+            "left": sum(1 for v in rs if v.get("left", 0) > 0.02), "user": sum(1 for v in info.values()
+                                                                               if v.get("skip") == "user"),
+            "added": round(warp.added(), 3) if warp else 0.0}
+
+
+def _vn(x: float, n: int = 2) -> str:
+    return f"{x:.{n}f}".replace(".", ",")
+
+
+def sync_note(sm: dict | None, speed: float = 1.0) -> str:
+    """Dòng kết quả "Khớp giọng"."""
+    if not sm:
+        return ""
+    if not sm.get("n"):
+        return f"khớp giọng ×{_vn(speed)}: không câu nào cần giãn (giọng đều vừa lúc nhân vật nói)"
+    add = float(sm.get("added") or 0)
+    add_s = f"{_vn(add, 1)} s" if add < 120 else f"{_vn(add / 60, 1)} phút"
+    txt = f"khớp giọng ×{_vn(speed)}: giãn {sm['n']} câu, hình chậm nhất ×{_vn(sm['min'])}, video dài thêm {add_s}"
+    if sm.get("left"):
+        txt += f" · {sm['left']} câu chạm 'Hình chậm nhất' (giọng vẫn phải đọc nhanh hơn – AI rút gọn)"
+    if sm.get("user"):
+        txt += f" · bỏ qua {sm['user']} câu bạn tự đặt tốc độ"
+    return txt
 
 
 # ------------------------------------------------------------------ giãn âm thanh giữ cao độ (WSOLA, 2 kênh cùng nhịp)

@@ -1817,7 +1817,7 @@ class Player(QWidget):
         edit = edit or {}
         self.view.set_edit(edit, src_w, src_h)
         self.view.set_layers(edit.get("layers") or [])
-        gap = (edit.get("speed_mode") or "all") in ("gaps", "need", "dense")   # làm chậm chỉ khoảng nghỉ: ô Tốc độ không dùng
+        gap = (edit.get("speed_mode") or "all") in ("gaps", "need", "dense", "sync")   # làm chậm chỉ khoảng nghỉ: ô Tốc độ không dùng
         rate = 1.0 if gap else min(4.0, max(0.25, float(edit.get("speed") or 1.0)))
         self.speed = rate
         if not gap:
