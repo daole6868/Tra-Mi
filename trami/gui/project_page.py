@@ -191,6 +191,9 @@ _HfwBox = HfwBox    # 2.1.35: khung chứa thẻ có hàng nút tự xuống dò
 
 
 # 2.4.3: công tắc tên pinyin / từ lóng – mỗi cài đặt có 1 công tắc ở tab Tự động + 1 ở khung Dịch tab Phụ đề
+# 2.4.10: rút gọn bản dịch (lúc dịch + AI kiểm tra) / AI tự rút gọn khi lồng tiếng – mặc định tắt; mỗi cài đặt nhiều
+# công tắc giống nhau (tab Tự động bước 2 / khung Dịch tab Phụ đề; tab Tự động bước 3 / tab Lồng tiếng mục 3)
+SHORTEN_SW = {"dub_fit": ("a_fit", "s_fit"), "dub_auto_shorten": ("a_autoshort", "d_autoshort")}
 TRANS_FIX = {"trans_name_fix": ("a_namefix", "s_namefix"), "trans_term_fix": ("a_termfix", "s_termfix"),
              "trans_slang": ("a_slang", "s_slang")}
 # 2.4.4: ô chọn loại tên riêng (tên người / địa danh, môn phái, đồ vật) – tab Tự động + khung Dịch tab Phụ đề
@@ -839,13 +842,17 @@ class ProjectPage(QWidget):
                               "này): AI đọc cả kịch bản, câu là lời bài hát (văn vần, điệp khúc, không ăn nhập lời thoại) "
                               "-> đánh 🎵 không lồng tiếng; câu máy tự bịa / chữ vô nghĩa lúc chỉ có nhạc -> bỏ. Dựa vào "
                               "nội dung chữ, không dựa vào âm lượng. Có nút Hoàn tác sửa ở tab Phụ đề")
+        self.a_fit = f.row("AI rút gọn bản dịch cho vừa thời gian nói", Switch(bool(s.get("dub_fit", False))),
+                           C.FIT_HELP)
+        self.a_fit.toggled.connect(lambda on: self._shorten_sw_changed("dub_fit", on))
         self.a_review = f.row("AI kiểm tra lại bản dịch", Switch(bool(s.get("ai_review_after_translate", False))),
-                              "Sau khi dịch cả phim: AI soát sai nghĩa, xưng hô / tên không thống nhất, câu quá dài, còn "
-                              "chữ Hán rồi sửa (tốn thêm ~1 lần gọi AI)")
+                              "Sau khi dịch cả phim: AI soát sai nghĩa, xưng hô / tên không thống nhất, còn chữ Hán rồi "
+                              "sửa (tốn thêm ~1 lần gọi AI). Chỉ rút gọn câu dài khi bật 'AI rút gọn bản dịch cho vừa "
+                              "thời gian nói' ở trên")
         self.a_fill = f.row("Câu ngắn nói đầy đủ hơn cho vừa thời gian", Switch(bool(s.get("translate_fill", False))),
                             "Dịch bằng AI: câu dịch ngắn hơn hẳn thời gian nhân vật nói thì dùng câu đủ thành phần "
-                            "(chủ ngữ, xưng hô, từ nối) – vẫn KHÔNG thêm ý, không thêm từ đệm / tiếng cảm thán. Tắt "
-                            "(mặc định) = dịch sát nghĩa, chỉ giới hạn độ dài tối đa")
+                            "(chủ ngữ, xưng hô, từ nối) – vẫn KHÔNG thêm ý, không thêm từ đệm / tiếng cảm thán. Chỉ "
+                            "dùng được khi bật 'AI rút gọn bản dịch cho vừa thời gian nói'")
         # 2.4.0 xưng hô: gửi người nói + nam / nữ cho AI; câu không chắc ai nói với ai -> bỏ đại từ / cặp trung tính
         from ..translate import ADDR_LABELS, ADDR_MODES
 
@@ -919,6 +926,9 @@ class ProjectPage(QWidget):
         f.row("Giọng lồng", v_row,
               "1 giọng cho MỌI người nói – áp cho mọi nút lồng tiếng (cả '3. Lồng tiếng', 'Tạo bản lồng tiếng') và nhớ làm "
               "mặc định cho video sau. 'Theo giọng từng người nói' = chọn giọng từng người ở tab Lồng tiếng mục 2")
+        self.a_autoshort = f.row("AI tự rút gọn câu quá dài khi lồng tiếng",
+                                 Switch(bool(s.get("dub_auto_shorten", False))), C.AUTOSHORT_HELP)
+        self.a_autoshort.toggled.connect(lambda on: self._shorten_sw_changed("dub_auto_shorten", on))
         f = f4 = Form()
         self.a_hardsub = f.row("Phụ đề Trung cũ", combo(C.HARDSUB, "none"))
         self.a_which = f.row("Ghép phụ đề vào video", combo(C.WHICH, "trans"))
@@ -1124,7 +1134,14 @@ class ProjectPage(QWidget):
         tr_card.add(flow(self.s_namefix, lb_name, self.s_namekind))
         tr_card.add(flow(self.s_termfix, lb_term,
                          self.s_slang, label("Hiểu từ lóng / tiếng mạng (躺平, yyds…)", "muted", wrap=True)))
+        self.s_fit = Switch(bool(self.settings.get("dub_fit", False)))
+        self.s_fit.setToolTip(C.FIT_HELP)
+        self.s_fit.toggled.connect(lambda on: self._shorten_sw_changed("dub_fit", on))
+        lb_fit = label("AI rút gọn bản dịch cho vừa thời gian nói (tắt = giữ bản dịch sát nghĩa)", "muted", wrap=True)
+        lb_fit.setToolTip(C.FIT_HELP)
+        tr_card.add(flow(self.s_fit, lb_fit))
         self._name_kind_enable()
+        self._fill_enable()
         self.s_tr_card = tr_card
         # ---- các trang của khung "Công cụ" (mỗi lúc hiện 1 trang)
         self.s_snap_ct = Switch(False)
@@ -3294,9 +3311,8 @@ class ProjectPage(QWidget):
                                     "đọc riêng rồi ghép lại. VieNeu / OmniVoice LUÔN đọc cả câu 1 lần (đọc vế ngắn riêng "
                                     "hay bị lặp lời) – chỗ nghỉ vẫn đúng lúc nhân vật nói tiếp nhờ chèn lặng vào đúng chỗ "
                                     "bộ đọc tự ngắt ở dấu phẩy")
-        self.d_autoshort = g.row("AI tự rút gọn câu quá dài", Switch(bool(st.get("dub_auto_shorten", True))))
-        self.d_autoshort.setToolTip("Khi bấm Tạo bản lồng tiếng: câu vẫn quá dài sau khi tăng tốc được AI viết lại ngắn "
-                                    "hơn rồi đọc lại (cần công cụ dịch AI; câu bạn tự sửa lời không bị đổi)")
+        self.d_autoshort = g.row("AI tự rút gọn câu quá dài", Switch(bool(st.get("dub_auto_shorten", False))))
+        self.d_autoshort.setToolTip(C.AUTOSHORT_HELP.replace("tab Lồng tiếng mục 3", "tab Tự động bước 3"))
         mix.add(g)
         self.d_overflow.currentIndexChanged.connect(self._dub_layout_changed)
         for w in (self.d_maxspeed, self.d_lead, self.d_maxlag, self.d_pause_min):
@@ -3304,7 +3320,7 @@ class ProjectPage(QWidget):
         self.d_pauses.toggledOn.connect(self._dub_layout_changed)
         self.d_by_clause.toggledOn.connect(self._dub_layout_changed)
         self.d_follow.toggledOn.connect(self._dub_follow_changed)
-        self.d_autoshort.toggledOn.connect(self._dub_autoshort_changed)
+        self.d_autoshort.toggled.connect(lambda on: self._shorten_sw_changed("dub_auto_shorten", on))
         self._update_overflow_help()
         gen = GradientButton("Tạo bản lồng tiếng", "mic", big=True)
         gen.clicked.connect(self.run_dub)
@@ -4475,6 +4491,12 @@ class ProjectPage(QWidget):
             self.a_review.setChecked(bool(st.get("ai_review_after_translate", False)))
             self.a_songai.setChecked(bool(st.get("ai_song_filter", True)))
             self.a_fill.setChecked(bool(st.get("translate_fill", False)))
+            for key, names in SHORTEN_SW.items():
+                for name in names:
+                    w = getattr(self, name, None)
+                    if w is not None:
+                        w.setChecked(bool(st.get(key, False)))
+            self._fill_enable()
             self.a_spktag.setChecked(bool(st.get("translate_speakers", True)))
             set_combo(self.a_addr, st.get("addr_unsure", "drop"))
             on = bool(st.get("split_long_trans", True))
@@ -5013,10 +5035,12 @@ class ProjectPage(QWidget):
 
         eng = self.a_engine.currentData()
         ai = eng not in LOCAL_ENGINES and eng != pipeline.NO_TRANSLATE
-        for name in ("a_skill", "a_clean", "a_join", "a_songai", "a_review", "a_fill", "a_spktag", "a_addr", "s_skill"):
+        for name in ("a_skill", "a_clean", "a_join", "a_songai", "a_review", "a_fill", "a_spktag", "a_addr", "s_skill",
+                     "a_fit", "s_fit", "a_autoshort", "d_autoshort"):
             w = getattr(self, name, None)
             if w is not None:
                 w.setEnabled(ai)
+        self._fill_enable()
         for name in ("a_vtrans", "s_vtrans"):   # chỉ Gemini nhận video
             w = getattr(self, name, None)
             if w is not None:
@@ -6740,7 +6764,7 @@ class ProjectPage(QWidget):
         self.d_pauses.setChecked(bool(st.get("dub_pauses", True)))
         self.d_pause_min.setValue(float(st.get("dub_pause_min", 0.3)))
         self.d_by_clause.setChecked(bool(st.get("dub_by_clause", True)))
-        self.d_autoshort.setChecked(bool(st.get("dub_auto_shorten", True)))
+        self.d_autoshort.setChecked(bool(st.get("dub_auto_shorten", False)))
         self._update_overflow_help()
 
     def _dub_layout_changed(self, *_):
@@ -6928,11 +6952,31 @@ class ProjectPage(QWidget):
         finally:
             self.loading = was
 
-    def _dub_autoshort_changed(self, on: bool):
-        if not self.loading:
-            from ..config import save_settings
+    def _shorten_sw_changed(self, key: str, on: bool):
+        """Công tắc rút gọn (2.4.10): dub_fit = rút gọn lúc dịch + AI kiểm tra; dub_auto_shorten = AI tự rút gọn khi lồng
+        tiếng. Mỗi cài đặt có 2 công tắc luôn giống nhau (SHORTEN_SW)."""
+        for name in SHORTEN_SW[key]:
+            w = getattr(self, name, None)
+            if w is not None and w.isChecked() != bool(on):
+                w.blockSignals(True)
+                w.setChecked(bool(on))
+                w.blockSignals(False)
+        self._fill_enable()
+        if getattr(self, "loading", True):
+            return
+        self._save_setting(key, bool(on))
 
-            save_settings({"dub_auto_shorten": on})
+    def _fill_enable(self):
+        """'Câu ngắn nói đầy đủ hơn' chỉ có tác dụng khi gửi độ dài (bật rút gọn bản dịch) và dùng công cụ dịch AI."""
+        w = getattr(self, "a_fill", None)
+        sw = getattr(self, "a_fit", None) or getattr(self, "s_fit", None)
+        if w is None or sw is None:
+            return
+        from ..translate import LOCAL_ENGINES
+
+        eng = self.a_engine.currentData() if getattr(self, "a_engine", None) is not None else None
+        ai = eng not in LOCAL_ENGINES and eng != pipeline.NO_TRANSLATE
+        w.setEnabled(bool(sw.isChecked()) and ai)
 
     def _relayout(self, what: str, replay_row: int | None = None, deleted: int = 0):
         """Xếp lại bản lồng tiếng đang dùng theo cài đặt / cách xếp / câu mới (không đọc lại câu nào; chỉ ghi lại đoạn

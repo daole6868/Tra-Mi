@@ -666,6 +666,7 @@ async function translateScreen(pid) {
       select('Dịch sang', o.targets, v.target_lang, async (val) => { await post(`/api/p/${enc}/target`, { lang: val }); }),
       select('Thể loại phim', o.styles, v.translate_style, set('translate_style')),
       select('Kỹ năng AI', o.skills, v.translate_skill || '', set('translate_skill'))),
+    sw('AI rút gọn bản dịch cho vừa thời gian nói', v.dub_fit, set('dub_fit')),
     sw('AI kiểm tra lại bản dịch', v.ai_review_after_translate, set('ai_review_after_translate')),
     sw('Tách câu dịch dài', v.split_long_trans, set('split_long_trans')),
     sw('Tên riêng → Hán Việt', v.trans_name_fix, set('trans_name_fix')),

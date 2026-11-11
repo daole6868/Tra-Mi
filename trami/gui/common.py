@@ -169,6 +169,16 @@ OCR_READ_HELP = ("<b>Đọc chữ kỹ</b> (2.1.37)<br>"
                  "Cần tải PP-OCRv5 server (hoặc PP-OCRv6 medium) ở tab Tài liệu.<br>"
                  "Chữ bộ đọc không chắc được tô đỏ trong cột chữ gốc (từng chữ).")
 
+# 2.4.10: rút gọn bản dịch – mặc định TẮT (giữ bản dịch sát nghĩa), bật mới rút gọn
+FIT_HELP = ("Tắt (mặc định): bản dịch là bản dịch sát nghĩa gốc – AI KHÔNG rút gọn ở bước dịch lẫn bước 'AI kiểm tra lại "
+            "bản dịch'. Bật: mỗi câu gửi kèm số tiếng tối đa nói vừa thời gian nhân vật nói, AI chọn cách nói ngắn hơn "
+            "(vẫn đủ ý); 'AI kiểm tra lại bản dịch' rút gọn câu dài hơn mức đó. Chỉ với công cụ dịch AI. Câu đã dịch "
+            "trước đó giữ nguyên – muốn đổi thì 'Dịch lại tất cả' / 'Dịch câu đã tích'")
+AUTOSHORT_HELP = ("Tắt (mặc định): lồng tiếng đọc đúng bản dịch đang có, không đổi lời. Bật: khi đọc giọng (Tạo bản lồng "
+                  "tiếng / 3. Lồng tiếng / Tạo lại giọng câu đã tích) câu vẫn dài hơn chỗ trống dù đã tăng tốc tối đa "
+                  "-> AI viết lại ngắn hơn rồi đọc lại câu đó (cần công cụ dịch AI; câu bạn tự sửa lời không bị đổi). "
+                  "Cùng 1 công tắc với tab Lồng tiếng mục 3")
+
 
 def which_choices(lang: str = "vi") -> list[tuple[str, str]]:
     """Lựa chọn phụ đề ghép vào video theo tiếng đích ("Chỉ tiếng Anh", "Song ngữ Anh + Trung"…)."""

@@ -177,8 +177,9 @@ DEFAULT_SETTINGS: dict = {
     "trans_name_kinds": "all",        # all / people (chỉ tên người) / places (chỉ địa danh, môn phái, đồ vật) – 2.4.4
     "trans_term_fix": False,          # từ thường (viết thường) còn để pinyin "jianghu" -> "giang hồ" (2.4.4)
     "trans_slang": False,             # từ lóng / tiếng mạng (躺平, yyds…) -> gửi nghĩa quen dùng cho công cụ dịch (2.4.2)
-    "dub_fit": True,                  # AI dịch vừa thời lượng câu (giới hạn số tiếng)
-    "dub_auto_shorten": True,         # câu đọc vẫn quá dài -> AI rút gọn rồi đọc lại
+    "dub_fit": False,                 # AI rút gọn bản dịch cho vừa thời gian nói (lúc dịch + AI kiểm tra); 2.4.10: mặc định
+                                      # tắt = giữ bản dịch sát nghĩa
+    "dub_auto_shorten": False,        # câu đọc vẫn quá dài -> AI rút gọn rồi đọc lại; 2.4.10: mặc định tắt (giữ bản dịch)
     # nút "AI rút gọn" (tab Lồng tiếng, 2.3.6)
     "shorten_mode": "speech",         # rút cho vừa: speech = thời gian nhân vật nói / slot = chỗ trống tới câu sau (cũ)
     "shorten_speed": 1.1,             # ... khi giọng đọc nhanh tối đa (×)

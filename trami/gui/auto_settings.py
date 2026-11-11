@@ -42,6 +42,7 @@ class AutoSettingsDialog(QDialog):
         self.clean = f.row("AI sửa lỗi nghe trước khi dịch", Switch(bool(s.get("ai_clean_before_translate", False))))
         self.join = f.row("AI nối câu trước khi dịch", Switch(pipeline.pre_translate_ai(s)[1]))
         self.songai = f.row("AI lọc lời bài hát trước khi dịch", Switch(bool(s.get("ai_song_filter", True))))
+        self.fit = f.row("AI rút gọn bản dịch cho vừa thời gian nói", Switch(bool(s.get("dub_fit", False))), C.FIT_HELP)
         self.review = f.row("AI kiểm tra lại bản dịch", Switch(bool(s.get("ai_review_after_translate", False))))
         self.fill = f.row("Câu ngắn nói đầy đủ hơn cho vừa thời gian", Switch(bool(s.get("translate_fill", False))))
         from ..hanviet import NAME_MODES
@@ -64,6 +65,8 @@ class AutoSettingsDialog(QDialog):
                            "Chưa nghe phim nên chưa biết có những người nói nào: chọn 1 giọng cho tất cả, hoặc tự gán "
                            "giọng nam / nữ theo từng người nói")
         self.voice.setMinimumWidth(280)
+        self.autoshort = f.row("AI tự rút gọn câu quá dài khi lồng tiếng",
+                               Switch(bool(s.get("dub_auto_shorten", False))), C.AUTOSHORT_HELP)
         self.parallel = f.row("Vừa tách vừa dịch", Switch(bool(s.get("auto_parallel", False))))
         self.denoise = f.row("Lọc nhiễu âm thanh", Switch(bool(pv["denoise"])))
         self.target.currentIndexChanged.connect(self._fill_voices)
@@ -102,6 +105,7 @@ class AutoSettingsDialog(QDialog):
                 "ai_clean_before_translate": self.clean.isChecked(), "ai_join_before_translate": self.join.isChecked(),
                 "ai_song_filter": self.songai.isChecked(),
                 "ai_review_after_translate": self.review.isChecked(), "translate_fill": self.fill.isChecked(),
+                "dub_fit": self.fit.isChecked(), "dub_auto_shorten": self.autoshort.isChecked(),
                 "trans_name_fix": self.namefix.isChecked(), "trans_name_kinds": self.namekind.currentData() or "all",
                 "trans_term_fix": self.termfix.isChecked(), "trans_slang": self.slang.isChecked(),
                 "split_long_trans": self.split_long.isChecked(), "tts_engine": self.tts.currentData(),

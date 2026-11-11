@@ -940,6 +940,21 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (`_pick_still_long`). `unshorten_lines` trả lời + tốc độ cũ (GUI: câu chỉ đổi tốc độ -> relayout). GUI hàng "Rút gọn
   cho vừa" `d_sh_mode` / `d_sh_speed` / `d_sh_rounds` / `d_sh_fb` / `d_sh_vmax` -> `_shorten_opts_changed` (Cài đặt),
   `_sync_shorten_opts` trong `sync_engine`. AI tự rút gọn khi lồng (tầng 3b) cũng gửi info + nhận 2 phương án.
+- Rút gọn bản dịch – 2 công tắc, MẶC ĐỊNH TẮT (2.4.10 – tắt = giữ bản dịch sát nghĩa, "bản gốc"): (1) Cài đặt `dub_fit`
+  "AI rút gọn bản dịch cho vừa thời gian nói" = rút gọn LÚC DỊCH + ở "AI kiểm tra lại bản dịch": bật -> `Translator`
+  (`fit_dub`) gửi ⟪≤N⟫ / ⟪M–N⟫ (`length_marker`) + luật 8 cũ; tắt -> không gửi ký hiệu, `system_prompt(fit=False)` thay khối
+  luật 8 (`LEN_RULE_VI_RE` / `_EN_RE`) bằng `NOFIT_RULE_VI` / `_EN` (dịch sát nghĩa, không tự rút gọn / thêm từ);
+  `skills.review_lines(fit=False)` không gửi "do_dai", mục 3 REVIEW_PROMPT (`REVIEW_LEN_RULE`) -> `REVIEW_NOLEN_RULE`
+  (`pipeline.ai_review` đọc dub_fit); bộ nhớ bản dịch AI khi tắt thêm đuôi khoá `NOFIT_KEY` " ⟪=⟫" (`Translator._ckey`;
+  `cache_text` / `BUDGET_RE` vẫn bỏ được) -> không lấy lại bản đã rút gọn của lần dịch có rút gọn (Dịch lại tất cả KHÔNG xoá
+  bộ nhớ dịch); "Câu ngắn nói đầy đủ hơn" (`translate_fill`) chỉ dùng khi bật (`_fill_enable` làm mờ ô). (2) `dub_auto_shorten`
+  "AI tự rút gọn câu quá dài khi lồng tiếng" (tầng 3b của `pipeline.dub`). GUI: `project_page.SHORTEN_SW` – dub_fit = `a_fit`
+  (tab Tự động bước 2) + `s_fit` (khung Dịch tab Phụ đề); dub_auto_shorten = `a_autoshort` (tab Tự động bước 3) +
+  `d_autoshort` (tab Lồng tiếng mục 3) -> `_shorten_sw_changed` (2 công tắc luôn giống nhau, lưu Cài đặt), `sync_engine`
+  nạp lại, mờ khi Google / Hy-MT2 (`_update_engine_label`); Cài đặt khung "Lồng tiếng, xoá phụ đề & xuất video" 2 ô cùng
+  khoá; hộp Thiết lập tự động `fit` / `autoshort`; điện thoại `api.SETTING_KEYS` dub_fit + công tắc ở sheet Cách dịch;
+  `C.FIT_HELP` / `AUTOSHORT_HELP`; `autoflow.summary` "AI … rút gọn bản dịch cho vừa thời gian nói" / "AI tự rút gọn câu quá
+  dài khi lồng". Nút "AI rút gọn" (tab Lồng tiếng mục 2, 2.3.6) không phụ thuộc 2 công tắc này.
 - Giờ HIỆN phụ đề (2.0.96): `subtitle.follow_dub(mode="always", lead, hold, min_dur, join)` + `pipeline.follow_params`
   (Cài đặt `sub_follow_mode` / `sub_lead` 0,1 / `sub_hold` 0,3 / `sub_min_dur` 1 / `sub_join_gap` 0,3, công tắc
   `dub_subs_follow`) – xem trước, xuất video, SRT đã dịch (`export_subs`, `_export_sub`); tab Phụ đề → Công cụ → "Giờ
@@ -1060,7 +1075,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (346 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (348 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -3113,7 +3128,19 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   "Khớp giọng ×1,00". Thử: Edge giả câu 1,6 s / miệng 1,0 s -> giãn ×0,77, xếp lại không đọc lại câu nào, mọi câu đọc
   ≤ ×1,01, giọng hết sau miệng ≈ 0,3 s (theo giờ giãn), xem trước = kết quả, Ctrl+Z / Ctrl+Y, mở lại dự án giữ thông số;
   giao diện offscreen (bật / tắt ẩn đúng ô, bảng xem trước). Chưa xem trên phim thật (hình chậm ×0,6 có lộ không).
+- 2.4.10: người dùng hỏi AI đang rút gọn ở bước nào (1 lúc dịch – ⟪≤N tiếng⟫ tự động bật sẵn; 2 AI kiểm tra lại bản dịch –
+  phải bật; 3 AI tự rút gọn khi lồng tiếng – tự động bật sẵn; 4 nút AI rút gọn – bấm tay) -> "bản dịch phải là bản gốc, 1 và
+  2 như nhau: tôi bật mới rút gọn, thêm công tắc ở bước dịch; lồng tiếng cũng vậy, thêm công tắc; 4 không cần". Làm: 1 công
+  tắc `dub_fit` cho cả 1 + 2, `dub_auto_shorten` cho 3, cả 2 mặc định tắt (xem Cấu trúc "Rút gọn bản dịch"). Tìm ra khi làm:
+  "Dịch lại tất cả" dùng lại bộ nhớ bản dịch (không xoá như "Dịch câu đã tích") + bản cũ còn nhớ bản rút gọn theo khoá câu
+  gốc trơn -> tắt rút gọn rồi dịch lại vẫn ra câu rút gọn -> khoá riêng `NOFIT_KEY`. Thử với AI giả: tắt -> không gửi ⟪⟫,
+  lời nhắc có luật 8 mới, không lấy bản nhớ cũ; bật -> như cũ; 2 chế độ không lẫn bộ nhớ; AI kiểm tra không gửi độ dài; giao
+  diện offscreen (2 cặp công tắc luôn giống nhau, lưu Cài đặt, ô "Câu ngắn…" mờ khi tắt, Google -> mờ).
 ## Vấn đề đang mở
+- 2.4.10: chờ người dùng chép file, mở dự án đã dịch: 2 công tắc rút gọn đang tắt (tab Tự động bước 2 / bước 3); muốn bản
+  dịch đầy đủ cho câu đã bị rút gọn trước đây -> tab Phụ đề → "Dịch lại tất cả" (hoặc tích câu → "Dịch câu đã tích"), câu
+  bị AI tự rút gọn lúc lồng -> tích → "Bỏ rút gọn" (tab Lồng tiếng mục 2); câu dịch đầy đủ dài hơn chỗ trống sẽ đọc nhanh
+  hơn / câu sau lùi (theo cách xếp) – bật lại công tắc nếu cần.
 - 2.4.9: chờ người dùng chép file, mở phim đã lồng (nên tách giọng trước – mục 1 – để đo lúc miệng thôi nói): tab Lồng
   tiếng → mục 3 → khối Giãn video → bật "Khớp giọng" → Xem trước → Áp dụng; xem chỗ hình chậm có lộ không (tăng "Hình
   chậm nhất" ×0,7–0,8 + AI rút gọn câu ⚠), giọng ×1,00 có khớp miệng không (lệch nhiều -> giảm "Giọng dài hơn miệng").

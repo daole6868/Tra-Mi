@@ -4083,8 +4083,11 @@ def ai_review(p: Project, settings: dict | None = None, engine: str | None = Non
     target = target_lang(p, settings)
     L = langs.INFO[target]
     fill = bool(settings.get("translate_fill", False))
+    # 2.4.10: chỉ khi bật "AI rút gọn bản dịch cho vừa thời gian nói" (dub_fit) mới gửi độ dài + cho AI rút gọn câu dài
+    fit = bool(settings.get("dub_fit", False))
     # độ dài theo thời gian câu thoại: "≤N tiếng" hoặc "M–N tiếng" (bật "Câu ngắn nói đầy đủ hơn": câu ngắn hơn M)
-    items = [(i, x.text, x.trans, length_marker(x.duration, target, L["unit_vi"], fill).strip("⟪⟫"))
+    items = [(i, x.text, x.trans,
+              length_marker(x.duration, target, L["unit_vi"], fill).strip("⟪⟫") if fit else None)
              for i, x in enumerate(segs)
              if x.trans.strip() and x.text.strip() and not x.extra.get("trans_user") and (rows is None or i in rows)]
     if not items:
@@ -4097,7 +4100,7 @@ def ai_review(p: Project, settings: dict | None = None, engine: str | None = Non
                                 progress, cancel, ctx=[(x.text, x.trans) for x in segs],
                                 genre=genres.form(settings.get("translate_style"), target, settings),
                                 parallel=engine_parallel(settings, eng), who=speaker_tags(p, settings, segs),
-                                addr=addr_mode(settings))
+                                addr=addr_mode(settings), fit=fit)
     for i, (new, why) in fixes.items():
         segs[i].extra["trans_before_review"] = segs[i].trans
         segs[i].extra["review_note"] = why
@@ -4529,7 +4532,7 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     long_ = [x for x in (stats.get("too_long") or []) if not segs[x[0]].extra.get("trans_user")
              and (only is None or x[0] in only)]
     shortened = 0
-    if long_ and settings.get("dub_auto_shorten", True) and \
+    if long_ and settings.get("dub_auto_shorten", False) and \
             settings.get("translate_engine", "google") not in ("google", "hymt", NO_TRANSLATE):
         from .translate import Translator, budget_for, syllables
 

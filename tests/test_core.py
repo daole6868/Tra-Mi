@@ -5200,7 +5200,8 @@ def test_ai_song_filter_before_translate(monkeypatch):
 
     monkeypatch.setattr(tr.LLMClient, "chat", fake_chat)
     st_ = {"translate_engine": "openai", "openai_api_key": "x", "openai_base_url": "https://api.example.com/v1",
-           "ai_clean_before_translate": False, "ai_review_after_translate": True, "translate_fill": True}
+           "ai_clean_before_translate": False, "ai_review_after_translate": True, "translate_fill": True,
+           "dub_fit": True}      # 2.4.10: rút gọn mặc định tắt – bật để kiểm tra khoảng độ dài M–N
     p = Project.create("loc_loi_hat")
     p.segments = [Segment(0, 1, "你好"), Segment(1.2, 3.5, "你去哪儿我爱你到永远"), Segment(4, 8, "我爱你到永远"),
                   Segment(9, 10, "走吧"), Segment(11, 13, "请不吝点赞订阅转发")]
@@ -15337,7 +15338,7 @@ def test_address_speakers_unsure_240(monkeypatch):
     assert "NGƯỜI NÓI TỪNG DÒNG" in user and "2: S2 · nữ" in user and "1: S1 · nam" in user
     assert [x.trans for x in segs] == ["Em muốn ăn gì?", "Tùy anh.", "Đi đâu thế?"]
     assert segs[2].extra.get("addr_unsure") and not segs[1].extra.get("addr_unsure")
-    assert any(k.endswith("随你 ⟦F⟧") for k in t.cache)          # "随你" của nữ nhớ riêng
+    assert any(k.endswith("⟦F⟧") and tr.cache_text(k) == "随你" for k in t.cache)   # "随你" của nữ nhớ riêng
     # câu đã tích: kèm dòng liền trước / sau THẬT trong phim (có nhãn + bản dịch)
     asked.clear()
     t2 = tr.Translator({"openai_api_key": "x", "dub_fit": False}, "openai", target="vi")
@@ -16011,4 +16012,130 @@ def test_sync_gui_249(monkeypatch):
         save_settings({"dense_sync": False, "dense_sync_speed": 1.0, "dense_sync_lag": 0.3, "dense_sync_floor": 0.6,
                        "dense_sync_min": 0.05})
         win.timer.stop()
+        p.delete()
+
+
+def test_trans_shorten_switch_2410(monkeypatch):
+    """2.4.10: mặc định dịch AI giữ bản dịch sát nghĩa – không gửi ⟪≤N⟫, luật 8 'không tự rút gọn', AI kiểm tra không rút
+    gọn câu dài, khoá bộ nhớ dịch riêng (không lấy lại bản đã rút gọn của lần dịch có rút gọn); bật dub_fit -> như cũ.
+    AI tự rút gọn khi lồng tiếng (dub_auto_shorten) mặc định tắt."""
+    from trami import config, skills, translate as tr
+
+    assert config.DEFAULT_SETTINGS["dub_fit"] is False and config.DEFAULT_SETTINGS["dub_auto_shorten"] is False
+    for lg in ("vi", "en", "ja"):
+        off, on = tr.system_prompt(lg, fit=False), tr.system_prompt(lg)
+        assert "⟪≤N" not in off and "⟪≤N" in on
+        assert (tr.NOFIT_RULE_VI if lg == "vi" else tr.NOFIT_RULE_EN) in off
+        assert "9." in off and "13." in off                 # các luật khác giữ nguyên
+    sent = []
+
+    def fake_chat(self, system, user, max_tokens=8000, temperature=0.3):
+        payload = json.loads(user[user.rindex("{"):])
+        sent.append((system, payload))
+        return json.dumps({k: {"dau": tr.BUDGET_RE.sub(" ", v).strip()[:3], "dich": "Bản dịch đầy đủ."}
+                           for k, v in payload.items()}, ensure_ascii=False)
+
+    monkeypatch.setattr(tr.LLMClient, "chat", fake_chat)
+    segs = [Segment(0, 1.0, "你好啊朋友们"), Segment(2, 4.0, "我们今天去哪里吃饭呢")]
+    base = {"openai_api_key": "x", "translate_speakers": False}
+    old = {tr.cache_key("openai", "auto", "vi", "你好啊朋友们"): "Chào."}     # bản rút gọn nhớ từ bản cũ (khoá trơn)
+    t = tr.Translator(dict(base), "openai", target="vi", cache=dict(old))
+    assert t.fit_dub is False
+    t.translate_segments([Segment(x.start, x.end, x.text) for x in segs], auto_terms=False)
+    system, payload = sent[-1]
+    assert all("⟪" not in v for v in payload.values()) and len(payload) == 2   # câu nhớ cũ (rút gọn) không lấy lại
+    assert tr.NOFIT_RULE_VI in system and "⟪≤N" not in system
+    assert all(tr.NOFIT_KEY in k for k in t.cache if k not in old)
+    assert all(tr.cache_text(k) in ("你好啊朋友们", "我们今天去哪里吃饭呢") for k in t.cache)
+    # bật rút gọn: gửi ⟪≤N tiếng⟫ + luật 8 cũ, khoá có ký hiệu độ dài
+    sent.clear()
+    t2 = tr.Translator({**base, "dub_fit": True}, "openai", target="vi")
+    t2.translate_segments([Segment(x.start, x.end, x.text) for x in segs], auto_terms=False)
+    system, payload = sent[-1]
+    assert all("⟪≤" in v for v in payload.values()) and "⟪≤N tiếng⟫" in system
+    assert not any(tr.NOFIT_KEY in k for k in t2.cache)
+    # bộ nhớ của từng chế độ không lẫn: tắt lại -> không lấy bản của chế độ bật
+    sent.clear()
+    t3 = tr.Translator(dict(base), "openai", target="vi", cache=dict(t2.cache))
+    t3.translate_segments([Segment(x.start, x.end, x.text) for x in segs], auto_terms=False)
+    assert sent and len(sent[-1][1]) == 2
+    # AI kiểm tra bản dịch: tắt -> không gửi độ dài, mục 3 "không rút gọn"
+    seen = []
+
+    class LLM:
+        def chat(self, sysp, user, **k):
+            seen.append((sysp, user))
+            return "{}"
+
+    skills.review_lines(LLM(), [(0, "你好", "Xin chào các bạn.", None)], "", "", "tiếng Trung", "tiếng Việt", "tiếng",
+                        fit=False)
+    sysp, user = seen[-1]
+    assert skills.REVIEW_NOLEN_RULE in sysp and skills.REVIEW_LEN_RULE not in sysp and "do_dai" not in user
+    skills.review_lines(LLM(), [(0, "你好", "Xin chào các bạn.", 6)], "", "", "tiếng Trung", "tiếng Việt", "tiếng")
+    sysp, user = seen[-1]
+    assert skills.REVIEW_LEN_RULE in sysp and '"do_dai"' in user
+    # tóm tắt thiết lập tự động
+    from trami import autoflow
+
+    s = {**config.DEFAULT_SETTINGS, "translate_engine": "gemini"}
+    assert "rút gọn" not in autoflow.summary(s)
+    s.update(dub_fit=True, dub_auto_shorten=True, auto_preset={"dub": True})
+    sm = autoflow.summary(s)
+    assert "rút gọn bản dịch cho vừa thời gian nói" in sm and "AI tự rút gọn câu quá dài khi lồng" in sm
+
+
+def test_trans_shorten_gui_2410():
+    """2.4.10 giao diện: 'AI rút gọn bản dịch cho vừa thời gian nói' ở tab Tự động bước 2 = khung Dịch tab Phụ đề (1 cài
+    đặt dub_fit, mặc định tắt; 'Câu ngắn nói đầy đủ hơn' chỉ bấm được khi bật); 'AI tự rút gọn câu quá dài khi lồng tiếng'
+    ở tab Tự động bước 3 = tab Lồng tiếng mục 3 (dub_auto_shorten, mặc định tắt); Google -> mờ."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from trami.config import load_settings, save_settings
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.gui.widgets import set_combo
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    keep = {k: load_settings().get(k) for k in ("dub_fit", "dub_auto_shorten", "translate_engine")}
+    save_settings({"dub_fit": False, "dub_auto_shorten": False, "translate_engine": "gemini"})
+    p = Project.create("shortgui")
+    p.segments = [Segment(0, 1, "你好")]
+    p.save()
+    win = MainWindow()
+    try:
+        win.show()
+        win.open_project(p.id)
+        pp = win.project_page
+        app.processEvents()
+        assert not pp.a_fit.isChecked() and not pp.s_fit.isChecked() and not pp.a_fill.isEnabled()
+        assert not pp.a_autoshort.isChecked() and not pp.d_autoshort.isChecked()
+        pp.s_fit.setChecked(True)
+        assert pp.a_fit.isChecked() and pp.a_fill.isEnabled() and load_settings()["dub_fit"] is True
+        pp.a_fit.setChecked(False)
+        assert not pp.s_fit.isChecked() and load_settings()["dub_fit"] is False
+        pp.a_autoshort.setChecked(True)
+        assert pp.d_autoshort.isChecked() and load_settings()["dub_auto_shorten"] is True
+        pp.d_autoshort.setChecked(False)
+        assert not pp.a_autoshort.isChecked() and load_settings()["dub_auto_shorten"] is False
+        set_combo(pp.a_engine, "google")
+        app.processEvents()
+        assert not pp.a_fit.isEnabled() and not pp.s_fit.isEnabled() and not pp.a_autoshort.isEnabled()
+        set_combo(pp.a_engine, "gemini")
+        app.processEvents()
+        assert pp.a_fit.isEnabled() and pp.a_autoshort.isEnabled()
+        # Cài đặt / hộp Thiết lập tự động cùng cài đặt
+        from trami.gui.auto_settings import AutoSettingsDialog
+
+        save_settings({"dub_fit": True})
+        dlg = AutoSettingsDialog(win)
+        v = dlg.values()
+        assert v["dub_fit"] is True and v["dub_auto_shorten"] is False
+        dlg.deleteLater()
+    finally:
+        save_settings(keep)
+        win.timer.stop()
+        win.close()
         p.delete()

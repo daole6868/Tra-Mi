@@ -83,6 +83,8 @@ def summary(settings: dict | None = None) -> str:
                 ai.append("lọc lời hát")
             if st.get("ai_review_after_translate", False):
                 ai.append("kiểm tra bản dịch")
+            if st.get("dub_fit", False):     # 2.4.10: mặc định tắt = giữ bản dịch sát nghĩa
+                ai.append("rút gọn bản dịch cho vừa thời gian nói")
             if ai:
                 parts.append("AI " + ", ".join(ai))
         if langs.norm(o["target"]) == "vi":    # 2.4.3/2.4.4: tên pinyin -> Hán Việt / từ lóng (mặc định tắt)
@@ -110,6 +112,10 @@ def summary(settings: dict | None = None) -> str:
         v = o["voice"]
         vn = "tự gán nam / nữ" if v == "@auto" else (voice_label(v) if v else "")
         parts.append("lồng tiếng " + name(C.TTS_ENGINES, o["tts_engine"]).split(" ")[0] + (f" ({vn})" if vn else ""))
+        from .translate import LOCAL_ENGINES as _LOCAL
+
+        if st.get("dub_auto_shorten", False) and o["engine"] not in _LOCAL and o["engine"] != "none":
+            parts.append("AI tự rút gọn câu quá dài khi lồng")
     else:
         parts.append("không lồng tiếng")
     return " · ".join(p for p in parts if p)

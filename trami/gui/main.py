@@ -1091,10 +1091,8 @@ class SettingsPage(QWidget):
                                  "Sau khi nhận dạng: mốc câu sát lúc nhân vật nói, tách câu ở chỗ nghỉ")
         self.split_spk = f.row("Tách câu 2 người nói liền nhau", Switch(),
                                "Khi phân biệt người nói: câu có 2 giọng khác nhau được tách đôi")
-        self.dub_fit = f.row("AI dịch vừa thời lượng", Switch(),
-                             "Gửi kèm số tiếng tối đa theo thời gian nói để giọng lồng khớp nhân vật")
-        self.dub_short = f.row("Tự rút gọn câu đọc quá dài", Switch(),
-                               "Sau khi lồng tiếng: câu vẫn quá dài được AI viết ngắn lại rồi đọc lại")
+        self.dub_fit = f.row("AI rút gọn bản dịch cho vừa thời gian nói", Switch(), C.FIT_HELP)
+        self.dub_short = f.row("AI tự rút gọn câu quá dài khi lồng tiếng", Switch(), C.AUTOSHORT_HELP)
         self.inpaint = f.row("Xoá phụ đề", combo([("lama", "AI LaMa (đẹp)"), ("opencv", "OpenCV (nhanh)")]))
         self.codec = f.row("Bộ mã hoá video", combo([("libx264", "H.264 CPU (tương thích nhất)"),
                                                      ("h264_nvenc", "H.264 GPU NVIDIA (rất nhanh)"),

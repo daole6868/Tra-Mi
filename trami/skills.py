@@ -148,7 +148,7 @@ Việt cho người dịch sang {lang}. Chỉ trả về JSON:
  "ghi_chu": "những điều người dịch cần biết để dịch đúng ngữ cảnh (câu đùa, bối cảnh, ẩn ý)"}}"""
 
 REVIEW_PROMPT = """Bạn là biên tập viên kiểm tra bản dịch phụ đề {src} -> {lang} để LỒNG TIẾNG. Mỗi mục (khoá = số thứ tự câu
-trong phim) có câu gốc, bản dịch và độ dài nói vừa thời gian câu thoại ("≤N" = tối đa N; "M–N" = từ M tới N). Mỗi câu
+trong phim) có câu gốc, bản dịch{len_intro}. Mỗi câu
 đọc kèm ít nhất 2 câu trước và 2 câu sau nó (trong danh sách hoặc phần NGỮ CẢNH) để biết ai nói với ai, câu nào trả lời
 câu nào. Kiểm tra và CHỈ sửa câu có lỗi thật – câu đã đúng nghĩa thì KHÔNG sửa chỉ vì muốn hay hơn; chỉ sửa trong
 từng câu, không gộp / chuyển ý sang câu khác:
@@ -163,9 +163,7 @@ từng câu, không gộp / chuyển ý sang câu khác:
    / dùng cặp trung tính (cậu – tớ, ngươi – ta) để nguyên – KHÔNG đổi sang anh / em, chị / em khi chưa chắc.
    KHÔNG đổi xưng hô mà câu gốc đã ghi rõ chỉ để khớp hồ sơ phim / thể loại. Tên riêng, thuật ngữ không thống nhất với
    HỒ SƠ PHIM / các câu khác -> sửa.
-3. Độ dài: đếm số tiếng (âm tiết; số đếm theo cách đọc). Dài hơn N -> rút gọn, giữ ý (bỏ từ thừa, dùng từ ngắn hơn).
-   Ngắn hơn M -> có thể dùng câu đủ thành phần (chủ ngữ, xưng hô, từ nối) – KHÔNG thêm từ đệm, tiếng cảm thán, ý mới,
-   tên / thông tin. Câu chỉ có "≤N": ngắn thì để nguyên. Dư / thiếu 1–2 tiếng thì để nguyên.
+{len_rule}
 4. Còn chữ Hán, sai chính tả, sai dấu câu: dấu phẩy chen giữa 1 cụm từ ("một món, đồ tốt", "Thiên Kiếm, Tông") -> chuyển về
    ranh giới tự nhiên; thiếu dấu câu cuối (câu hỏi thiếu "?", câu kể thiếu ".") -> thêm.
 5. Sai giọng điệu (phim hài mà câu đùa không còn buồn cười…).
@@ -173,6 +171,16 @@ từng câu, không gộp / chuyển ý sang câu khác:
 7. Bản dịch lặp lại 1 vế vì câu gốc NÓI VẤP / nói dở rồi nói lại (我不管闲，我不管闲事) hoặc bộ nghe lặp 1 cụm -> chỉ giữ
    1 lần. Lặp có chủ ý để nhấn mạnh / gọi / giục (让一让，让一让) thì để nguyên.
 Chỉ trả về JSON: {{"<số>": {{"sua": "bản dịch mới", "ly_do": "lý do ngắn bằng tiếng Việt"}}}}. Câu đã ổn thì KHÔNG ghi."""
+
+
+# mục độ dài của REVIEW_PROMPT: có / không "AI rút gọn bản dịch cho vừa thời gian nói" (Cài đặt dub_fit, 2.4.10)
+REVIEW_LEN_INTRO = ' và độ dài nói vừa thời gian câu thoại ("≤N" = tối đa N; "M–N" = từ M tới N)'
+REVIEW_LEN_RULE = """3. Độ dài: đếm số tiếng (âm tiết; số đếm theo cách đọc). Dài hơn N -> rút gọn, giữ ý (bỏ từ thừa, dùng từ ngắn hơn).
+   Ngắn hơn M -> có thể dùng câu đủ thành phần (chủ ngữ, xưng hô, từ nối) – KHÔNG thêm từ đệm, tiếng cảm thán, ý mới,
+   tên / thông tin. Câu chỉ có "≤N": ngắn thì để nguyên. Dư / thiếu 1–2 tiếng thì để nguyên."""
+REVIEW_NOLEN_RULE = """3. Độ dài: KHÔNG sửa câu chỉ vì dài / ngắn – không rút gọn (bỏ từ, đổi sang cách nói ngắn hơn) bản dịch đã đúng
+   nghĩa, không thêm từ cho dài ra. Câu phải sửa vì lỗi khác thì giữ độ dài như dịch sát câu gốc."""
+REVIEW_PROMPT = REVIEW_PROMPT.replace("{len_intro}", REVIEW_LEN_INTRO).replace("{len_rule}", REVIEW_LEN_RULE)
 
 
 # nội dung mặc định của "Dịch chuẩn" ở các bản trước (sha1 16 ký tự) – bản lưu y nguyên thì coi như chưa sửa
@@ -449,23 +457,27 @@ def review_lines(llm, items: list[tuple[int, str, str, int | str]], profile: str
                  target_name: str, unit: str, lang: str = "vi", progress=None, cancel=None,
                  ctx: list[tuple[str, str]] | None = None, genre: str = "",
                  parallel: bool = False, who: list[str] | None = None,
-                 addr: str = "drop") -> dict[int, tuple[str, str]]:
+                 addr: str = "drop", fit: bool = True) -> dict[int, tuple[str, str]]:
     """items: (chỉ số câu, câu gốc, bản dịch, độ dài: số tối đa hoặc chữ "M–N tiếng"). ctx: (câu gốc, bản dịch) của MỌI
     câu trong phim – câu ±2 quanh câu kiểm tra mà không có trong lô được gửi kèm làm ngữ cảnh. genre: form thể loại phim.
     parallel: gửi tất cả các lô cùng lúc ("Gửi tất cả cùng lúc" của công cụ dịch, 2.1.23). who: nhãn người nói + nam / nữ
-    MỌI câu trong phim ("S2 · nữ", 2.4.0); addr: cách làm khi không chắc xưng hô. Trả về {chỉ số: (bản dịch mới, lý do)}."""
+    MỌI câu trong phim ("S2 · nữ", 2.4.0); addr: cách làm khi không chắc xưng hô; fit False (tắt "AI rút gọn bản dịch cho
+    vừa thời gian nói", 2.4.10): không gửi độ dài, AI không rút gọn câu. Trả về {chỉ số: (bản dịch mới, lý do)}."""
     from .ffmpeg import Cancelled
     from .translate import GENRE_HEAD_VI, address_tail, punct_fix, run_parallel
 
     out: dict[int, tuple[str, str]] = {}
     sysp = REVIEW_PROMPT.format(src=src_name, lang=target_name)
+    if not fit:
+        sysp = sysp.replace(REVIEW_LEN_INTRO, "").replace(REVIEW_LEN_RULE, REVIEW_NOLEN_RULE)
     if (genre or "").strip():
         sysp += f"\n\n{GENRE_HEAD_VI}:\n" + genre.strip()
 
     def one(a: int) -> dict[int, tuple[str, str]]:
         chunk = items[a:a + REVIEW_CHUNK]
         by_no = {i + 1: (i, zh, tr, mx) for i, zh, tr, mx in chunk}   # khoá = số thứ tự câu trong phim
-        payload = {str(i + 1): {"goc": zh, "dich": tr, "do_dai": mx if isinstance(mx, str) else f"≤{mx} {unit}",
+        payload = {str(i + 1): {"goc": zh, "dich": tr,
+                                **({"do_dai": mx if isinstance(mx, str) else f"≤{mx} {unit}"} if fit and mx else {}),
                                 **({"nguoi_noi": who[i]} if who and i < len(who) else {})}
                    for i, zh, tr, mx in chunk}
         near = []

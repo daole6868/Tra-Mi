@@ -208,15 +208,19 @@ def address_tail(target: str, addr: str = "drop") -> str:
     return ADDRESS_TAIL_EN + ADDR_TAIL_EN[addr]
 
 
-def system_prompt(target: str, source: str = "zh", fill: bool = False, genre: str = "", addr: str = "drop") -> str:
+def system_prompt(target: str, source: str = "zh", fill: bool = False, genre: str = "", addr: str = "drop",
+                  fit: bool = True) -> str:
     """Lời nhắc hệ thống cho AI theo ngôn ngữ đích. fill: có ký hiệu ⟪M–N⟫ (Cài đặt "Câu ngắn nói đầy đủ hơn…"); genre:
-    form thể loại phim (genres.form) gắn cuối; addr: cách làm khi không chắc xưng hô (luật 5f, ADDR_MODES)."""
+    form thể loại phim (genres.form) gắn cuối; addr: cách làm khi không chắc xưng hô (luật 5f, ADDR_MODES); fit False:
+    không gửi giới hạn độ dài -> luật 8 "dịch sát nghĩa, không tự rút gọn" (2.4.10)."""
     target = langs.norm(target)
     addr = addr if addr in ADDR_MODES else "drop"
     src_vi, src_en = SRC_NAMES.get(source, SRC_NAMES["zh"])
     if target == "vi":
         sp = SYSTEM_PROMPT.replace("từ tiếng Trung sang", f"từ {src_vi} sang", 1).replace("{fill}", FILL_RULE_VI if fill else "")
         sp = sp.replace("{addr}", ADDR_RULE_VI[addr])
+        if not fit:
+            sp = LEN_RULE_VI_RE.sub(lambda _m: NOFIT_RULE_VI, sp, count=1)
         return sp + (f"\n\n{GENRE_HEAD_VI}:\n{genre.strip()}" if (genre or "").strip() else "")
     L = langs.INFO[target]
     fill_en = FILL_RULE_EN.format(unit=L["unit_ai"]) if fill else ""
@@ -291,7 +295,20 @@ Mandatory rules:
    with EVERY requested line number. "head" = copy exactly the first 3 characters of that source line (without
    punctuation or spaces) – used to check that each translation sits on the right line. A line handled by rule 5f also
    gets "addr": "?" – {{"head": "…", "text": "…", "addr": "?"}}; other lines have no "addr"."""
+    if not fit:
+        sp = LEN_RULE_EN_RE.sub(lambda _m: NOFIT_RULE_EN, sp, count=1)
     return sp + (f"\n\n{GENRE_HEAD_EN}:\n{genre.strip()}" if (genre or "").strip() else "")
+
+
+# 2.4.10: tắt "AI rút gọn bản dịch cho vừa thời gian nói" (mặc định) -> không gửi ⟪≤N⟫, luật 8 thành "giữ đúng bản dịch
+# sát nghĩa" (thay đúng khối luật 8 có ký hiệu độ dài trong lời nhắc)
+LEN_RULE_VI_RE = re.compile(r"8\. ĐỘ DÀI:.*?KHÔNG chép ký hiệu ⟪⟫ vào bản dịch\.", re.S)
+LEN_RULE_EN_RE = re.compile(r"8\. LENGTH:.*?NEVER copy the ⟪⟫ marker into the translation\.", re.S)
+NOFIT_RULE_VI = ("8. ĐỘ DÀI: dịch sát nghĩa, đủ ý như câu gốc – KHÔNG tự rút gọn (bỏ từ, đổi sang cách nói ngắn hơn) cho vừa "
+                 "thời gian nói,\n   KHÔNG thêm từ cho dài ra.")
+NOFIT_RULE_EN = ("8. LENGTH: translate faithfully with the full meaning of the source – do NOT shorten (drop words, switch "
+                 "to shorter wording)\n   to fit the speaking time, do NOT add words to make it longer.")
+NOFIT_KEY = " ⟪=⟫"   # đuôi khoá bộ nhớ bản dịch AI khi không rút gọn: không lấy lại bản đã rút gọn của lần dịch trước
 
 
 SYL_PER_SEC = 4.6      # tiếng Việt lồng tiếng tự nhiên ~4–5 tiếng/giây (tiếng khác: langs.INFO[...]["rate"])
@@ -1361,7 +1378,7 @@ class Translator:
         self.batch = engine_batch(settings, self.engine)   # số câu mỗi lần gửi (khung riêng từng công cụ ở Cài đặt)
         self.parallel = engine_parallel(settings, self.engine)   # gửi tất cả các lần cùng lúc (2.1.23)
         self.llm = None if self.engine in LOCAL_ENGINES else LLMClient(settings, self.engine)
-        self.fit_dub = bool(settings.get("dub_fit", True))   # dịch vừa thời lượng để lồng tiếng khớp
+        self.fit_dub = bool(settings.get("dub_fit", False))   # AI rút gọn bản dịch cho vừa thời gian nói (2.4.10: mặc định tắt)
         # câu ngắn hơn hẳn chỗ trống -> nói đầy đủ hơn (2.1.13: mặc định TẮT – người dùng không muốn AI tự thêm từ)
         self.fill_short = bool(settings.get("translate_fill", False))
         self.genre = genres.form(self.style, self.target, settings)   # form thể loại phim (sửa được) -> lời nhắc hệ thống
@@ -1432,8 +1449,7 @@ class Translator:
                     segs[i].extra.pop("addr_unsure", None)
             if segs[i].trans and not untranslated(segs[i].trans, self.target):   # nhớ theo câu gốc -> không tốn API
                 f = n < len(flags) and flags[n]
-                self.cache.setdefault(cache_key(self.engine, self.style, self.target,
-                                                segs[i].text + self._gkey(who[n] if who else "")),
+                self.cache.setdefault(self._ckey(texts[n], who[n] if who else ""),
                                       (XH_MARK if f else "") + segs[i].trans)
         return segs
 
@@ -1465,6 +1481,13 @@ class Translator:
             out.append((b, a) if (b or a) else None)
             any_ = any_ or bool(b or a)
         return out if any_ and len(idx) < len(segs) else None
+
+    def _ckey(self, line: str, tag: str = "") -> str:
+        """Khoá bộ nhớ bản dịch của 1 dòng (đúng như dòng gửi đi – có ⟪≤N⟫ khi rút gọn). Dịch AI KHÔNG rút gọn (2.4.10)
+        thêm đuôi NOFIT_KEY: bản đã nhớ theo câu gốc từ các lần dịch có rút gọn trước đây không bị lấy lại."""
+        if self.llm and not self.fit_dub and not BUDGET_RE.search(line):
+            line = line + NOFIT_KEY
+        return cache_key(self.engine, self.style, self.target, line + self._gkey(tag))
 
     def _gkey(self, tag: str) -> str:
         """Đuôi khoá bộ nhớ bản dịch theo nam / nữ người nói: "随你" của nam và của nữ dịch riêng (2.4.0)."""
@@ -1612,8 +1635,7 @@ class Translator:
         dòng liền trước / sau trong phim của dòng không nằm cạnh nó trong danh sách. Sau khi chạy: self.addr_flags = dòng
         AI báo không chắc xưng hô (luật 5f)."""
         out: list[str | None] = [None] * len(lines)
-        keys = [cache_key(self.engine, self.style, self.target, l + self._gkey(who[i] if who else ""))
-                for i, l in enumerate(lines)]
+        keys = [self._ckey(l, who[i] if who else "") for i, l in enumerate(lines)]
         todo = []
         for i, l in enumerate(lines):
             hit = self.cache.get(keys[i])
@@ -1787,7 +1809,8 @@ class Translator:
 
     def system(self) -> str:
         """Lời nhắc hệ thống khi dịch: luật chung + form thể loại phim + kỹ năng của bạn."""
-        return with_skill(system_prompt(self.target, self.source, self.fit_dub and self.fill_short, self.genre, self.addr),
+        return with_skill(system_prompt(self.target, self.source, self.fit_dub and self.fill_short, self.genre, self.addr,
+                                        fit=self.fit_dub),
                           self.skill) + address_tail(self.target, self.addr)
 
     def _llm_batch(self, lines: list[str], ctx_before, ctx_after, summary: str, depth: int = 0,
