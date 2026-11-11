@@ -657,11 +657,16 @@ async function translateScreen(pid) {
   const sub = pg.querySelector('.top .sub');
   const set = (k) => async (val) => { await post('/api/settings', { [k]: val }); };
   const vt = sw('Dịch có nhìn hình (Gemini xem video)', v.translate_video, set('translate_video'), v.translate_engine !== 'gemini');
+  const VIS = ['gemini', 'openai', 'anthropic', 'ollama'];
+  const vs = sw('… chỉ gửi đoạn có lời', v.translate_video_speech !== false, set('translate_video_speech'), v.translate_engine !== 'gemini');
+  const vf = sw('Gửi ảnh khung từng câu cho AI', v.translate_frames, set('translate_frames'), !VIS.includes(v.translate_engine));
   pg.append(h('section', { class: 'card' }, h('h2', { text: 'Cách dịch' }),
     h('div', { class: 'grid2' },
       select('Dịch bằng', o.engines, v.translate_engine, async (val) => {
         await post('/api/settings', { translate_engine: val });
         vt.querySelector('button').disabled = val !== 'gemini';
+        vs.querySelector('button').disabled = val !== 'gemini';
+        vf.querySelector('button').disabled = !VIS.includes(val);
       }),
       select('Dịch sang', o.targets, v.target_lang, async (val) => { await post(`/api/p/${enc}/target`, { lang: val }); }),
       select('Thể loại phim', o.styles, v.translate_style, set('translate_style')),
@@ -673,7 +678,7 @@ async function translateScreen(pid) {
     select('Loại tên riêng được đổi', o.name_kinds || [], v.trans_name_kinds || 'all', set('trans_name_kinds')),
     sw('Từ thường còn pinyin → Hán Việt', v.trans_term_fix, set('trans_term_fix')),
     sw('Hiểu từ lóng / tiếng mạng', v.trans_slang, set('trans_slang')),
-    vt));
+    vt, vs, vf));
   const tmsg = h('div', { class: 'hidden' });
   const btnEmpty = h('button', { class: 'btn primary block', text: 'Dịch câu chưa dịch' });
   const btnAll = h('button', { class: 'btn grow', text: 'Dịch lại tất cả' });

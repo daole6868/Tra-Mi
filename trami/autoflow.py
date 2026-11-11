@@ -85,6 +85,10 @@ def summary(settings: dict | None = None) -> str:
                 ai.append("kiểm tra bản dịch")
             if st.get("dub_fit", False):     # 2.4.10: mặc định tắt = giữ bản dịch sát nghĩa
                 ai.append("rút gọn bản dịch cho vừa thời gian nói")
+            if st.get("translate_video") and o["engine"] == "gemini":     # 2.1.25 / 2.4.11
+                ai.append("xem video" + (" (chỉ đoạn có lời)" if st.get("translate_video_speech", True) else ""))
+            elif st.get("translate_frames") and o["engine"] in ("gemini", "openai", "anthropic", "ollama"):
+                ai.append("xem ảnh khung từng câu")
             if ai:
                 parts.append("AI " + ", ".join(ai))
         if langs.norm(o["target"]) == "vi":    # 2.4.3/2.4.4: tên pinyin -> Hán Việt / từ lóng (mặc định tắt)

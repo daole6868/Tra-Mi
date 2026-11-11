@@ -164,7 +164,7 @@ def classify(rel: tuple[str, ...], ctx: _Ctx) -> str:
     d = sub[0]
     if d == "live":
         return "live"
-    if d in ("gemvideo", "layers"):
+    if d in ("gemvideo", "layers", "aiframes"):
         return "misc"
     if d == "stems":
         return "tmp" if (len(sub) > 2 and sub[1] == "_sep") or name == "mix44k.wav" else "stems"

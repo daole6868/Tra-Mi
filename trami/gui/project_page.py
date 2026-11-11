@@ -194,6 +194,11 @@ _HfwBox = HfwBox    # 2.1.35: khung chứa thẻ có hàng nút tự xuống dò
 # 2.4.10: rút gọn bản dịch (lúc dịch + AI kiểm tra) / AI tự rút gọn khi lồng tiếng – mặc định tắt; mỗi cài đặt nhiều
 # công tắc giống nhau (tab Tự động bước 2 / khung Dịch tab Phụ đề; tab Tự động bước 3 / tab Lồng tiếng mục 3)
 SHORTEN_SW = {"dub_fit": ("a_fit", "s_fit"), "dub_auto_shorten": ("a_autoshort", "d_autoshort")}
+# 2.4.11: dịch có nhìn hình – chỉ gửi đoạn có lời (Gemini) / ảnh khung từng câu (AI xem được ảnh): tab Tự động bước 2 +
+# khung Dịch tab Phụ đề, 1 cài đặt chung mỗi công tắc
+VISION_SW = {"translate_video_speech": ("a_vspeech", "s_vspeech"), "translate_frames": ("a_frames", "s_frames")}
+PAIR_SW = {**SHORTEN_SW, **VISION_SW}
+VISION_ENGINES = ("gemini", "openai", "anthropic", "ollama")
 TRANS_FIX = {"trans_name_fix": ("a_namefix", "s_namefix"), "trans_term_fix": ("a_termfix", "s_termfix"),
              "trans_slang": ("a_slang", "s_slang")}
 # 2.4.4: ô chọn loại tên riêng (tên người / địa danh, môn phái, đồ vật) – tab Tự động + khung Dịch tab Phụ đề
@@ -897,6 +902,12 @@ class ProjectPage(QWidget):
         self.a_vtrans = f.row("Dịch có nhìn hình (Gemini xem video)", Switch(bool(s.get("translate_video", False))),
                               C.VIDEO_TRANSLATE_HELP)
         self.a_vtrans.toggled.connect(self._vtrans_changed)
+        self.a_vspeech = f.row("… chỉ gửi đoạn có lời", Switch(bool(s.get("translate_video_speech", True))),
+                               C.VIDEO_SPEECH_HELP)
+        self.a_vspeech.toggled.connect(lambda on: self._shorten_sw_changed("translate_video_speech", on))
+        self.a_frames = f.row("Gửi ảnh khung từng câu cho AI", Switch(bool(s.get("translate_frames", False))),
+                              C.FRAMES_HELP)
+        self.a_frames.toggled.connect(lambda on: self._shorten_sw_changed("translate_frames", on))
         self.a_clean.toggled.connect(self._ai_switch_changed)
         self.a_join.toggled.connect(self._ai_switch_changed)
         self.a_review.toggled.connect(self._ai_switch_changed)
@@ -1113,6 +1124,16 @@ class ProjectPage(QWidget):
         self.s_vtrans.toggled.connect(self._vtrans_changed)
         tr_card.add(flow(self.s_vtrans, label("Dịch có nhìn hình – Gemini xem khúc video của từng lô câu (xưng hô theo "
                                               "người nói / người nghe, giới tính người nói)", "muted", wrap=True)))
+        self.s_vspeech = Switch(bool(self.settings.get("translate_video_speech", True)))
+        self.s_vspeech.setToolTip(C.VIDEO_SPEECH_HELP)
+        self.s_vspeech.toggled.connect(lambda on: self._shorten_sw_changed("translate_video_speech", on))
+        tr_card.add(flow(self.s_vspeech, label("… chỉ gửi đoạn có lời (bỏ đoạn nhạc / cảnh không lời – bớt token video)",
+                                               "muted", wrap=True)))
+        self.s_frames = Switch(bool(self.settings.get("translate_frames", False)))
+        self.s_frames.setToolTip(C.FRAMES_HELP)
+        self.s_frames.toggled.connect(lambda on: self._shorten_sw_changed("translate_frames", on))
+        tr_card.add(flow(self.s_frames, label("Gửi ảnh khung từng câu cho AI (Gemini / OpenAI / Claude / Ollama – AI "
+                                              "thấy ai đang nói, xưng hô chuẩn hơn)", "muted", wrap=True)))
         from ..hanviet import NAME_MODES
 
         self.s_namefix = Switch(bool(self.settings.get("trans_name_fix", False)))
@@ -4491,11 +4512,13 @@ class ProjectPage(QWidget):
             self.a_review.setChecked(bool(st.get("ai_review_after_translate", False)))
             self.a_songai.setChecked(bool(st.get("ai_song_filter", True)))
             self.a_fill.setChecked(bool(st.get("translate_fill", False)))
-            for key, names in SHORTEN_SW.items():
+            for key, names in PAIR_SW.items():
                 for name in names:
                     w = getattr(self, name, None)
                     if w is not None:
-                        w.setChecked(bool(st.get(key, False)))
+                        w.blockSignals(True)
+                        w.setChecked(bool(st.get(key, key == "translate_video_speech")))
+                        w.blockSignals(False)
             self._fill_enable()
             self.a_spktag.setChecked(bool(st.get("translate_speakers", True)))
             set_combo(self.a_addr, st.get("addr_unsure", "drop"))
@@ -4648,6 +4671,8 @@ class ProjectPage(QWidget):
                 w.blockSignals(True)
                 w.setChecked(bool(on))
                 w.blockSignals(False)
+        if getattr(self, "a_engine", None) is not None:
+            self._update_engine_label()      # "… chỉ gửi đoạn có lời" theo công tắc này
         if getattr(self, "loading", True):
             return
         self._save_setting("translate_video", bool(on))
@@ -5045,6 +5070,15 @@ class ProjectPage(QWidget):
             w = getattr(self, name, None)
             if w is not None:
                 w.setEnabled(eng == "gemini")
+        vt = getattr(self, "a_vtrans", None)
+        for name in ("a_vspeech", "s_vspeech"):   # 2.4.11: đi kèm Dịch có nhìn hình
+            w = getattr(self, name, None)
+            if w is not None:
+                w.setEnabled(eng == "gemini" and (vt is None or vt.isChecked()))
+        for name in ("a_frames", "s_frames"):     # 2.4.11: AI xem được ảnh
+            w = getattr(self, name, None)
+            if w is not None:
+                w.setEnabled(eng in VISION_ENGINES)
         if getattr(self, "a_ai_note", None) is not None:
             self.a_ai_note.setVisible(not ai)
 
@@ -5521,6 +5555,8 @@ class ProjectPage(QWidget):
             for r in rows:
                 self._retranslate_one(r)
             return
+        if name == "sub_dub":     # 2.4.11: lồng tiếng ngay các câu đang chọn trên dòng Phụ đề
+            return self._dub_rows_now(rows)
         # ---- lồng tiếng
         if name in ("play", "redub", "dub_redo"):
             if not rows:
@@ -6955,7 +6991,7 @@ class ProjectPage(QWidget):
     def _shorten_sw_changed(self, key: str, on: bool):
         """Công tắc rút gọn (2.4.10): dub_fit = rút gọn lúc dịch + AI kiểm tra; dub_auto_shorten = AI tự rút gọn khi lồng
         tiếng. Mỗi cài đặt có 2 công tắc luôn giống nhau (SHORTEN_SW)."""
-        for name in SHORTEN_SW[key]:
+        for name in PAIR_SW[key]:
             w = getattr(self, name, None)
             if w is not None and w.isChecked() != bool(on):
                 w.blockSignals(True)
@@ -8369,6 +8405,47 @@ class ProjectPage(QWidget):
         if vid and self.model.set_voices(rows, vid):
             self._save_segs_now()
         self._redub_rows(rows)
+
+    def _dub_rows_now(self, rows: list[int]):
+        """Nút "Lồng tiếng" trên thanh công cụ dòng Phụ đề (2.4.11): đọc giọng ĐÚNG các câu đang chọn rồi ghép vào bản lồng
+        đang dùng (câu khác giữ giọng cũ). Câu chưa có bản dịch -> dịch các câu đó trước (công cụ dịch đang chọn) rồi đọc
+        luôn trong cùng 1 việc. Phim chưa có bản lồng -> chỉ đường tạo bản lồng cả phim (đọc riêng vài câu không ghép
+        được vào đâu)."""
+        self.inspector._flush()
+        segs = self.model.segs
+        rows = sorted({r for r in rows if 0 <= r < len(segs) and (segs[r].text.strip() or segs[r].trans.strip())})
+        if not rows:
+            return self.win.toast("Bấm chọn câu trên dòng Phụ đề trước (Ctrl / Shift: chọn nhiều)", "warn")
+        if not pipeline.has_dub(self.p):
+            return self.win.toast("Phim chưa có bản lồng tiếng – tab Lồng tiếng → 'Tạo bản lồng tiếng' cho cả phim trước, "
+                                  "sau đó chọn câu rồi bấm 'Lồng tiếng' để đọc lại từng câu", "warn")
+        empty = [r for r in rows if not segs[r].trans.strip()]
+        if not empty:
+            return self._redub_rows(rows)
+        eng, sty = self.a_engine.currentData(), self.a_style.currentData()
+        if eng == pipeline.NO_TRANSLATE:
+            return self.win.toast(f"Câu {', '.join(str(r + 1) for r in empty[:5])} chưa có bản dịch mà đang chọn "
+                                  "'Không dịch' ở tab Tự động – chọn công cụ dịch hoặc gõ lời Việt trước", "warn")
+        tts_eng, rate = self.d_engine.currentData(), self.d_rate.currentData()
+        st = dict(load_settings())
+        st["dub_skip_songs"] = self.d_skipsong.isChecked()
+        self._replay_row = rows[0]
+
+        def fn(j, p):
+            j.update(0.02, f"Đang dịch {len(empty)} câu chưa có bản dịch…")
+            pipeline.translate(p, eng, sty, True, None, lambda x, m="": j.update(0.4 * x, m), j.cancelled, rows=empty)
+            new = p.segments
+            ok = [r for r in rows if r < len(new) and new[r].trans.strip()]
+            if not ok:
+                return {"message": "Không dịch được câu nào – chưa đọc giọng"}
+            pipeline.redub(p, ok, rate, st, lambda x, m="": j.update(0.4 + 0.6 * x, m), j.cancelled, tts_eng)
+            sts = p.data.get("dub_stats") or {}
+            msg = (f"Đã dịch {sum(1 for r in empty if r in ok)} câu và lồng tiếng {sts.get('redone', len(ok))}/{len(ok)} "
+                   "câu – trình phát đang dùng bản mới")
+            if len(ok) < len(rows):
+                msg += f" · ⚠ {len(rows) - len(ok)} câu không dịch được nên chưa đọc"
+            return {"message": msg, "pick": ok}
+        self.submit("redub", f"Dịch + lồng tiếng {len(rows)} câu", fn)
 
     def _redub_rows(self, rows: list[int], play: bool = True):
         self.inspector._flush()

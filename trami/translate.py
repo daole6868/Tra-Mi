@@ -1258,6 +1258,34 @@ def hymt_worker(settings: dict | None = None) -> HymtWorker:
 
 VIDEO_WIN = 600.0  # dịch có nhìn hình (2.1.25): mỗi lô ứng với 1 khúc video ≤ 10 phút
 VIDEO_PAD = 3.0    # khúc video rộng hơn dòng đầu / cuối của lô 3 s
+VIDEO_SPEECH_SPAN = 1800.0   # 2.4.11 chỉ gửi đoạn có lời: lô trải ≤ 30 phút phim (tổng lời ≤ VIDEO_WIN)
+FRAMES_BATCH = 40  # 2.4.11 ảnh khung: ≤ 40 câu (40 ảnh) mỗi lần gửi
+VIDEO_SPEECH_VI = """
+Khúc video gửi kèm CHỈ GỒM CÁC ĐOẠN CÓ LỜI của các dòng đã ghép nối (đã bỏ đoạn không ai nói) – hình có thể nhảy cảnh
+giữa 2 dòng; giờ ở mục THỜI ĐIỂM TRONG VIDEO là giờ trong khúc đã ghép."""
+VIDEO_SPEECH_EN = """
+The attached clip contains ONLY THE SPOKEN PARTS of these lines joined together (parts where nobody talks were cut) – the
+picture may jump between two lines; VIDEO TIMES are times in this joined clip."""
+FRAME_RULE_VI = """
+
+ẢNH KHUNG GỬI KÈM: mỗi ảnh "Dòng N" chụp 1 khung hình lúc dòng N đang được nói. Dùng ảnh để: đoán ai đang nói (người
+mở miệng / ở giữa khung / được quay cận), nam / nữ, già / trẻ, đang nói với ai (vai vế, thân / sơ) mà chọn xưng hô cho
+dòng KHÔNG ghi rõ đại từ / cách gọi (luật 5c) – dòng gốc đã ghi rõ (他 / 她, 哥 / 姐…) thì vẫn theo dòng gốc dù ảnh cho
+thấy khác; hiểu câu ngắn theo hành động trên hình; đọc chữ trên màn hình (tin nhắn, biển hiệu) làm ngữ cảnh. Ảnh chỉ là 1
+khoảnh khắc: người nói có thể ở ngoài khung – không chắc thì theo luật 5e / 5f. Vẫn dịch đúng CHỮ của từng dòng, giữ mọi
+luật trên.
+Thêm 1 khoá "_nguoi_noi" vào JSON: {"S1": {"gioi": "nam" | "nu", "ten": "<tên nhân vật nếu biết>"}} cho người nói có
+trong lô – chỉ ghi khi thấy rõ người đó đang nói trên ảnh."""
+FRAME_RULE_EN = """
+
+ATTACHED FRAMES: each image "Line N" is one frame taken while line N is being spoken. Use them to tell who is speaking
+(the person with the open mouth / centred / in close-up), male / female, age, and who they talk to (rank, closeness) to
+choose the form of address for lines WITHOUT an explicit pronoun / kinship term (rule 5c) – a pronoun / term written in
+the line (他 / 她, 哥 / 姐…) still wins over the picture; understand short lines from the action; read on-screen text
+(messages, signs) as context. A frame is one moment: the speaker may be off screen – if unsure follow rules 5e / 5f.
+Still translate the TEXT of each line and keep every rule above.
+Add one key "_speakers" to the JSON: {"S1": {"gender": "male" | "female", "name": "<character name if known>"}} for
+speakers in this batch – only when clearly seen speaking in a frame."""
 VIDEO_RULE_VI = """
 
 VIDEO GỬI KÈM: bạn được XEM + NGHE khúc video chứa các dòng cần dịch (giờ từng dòng – giây tính từ đầu khúc – và người
@@ -1278,6 +1306,11 @@ from the action on screen; read on-screen
 text (messages, signs, character names) as context. Still translate the TEXT of each line (if what you hear differs from
 the line, follow the line) and keep every rule above. Add one key "_speakers" to the JSON: {"S1": {"gender": "male" |
 "female", "name": "<character name if known>"}} for speakers in this batch – only when clearly seen."""
+def _clip_t(win, t: float) -> float:
+    """Giây trong khúc video gửi kèm của giây t phim gốc: khúc liền (a, b) hoặc gemvideo.Clip (chỉ đoạn có lời)."""
+    return max(0.0, t - win[0]) if isinstance(win, tuple) else win.map(t)
+
+
 CTX_BEFORE = 6     # số dòng ngay trước lô gửi kèm (đã dịch) – luật 2: đọc ≥ 2 dòng trước / sau mỗi dòng
 CTX_AFTER = 4      # số dòng ngay sau lô gửi kèm
 _HEAD_DROP = re.compile(r"[\W_]+")
@@ -1392,6 +1425,12 @@ class Translator:
         self.video_batches = 0       # số lô đã gửi kèm video
         self.video_failed = 0        # số lô gửi video lỗi -> đã dịch chỉ bằng chữ
         self.video_error = ""
+        # 2.4.11: ảnh khung từng câu (vframes.FrameSource) gửi kèm mỗi lô cho AI xem được ảnh (Gemini không gửi video /
+        # gửi video lỗi, OpenAI, Claude, Ollama mô hình ảnh) – AI thấy ai đang nói, nam / nữ, bối cảnh
+        self.frames = None
+        self.frame_batches = 0
+        self.frame_failed = 0
+        self.frame_error = ""
         self.speakers: dict[str, dict] = {}   # người nói -> {"g": male / female, "name"} Gemini thấy trên hình
         self._spk_lock = threading.Lock()
         # 2.4.2: tên / thuật ngữ còn để pinyin -> âm Hán Việt (hanviet.py, mọi công cụ dịch) + từ lóng / tiếng mạng
@@ -1432,7 +1471,7 @@ class Translator:
             texts = [f"{segs[i].text} {length_marker(segs[i].duration, self.target, unit, self.fill_short)}"
                      for i in idx]
         kw = {}
-        if self.video is not None and self.llm is not None and self.engine == "gemini":
+        if self.llm is not None and ((self.video is not None and self.engine == "gemini") or self.frames is not None):
             kw["times"] = [(segs[i].start, segs[i].end, segs[i].speaker or "") for i in idx]
         tags = self.speaker_tags(segs)
         who = [tags[i] for i in idx] if tags else None
@@ -1636,6 +1675,7 @@ class Translator:
         AI báo không chắc xưng hô (luật 5f)."""
         out: list[str | None] = [None] * len(lines)
         keys = [self._ckey(l, who[i] if who else "") for i, l in enumerate(lines)]
+        frames = bool(times) and self.frames is not None and self.llm is not None
         todo = []
         for i, l in enumerate(lines):
             hit = self.cache.get(keys[i])
@@ -1667,6 +1707,17 @@ class Translator:
                 if progress:
                     progress(done / len(lines), f"Đang dịch {done}/{len(lines)} câu (Google)")
         else:
+            if frames and todo and not (self.video is not None and self.engine == "gemini"):
+                # 2.4.11 chụp trước ảnh khung các câu sắp dịch (4 FFmpeg cùng lúc; ảnh đã có từ lần trước dùng lại)
+                fs = self.frames
+                try:
+                    fs.prefetch([fs.at(times[i][0], times[i][1]) for i in todo],
+                                (lambda x, m: progress(done / len(lines), m)) if progress else None, cancel)
+                except Cancelled:
+                    raise
+                except Exception:  # noqa: BLE001 – chụp lỗi: lô nào thiếu ảnh thì gửi chữ như cũ
+                    pass
+
             def tagged(k: int) -> str:
                 return f"[{who[k]}] {lines[k]}" if who else lines[k]
 
@@ -1692,12 +1743,22 @@ class Translator:
             def take(at: int) -> list[int]:
                 """Lô tiếp theo từ vị trí at: ≤ số câu mỗi lần gửi; dịch có nhìn hình thì khúc video ≤ VIDEO_WIN."""
                 ids = todo[at:at + self._size()]
-                if times and ids:
+                if times and ids and self.video is not None:
                     a = times[ids[0]][0]
                     k = 1
-                    while k < len(ids) and times[ids[k]][1] - a <= VIDEO_WIN:
-                        k += 1
+                    if getattr(self.video, "speech", False):
+                        # 2.4.11 chỉ gửi đoạn có lời: tổng lời của lô ≤ VIDEO_WIN, lô trải ≤ VIDEO_SPEECH_SPAN phim
+                        talk = times[ids[0]][1] - a
+                        while (k < len(ids) and talk + times[ids[k]][1] - times[ids[k]][0] <= VIDEO_WIN
+                               and times[ids[k]][1] - a <= VIDEO_SPEECH_SPAN):
+                            talk += times[ids[k]][1] - times[ids[k]][0]
+                            k += 1
+                    else:
+                        while k < len(ids) and times[ids[k]][1] - a <= VIDEO_WIN:
+                            k += 1
                     ids = ids[:k]
+                if frames and ids:          # 2.4.11 ảnh khung: ≤ FRAMES_BATCH câu (ảnh) mỗi lần gửi
+                    ids = ids[:FRAMES_BATCH]
                 return ids
 
             def keep(ids, res):
@@ -1873,11 +1934,12 @@ class Translator:
         n = len(lines)
         if vt and self.video is not None:     # dịch có nhìn hình: khúc video của chính các dòng trong lô
             if win is None:   # hỏi lại phần thiếu / chia đôi lô: dùng lại đúng khúc video đã tải lên của lô
-                win = (max(0.0, min(t[0] for t in vt) - VIDEO_PAD), max(t[1] for t in vt) + VIDEO_PAD)
-            a = win[0]
+                plan = getattr(self.video, "plan", None)
+                win = (plan([(t[0], t[1]) for t in vt], VIDEO_PAD) if plan else
+                       (max(0.0, min(t[0] for t in vt) - VIDEO_PAD), max(t[1] for t in vt) + VIDEO_PAD))
             parts.append(("THỜI ĐIỂM TRONG VIDEO (giây tính từ đầu khúc video gửi kèm | người nói):\n" if vi else
                           "VIDEO TIMES (seconds from the start of the attached clip | speaker):\n") +
-                         "\n".join(f"{k + 1}: {max(0.0, t0 - a):.1f}–{max(0.0, t1 - a):.1f} | "
+                         "\n".join(f"{k + 1}: {_clip_t(win, t0):.1f}–{_clip_t(win, t1):.1f} | "
                                     f"{(who[k] if who and who[k] else sp) or '?'}"
                                     for k, (t0, t1, sp) in enumerate(vt)))
         ask = (f"DỊCH {n} DÒNG SAU sang tiếng Việt – đúng {n} dòng, trả về JSON với đủ các khoá 1..{n}:" if vi else
@@ -1890,9 +1952,14 @@ class Translator:
             tl.cut = False
         try:   # xin đủ chỗ trả lời cho cả lô (trước 2.1.23 cố định 8000 token: lô 200 câu bị cắt giữa chừng)
             reply = None
+            seen = False      # đã gửi kèm hình (video / ảnh khung) -> đọc "_nguoi_noi"
             if win is not None:
                 reply = self._video_chat(user, win, TOK_BASE + TOK_LINE * n + 400)
                 tl = getattr(getattr(self.video, "client", None), "_tl", None) if reply is not None else tl
+                seen = reply is not None
+            if reply is None and vt and self.frames is not None:   # 2.4.11 ảnh khung (không có video / video lỗi)
+                reply = self._frames_chat(user, vt, TOK_BASE + TOK_LINE * n + 400)
+                seen = reply is not None
             if reply is None:
                 reply = self.llm.chat(self.system(), user, max_tokens=TOK_BASE + TOK_LINE * n)
             d = _extract_json(reply)
@@ -1906,7 +1973,7 @@ class Translator:
         except Exception:
             d = None
         if isinstance(d, dict):
-            if win is not None:
+            if seen:
                 self._keep_speakers(d)
             res, heads = _answers(d, n)
             xh = _addr_flags(d, n)
@@ -1959,7 +2026,12 @@ class Translator:
         bằng chữ như trước. Huỷ / mất mạng quá lâu / key hỏng hết -> ném lỗi như dịch thường."""
         rule = VIDEO_RULE_VI if self.target == "vi" else VIDEO_RULE_EN
         try:
-            reply = self.video.ask(self.system() + rule, user, win[0], win[1], max_tokens)
+            if isinstance(win, tuple):
+                reply = self.video.ask(self.system() + rule, user, win[0], win[1], max_tokens)
+            else:          # 2.4.11 gemvideo.Clip – khúc liền hoặc chỉ các đoạn có lời ghép lại
+                if win.spans:
+                    rule += VIDEO_SPEECH_VI if self.target == "vi" else VIDEO_SPEECH_EN
+                reply = self.video.ask_clip(self.system() + rule, user, win, max_tokens)
             with self._spk_lock:
                 self.video_batches += 1
             return reply
@@ -1969,6 +2041,36 @@ class Translator:
             with self._spk_lock:
                 self.video_failed += 1
                 self.video_error = str(e)[:160]
+            return None
+
+    def _frames_chat(self, user: str, vt: list, max_tokens: int) -> str | None:
+        """2.4.11: hỏi AI kèm ảnh khung từng dòng ("Dòng N" = 1 khung lúc dòng N đang nói). Lỗi (AI / model không nhận
+        ảnh, chụp ảnh lỗi…) -> None: lô này dịch chỉ bằng chữ; 2 lô đầu đều lỗi -> thôi gửi ảnh cả lượt dịch."""
+        fs = self.frames
+        if fs is None:
+            return None
+        rule = FRAME_RULE_VI if self.target == "vi" else FRAME_RULE_EN
+        lab = "Dòng" if self.target == "vi" else "Line"
+        try:
+            imgs = []
+            for k, (t0, t1, _sp) in enumerate(vt):
+                data = fs.get(fs.at(t0, t1))
+                if data:
+                    imgs.append((f"{lab} {k + 1}", data))
+            if not imgs:
+                return None
+            reply = self.llm.chat(self.system() + rule, user, max_tokens=max_tokens, images=imgs)
+            with self._spk_lock:
+                self.frame_batches += 1
+            return reply
+        except (Cancelled, net.NetworkDown, PermissionError):
+            raise
+        except Exception as e:  # noqa: BLE001
+            with self._spk_lock:
+                self.frame_failed += 1
+                self.frame_error = str(e)[:160]
+                if self.frame_failed >= 2 and not self.frame_batches:
+                    self.frames = None       # model này không nhận ảnh -> thôi gửi ảnh, dịch bằng chữ
             return None
 
     def _keep_speakers(self, d: dict) -> None:

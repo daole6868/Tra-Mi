@@ -66,6 +66,18 @@ VIDEO_TRANSLATE_HELP = ("Chỉ khi Công cụ dịch = Gemini: mỗi lô câu g�
                         "hiểu câu ngắn theo hành động trên hình, đọc chữ trên màn hình; ghi lại giới tính từng người nói "
                         "(Tự gán giọng nam / nữ dùng). Luật dịch / form thể loại / kỹ năng giữ nguyên. Lô gửi video lỗi -> "
                         "dịch chỉ bằng chữ như thường. Chậm hơn dịch thường (tải video lên), tốn thêm token video")
+VIDEO_SPEECH_HELP = ("2.4.11 – đi kèm 'Dịch có nhìn hình' (Gemini): mỗi lô chỉ gửi CÁC ĐOẠN NHÂN VẬT NÓI (giờ từng câu ± "
+                     "0,3 s, 2 câu cách ≤ 1 s giữ cả khoảng giữa) ghép thành 1 khúc ngắn, bỏ đoạn nhạc / cảnh không lời "
+                     "-> bớt token video (phim nhiều nhạc / cảnh không lời bớt nhiều), tải lên nhanh hơn, mỗi lô được nhiều "
+                     "câu hơn. Giờ từng câu trong khúc do tool tính nên không lệch. Đoạn có lời đã chiếm ≥ 80 % khúc -> gửi "
+                     "khúc liền như cũ. Khúc đã cắt lưu ở work/gemvideo, dịch lại dùng lại. Tắt = gửi khúc liền như 2.1.25")
+FRAMES_HELP = ("2.4.11 – mỗi câu gửi dịch kèm 1 ảnh khung hình chụp lúc nhân vật đang nói (ảnh nhỏ 448 px) cho AI xem được "
+               "ảnh: Gemini, OpenAI, Claude, Ollama (mô hình xem ảnh, vd qwen2.5-vl) – không có với DeepSeek / Google / "
+               "Hy-MT2. AI thấy ai đang nói, nam / nữ, nói với ai, bối cảnh -> chọn xưng hô đúng hơn cho câu không ghi rõ "
+               "đại từ (câu gốc ghi rõ 他 / 她, 哥 / 姐… vẫn theo câu gốc). Ghi lại giới tính người nói AI thấy (Tự gán "
+               "giọng nam / nữ dùng). Tốn thêm token ảnh (~100–250 token / câu tuỳ AI), mỗi lần gửi ≤ 40 câu. Ảnh lưu ở "
+               "work/aiframes, dịch lại dùng lại. Gemini đang bật 'Dịch có nhìn hình' thì ảnh chỉ dùng khi lô gửi video "
+               "lỗi. Model không nhận ảnh -> tự thôi gửi ảnh, dịch bằng chữ")
 NAME_FIX_HELP = ("Chỉ khi dịch sang tiếng Việt, mọi công cụ dịch (Google, Hy-MT2, AI): TÊN RIÊNG máy dịch để nguyên pinyin "
                  "(chữ viết hoa: \"Lin Fan\", \"Tianjian Zong\", \"Changsha\") -> đổi theo chữ Hán của câu gốc (\"Lâm "
                  "Phàm\", \"Thiên Kiếm Tông\", \"Trường Sa\"). Ô bên cạnh chọn loại: cả tên người lẫn địa danh, môn "

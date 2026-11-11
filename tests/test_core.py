@@ -16139,3 +16139,299 @@ def test_trans_shorten_gui_2410():
         win.timer.stop()
         win.close()
         p.delete()
+
+
+def test_speech_clip_2411(tmp_path):
+    """2.4.11 A: dịch có nhìn hình chỉ gửi đoạn có lời – đoạn = giờ câu ± 0,3 s, gộp chỗ cách ≤ 1 s, tròn 0,1 s; đoạn có lời
+    ≥ 80 % khúc -> khúc liền như cũ; khúc ghép bằng FFmpeg: tiếng từng đoạn đúng chỗ (tiếng bíp ở giây 2,5 / 8,5 / 15,2
+    phim gốc nằm đúng giây map() trong khúc), dài đúng tổng các đoạn; cùng đoạn -> dùng lại file."""
+    import numpy as np
+
+    from trami import gemvideo
+
+    sp = gemvideo.speech_spans([(2.3, 3.2), (8.3, 8.9), (15.1, 15.7), (16.2, 16.5)], total=20.0)
+    assert sp == [(2.0, 3.5), (8.0, 9.2), (14.8, 16.8)]       # 15,1–15,7 và 16,2–16,5 cách 0,5 s -> 1 đoạn
+    c = gemvideo.Clip(2.0, 16.8, sp)
+    assert abs(c.length - 4.7) < 1e-9 and abs(c.map(2.5) - 0.5) < 1e-9 and abs(c.map(8.5) - 2.0) < 1e-9
+    assert abs(c.map(5.0) - 1.5) < 1e-9 and abs(c.map(15.2) - 3.1) < 1e-9 and gemvideo.Clip(10, 20).map(12.5) == 2.5
+    # quá nhiều đoạn -> nối chỗ gần nhất
+    many = gemvideo.speech_spans([(i * 3.0, i * 3.0 + 0.5) for i in range(10)], max_spans=4)
+    assert len(many) == 4 and many[0][0] == 0.0 and many[-1][1] == 27.8
+    src = tmp_path / "src.mkv"
+    subprocess.run([ff.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "color=gray:s=160x120:r=25:d=20", "-f", "lavfi", "-i",
+                    "sine=frequency=1000:duration=20:sample_rate=44100", "-filter_complex",
+                    "[1:a]volume='if(between(t,2.5,3.0)+between(t,8.5,9.0)+between(t,15.2,15.6),1,0)':eval=frame[a]",
+                    "-map", "0:v", "-map", "[a]", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "pcm_s16le",
+                    str(src)], check=True)
+    vs = gemvideo.VideoSource(src, tmp_path / "gv", {"gemini_api_keys": ["k"]}, low_res=True, speech=True, total=20.0)
+    clip = vs.plan([(2.3, 3.2), (8.3, 8.9), (15.1, 15.7)], 3.0)
+    assert clip.spans == [(2.0, 3.5), (8.0, 9.2), (14.8, 16.0)] and abs(clip.length - 3.9) < 1e-9
+    path = vs.clip_spans(clip.spans)
+    pcm = np.frombuffer(subprocess.run([ff.ffmpeg_bin(), "-v", "error", "-i", str(path), "-f", "s16le", "-ac", "1",
+                                        "-ar", "16000", "-"], capture_output=True).stdout, np.int16).astype(float)
+    assert abs(len(pcm) / 16000 - 3.9) < 0.05
+    env = np.array([np.abs(pcm[i:i + 160]).mean() for i in range(0, len(pcm) - 159, 160)])
+    on = np.flatnonzero(env > 1000) * 0.01
+    for t0, t1 in ((2.5, 3.0), (8.5, 9.0), (15.2, 15.6)):       # bíp nằm đúng chỗ map() tính
+        a, b = clip.map(t0), clip.map(t1)
+        got = on[(on >= a - 0.1) & (on <= b + 0.1)]
+        assert len(got) and abs(got.min() - a) <= 0.03 and abs(got.max() + 0.01 - b) <= 0.03
+    mt = path.stat().st_mtime
+    vs2 = gemvideo.VideoSource(src, tmp_path / "gv", {"gemini_api_keys": ["k"]}, speech=True, total=20.0)
+    assert vs2.clip_spans(clip.spans) == path and path.stat().st_mtime == mt      # có sẵn -> dùng lại
+    # đoạn có lời ≥ 80 % khúc -> khúc liền như trước
+    dense = vs.plan([(3.0, 10.0), (10.5, 17.0)], 3.0)
+    assert dense.spans is None and dense.a == 0.0 and dense.b == 20.0
+    assert gemvideo.VideoSource(src, tmp_path / "gv", {"gemini_api_keys": ["k"]}, speech=False).plan(
+        [(2.3, 3.2), (15.1, 15.7)]).spans is None
+
+
+def test_translate_speech_frames_2411(tmp_path, monkeypatch):
+    """2.4.11: Translator gửi khúc chỉ có lời (giờ từng dòng theo khúc đã ghép + lời nhắc báo khúc đã ghép; lô theo tổng
+    lời ≤ 10 phút chứ không theo 10 phút phim); ảnh khung từng câu cho AI xem ảnh (nhãn 'Dòng N', luật ảnh, giới tính
+    người nói, ≤ 40 câu / lần; model không nhận ảnh 2 lô đầu -> thôi gửi ảnh); Gemini gửi video lỗi -> dùng ảnh khung;
+    pipeline.frame_source chỉ cho AI xem ảnh."""
+    from trami import gemvideo, pipeline
+    from trami import translate as tr
+
+    monkeypatch.setattr(tr, "_OUT_CAP", {})
+    sent = []
+
+    class FakeVideo:
+        speech = True
+
+        def __init__(self, fail=False):
+            self.fail = fail
+
+        def plan(self, times, pad=3.0):
+            return gemvideo.Clip(min(a for a, _ in times), max(b for _, b in times),
+                                 gemvideo.speech_spans(times, 0.0))
+
+        def ask_clip(self, system, user, clip, max_tokens=8000):
+            sent.append(("V", system, user, clip))
+            if self.fail:
+                raise RuntimeError("tải video lỗi")
+            payload = json.loads(user[user.rindex("{"):])
+            out = {k: {"dau": v[:3], "dich": "V " + re.sub(r"\D", "", v)} for k, v in payload.items()}
+            return json.dumps(out, ensure_ascii=False)
+
+    def chat(self, system, user, max_tokens=8000, temperature=0.3, images=None):
+        sent.append(("T", system, user, images))
+        payload = json.loads(user[user.rindex("{"):])
+        out = {k: {"dau": v[:3], "dich": ("I " if images else "T ") + re.sub(r"\D", "", v)} for k, v in payload.items()}
+        if images:
+            out["_nguoi_noi"] = {"S1": {"gioi": "nu"}}
+        return json.dumps(out, ensure_ascii=False)
+    monkeypatch.setattr(tr.LLMClient, "chat", chat)
+    # 30 câu cách nhau 60 s (phim 30 phút), mỗi câu 2 s -> tổng lời 1 phút: 1 lô video (trước: 3 lô theo 10 phút phim)
+    segs = [Segment(60.0 * i, 60.0 * i + 2, f"他说第{i:02d}句", "", "S1") for i in range(30)]
+    base = {"translate_engine": "gemini", "gemini_api_key": "k", "gemini_batch": 100, "dub_fit": False}
+    t = tr.Translator(base, "gemini")
+    t.video = FakeVideo()
+    t.translate_segments(segs, auto_terms=False)
+    assert [s.trans for s in segs] == [f"V {i:02d}." for i in range(30)] and len(sent) == 1
+    _k, sysm, user, clip = sent[0]
+    assert "CHỈ GỒM CÁC ĐOẠN CÓ LỜI" in sysm and clip.spans and abs(clip.length - (2.3 + 29 * 2.6)) < 1e-6
+    assert "1: 0.0–2.0 | S1" in user and "2: 2.6–4.6 | S1" in user       # giờ trong khúc đã ghép, không phải 60 s
+
+    class FakeFrames:
+        def __init__(self):
+            self.asked = []
+
+        @staticmethod
+        def at(a, b):
+            return a + 0.4 * (b - a)
+
+        def get(self, t):
+            self.asked.append(t)
+            return b"JPEG%d" % int(t)
+
+        def prefetch(self, times, progress=None, cancel=None):
+            self.pre = list(times)
+    # OpenAI + ảnh khung: 50 câu -> 2 lần gửi (≤ 40 ảnh), mỗi ảnh nhãn "Dòng N", luật ảnh, giới tính người nói
+    sent.clear()
+    segs2 = [Segment(5.0 * i, 5.0 * i + 2, f"好的{i:02d}个", "", "S1") for i in range(50)]
+    t2 = tr.Translator({"translate_engine": "openai", "openai_api_key": "k", "openai_batch": 100, "dub_fit": False},
+                       "openai")
+    t2.frames = FakeFrames()
+    t2.translate_segments(segs2, auto_terms=False)
+    assert [s.trans for s in segs2] == [f"I {i:02d}." for i in range(50)]
+    assert len(sent) == 2 and len(sent[0][3]) == 40 and len(sent[1][3]) == 10
+    assert sent[0][3][0] == ("Dòng 1", b"JPEG0") and sent[0][3][1] == ("Dòng 2", b"JPEG5")
+    assert "ẢNH KHUNG GỬI KÈM" in sent[0][1] and len(t2.frames.pre) == 50 and t2.frame_batches == 2
+    assert t2.speaker_genders()["S1"]["g"] == "female"
+    note = pipeline.video_translate_note(type("P", (), {"data": {}})(), t2)
+    assert "AI xem ảnh khung từng câu khi dịch 2 lô" in note
+    # model không nhận ảnh: 2 lô đầu lỗi -> thôi gửi ảnh, dịch bằng chữ
+    sent.clear()
+
+    def chat_noimg(self, system, user, max_tokens=8000, temperature=0.3, images=None):
+        if images:
+            raise RuntimeError("HTTP 400: image input not supported")
+        return chat(self, system, user, max_tokens, temperature, None)
+    monkeypatch.setattr(tr.LLMClient, "chat", chat_noimg)
+    segs3 = [Segment(5.0 * i, 5.0 * i + 2, f"好的{i:02d}个", "", "S1") for i in range(90)]
+    t3 = tr.Translator({"translate_engine": "openai", "openai_api_key": "k", "openai_batch": 100, "dub_fit": False},
+                       "openai")
+    t3.frames = FakeFrames()
+    t3.translate_segments(segs3, auto_terms=False)
+    assert [s.trans for s in segs3] == [f"T {i:02d}." for i in range(90)]
+    assert t3.frames is None and t3.frame_failed == 2 and t3.frame_batches == 0
+    # Gemini gửi video lỗi -> lô đó dùng ảnh khung
+    monkeypatch.setattr(tr.LLMClient, "chat", chat)
+    sent.clear()
+    segs4 = [Segment(3.0 * i, 3.0 * i + 1, f"走吧{i:02d}个", "", "S1") for i in range(5)]
+    t4 = tr.Translator(base, "gemini")
+    t4.video = FakeVideo(fail=True)
+    t4.frames = FakeFrames()
+    t4.translate_segments(segs4, auto_terms=False)
+    assert [s.trans for s in segs4] == [f"I {i:02d}." for i in range(5)] and t4.video_failed == 1 and t4.frame_batches == 1
+    assert "dùng ảnh khung" in pipeline.video_translate_note(type("P", (), {"data": {}})(), t4)
+    # frame_source: chỉ khi bật + AI xem được ảnh
+    src = tmp_path / "v.mp4"
+    src.write_bytes(b"x")
+    pr = type("P", (), {"data": {"source": str(src)}, "source": src, "work": tmp_path / "work"})()
+    monkeypatch.setattr(pipeline, "source_missing", lambda p: False)
+    assert pipeline.frame_source(pr, {"translate_frames": True}, "deepseek") is None
+    assert pipeline.frame_source(pr, {"translate_frames": False}, "openai") is None
+    fs = pipeline.frame_source(pr, {"translate_frames": True}, "anthropic")
+    assert fs is not None and fs.dir == tmp_path / "work" / "aiframes"
+
+
+def test_frame_source_2411(tmp_path, sample_video):
+    """2.4.11 C: vframes.FrameSource chụp ảnh khung (JPEG ≤ 448 px), lưu đệm theo giây, lần sau đọc lại không chụp;
+    prefetch bỏ qua ảnh đã có; storage xếp work/aiframes vào nhóm đệm."""
+    import cv2
+    import numpy as np
+
+    from trami import storage
+    from trami.vframes import FrameSource
+
+    fs = FrameSource(sample_video, tmp_path / "aiframes")
+    assert abs(fs.at(10.0, 12.0) - 10.8) < 1e-9
+    data = fs.get(2.0)
+    img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    assert img is not None and img.shape[1] == 448 and fs.grabbed == 1 and fs.path(2.0).exists()
+    assert fs.get(2.0) == data and fs.grabbed == 1 and fs.reused == 1
+    fs.prefetch([2.0, 3.0, 4.0])
+    assert fs.grabbed == 3 and fs.path(4.0).exists()
+    assert storage.classify(("work", "aiframes", fs.path(4.0).name), None) == "misc"
+
+
+def test_vision_switches_gui_2411():
+    """2.4.11 giao diện: '… chỉ gửi đoạn có lời' + 'Gửi ảnh khung từng câu cho AI' – mỗi công tắc ở tab Tự động bước 2 =
+    khung Dịch tab Phụ đề (1 cài đặt chung); chỉ gửi đoạn có lời chỉ bấm được khi Gemini + đang bật Dịch có nhìn hình;
+    ảnh khung chỉ với AI xem được ảnh (DeepSeek / Google -> mờ)."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from trami.config import load_settings, save_settings
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.gui.widgets import set_combo
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    keys = ("translate_video", "translate_video_speech", "translate_frames", "translate_engine")
+    keep = {k: load_settings().get(k) for k in keys}
+    save_settings({"translate_video": False, "translate_video_speech": True, "translate_frames": False,
+                   "translate_engine": "gemini"})
+    p = Project.create("visiongui")
+    p.segments = [Segment(0, 1, "你好")]
+    p.save()
+    win = MainWindow()
+    try:
+        win.show()
+        win.open_project(p.id)
+        pp = win.project_page
+        app.processEvents()
+        assert pp.a_vspeech.isChecked() and pp.s_vspeech.isChecked() and not pp.a_vspeech.isEnabled()
+        assert not pp.a_frames.isChecked() and not pp.s_frames.isChecked() and pp.a_frames.isEnabled()
+        pp.s_vtrans.setChecked(True)
+        assert pp.a_vspeech.isEnabled() and pp.s_vspeech.isEnabled() and load_settings()["translate_video"] is True
+        pp.a_vspeech.setChecked(False)
+        assert not pp.s_vspeech.isChecked() and load_settings()["translate_video_speech"] is False
+        pp.s_frames.setChecked(True)
+        assert pp.a_frames.isChecked() and load_settings()["translate_frames"] is True
+        set_combo(pp.a_engine, "deepseek")
+        app.processEvents()
+        assert not pp.a_frames.isEnabled() and not pp.s_frames.isEnabled() and not pp.a_vspeech.isEnabled()
+        set_combo(pp.a_engine, "openai")
+        app.processEvents()
+        assert pp.a_frames.isEnabled() and not pp.s_vspeech.isEnabled()
+        from trami import autoflow
+
+        assert "xem ảnh khung từng câu" in autoflow.summary(load_settings())
+    finally:
+        save_settings(keep)
+        win.timer.stop()
+        win.close()
+        p.delete()
+
+
+def test_timeline_dub_button_2411(monkeypatch):
+    """2.4.11: nút 'Lồng tiếng' trên thanh công cụ dòng Phụ đề – chọn câu trên timeline rồi bấm: câu đã dịch -> tạo lại
+    giọng đúng các câu đó (ghép vào bản lồng đang dùng); câu chưa dịch -> 1 việc dịch các câu đó rồi đọc luôn; phim chưa
+    có bản lồng -> chỉ đường, không chạy gì."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from trami import pipeline
+    from trami.gui import project_page as ppm, theme
+    from trami.gui.main import MainWindow
+    from trami.gui.timeline import TrackTimeline
+    from trami.project import Project
+
+    assert any(t[0] == "sub_dub" and t[2] == "Lồng tiếng" for t in TrackTimeline.TOOLS["subs"])
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    p = Project.create("dubbtn")
+    p.segments = [Segment(0, 1, "你好", "Xin chào"), Segment(2, 3, "走吧", ""), Segment(4, 5, "好的", "Được")]
+    p.save()
+    win = MainWindow()
+    try:
+        win.show()
+        win.open_project(p.id)
+        pp = win.project_page
+        app.processEvents()
+        toasts, subs, redubs = [], [], []
+        monkeypatch.setattr(win, "toast", lambda t, k="info": toasts.append((t, k)))
+        monkeypatch.setattr(pp, "submit", lambda kind, title, fn, quiet=False: subs.append((kind, title, fn)))
+        monkeypatch.setattr(pp, "_redub_rows", lambda rows, play=True: redubs.append(list(rows)))
+        monkeypatch.setattr(pipeline, "has_dub", lambda proj: False)
+        pp.tracks.selected_rows = lambda: [0, 2]
+        pp._timeline_action("sub_dub")
+        assert not subs and not redubs and "chưa có bản lồng" in toasts[-1][0]
+        monkeypatch.setattr(pipeline, "has_dub", lambda proj: True)
+        pp._timeline_action("sub_dub")            # đã dịch -> tạo lại giọng đúng 2 câu
+        assert redubs == [[0, 2]] and not subs
+        pp.tracks.selected_rows = lambda: [1, 2]
+        pp._timeline_action("sub_dub")            # câu 2 chưa dịch -> 1 việc dịch + lồng
+        assert len(subs) == 1 and subs[0][0] == "redub" and "Dịch + lồng tiếng 2 câu" in subs[0][1]
+        seen = {}
+
+        def fake_translate(proj, eng, sty, only_empty, *a, rows=None, **kw):
+            seen["tr"] = (only_empty, list(rows))
+            segs = proj.segments
+            segs[1].trans = "Đi thôi"
+            proj.segments = segs
+            proj.save()
+
+        def fake_redub(proj, rows, *a, **kw):
+            seen["dub"] = list(rows)
+            proj.data["dub_stats"] = {"redone": len(rows)}
+        monkeypatch.setattr(ppm.pipeline, "translate", fake_translate)
+        monkeypatch.setattr(ppm.pipeline, "redub", fake_redub)
+        job = type("J", (), {"update": lambda self, *a: None, "cancelled": lambda self: False})()
+        out = subs[0][2](job, Project(p.id))
+        assert seen == {"tr": (True, [1]), "dub": [1, 2]} and out["pick"] == [1, 2]
+        assert "Đã dịch 1 câu và lồng tiếng 2/2 câu" in out["message"]
+        pp.tracks.selected_rows = lambda: []
+        pp._timeline_action("sub_dub")
+        assert "chọn câu" in toasts[-1][0]
+    finally:
+        win.timer.stop()
+        win.close()
+        p.delete()

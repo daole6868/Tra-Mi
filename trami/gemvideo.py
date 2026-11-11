@@ -28,6 +28,60 @@ CLIP_H = 480            # chiều cao bản nhẹ: đủ đọc chữ trên màn
 CLIP_FPS = 1            # Gemini lấy 1 khung / giây -> gửi đúng 1 khung / giây (file nhỏ)
 ACTIVE_WAIT = 600       # chờ Gemini xử lý video tối đa 10 phút
 MAX_OUT = 65536
+# 2.4.11 – dịch có nhìn hình CHỈ GỬI ĐOẠN CÓ LỜI: ghép các đoạn nhân vật nói (giờ từng câu ± SPEECH_PAD) thành 1 khúc ngắn
+SPEECH_PAD = 0.3        # mỗi câu nới 0,3 s 2 bên (đủ thấy miệng mở / người quay sang)
+SPEECH_JOIN = 1.0       # 2 đoạn có lời cách ≤ 1 s -> giữ cả khoảng giữa (không cắt vụn)
+SPEECH_KEEP = 0.8       # đoạn có lời ≥ 80 % khúc -> gửi khúc liền như cũ (dùng lại khúc đã cắt, không lợi gì khi cắt)
+SPEECH_MAX = 120        # tối đa 120 đoạn / khúc (lệnh FFmpeg ngắn) – nhiều hơn thì nối các đoạn cách nhau gần nhất
+SPEECH_SEC = 1800.0     # khúc chỉ có lời: lô dịch trải tối đa 30 phút phim (tổng lời vẫn ≤ VIDEO_WIN)
+
+
+class Clip:
+    """Khúc video gửi Gemini: liền [a, b] (spans None) hoặc CHỈ các đoạn có lời `spans` [(đầu, cuối)] giờ gốc (đã làm
+    tròn 0,1 s) ghép nối liền. `map(t)` = giây trong khúc của giây t phim gốc (giờ từng dòng gửi kèm lời nhắc)."""
+
+    def __init__(self, a: float, b: float, spans: list[tuple[float, float]] | None = None):
+        self.a, self.b = float(a), float(b)
+        self.spans = spans or None
+
+    @property
+    def length(self) -> float:
+        return sum(y - x for x, y in self.spans) if self.spans else self.b - self.a
+
+    def map(self, t: float) -> float:
+        if not self.spans:
+            return max(0.0, t - self.a)
+        off = 0.0
+        for x, y in self.spans:
+            if t < x:
+                return off          # rơi vào chỗ đã bỏ -> đầu đoạn có lời kế tiếp
+            if t <= y:
+                return off + t - x
+            off += y - x
+        return off
+
+
+def speech_spans(times: list[tuple[float, float]], total: float = 0.0, pad: float = SPEECH_PAD,
+                 join: float = SPEECH_JOIN, max_spans: int = SPEECH_MAX) -> list[tuple[float, float]]:
+    """Đoạn có lời của các dòng: mỗi dòng ± pad, gộp đoạn chồng / cách ≤ join, làm tròn ra ngoài 0,1 s (hình 10
+    khung / giây + tiếng 10 ms / khung khi ghép -> đoạn hình và đoạn tiếng dài đúng bằng nhau, không lệch dần)."""
+    import math
+
+    iv = sorted((max(0.0, a - pad), (min(total, b + pad) if total else b + pad)) for a, b in times if b > a)
+    out: list[list[int]] = []
+    for a, b in iv:
+        x, y = int(math.floor(a * 10 + 1e-6)), int(math.ceil(b * 10 - 1e-6))
+        if y <= x:
+            y = x + 1
+        if out and x - out[-1][1] <= join * 10:
+            out[-1][1] = max(out[-1][1], y)
+        else:
+            out.append([x, y])
+    while len(out) > max_spans:                     # quá nhiều đoạn: nối chỗ cách nhau gần nhất
+        k = min(range(len(out) - 1), key=lambda i: out[i + 1][0] - out[i][1])
+        out[k][1] = out[k + 1][1]
+        del out[k + 1]
+    return [(x / 10.0, y / 10.0) for x, y in out]
 
 
 def ready(settings: dict) -> tuple[bool, str]:
@@ -40,7 +94,8 @@ def ready(settings: dict) -> tuple[bool, str]:
 class VideoSource:
     """Cắt khúc video nhẹ để gửi Gemini (mỗi khúc 1 file đệm, dùng lại trong phiên) + hỏi Gemini kèm khúc đó."""
 
-    def __init__(self, src: str | Path, work: str | Path, settings: dict, low_res: bool = False):
+    def __init__(self, src: str | Path, work: str | Path, settings: dict, low_res: bool = False,
+                 speech: bool = False, total: float = 0.0):
         self.src = Path(src)
         self.work = Path(work)
         self.work.mkdir(parents=True, exist_ok=True)
@@ -51,6 +106,67 @@ class VideoSource:
         self._sig = hashlib.md5(f"{self.src.resolve()}|{st.st_size}|{int(st.st_mtime)}".encode()).hexdigest()[:8]
         self.asked = 0       # số lần hỏi Gemini có kèm video
         self.failed = 0      # số lần hỏi kèm video lỗi (đã quay về chỉ gửi chữ)
+        self.speech = bool(speech)   # 2.4.11: chỉ gửi đoạn có lời (ghép các đoạn nhân vật nói)
+        self.total = float(total or 0.0)
+        self.sent_sec = 0.0          # tổng giây video đã gửi (mỗi khúc tính 1 lần)
+        self.full_sec = 0.0          # … nếu gửi khúc liền như trước
+        self._counted: set = set()
+
+    def plan(self, times: list[tuple[float, float]], pad: float = 3.0) -> Clip:
+        """Khúc video cho 1 lô dịch: giờ các dòng (đầu, cuối). Liền = [dòng đầu − pad, dòng cuối + pad] như trước; chỉ có
+        lời (`speech`) = các đoạn nói ghép lại – trừ khi đoạn có lời đã chiếm ≥ SPEECH_KEEP khúc (gửi khúc liền, dùng
+        lại khúc đã cắt sẵn)."""
+        a = max(0.0, min(t[0] for t in times) - pad)
+        b = max(t[1] for t in times) + pad
+        if self.total:
+            b = min(b, self.total) if self.total > a + 1.0 else b
+        if not self.speech:
+            return Clip(a, b)
+        spans = speech_spans(times, self.total)
+        if not spans or sum(y - x for x, y in spans) >= SPEECH_KEEP * (spans[-1][1] - spans[0][0]):
+            return Clip(a, b)      # lời gần như liền -> khúc liền như cũ (dùng lại khúc đã cắt từ trước nếu có)
+        return Clip(spans[0][0], spans[-1][1], spans)
+
+    def clip_spans(self, spans: list[tuple[float, float]], cancel=None) -> Path:
+        """Khúc CHỈ CÓ LỜI: các đoạn `spans` (giờ gốc, tròn 0,1 s) cắt + ghép thành 1 file nhẹ. Cùng các đoạn -> dùng lại
+        file đã có (cả lần dịch trước). Hình: 10 khung / s chọn đúng khung trong đoạn, đánh giờ liền lại rồi lấy 1 khung
+        / s; tiếng: khung 10 ms chọn đúng trong đoạn -> hình và tiếng dài bằng nhau từng đoạn."""
+        a0 = spans[0][0]
+        key = hashlib.md5(";".join(f"{x:.1f}-{y:.1f}" for x, y in spans).encode()).hexdigest()[:10]
+        out = self.work / f"g_{self._sig}_s{key}.mp4"
+        with self._lock:
+            p = self._clips.get(("s", key))
+            if p and p.exists():
+                return p
+        if not (out.exists() and out.stat().st_size > 0):
+            rel = [(round(x - a0, 1), round(y - a0, 1)) for x, y in spans]
+            ev = "+".join(f"gte(t\\,{x - 0.05:.2f})*lt(t\\,{y - 0.05:.2f})" for x, y in rel)
+            ea = "+".join(f"gte(t\\,{x - 0.005:.3f})*lt(t\\,{y - 0.005:.3f})" for x, y in rel)
+            length = sum(y - x for x, y in rel)
+            tmp = out.with_suffix(".tmp.mp4")
+            ff.run(["-ss", f"{a0:.3f}", "-t", f"{spans[-1][1] - a0 + 0.3:.3f}", "-i", str(self.src.resolve()),
+                    "-vf", f"fps=10,select={ev},setpts=N/10/TB,fps={CLIP_FPS},scale=-2:{CLIP_H}",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "30", "-pix_fmt", "yuv420p"] +
+                   ff.af_args(ff.audio_sync(self.src, 16000), "asetnsamples=n=160:p=0", f"aselect={ea}",
+                              "asetpts=N/SR/TB") +
+                   ["-c:a", "aac", "-b:a", "48k", "-ac", "1", "-ar", "16000", "-t", f"{length:.3f}",
+                    "-movflags", "+faststart", str(tmp)],
+                   length, None, cancel, "Đang cắt đoạn có lời gửi Gemini")
+            ff.replace_file(tmp, out)
+        with self._lock:
+            self._clips[("s", key)] = out
+        return out
+
+    def ask_clip(self, system: str, user: str, clip: Clip, max_tokens: int = 8000, cancel=None) -> str:
+        """Hỏi Gemini kèm khúc `clip` (liền hoặc chỉ có lời)."""
+        path = self.clip_spans(clip.spans, cancel) if clip.spans else self.clip(clip.a, clip.b, cancel)
+        with self._lock:
+            if path not in self._counted:
+                self._counted.add(path)
+                self.sent_sec += clip.length
+                self.full_sec += clip.b - clip.a + (6.0 if clip.spans else 0.0)
+        self.asked += 1
+        return self.client.ask(system, user, path, max_tokens)
 
     def clip(self, a: float, b: float, cancel=None) -> Path:
         """Khúc video [a, b] giây (giờ video gốc) – bản nhẹ để tải lên Gemini."""

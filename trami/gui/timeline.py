@@ -1038,6 +1038,8 @@ class TrackTimeline(QWidget):
                  ("sub_merge", "merge", "Gộp", "Gộp các câu đang chọn (1 câu: gộp với câu sau)"),
                  ("sub_delete", "trash", "Xoá", "Xoá các câu đang chọn (phím Delete)"),
                  ("sub_translate", "globe", "Dịch lại", "Dịch lại các câu đang chọn"),
+                 ("sub_dub", "mic", "Lồng tiếng", "Đọc giọng lồng các câu đang chọn ngay (câu chưa dịch thì dịch trước) "
+                  "rồi ghép vào bản lồng đang dùng – không đọc lại câu khác"),
                  ("play", "play", "Nghe", "Nghe câu đang chọn"),
                  ("sel_all", "check", "Chọn hết", "Chọn mọi câu (Ctrl+A)")],
         "dub": [("play", "play", "Nghe", "Nghe câu đang chọn (bấm đúp vào đoạn giọng cũng được)"),

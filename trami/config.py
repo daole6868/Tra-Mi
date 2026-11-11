@@ -160,6 +160,8 @@ DEFAULT_SETTINGS: dict = {
     "dub_max_lag": 2.0,               # "Tự động": câu sau bị lùi tối đa (giây), quá thì đọc đè
     "asr_gemini_review": False,       # Gemini xem video soát lại phụ đề gốc cuối bước Nghe & tách câu (2.1.25)
     "translate_video": False,         # dịch bằng Gemini có gửi kèm khúc video (xưng hô theo hình, giới tính người nói)
+    "translate_video_speech": True,   # 2.4.11: … chỉ gửi đoạn có lời (ghép các đoạn nhân vật nói – bớt token, nhanh hơn)
+    "translate_frames": False,        # 2.4.11: gửi kèm 1 ảnh khung / câu cho AI xem được ảnh (Gemini / OpenAI / Claude…)
     "karaoke_listen": True,           # karaoke theo mốc thật từng từ của giọng lồng (Edge trả sẵn / Whisper nghe lại)
     "dub_subs_follow": True,          # phụ đề Việt hiện theo đúng lúc giọng lồng đọc (khi giọng sớm / trễ / dài)
     "sub_follow_mode": "always",      # giờ hiện phụ đề: always = luôn theo giọng lồng / shift = chỉ khi lệch > 0,3 s

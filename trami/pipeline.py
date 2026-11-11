@@ -4211,6 +4211,7 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
     tr = Translator(settings, engine, style, parse_glossary(p.data.get(gkey, "")), cache, target=target,
                     source=source_lang(p), skill=skills.skill_text(settings) if is_ai else "")
     tr.video = video_source(p, settings, eng)   # dịch có nhìn hình (Gemini xem khúc video của từng lô, 2.1.25)
+    tr.frames = frame_source(p, settings, eng)   # 2.4.11: ảnh khung từng câu cho AI xem được ảnh
     # người nói + nam / nữ từng câu gửi kèm cho AI (2.4.0) – chưa đo nam / nữ thì đo theo giọng (CPU, vài giây)
     spks = {(x.speaker or "S1") for x in segs if x.text.strip()}
     if is_ai and settings.get("translate_speakers", True) and len(spks) >= 2:
@@ -4250,7 +4251,7 @@ def translate(p: Project, engine: str | None = None, style: str | None = None, o
     finally:
         if tr.video is not None:
             tr.video.cleanup()      # xoá khúc video đã tải lên máy chủ Google
-    if tr.video is not None:
+    if tr.video is not None or tr.frame_batches or tr.frame_failed:
         note = video_translate_note(p, tr)
         if note:
             p.data["skill_note"] = ((p.data.get("skill_note", "") + " · ") if p.data.get("skill_note") else "") + note
@@ -4344,16 +4345,54 @@ def video_source(p: Project, settings: dict, engine: str):
 
     if not gemvideo.ready(settings)[0]:
         return None
-    return gemvideo.VideoSource(p.source, p.work / "gemvideo", settings, low_res=True)
+    total = float((p.data.get("info") or {}).get("duration") or 0.0)
+    return gemvideo.VideoSource(p.source, p.work / "gemvideo", settings, low_res=True,
+                                speech=bool(settings.get("translate_video_speech", True)), total=total)
+
+
+FRAME_ENGINES = ("gemini", "openai", "anthropic", "ollama")   # AI xem được ảnh (DeepSeek: API chỉ nhận chữ)
+
+
+def frame_source(p: Project, settings: dict, engine: str):
+    """2.4.11 ảnh khung từng câu (Cài đặt translate_frames): AI xem được ảnh -> mỗi lô dịch gửi kèm 1 khung / câu (Gemini
+    đang gửi video thì chỉ dùng khi lô gửi video lỗi). Không đủ điều kiện -> None."""
+    if not settings.get("translate_frames") or engine not in FRAME_ENGINES or not p.data.get("source") or \
+            source_missing(p):
+        return None
+    from .vframes import FrameSource
+
+    return FrameSource(p.source, p.work / "aiframes")
+
+
+def _mmss(sec: float) -> str:
+    sec = int(round(sec))
+    return f"{sec // 3600}:{sec % 3600 // 60:02d}:{sec % 60:02d}" if sec >= 3600 else f"{sec // 60}:{sec % 60:02d}"
 
 
 def video_translate_note(p: Project, tr) -> str:
-    """Kết quả dịch có nhìn hình + lưu giới tính người nói Gemini thấy trên hình (Tự gán giọng nam / nữ dùng)."""
-    if not (tr.video_batches or tr.video_failed):
+    """Kết quả dịch có nhìn hình (video / ảnh khung) + lưu giới tính người nói AI thấy trên hình (Tự gán giọng nam / nữ
+    dùng)."""
+    vb, vf = getattr(tr, "video_batches", 0), getattr(tr, "video_failed", 0)
+    fb, ffl = getattr(tr, "frame_batches", 0), getattr(tr, "frame_failed", 0)
+    if not (vb or vf or fb or ffl):
         return ""
-    note = f"Gemini xem video khi dịch {tr.video_batches} lô"
-    if tr.video_failed:
-        note += f" · ⚠ {tr.video_failed} lô gửi video lỗi – dịch chỉ bằng chữ ({tr.video_error[:80]})"
+    out = []
+    if vb or vf:
+        n = f"Gemini xem video khi dịch {vb} lô"
+        v = getattr(tr, "video", None)
+        sent, full = float(getattr(v, "sent_sec", 0.0) or 0.0), float(getattr(v, "full_sec", 0.0) or 0.0)
+        if getattr(v, "speech", False) and sent and full > sent:
+            n += f" (chỉ gửi đoạn có lời: {_mmss(sent)} thay vì {_mmss(full)} – bớt {100 * (1 - sent / full):.0f} %)"
+        if vf:
+            n += f" · ⚠ {vf} lô gửi video lỗi – " + ("dùng ảnh khung" if fb else "dịch chỉ bằng chữ") + \
+                 f" ({tr.video_error[:80]})"
+        out.append(n)
+    if fb or ffl:
+        n = f"AI xem ảnh khung từng câu khi dịch {fb} lô" if fb else "không gửi được ảnh khung"
+        if ffl:
+            n += f" · ⚠ {ffl} lô gửi ảnh lỗi – dịch chỉ bằng chữ ({getattr(tr, 'frame_error', '')[:80]})"
+        out.append(n)
+    note = " · ".join(out)
     sg = tr.speaker_genders()
     if sg:
         cur = dict(p.data.get("speaker_gender") or {})

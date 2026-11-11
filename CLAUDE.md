@@ -940,6 +940,29 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   (`_pick_still_long`). `unshorten_lines` trả lời + tốc độ cũ (GUI: câu chỉ đổi tốc độ -> relayout). GUI hàng "Rút gọn
   cho vừa" `d_sh_mode` / `d_sh_speed` / `d_sh_rounds` / `d_sh_fb` / `d_sh_vmax` -> `_shorten_opts_changed` (Cài đặt),
   `_sync_shorten_opts` trong `sync_engine`. AI tự rút gọn khi lồng (tầng 3b) cũng gửi info + nhận 2 phương án.
+- Dịch có nhìn hình CHỈ ĐOẠN CÓ LỜI + ảnh khung (2.4.11, 2 công tắc riêng): (A) Cài đặt `translate_video_speech` (mặc
+  định bật, đi kèm `translate_video` Gemini) -> `gemvideo.VideoSource(speech=, total=)`: `plan(times, pad)` trả `Clip`
+  (liền [a, b] như 2.1.25, hoặc `spans` = `speech_spans`: giờ câu ± `SPEECH_PAD` 0,3 s, gộp chỗ cách ≤ `SPEECH_JOIN` 1 s,
+  tròn ra ngoài 0,1 s, ≤ `SPEECH_MAX` 120 đoạn; lời ≥ `SPEECH_KEEP` 80 % từ đoạn đầu tới đoạn cuối -> khúc liền, dùng lại
+  khúc đã cắt), `Clip.map(t)` giờ trong khúc đã ghép, `clip_spans` (FFmpeg 1 lệnh: `fps=10,select=…,setpts=N/10/TB,fps=1`
+  + tiếng `asetnsamples=160,aselect=…,asetpts=N/SR/TB` -> tiếng khớp từng 0,01 s, hình ±0,5 s như khúc liền; file
+  `g_<sig>_s<mã đoạn>.mp4` dùng lại), `ask_clip`, `sent_sec` / `full_sec`. Translator: `_llm_batch` lập `win` bằng
+  `video.plan` (đối tượng giả không có plan -> tuple cũ), giờ dòng `_clip_t`, `_video_chat` + `VIDEO_SPEECH_VI/EN` khi khúc
+  ghép; lô (`take`) theo tổng lời ≤ VIDEO_WIN và trải ≤ `VIDEO_SPEECH_SPAN` 30 phút. (C) Cài đặt `translate_frames` (mặc định
+  tắt) -> `pipeline.frame_source` (chỉ `FRAME_ENGINES` gemini / openai / anthropic / ollama) -> `vframes.FrameSource`
+  (work/aiframes/f_<sig>_<giây×10>.jpg, `at` = 40 % câu, rộng ≤ `FRAME_W` 448, `prefetch` 4 FFmpeg, có sẵn thì đọc file);
+  `Translator.frames`: `translate_segments` gửi times khi có frames, `translate_lines` chụp trước câu cần dịch (không khi
+  Gemini đang gửi video), lô ≤ `FRAMES_BATCH` 40, `_frames_chat` (`LLMClient.chat(images=[("Dòng N", jpeg)])` +
+  `FRAME_RULE_VI/EN`, "_nguoi_noi" -> `_keep_speakers`; 2 lô đầu lỗi -> `frames = None`), dùng khi không có video / lô gửi
+  video lỗi. `video_translate_note` báo cả video (giây đã gửi so với khúc liền) + ảnh khung. GUI: `VISION_SW` (a_vspeech /
+  s_vspeech, a_frames / s_frames) trong `PAIR_SW` dùng chung `_shorten_sw_changed`; vspeech chỉ bấm được khi Gemini + đang
+  bật Dịch có nhìn hình, frames khi AI xem ảnh; điện thoại `api.SETTING_KEYS` + 2 công tắc màn Dịch; `autoflow.summary` "AI
+  xem video (chỉ đoạn có lời)" / "xem ảnh khung từng câu"; `storage` work/aiframes = đệm; `C.VIDEO_SPEECH_HELP` / `FRAMES_HELP`.
+- Nút "Lồng tiếng" dòng Phụ đề timeline (2.4.11): `TrackTimeline.TOOLS["subs"]` `sub_dub` (biểu tượng mic, sau Dịch lại)
+  -> `project_page._dub_rows_now(rows)`: câu đang chọn đã dịch -> `_redub_rows` (đọc đúng các câu, vá vào bản lồng đang
+  dùng, phát câu đầu); có câu chưa dịch -> 1 việc "redub": `pipeline.translate(only_empty, rows=câu chưa dịch)` rồi
+  `pipeline.redub` mọi câu đã có lời ("pick" tích sẵn); phim chưa có bản lồng -> toast chỉ đường "Tạo bản lồng tiếng" (đọc
+  riêng vài câu khi chưa có bản lồng sẽ đọc cả phim).
 - Rút gọn bản dịch – 2 công tắc, MẶC ĐỊNH TẮT (2.4.10 – tắt = giữ bản dịch sát nghĩa, "bản gốc"): (1) Cài đặt `dub_fit`
   "AI rút gọn bản dịch cho vừa thời gian nói" = rút gọn LÚC DỊCH + ở "AI kiểm tra lại bản dịch": bật -> `Translator`
   (`fit_dub`) gửi ⟪≤N⟫ / ⟪M–N⟫ (`length_marker`) + luật 8 cũ; tắt -> không gửi ký hiệu, `system_prompt(fit=False)` thay khối
@@ -1075,7 +1098,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (348 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (353 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -3136,7 +3159,25 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   gốc trơn -> tắt rút gọn rồi dịch lại vẫn ra câu rút gọn -> khoá riêng `NOFIT_KEY`. Thử với AI giả: tắt -> không gửi ⟪⟫,
   lời nhắc có luật 8 mới, không lấy bản nhớ cũ; bật -> như cũ; 2 chế độ không lẫn bộ nhớ; AI kiểm tra không gửi độ dài; giao
   diện offscreen (2 cặp công tắc luôn giống nhau, lưu Cài đặt, ô "Câu ngắn…" mờ khi tắt, Google -> mờ).
+- 2.4.11: (1) người dùng gửi DichVideoStudio-1.0.0.zip (MIT) hỏi lấy được gì -> đề xuất che phụ đề chỉ lúc có chữ, tự chọn
+  nguồn phụ đề, Claude lưu đệm lời nhắc… (chưa làm). (2) VideOCR (timminator, MIT – tool quét phụ đề cứng) -> người dùng
+  chọn "Google Lens làm bộ đọc lại câu OCR" -> DỪNG, không làm: Chrome-Lens-OCR gọi cổng Lens nội bộ của Google bằng mã khoá
+  của trình duyệt Chrome (giả làm Chrome để lách chặn "unregistered callers"); lần gọi thử bị hệ thống chặn; đã xoá mã, đề
+  xuất Gemini (có sẵn) / Google Cloud Vision (key của người dùng). (3) "cắt video đúng đoạn nhân vật nói rồi gửi API dịch"
+  -> tư vấn A (Gemini chỉ đoạn có lời) / B (Gemini nghe + dịch từng câu) / C (ảnh khung cho mọi AI xem ảnh); người dùng chọn
+  A + C, "tách ra riêng, có sẵn thì dùng sẵn" -> 2 công tắc riêng, khúc / ảnh đã có dùng lại (xem Cấu trúc "Dịch có nhìn
+  hình CHỈ ĐOẠN CÓ LỜI + ảnh khung"). Thử: video tiếng bíp ở 2,5 / 8,5 / 15,2 s -> khúc ghép 3,9 s, bíp đúng 0,5 / 2,0 / 3,1 s
+  (±0,01 s); 30 câu cách nhau 60 s -> 1 lô video thay 3 lô, giờ dòng theo khúc ghép; OpenAI giả 50 câu -> 2 lần gửi (40 + 10
+  ảnh "Dòng N"), giới tính người nói; model không nhận ảnh -> thôi gửi ảnh; Gemini video lỗi -> ảnh khung; giao diện (2 cặp
+  công tắc, mờ theo công cụ dịch). Chưa gọi Gemini / OpenAI / Claude thật (sandbox). (4) Ảnh thanh công cụ dòng Phụ đề
+  timeline + "thêm nút lồng tiếng, chọn câu bấm là lồng câu đó luôn" -> nút "Lồng tiếng" (xem Cấu trúc).
 ## Vấn đề đang mở
+- 2.4.11: chờ người dùng chép file, dịch lại 1 tập: (A) Công cụ dịch Gemini + bật "Dịch có nhìn hình" (… chỉ gửi đoạn có lời
+  mặc định bật) -> thông báo "Gemini xem video khi dịch N lô (chỉ gửi đoạn có lời: x thay vì y – bớt z %)", xưng hô / người
+  nói có chuẩn hơn không; (C) OpenAI / Claude / Gemini (không video) + bật "Gửi ảnh khung từng câu cho AI" -> "AI xem ảnh khung
+  từng câu khi dịch N lô", tiền / token tăng bao nhiêu; lỗi gửi ảnh -> gửi dòng ⚠ trong thông báo.
+- 2.4.11: nút "Lồng tiếng" trên thanh công cụ dòng Phụ đề (timeline): chọn 1 / nhiều câu (Ctrl / Shift) -> bấm ->
+  giọng câu đó đọc lại + ghép vào bản lồng; câu chưa dịch tự dịch trước. Phim chưa lồng lần nào phải Tạo bản lồng tiếng.
 - 2.4.10: chờ người dùng chép file, mở dự án đã dịch: 2 công tắc rút gọn đang tắt (tab Tự động bước 2 / bước 3); muốn bản
   dịch đầy đủ cho câu đã bị rút gọn trước đây -> tab Phụ đề → "Dịch lại tất cả" (hoặc tích câu → "Dịch câu đã tích"), câu
   bị AI tự rút gọn lúc lồng -> tích → "Bỏ rút gọn" (tab Lồng tiếng mục 2); câu dịch đầy đủ dài hơn chỗ trống sẽ đọc nhanh
