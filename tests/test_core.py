@@ -16435,3 +16435,218 @@ def test_timeline_dub_button_2411(monkeypatch):
         win.timer.stop()
         win.close()
         p.delete()
+
+
+def test_sync_force_plan_2412():
+    """2.4.12 Khớp giọng – ép mọi câu đúng tốc độ: câu đặt tốc độ tay cũng khoá ×1,00 (đánh dấu user), không giới hạn hình
+    chậm; câu nói liền nhau (khoảng < 0,15 s) dồn phần thiếu vào lúc nói; khoảng nghỉ ≥ 0,15 s thì giãn khoảng đó; nghỉ P
+    giữa 2 câu (mọi câu / chỉ câu tích); câu cuối; 2 giọng cùng lúc -> left; chữ ký / tuỳ chọn / dòng báo."""
+    from trami import timewarp, tts
+
+    segs = [Segment(0.0, 1.0, "a"), Segment(1.0, 2.0, "b"), Segment(2.02, 3.0, "c"), Segment(5.0, 6.0, "d"),
+            Segment(6.0, 6.05, "e"), Segment(6.05, 7.0, "f")]
+    durs = [1.6, 1.2, 2.5, 0.8, 1.0, 0.5]
+    items = [{"k": k, "want": s.start, "dur": d, "user": 0.0, "lock": False, "fixed": False, "mode": "", "pause": 0.0}
+             for k, (s, d) in enumerate(zip(segs, durs))]
+    items[1]["user"], items[1]["lock"] = 1.3, True
+    tts.force_items(items, 1.0)
+    assert all(it["lock"] and it["user"] == 1.0 for it in items) and items[1]["was_user"] and not items[0]["was_user"]
+    info: dict = {}
+    sp = timewarp.plan_force(items, segs, 9.0, 1.0, 0.3, 0.5, True, None, info)
+    w = timewarp.Warp.of(sp)
+    its = sorted(items, key=lambda x: x["want"])
+    pl = tts.plan_layout([dict(x, want=w.fwd(x["want"])) for x in its], w.fwd(9.0), "smart", 1.3, 1.0, 2.0)
+    order = sorted(pl, key=lambda k: pl[k]["start"])
+    for a, b in zip(order, order[1:]):
+        assert pl[a]["speed"] == 1.0 and pl[a]["fit"] != "long"
+        assert pl[b]["start"] - pl[a]["end"] >= 0.5 - 1e-3                 # nghỉ ≥ 0,5 s giữa 2 giọng
+        assert abs(pl[a]["start"] - w.fwd(segs[a].start)) < 1e-3          # giọng vào đúng lúc nhân vật nói
+    assert info[1]["user"] is True and info[0]["user"] is False
+    assert info[0]["r"] < 0.6                                              # không giới hạn hình chậm (×0,6 cũ)
+    # câu 2 – 3 cách 2 s: khoảng nghỉ đủ chỗ -> chỉ giãn lúc nói, nghỉ còn dài hơn 0,5 s (không cắt bớt)
+    assert pl[3]["start"] - pl[2]["end"] > 1.0
+    sm = timewarp.sync_summary(info, w)
+    assert sm["over"] == 1 and sm["left"] == 0 and sm["n"] >= 4
+    note = timewarp.sync_note(sm, 1.0, True, 0.5)
+    assert note.startswith("ép mọi câu ×1,00, nghỉ 0,50 s") and "1 câu tự đặt tốc độ" in note
+    # nghỉ chỉ cho câu tích (câu 0): câu 1 -> 2 chỉ còn GAP
+    info2: dict = {}
+    w2 = timewarp.Warp.of(timewarp.plan_force(items, segs, 9.0, 1.0, 0.3, 0.5, False, None, info2, {0}))
+    pl2 = tts.plan_layout([dict(x, want=w2.fwd(x["want"])) for x in its], w2.fwd(9.0), "smart", 1.3, 1.0, 2.0)
+    assert pl2[1]["start"] - pl2[0]["end"] >= 0.5 - 1e-3 and pl2[2]["start"] - pl2[1]["end"] < 0.3
+    assert w2.added() < w.added()
+    # 2 giọng vào cùng lúc: không giãn được -> left
+    s2 = [Segment(0.0, 1.0, "a"), Segment(0.0, 1.0, "b")]
+    it2 = [{"k": 0, "want": 0.0, "dur": 1.5}, {"k": 1, "want": 0.0, "dur": 1.0}]
+    info3: dict = {}
+    timewarp.plan_force(it2, s2, 5.0, 1.0, 0.0, 0.2, True, None, info3)
+    assert info3[0]["left"] > 1.0
+    # tuỳ chọn + chữ ký (cách thường giữ nguyên chữ ký cũ)
+    q = timewarp.sync_params({"sync": {"force": 1, "pause": 9, "pause_all": 0}})
+    assert q["force"] == 1.0 and q["pause"] == timewarp.PAUSE_MAX and q["pause_all"] == 0.0
+    e = {"speed_mode": "sync", "sync": {"speed": 1.0, "lag": 0.3, "force": 1, "pause": 0.4, "pause_all": 0,
+                                        "tick_key": "ab12"}}
+    assert timewarp.signature(e) == "sync:force:1.000,0.300,0.400,0.000:ab12"
+    e2 = {"speed_mode": "sync", "sync": {"speed": 1.1, "lag": 0, "floor": 0, "min": 0}}
+    assert timewarp.signature(e2) == "sync:1.100,0.000,0.000,0.000"
+
+
+def test_sync_force_dub_2412(monkeypatch):
+    """2.4.12: lồng tiếng thật (Edge giả), câu nói liền nhau + 1 câu khoá ×1,30 -> ép ×1,00 + nghỉ 0,4 s -> xếp lại không
+    đọc lại câu nào; MỌI câu đọc ×1,00 (kể cả câu khoá), không câu ⚠; giọng 2 câu liền nhau cách ≥ 0,4 s (giờ giãn); xem
+    trước = kết quả; tắt ép -> câu khoá về ×1,30."""
+    from trami import pipeline, timewarp, tts
+    from trami.project import Project
+
+    spoken = []
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, path, voice in items:
+            spoken.append(i)
+            _fake_audio(path, 1.6, 400 + 50 * i)
+        return []
+
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    p = Project.create("syncforce")
+    p.data["info"] = {"duration": 12}
+    p.segments = [Segment(1.0 + 1.0 * i, 2.0 + 1.0 * i, "你好", f"Câu số {i}", "S1") for i in range(6)]
+    p.save()
+    st = {"translate_engine": "google", "tts_voice": "vi-VN-HoaiMyNeural", "dub_overflow": "smart",
+          "dub_pauses": True}
+    try:
+        pipeline.dub(p, None, settings=st, engine="edge")
+        segs = p.segments
+        segs[2].extra.update(speed=1.3, speed_lock=True)
+        p.segments = segs
+        p.save()
+        opts = {"speed": 1.0, "lag": 0.3, "force": 1, "pause": 0.4, "pause_all": 1}
+        prev = pipeline.sync_preview(p, opts)
+        sm0 = prev["summary"]
+        assert sm0["lines"] == 6 and sm0["over"] == 1 and sm0["fast_after"] == 0 and sm0["fast_before"] >= 3
+        assert prev["pauses"] == 5 and prev["total"] >= 12
+        ed = p.edit
+        ed.update({"speed_mode": "sync", "sync": timewarp.sync_params({"sync": opts})})
+        p.data["edit"] = ed
+        p.save()
+        assert pipeline.dub_speed_stale(p)
+        spoken.clear()
+        pipeline.relayout(p, st)
+        assert spoken == []
+        segs = p.segments
+        w = timewarp.Warp(p.edit["dub"]["warp"])
+        assert all(float(s.extra.get("fit_speed") or 1.0) == 1.0 and s.extra.get("fit") != "long" for s in segs)
+        assert segs[2].extra["speed"] == 1.3                    # tốc độ tay vẫn lưu – tắt ép thì về như cũ
+        for a, b in zip(segs, segs[1:]):
+            gap = w.fwd(b.extra["dub_at"][0]) - w.fwd(a.extra["dub_at"][1])
+            assert gap >= 0.4 - 0.02, gap
+            voice = w.fwd(a.extra["dub_at"][1]) - w.fwd(a.extra["dub_at"][0])
+            assert abs(voice - 1.6) < 0.06
+        sm = p.data["dub_stats"]["sync"]
+        assert sm["force"] and sm["over"] == 1 and abs(sm["added"] - sm0["added"]) < 0.05
+        assert "ép mọi câu ×1,00, nghỉ 0,40 s" in pipeline.dub_summary(p)
+        assert "ép mọi câu" in pipeline.warp_note(p).lower()
+        # tắt ép (cách khớp giọng thường) -> câu khoá đọc lại ×1,30
+        ed = p.edit
+        ed["sync"] = {"speed": 1.0, "lag": 0.3, "floor": 0.6, "min": 0.05}
+        p.data["edit"] = ed
+        p.save()
+        pipeline.relayout(p, st)
+        assert abs(float(p.segments[2].extra["fit_speed"]) - 1.3) < 1e-6 and spoken == []
+    finally:
+        p.delete()
+
+
+def test_sync_force_gui_2412(monkeypatch):
+    """2.4.12 khối Khớp giọng: công tắc 'Ép mọi câu đúng tốc độ' -> ẩn 'Hình chậm nhất' / 'Bỏ qua câu chênh', hiện 'Nghỉ
+    giữa 2 câu' + 'áp cho'; Áp dụng -> hộp CẢNH BÁO (đủ số liệu) – Không thì không đổi gì, Có thì áp; áp cho câu đã tích
+    -> đánh dấu sync_pause đúng câu + chữ ký có mã câu tích; chưa tích câu nào -> nhắc; mở lại dự án hiện đúng tuỳ chọn."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from trami import pipeline, timewarp
+    from trami.config import load_settings, save_settings
+    from trami.gui import project_page as PP, theme
+    from trami.gui.main import MainWindow
+    from trami.gui.widgets import set_combo
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    p = Project.create("syncforcegui")
+    p.data["info"] = {"duration": 30}
+    p.segments = _dense_segs(6, talk=1.0, gap=0.0, need=1.6)
+    p.segments[1].extra.update(speed=1.25, speed_lock=True)
+    p.save()
+    monkeypatch.setattr(pipeline, "has_dub", lambda pr: True)
+    monkeypatch.setattr(PP, "run_async", lambda fn, done=None, err=None: done(fn()))
+    win = MainWindow()
+    win.show()
+    win.open_project(p.id)
+    pp = win.project_page
+    toasts, warns, answer = [], [], [QMessageBox.StandardButton.No]
+    monkeypatch.setattr(win, "toast", lambda m, *a, **k: toasts.append(m))
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+
+    def fake_warn(parent, title, text, *a, **k):
+        warns.append((title, text))
+        return answer[0]
+
+    monkeypatch.setattr(QMessageBox, "warning", fake_warn)
+    monkeypatch.setattr(pp, "_relayout", lambda *a, **k: None)
+    g = pp._dense_g
+
+    def shown(w):
+        return g._form_of(w).isRowVisible(w)
+
+    try:
+        app.processEvents()
+        pp.d_sy_on.setChecked(True)
+        pp.d_sy_force.setChecked(False)
+        assert shown(pp.d_sy_floor) and shown(pp.d_sy_min) and not shown(pp.d_sy_pause_row)
+        pp.d_sy_force.setChecked(True)
+        assert not shown(pp.d_sy_floor) and not shown(pp.d_sy_min) and shown(pp.d_sy_pause_row)
+        assert shown(pp.d_sy_force) and load_settings()["dense_sync_force"] is True
+        pp.d_sy_pause.setValue(0.5)
+        assert load_settings()["dense_sync_pause"] == 0.5
+        pp._dense_find()                                        # Xem trước
+        assert pp.d_dn_table.rowCount() == 6 and "Ép mọi câu ×1,00, nghỉ 0,50 s" in pp.d_dn_note.text()
+        # Áp dụng -> cảnh báo, bấm Không -> không đổi gì
+        pp._dense_apply()
+        assert len(warns) == 1
+        txt = warns[0][1]
+        for key in ("6 câu lồng tiếng đọc đúng ×1,00", "không rút gọn", "1 câu bạn / AI đã đặt tốc độ riêng",
+                    "Video dài thêm", "nghỉ ít nhất 0,50 s", "Ctrl+Z", "chậm nhất ×"):
+            assert key in txt, key
+        p.reload()
+        assert (p.edit.get("speed_mode") or "all") == "all"
+        # bấm Có -> áp
+        answer[0] = QMessageBox.StandardButton.Yes
+        pp._dense_apply()
+        p.reload()
+        assert p.edit["speed_mode"] == "sync" and p.edit["sync"]["force"] == 1.0 and p.edit["sync"]["pause"] == 0.5
+        assert timewarp.signature(p.edit).startswith("sync:force:")
+        # áp cho câu đã tích: chưa tích -> nhắc; tích câu 0, 3 -> đánh dấu đúng câu
+        set_combo(pp.d_sy_pall, "ticked")
+        pp.model.set_picked(range(6), False)
+        n = len(warns)
+        pp._dense_apply()
+        assert len(warns) == n and "chưa tích câu nào" in toasts[-1]
+        pp.model.set_picked([0, 3])
+        pp._dense_apply()
+        p.reload()
+        assert [i for i, s in enumerate(p.segments) if s.extra.get("sync_pause")] == [0, 3]
+        assert "2 câu đã tích" in warns[-1][1]
+        assert p.edit["sync"]["pause_all"] == 0.0 and p.edit["sync"]["tick_key"]
+        assert timewarp.signature(p.edit).endswith(":" + p.edit["sync"]["tick_key"])
+        # mở lại dự án: ô hiện đúng tuỳ chọn đã áp
+        save_settings({"dense_sync_force": False, "dense_sync_pause": 0.1})
+        pp.d_sy_force.setChecked(False)
+        win.open_project(p.id)
+        app.processEvents()
+        assert pp.d_sy_force.isChecked() and abs(pp.d_sy_pause.value() - 0.5) < 1e-6
+        assert pp.d_sy_pall.currentData() == "ticked"
+    finally:
+        save_settings({"dense_sync": False, "dense_sync_force": False, "dense_sync_pause": 0.3,
+                       "dense_sync_pause_all": True})
+        win.timer.stop()
+        p.delete()

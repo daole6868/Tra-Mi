@@ -574,6 +574,21 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   đúp = nghe câu), "Áp dụng" `_sync_apply` (cần bản lồng; cách khác đang dùng -> hỏi; `self._sync` -> `_dense_set(...,
   "sync")` = xếp lại giọng, không đọc lại), "Bỏ giãn", "Tích câu vẫn còn nhanh" (`sync_left_rows`); edit["sync"] lưu,
   hoàn tác qua `_warp_state` "s". Tab Chỉnh sửa: Làm chậm "Khớp giọng ×1,00" -> nút "Đặt khớp giọng…" (`_goto_dense`).
+  Ép mọi câu đúng tốc độ + nghỉ đều (2.4.12, edit["sync"] `force` / `pause` 0–`PAUSE_MAX` 3 s / `pause_all` (+ `tick_key`)):
+  `tts.force_items` – MỌI đoạn giọng khoá đúng ×speed (câu có tốc độ tay / AI khoá cũng vậy, chỉ trong bộ nhớ – `extra
+  ["speed"]` giữ, tắt ép thì về như cũ; `was_user` để báo) -> không câu "long" -> không AI rút gọn; `timewarp.plan_force`
+  (không hình chậm nhất / bỏ qua câu chênh): mỗi câu tới giọng câu sau (câu cuối: hết video) – miệng [want, b] giãn thành
+  M = max(S, D − lag), khoảng không lời [b, nw] giãn thành max(G, D + P − M) (P = `force_pause`: ≥ GAP / nghỉ vế sau; "Nghỉ
+  giữa 2 câu" cho mọi câu hoặc câu `extra["sync_pause"]` – xem trước `pause_rows`); khoảng < `FORCE_GAP_MIN` 0,15 s -> dồn
+  vào miệng; miệng < 0,1 s -> giãn cả [want, nw] thành max(L, D + P); chậm nhất `FORCE_MIN_RATE` ×0,02; 2 giọng cùng lúc ->
+  `left`. Chỗ nghỉ vốn dài hơn P giữ nguyên (chỉ giãn, không cắt). `plan_pauses` room trừ P (`force_gap`). `signature`
+  "sync:force:speed,lag,pause,pause_all[:tick_key]" (cách thường giữ chữ ký cũ); `sync_summary` thêm `over` (câu bị đè tốc
+  độ tay); `sync_note(sm, speed, force, pause)`. `pipeline.sync_preview` thêm force + summary lines / fast_before /
+  fast_after + total + pauses. GUI khối Khớp giọng: `d_sy_force` "Ép mọi câu đúng tốc độ" (ẩn `d_sy_floor` / `d_sy_min`,
+  hiện `d_sy_pause_row` = `d_sy_pause` + `d_sy_pall` mọi câu / câu đã tích; Cài đặt `dense_sync_force` / `_pause` /
+  `_pause_all`); Áp dụng khi ép -> tính lại xem trước nếu tuỳ chọn khác -> HỘP CẢNH BÁO `_sync_force_warning` (số câu ×1,00,
+  câu bị đè tốc độ tay, chậm nhất ×r, video dài thêm a → b, nghỉ P s, nhạc nền chậm theo, câu chồng giọng, Ctrl+Z / Bỏ giãn)
+  -> Có: câu đã tích `_sync_mark_pauses` (sync_pause + tick_key) -> `_sync_do_apply`.
 - Tách phụ đề HIỂN THỊ (2.1.28, `trami/subsplit.py`) – khác "Tách câu dài" (`align.split_clauses`, tách hẳn câu + đọc lại
   giọng): câu / bản dịch / giọng lồng / karaoke giữ nguyên, chỉ chữ HIỆN thành nhiều mảnh nối nhau, mỗi mảnh hiện đúng lúc
   giọng đọc tới từ đầu mảnh (`karaoke.word_times` theo kv / kw; mảnh đầu từ đầu câu, mảnh cuối tới cuối câu). Cách
@@ -1098,7 +1113,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (353 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (356 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -3171,7 +3186,19 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   ảnh "Dòng N"), giới tính người nói; model không nhận ảnh -> thôi gửi ảnh; Gemini video lỗi -> ảnh khung; giao diện (2 cặp
   công tắc, mờ theo công cụ dịch). Chưa gọi Gemini / OpenAI / Claude thật (sandbox). (4) Ảnh thanh công cụ dòng Phụ đề
   timeline + "thêm nút lồng tiếng, chọn câu bấm là lồng câu đó luôn" -> nút "Lồng tiếng" (xem Cấu trúc).
+- 2.4.12: ảnh khối Khớp giọng (×1,00 / 0,30 s / Hình chậm nhất ×0,5 / 0,05 s – "Đang giãn 308 đoạn (2113 câu) · video dài
+  thêm 102,1 s") + "sao nhiều chỗ vẫn không giãn – muốn cả video + lồng tiếng khớp ×1,00, nghỉ giữa mỗi câu (tích áp dụng
+  tất cả cho nhất quán), không rút gọn, mọi câu ×1,00, video chậm bao nhiêu cũng được; hiện cảnh báo trước khi áp dụng".
+  Nguyên nhân cách 2.4.9 bỏ sót: câu có tốc độ tay / AI khoá bị bỏ qua hẳn; "Hình chậm nhất" ×0,5 chặn -> phần thiếu vẫn
+  đọc nhanh; chỉ giãn [lúc giọng vào, lúc thôi nói] – câu nói liền nhau (câu sau vào sát / trước khi câu trước thôi nói)
+  giọng vẫn chồng -> bộ xếp tăng tốc / lùi câu sau; câu miệng < 0,1 s / chênh < 0,05 s bỏ qua. Làm "Ép mọi câu đúng tốc độ"
+  + "Nghỉ giữa 2 câu" (mọi câu / câu đã tích) + hộp cảnh báo (xem Cấu trúc "Khớp giọng ×1,00"). Thử: 6 câu nói liền nhau
+  (Edge giả 1,6 s / câu 1 s, 1 câu khoá ×1,30) -> xếp lại không đọc lại, mọi câu ×1,00, giọng cách nhau ≥ 0,4 s, tắt ép ->
+  câu khoá về ×1,30; giao diện (ẩn / hiện ô, cảnh báo Không -> không đổi, Có -> áp, câu đã tích đánh dấu đúng, mở lại dự án).
 ## Vấn đề đang mở
+- 2.4.12: chờ người dùng chép file, tab Lồng tiếng mục 3 → khối Giãn video → Khớp giọng bật → bật "Ép mọi câu đúng tốc độ",
+  "Nghỉ giữa 2 câu" (VD 0,3 s, mọi câu) → Xem trước → Áp dụng (đọc hộp cảnh báo) → xem / nghe: còn câu đọc nhanh / chồng
+  giọng không (dòng tóm tắt "N câu vẫn chồng giọng câu sau" = 2 người nói cùng lúc), hình chậm có chấp nhận được không.
 - 2.4.11: chờ người dùng chép file, dịch lại 1 tập: (A) Công cụ dịch Gemini + bật "Dịch có nhìn hình" (… chỉ gửi đoạn có lời
   mặc định bật) -> thông báo "Gemini xem video khi dịch N lô (chỉ gửi đoạn có lời: x thay vì y – bớt z %)", xưng hô / người
   nói có chuẩn hơn không; (C) OpenAI / Claude / Gemini (không video) + bật "Gửi ảnh khung từng câu cho AI" -> "AI xem ảnh khung

@@ -1112,6 +1112,21 @@ SHIFT_OK = 0.3         # lệch ≤ 0,3 s so với lúc nhân vật nói vẫn c
 _TOL = 0.05
 
 
+def force_items(items: list[dict], speed: float = 1.0) -> None:
+    """Khớp giọng – ép mọi câu đúng tốc độ (2.4.12): mọi đoạn giọng khoá đúng ×speed (câu đang có tốc độ tay / khoá cũng
+    vậy – đánh dấu was_user để báo), không đọc sớm / tự tăng tốc -> không câu nào bị coi là "quá dài" để AI rút gọn."""
+    for it in items:
+        it["was_user"] = bool(it.get("user") or it.get("lock"))
+        it["user"] = float(speed)
+        it["lock"] = True
+
+
+def _pairs(items: list[dict]):
+    """(các câu theo thứ tự giọng, câu ngay sau mỗi câu – câu cuối None)."""
+    its = sorted(items, key=lambda x: (float(x["want"]), int(x["k"])))
+    return its, its[1:] + [None]
+
+
 def plan_layout(items: list[dict], total: float, mode: str = "smart", max_speedup: float = 1.3,
                 lead_max: float = 1.0, max_lag: float = 2.0) -> dict[int, dict]:
     """Xếp các đoạn giọng lồng theo thời gian (chỉ tính toán, không đụng âm thanh).
@@ -2163,6 +2178,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     durs = {it["k"]: it["dur"] for it in items}
     user_min = {it["k"]: it["user"] for it in items if it["user"]}
     tw = None        # bản đồ giờ giãn khoảng nghỉ (2.1.27): mọi mốc xếp giọng theo giờ giãn, dub_at đổi ngược về giờ gốc
+    force_gap: dict[int, float] = {}    # ép ×1,00 (2.4.12): khoảng nghỉ phải chừa sau giọng từng câu
     if warp and warp.get("mode") in ("gaps", "need", "dense", "sync"):
         from . import timewarp
 
@@ -2172,16 +2188,25 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         elif warp["mode"] == "dense":      # đoạn nói nhanh (2.3.8): các đoạn đã áp cố định khi bấm Áp dụng
             spans = warp.get("spans") or []
         elif warp["mode"] == "sync":       # khớp giọng (2.4.9): làm chậm lúc nhân vật nói cho vừa giọng ×T
-            q = warp.get("sync") or timewarp.SYNC_DEFAULTS
+            q = dict(timewarp.SYNC_DEFAULTS, **(warp.get("sync") or {}))
             sync_info: dict = {}
-            spans = timewarp.plan_sync(items, segs, total, q["speed"], q["lag"], q["floor"], q["min"],
-                                       warp.get("lines"), sync_info)
+            if q.get("force"):             # 2.4.12: ép MỌI câu đúng ×T (đè tốc độ tay, không rút gọn) + nghỉ đều
+                force_items(items, q["speed"])
+                spans = timewarp.plan_force(items, segs, total, q["speed"], q["lag"], q.get("pause", 0.0),
+                                            bool(q.get("pause_all", 1)), warp.get("lines"), sync_info)
+                force_gap = {int(x["k"]): timewarp.force_pause(x, nx, segs[int(x["k"])], q.get("pause", 0.0),
+                                                               bool(q.get("pause_all", 1)))
+                             for x, nx in zip(*_pairs(items))}
+            else:
+                spans = timewarp.plan_sync(items, segs, total, q["speed"], q["lag"], q["floor"], q["min"],
+                                           warp.get("lines"), sync_info)
         else:
             spans = timewarp.plan_need(items, segs, total, wp["need_rate"], wp["need_max"],
                                        speech=warp.get("speech"))
         tw = timewarp.Warp.of(spans)
         if warp["mode"] == "sync":
-            stats["sync"] = dict(timewarp.sync_summary(sync_info, tw), speed=float(q["speed"]))
+            stats["sync"] = dict(timewarp.sync_summary(sync_info, tw), speed=float(q["speed"]),
+                                 force=bool(q.get("force")), pause=float(q.get("pause") or 0))
         if tw:
             for it in items:
                 it["want"] = tw.fwd(it["want"])
@@ -2210,7 +2235,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             s = segs[k]
             if x["keep"] is not None or "ct" not in s.extra:
                 continue
-            room = min(nxt.get(k, total), total) - GAP - x["end"]
+            room = min(nxt.get(k, total), total) - max(GAP, force_gap.get(k, 0.0)) - x["end"]
             spd = _clip_speed(x["speed"])
             # 2.1.12: cả câu đọc 1 lần (bộ đọc AI) cũng được đọc nhanh riêng vế trước khi vế đó dài hơn vế gốc (cắt ở
             # đúng chỗ bộ đọc tự ngắt) – như đọc từng vế mà không phải đọc riêng từng mẩu ngắn

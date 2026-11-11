@@ -4920,7 +4920,8 @@ def warp_note(p: Project, edit: dict | None = None, segs: list | None = None) ->
     if m == "sync":
         sm = (p.data.get("dub_stats") or {}).get("sync") if (d.get("warp_sig") or "") == timewarp.signature(ed) \
             else None
-        txt = timewarp.sync_note(sm, timewarp.sync_params(ed)["speed"]) or "chưa xếp giọng lồng theo cách này"
+        q = timewarp.sync_params(ed)
+        txt = timewarp.sync_note(sm, q["speed"], bool(q["force"]), q["pause"]) or "chưa xếp giọng lồng theo cách này"
     elif m == "dense":
         from . import dense
 
@@ -4974,35 +4975,53 @@ def sync_lines(p: Project, segs: list | None = None) -> dict:
 
 
 def sync_preview(p: Project, opts: dict, segs: list | None = None) -> dict:
-    """Xem trước cách "Khớp giọng" (chưa đổi gì): opts = {speed, lag, floor, min}. Trả {"rows": [{k, a, b, r, need,
-    add, left, before, after}], "summary", "voice"} – before / after = tốc độ đọc (bộ xếp chạy nháp) trước / sau."""
+    """Xem trước cách "Khớp giọng" (chưa đổi gì): opts = {speed, lag, floor, min, force, pause, pause_all, rows (câu đang
+    tích – nghỉ chỉ áp cho câu tích)}. Trả {"rows": [{k, a, b, r, need, add, left, before, after}], "summary", "voice",
+    "opts", "total" (độ dài video gốc), "pauses" (số chỗ nghỉ đặt)} – before / after = tốc độ đọc (bộ xếp chạy nháp)."""
     from . import timewarp
+    from .tts import force_items
 
     segs = p.segments if segs is None else segs
     items, plan, total, layout = _dense_base(p, segs, load_settings())
     q = timewarp.sync_params({"sync": opts})
     by_k = {x["k"]: x for x in items}
     info: dict = {}
-    # câu đặt tốc độ tay / khoá tốc độ: không giãn (như khi xếp giọng thật)
     for x in items:
         e = segs[x["k"]].extra
         x["user"] = float(e.get("speed") or 0)
         x["lock"] = bool(e.get("speed_lock"))
-    spans = timewarp.plan_sync(items, segs, total, q["speed"], q["lag"], q["floor"], q["min"], sync_lines(p, segs),
-                               info)
+    lines = sync_lines(p, segs)
+    n_pause = 0
+    if q["force"]:         # ép mọi câu đúng tốc độ (2.4.12): khoá cả câu đặt tốc độ tay, không giới hạn hình chậm
+        force_items(items, q["speed"])
+        tick = None if q["pause_all"] else {int(r) for r in (opts.get("rows") or [])}
+        spans = timewarp.plan_force(items, segs, total, q["speed"], q["lag"], q["pause"], bool(q["pause_all"]), lines,
+                                    info, tick)
+        if q["pause"] > 0:
+            n_pause = max(0, len(items) - 1) if q["pause_all"] else \
+                sum(1 for x in sorted(items, key=lambda v: (float(v["want"]), int(v["k"])))[:-1] if int(x["k"]) in tick)
+    else:          # câu đặt tốc độ tay / khoá tốc độ: không giãn (như khi xếp giọng thật)
+        spans = timewarp.plan_sync(items, segs, total, q["speed"], q["lag"], q["floor"], q["min"], lines, info)
     w = timewarp.Warp.of(spans)
     after = plan
     if w:
-        after = layout([dict(x, want=w.fwd(float(x["want"])), user=0, lock=False) for x in items], w.fwd(total))
+        after = layout([dict(x, want=w.fwd(float(x["want"])), **({} if q["force"] else {"user": 0, "lock": False}))
+                        for x in items], w.fwd(total))
     rows = []
     for k, v in sorted(info.items(), key=lambda kv: float(by_k[kv[0]]["want"])):
         if "r" not in v:
             continue
         rows.append(dict(v, k=k, a=round(float(segs[k].start), 3), b=round(float(segs[k].end), 3),
+                         need=v.get("need", v["r"]),
                          before=round(float((plan.get(k) or {}).get("speed") or 1.0), 3),
                          after=round(float((after.get(k) or {}).get("speed") or 1.0), 3)))
-    return {"rows": rows, "summary": dict(timewarp.sync_summary(info, w), speed=q["speed"]), "voice": bool(stems(p)),
-            "opts": q}
+    sm = dict(timewarp.sync_summary(info, w), speed=q["speed"], force=bool(q["force"]), pause=q["pause"])
+    sm["lines"] = len(items)
+    sm["fast_before"] = sum(1 for x in items if float((plan.get(x["k"]) or {}).get("speed") or 1.0) > q["speed"] + 0.02)
+    sm["fast_after"] = sum(1 for x in items if float((after.get(x["k"]) or {}).get("speed") or 1.0) > q["speed"] + 0.02
+                           or (after.get(x["k"]) or {}).get("fit") == "long")
+    return {"rows": rows, "summary": sm, "voice": bool(stems(p)), "opts": q, "total": round(total, 3),
+            "pauses": n_pause}
 
 
 def sync_left_rows(segs: list, speed: float = 1.0) -> list[int]:
@@ -6547,7 +6566,8 @@ def dub_summary(p: Project) -> str:
     if st.get("sync") is not None:      # khớp giọng (2.4.9): giãn cả lúc nhân vật nói
         from . import timewarp
 
-        extra.append(timewarp.sync_note(st["sync"], float(st["sync"].get("speed") or 1.0)))
+        extra.append(timewarp.sync_note(st["sync"], float(st["sync"].get("speed") or 1.0), bool(st["sync"].get("force")),
+                                        float(st["sync"].get("pause") or 0)))
     elif st.get("warp_n"):
         extra.append(f"làm chậm {st['warp_n']} khoảng nghỉ (video dài thêm {float(st.get('warp_add') or 0):.1f} s), "
                      "chỗ nhân vật nói giữ ×1")
