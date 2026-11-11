@@ -424,6 +424,19 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   nói tab Lồng tiếng 5 cột (Người nói | Nam / nữ ô chọn `_set_gender` | Số câu | Giọng lồng | ▶ – cột giọng là 3); tab
   Phụ đề → Công cụ → Sửa câu hàng "Xưng hô" nút "Tích câu xưng hô chưa chắc" (`_pick_addr`). Kỹ năng "Dịch chuẩn" mặc định
   thêm 2 dòng xưng hô; bản đã lưu y nguyên nội dung mặc định cũ (`skills.OLD_STD_SHA`, `_sha`) tự dùng bản mới.
+- Xưng hô – AI xác định AI NÓI VỚI AI trước khi chọn từ (2.4.13): luật 5 `SYSTEM_PROMPT` (tiêu đề "XÁC ĐỊNH AI NÓI VỚI AI
+  TRƯỚC, RỒI MỚI CHỌN TỪ") thêm bước 0) VAI CỦA MỖI DÒNG – người nói, người nghe (hay nói về người thứ 3 / tự nói), quan hệ,
+  nam / nữ; dấu hiệu theo thứ tự: (1) từ tự xưng / gọi trong chính dòng (为师 = sư phụ tự xưng, 师尊 / 师父 đầu dòng = đệ tử
+  gọi thầy, 本座 / 朕 / 老夫 / 在下 / 晚辈 / 前辈 / 公子 / 姑娘 / 师兄 / tên đứng đầu dòng…), (2) NGƯỜI NÓI TỪNG DÒNG, (3) lượt hỏi
+  – đáp, (4) thông tin phim / thể loại; cặp mẫu (đệ tử → sư tôn "con / đệ tử – sư tôn / người"…) + bước g) NHẤT QUÁN (cùng
+  1 cặp người giữ 1 cặp xưng hô, cùng 1 người được nhắc tới giữ 1 đại từ – "hắn" / "cậu ta" không lẫn). Luật 13 JSON thêm
+  "vai" (≤ 8 chữ "người nói→người nghe", "→(tự nói)", không rõ "?") VIẾT TRƯỚC "dich" (tiếng khác "role" trước "text") – ép
+  AI xác định trước rồi mới dịch. `translate._roles` đọc "vai" / "role" ("?" -> ""), `ROLE_MARK` "\ue060" gắn đuôi bản dịch
+  trong lúc dịch (`_with_role` / `split_role`, giữ trong bộ nhớ dịch, `untranslated` xét phần trước dấu), dòng NGỮ CẢNH TRƯỚC
+  gửi kèm "⟨vai⟩" (`_shown`) -> lô sau thấy cặp xưng hô đã chốt; cuối `translate_lines` tách -> `Translator.roles` ->
+  `translate_segments` ghi `extra["addr_role"]` (tooltip bản dịch "AI xác định: X → Y" – `subs_model`). `skills.review_lines
+  (roles=)` (pipeline.ai_review truyền) gửi "vai" mỗi câu + ⟨vai⟩ ở NGỮ CẢNH, REVIEW_PROMPT mục 2 soát lại vai theo từ tự
+  xưng + nhất quán ngôi 3. `ADDRESS_TAIL_VI/EN` thêm 1 câu nhắc. `TOK_LINE` 60 -> 75 (thêm trường "vai").
 - Form dịch AI (2.1.13): `translate.SYSTEM_PROMPT` / `system_prompt(target, source, fill, genre)` – luật 1 đúng số dòng
   (không gộp / tách / bỏ / để trống / chuyển ý sang dòng khác), 2 đọc ≥ 2 dòng trước + 2 dòng sau, 3 sát nghĩa KHÔNG thêm
   từ / từ đệm / ý, 8 độ dài (⟪M–N⟫ chỉ khi Cài đặt `translate_fill` – mặc định TẮT từ 2.1.13, `FILL_RULE_VI/EN`), 13 JSON
@@ -1113,7 +1126,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (356 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (357 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -3195,7 +3208,17 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   + "Nghỉ giữa 2 câu" (mọi câu / câu đã tích) + hộp cảnh báo (xem Cấu trúc "Khớp giọng ×1,00"). Thử: 6 câu nói liền nhau
   (Edge giả 1,6 s / câu 1 s, 1 câu khoá ×1,30) -> xếp lại không đọc lại, mọi câu ×1,00, giọng cách nhau ≥ 0,4 s, tắt ép ->
   câu khoá về ×1,30; giao diện (ẩn / hiện ô, cảnh báo Không -> không đổi, Có -> áp, câu đã tích đánh dấu đúng, mở lại dự án).
+- 2.4.13: ảnh bảng câu (cột Người trống) + "dịch hội thoại phải cho AI biết ai đang nói với ai / bảo AI xác định cho đúng
+  ngôi – sửa form cho chuẩn, cho tôi xem form hiện tại". Form cũ chỉ bảo "đọc ngữ cảnh để biết ai nói với ai", mục NGƯỜI NÓI
+  TỪNG DÒNG chỉ gửi khi phim có ≥ 2 người nói (cột Người trống = không gửi), AI không phải ghi ra mình hiểu ai nói với ai,
+  không có luật giữ 1 đại từ cho cùng 1 người ngôi 3 (他 -> "hắn" rồi "cậu ta"). Làm: bước 0) xác định vai + bảng từ tự xưng
+  / gọi, trường "vai" trước "dich", vai gửi theo ngữ cảnh lô sau + AI kiểm tra, luật g) nhất quán (xem Cấu trúc). Thử với AI
+  giả: vai lưu đúng câu, lô sau nhận ⟨vai⟩, bộ nhớ dịch giữ vai, vai có chữ Hán không làm câu thành "chưa dịch", AI kiểm tra
+  nhận "vai". Chưa dịch thử bằng API thật (sandbox) – tốn thêm ~10–15 token / dòng.
 ## Vấn đề đang mở
+- 2.4.13: chờ người dùng chép file, dịch lại 1 tập (tab Phụ đề → Dịch lại tất cả / tích câu → Dịch câu đã tích): rê chuột ô
+  bản dịch xem "AI xác định: … → …" có đúng không, xưng hô sư tôn / đệ tử, người ngôi 3 có nhất quán không; phim chưa phân
+  biệt người nói (cột Người trống) -> bật "Phân biệt người nói" rồi "1. Nghe & tách câu" lại để AI nhận S1 / S2 + nam / nữ.
 - 2.4.12: chờ người dùng chép file, tab Lồng tiếng mục 3 → khối Giãn video → Khớp giọng bật → bật "Ép mọi câu đúng tốc độ",
   "Nghỉ giữa 2 câu" (VD 0,3 s, mọi câu) → Xem trước → Áp dụng (đọc hộp cảnh báo) → xem / nghe: còn câu đọc nhanh / chồng
   giọng không (dòng tóm tắt "N câu vẫn chồng giọng câu sau" = 2 người nói cùng lúc), hình chậm có chấp nhận được không.

@@ -53,7 +53,21 @@ Luật bắt buộc:
    tiếng Việt bắt buộc phải có cho đúng ngữ pháp và ý đó đã ngầm có trong câu gốc. Không dịch word-by-word: câu tự nhiên
    như người Việt nói, đúng sắc thái của câu gốc (lịch sự, mỉa mai, giận dữ, đùa…).
 4. Thành ngữ, tiếng lóng, từ mạng: dùng cách nói tiếng Việt tương đương, cùng nghĩa, cùng sắc thái.
-5. XƯNG HÔ THEO ĐÚNG DÒNG GỐC – KHÔNG ĐỔI VAI VẾ:
+5. XƯNG HÔ – XÁC ĐỊNH AI NÓI VỚI AI TRƯỚC, RỒI MỚI CHỌN TỪ; THEO ĐÚNG DÒNG GỐC, KHÔNG ĐỔI VAI VẾ:
+   0) VAI CỦA MỖI DÒNG: trước khi dịch mỗi dòng, xác định NGƯỜI NÓI là ai, đang nói VỚI ai (người nghe) – hay đang kể /
+      nói VỀ người thứ ba, hay tự nói một mình – quan hệ giữa họ (trên / dưới, thầy – trò, cha mẹ – con, vợ chồng / người
+      yêu, anh chị em, bạn bè, kẻ thù, người lạ) và ai nam / nữ. Căn cứ, theo thứ tự tin cậy:
+      (1) cách TỰ XƯNG / cách GỌI trong chính dòng đó và các dòng liền kề: 为师 = sư phụ tự xưng (đang nói với đồ đệ);
+          徒儿 / 弟子 / 徒弟 = đồ đệ (tự xưng hoặc được gọi); 师尊 / 师父 / 师傅 gọi ở đầu câu = đồ đệ đang nói với sư phụ;
+          本君 / 本座 / 本尊 / 本王 / 本宫 / 朕 / 哀家 / 老夫 / 老身 = người địa vị cao / lớn tuổi tự xưng; 在下 / 晚辈 /
+          小女子 / 奴婢 / 属下 / 小的 = tự hạ mình trước bề trên / người lạ; 前辈 / 公子 / 姑娘 / 大人 / 殿下 / 陛下 / 师兄 /
+          师姐 / tên riêng đứng đầu câu = đang gọi người nghe; 老子 / 本大爷 = tự xưng hống hách;
+      (2) mục NGƯỜI NÓI TỪNG DÒNG (e) nếu có;
+      (3) lượt hỏi – đáp: người đáp là người vừa bị hỏi / vừa được gọi tên; 2 người nói thường xen kẽ nhau;
+      (4) THÔNG TIN PHIM / HỒ SƠ PHIM / THỂ LOẠI PHIM.
+      Ghi kết quả vào "vai" của dòng đó (luật 13) RỒI mới chọn xưng hô theo đúng CẶP vai đó: người nói tự xưng bằng từ hợp
+      với vai mình, gọi người nghe bằng từ hợp với vai người nghe (đồ đệ nói với sư tôn: "con / đệ tử – sư tôn / người";
+      sư tôn nói với đồ đệ: "ta / vi sư – con / ngươi"; người lạ ngang hàng thời hiện đại: "tôi – anh / chị").
    a) Dòng gốc đã ghi rõ đại từ / cách gọi thì bản dịch giữ ĐÚNG giới tính, vai vế trên – dưới, ngôi và số ít / nhiều
       đó: 他 (nam) -> anh ấy / anh ta / hắn / cậu ta / ông ấy, KHÔNG thành cô ta / bà ấy; 她 (nữ) -> cô ấy / cô ta / chị
       ấy / bà ấy / nàng, KHÔNG thành anh ta / hắn; 它 -> nó; 哥 / 哥哥 / 大哥 / 师兄 / 学长 -> anh / huynh / sư huynh /
@@ -81,6 +95,10 @@ Luật bắt buộc:
    f) KHÔNG CHẮC XƯNG HÔ – dòng gốc chỉ có 你 / 我 hoặc bỏ chủ ngữ, mà chưa rõ người nói / người nghe là nam hay nữ, ai lớn
       hơn, và các dòng trước chưa có cặp xưng hô chắc chắn giữa đúng 2 người đó: {addr}
       Dòng nào phải làm theo f) thì thêm "xh": "?" vào mục JSON của dòng đó (luật 13).
+   g) NHẤT QUÁN: cùng 1 cặp người nói – người nghe giữ ĐÚNG 1 cặp xưng hô suốt đoạn hội thoại (và cả phim) cho tới khi
+      quan hệ thật sự đổi; cùng 1 người được nhắc tới (ngôi 3) trong 1 đoạn dùng 1 cách gọi – KHÔNG dòng này "hắn" dòng
+      sau "cậu ta" (若是他被夺走的天赋全部归位 / 那他便是真正的天地宠儿 -> cùng "hắn" hoặc cùng "cậu ta"; chỉ đổi khi thái độ
+      người nói đổi rõ ràng). Dòng NGỮ CẢNH TRƯỚC có ⟨vai⟩ và bản dịch đã chốt: dịch tiếp đúng cặp xưng hô đó.
 6. Tên người, địa danh, tổ chức, chiêu thức: phiên âm Hán Việt chuẩn (李逍遥 -> Lý Tiêu Dao); địa danh có tên tiếng Việt quen
    dùng thì dùng tên đó (北京 -> Bắc Kinh); thương hiệu / người nước ngoài: tên quốc tế (微信 -> WeChat). Một tên chỉ một cách
    dịch. Tuân thủ tuyệt đối BẢNG THUẬT NGỮ. Thuật ngữ trong THỂ LOẠI PHIM chỉ dùng khi dòng gốc có đúng chữ đó.
@@ -106,10 +124,12 @@ Luật bắt buộc:
 12. GIỮ DẤU CÂU CUỐI: mỗi bản dịch kết thúc bằng dấu câu hợp nghĩa – câu hỏi "?" (kể cả câu gốc hỏi bằng 吗 / 呢 / 吧 /
    难道 mà thiếu dấu ？), cảm thán / ra lệnh "!", câu kể ".", bỏ lửng "…"; dòng gốc dừng ở dấu phẩy (câu nói tiếp ở dòng
    sau) thì kết thúc bằng ",". Dấu câu cuối giúp giọng lồng lên / xuống giọng đúng.
-13. Chỉ trả về JSON hợp lệ, không giải thích: {"1": {"dau": "…", "dich": "bản dịch"}, "2": {"dau": "…", "dich": "…"}, …}
-   đủ MỌI số dòng được yêu cầu. "dau" = chép y nguyên 3 ký tự đầu của dòng gốc đó (bỏ dấu câu, khoảng trắng) – để kiểm
-   tra bản dịch nằm đúng dòng. Dòng phải dùng cách ở luật 5f (không chắc xưng hô) thêm "xh": "?" – {"dau": "…", "dich":
-   "…", "xh": "?"}; dòng khác không ghi "xh"."""
+13. Chỉ trả về JSON hợp lệ, không giải thích: {"1": {"dau": "…", "vai": "…", "dich": "bản dịch"}, "2": {"dau": "…",
+   "vai": "…", "dich": "…"}, …} đủ MỌI số dòng được yêu cầu, ghi "vai" TRƯỚC "dich". "dau" = chép y nguyên 3 ký tự đầu
+   của dòng gốc đó (bỏ dấu câu, khoảng trắng) – để tool soát từng bản dịch nằm đúng dòng. "vai" = kết quả luật 5.0, ngắn gọn
+   ≤ 8 từ, viết tiếng Việt (tên riêng Hán Việt): "người nói→người nghe" (VD "đệ tử→sư tôn", "Lâm Phàm→Tô Nhu",
+   "S2·nữ→S1·nam"); kể / tự nói một mình: "người nói→(tự nói)"; không xác định được: "?". Dòng phải dùng cách ở luật 5f
+   (không chắc xưng hô) thêm "xh": "?" – {"dau": "…", "vai": "…", "dich": "…", "xh": "?"}; dòng khác không ghi "xh"."""
 
 # Luật 5f – khi KHÔNG CHẮC xưng hô (2.4.0, Cài đặt addr_unsure). Người dùng: "随你 nữ nói với nam mà tool dịch 'tùy em';
 # câu không chắc thì dùng 'cậu' cho khỏi lệch vai" -> mặc định bỏ đại từ khi câu vẫn tự nhiên, không bỏ được thì cặp
@@ -190,13 +210,16 @@ ADDRESS_TAIL_VI = """
 NHẮC LẠI – XƯNG HÔ THEO DÒNG GỐC (ưu tiên hơn THỂ LOẠI PHIM, THÔNG TIN PHIM, HỒ SƠ PHIM, KỸ NĂNG và hình ảnh): dòng gốc đã
 ghi rõ đại từ / cách gọi (他 / 她 / 它, 哥 / 姐 / 弟 / 妹, 爸 / 妈, 您…) thì bản dịch giữ đúng giới tính, vai vế trên – dưới,
 ngôi và số ít / nhiều đó; ngữ cảnh chỉ để chọn sắc thái (anh ấy / anh ta / hắn), KHÔNG đổi anh ↔ em, anh ta ↔ cô ta,
-chị ↔ em. Dòng gốc không ghi rõ mới chọn theo ngữ cảnh và giữ nhất quán."""
+chị ↔ em. Dòng gốc không ghi rõ mới chọn theo ngữ cảnh và giữ nhất quán. Luôn xác định NGƯỜI NÓI → NGƯỜI NGHE của mỗi dòng
+trước khi chọn xưng hô; cùng 1 cặp người giữ 1 cặp xưng hô, cùng 1 người được nhắc tới giữ 1 cách gọi."""
 ADDRESS_TAIL_EN = """
 
 REMINDER – FORMS OF ADDRESS FOLLOW THE SOURCE LINE (this outranks FILM GENRE, FILM NOTES, SKILL and the video): when the
 source line states a pronoun / kinship or rank term (他 / 她 / 它, 哥 / 姐 / 弟 / 妹, 爸 / 妈, 您…), keep exactly its gender,
 seniority, person and number; context only picks the tone, never switch he ↔ she, older ↔ younger brother / sister.
-Only lines without such a word get their form of address from context, consistently."""
+Only lines without such a word get their form of address from context, consistently. Always work out SPEAKER →
+LISTENER of each line before choosing the form of address; the same pair keeps one pair of forms, the same third person
+is referred to the same way."""
 
 
 def address_tail(target: str, addr: str = "drop") -> str:
@@ -242,7 +265,19 @@ Mandatory rules:
    connective when {L['english']} grammar requires it and it is implied by the source. Not word-by-word: natural speech
    with the same tone as the source (polite, sarcastic, angry, joking…).
 4. Render idioms, slang and internet expressions with natural {L['english']} equivalents of the same meaning and tone.
-5. FORMS OF ADDRESS FOLLOW THE SOURCE LINE – NEVER CHANGE WHO IS WHO:
+5. FORMS OF ADDRESS – FIRST WORK OUT WHO SPEAKS TO WHOM, THEN CHOOSE THE WORDS; FOLLOW THE SOURCE LINE, NEVER CHANGE
+   WHO IS WHO:
+   0) ROLES OF EACH LINE: before translating each line, work out who the SPEAKER is, who they speak TO (the listener) – or
+      whether they talk ABOUT a third person or to themselves – their relationship (senior / junior, master – disciple,
+      parent – child, spouses / lovers, siblings, friends, enemies, strangers) and who is male / female. Evidence, most
+      reliable first: (1) SELF-REFERENCE / VOCATIVE words in that line and the neighbouring lines: 为师 = the master
+      speaking (to a disciple); 徒儿 / 弟子 / 徒弟 = the disciple (speaking or addressed); 师尊 / 师父 / 师傅 at the start =
+      a disciple speaking to the master; 本君 / 本座 / 本尊 / 本王 / 本宫 / 朕 / 哀家 / 老夫 / 老身 = a high-ranking / old
+      person speaking; 在下 / 晚辈 / 小女子 / 奴婢 / 属下 / 小的 = humble self-reference to a superior / stranger; 前辈 / 公子
+      / 姑娘 / 大人 / 殿下 / 陛下 / 师兄 / 师姐 / a name at the start = addressing the listener; 老子 / 本大爷 = arrogant
+      self-reference; (2) the "SPEAKER OF EACH LINE" section (e) when present; (3) question – answer turns: the one who
+      answers is the one just asked / called; two speakers usually alternate; (4) FILM NOTES / FILM GENRE. Write the result
+      in that line's "role" (rule 13) and THEN choose the forms of address for exactly that pair.
    a) When the source line states a pronoun / kinship or rank term, keep exactly its gender, seniority (older / younger,
       higher / lower), person and number: 他 = he (male) – never she; 她 = she (female) – never he; 它 = it; 哥 / 哥哥 /
       大哥 / 师兄 = older brother / senior (male, older) – never younger or female; 姐 / 姐姐 / 师姐 = older sister /
@@ -266,6 +301,10 @@ Mandatory rules:
       listener is male or female or who is older, and earlier lines have no settled pair between the same two people:
       {addr_rule}
       For every line handled by f) add "addr": "?" to that line's JSON entry (rule 13).
+   g) CONSISTENCY: the same speaker – listener pair keeps ONE pair of forms of address through the conversation (and the
+      film) until their relationship really changes; the same third person within a scene is referred to the same way
+      (no switching between two different pronouns / tones for him or her from one line to the next unless the speaker's
+      attitude clearly changes). PREVIOUS CONTEXT lines carry ⟨role⟩ and the settled translation: continue that pair.
 6. Names of people, places, organizations and techniques: use {_NAMES[target]}. One name, one rendering. ALWAYS follow
    the GLOSSARY. Terms listed in the FILM GENRE apply only when the source line contains that exact term.
 7. Source lines may contain speech-recognition errors (homophones): use the context (rule 2) to get the intended meaning.
@@ -291,10 +330,13 @@ Mandatory rules:
    asks with 吗 / 呢 / 吧 / 难道 but lacks ？), "!" for exclamations / orders, a full stop for statements, "…" when it
    trails off; a source line that stops at a comma (the sentence continues on the next line) ends with a comma. The
    final mark lets the dubbed voice rise / fall correctly{" (Thai: no full stop, keep ? and !)" if target == "th" else ""}.
-13. Return ONLY valid JSON, no explanation: {{"1": {{"head": "…", "text": "translation"}}, "2": {{"head": "…", "text": "…"}}, …}}
-   with EVERY requested line number. "head" = copy exactly the first 3 characters of that source line (without
-   punctuation or spaces) – used to check that each translation sits on the right line. A line handled by rule 5f also
-   gets "addr": "?" – {{"head": "…", "text": "…", "addr": "?"}}; other lines have no "addr"."""
+13. Return ONLY valid JSON, no explanation: {{"1": {{"head": "…", "role": "…", "text": "translation"}}, "2": {{"head": "…",
+   "role": "…", "text": "…"}}, …}} with EVERY requested line number, "role" written BEFORE "text". "head" = copy exactly
+   the first 3 characters of that source line (without punctuation or spaces) – used to check that each translation sits
+   on the right line. "role" = the result of rule 5.0, at most 8 words in {L['english']}: "speaker→listener" (e.g.
+   "disciple→master", "Li Xiaoyao→Lin Yueru", "S2·female→S1·male"); narration / talking to oneself: "speaker→(self)";
+   cannot tell: "?". A line handled by rule 5f also gets "addr": "?" – {{"head": "…", "role": "…", "text": "…", "addr":
+   "?"}}; other lines have no "addr"."""
     if not fit:
         sp = LEN_RULE_EN_RE.sub(lambda _m: NOFIT_RULE_EN, sp, count=1)
     return sp + (f"\n\n{GENRE_HEAD_EN}:\n{genre.strip()}" if (genre or "").strip() else "")
@@ -562,7 +604,7 @@ def api_keys(settings: dict, engine: str) -> list[str]:
 
 BATCH_MAX = 1000    # "Số câu mỗi lần gửi" tối đa (2.1.23 – trước 200)
 PARALLEL_MAX = 16   # "Gửi tất cả cùng lúc": tối đa 16 lần gửi chạy song song
-TOK_LINE = 60       # token AI trả lời ước cho mỗi dòng dịch (JSON {"dau", "dich"}; tiếng Việt có dấu tốn token)
+TOK_LINE = 75       # token AI trả lời ước cho mỗi dòng dịch (JSON {"dau", "vai", "dich"}; tiếng Việt có dấu tốn token)
 TOK_BASE = 1500     # ... + phần chung của câu trả lời
 THINK_TOK = 12000   # model suy luận (gpt-5, o-series): phần suy nghĩ tính vào giới hạn trả lời -> chừa thêm
 
@@ -1363,6 +1405,42 @@ def _addr_flags(d: dict, n: int) -> list[bool]:
     return out
 
 
+ROLE_MARK = "\ue060"   # 2.4.13: "vai" AI xác định (người nói→người nghe) gắn sau bản dịch trong lúc dịch, tách ra ở cuối
+ROLE_MAX = 60
+
+
+def _roles(d: dict, n: int) -> list[str]:
+    """JSON của AI -> "vai" / "role" từng dòng (người nói→người nghe, luật 5.0); "?" / trống -> ""."""
+    out = []
+    for i in range(n):
+        v = d.get(str(i + 1))
+        r = v.get("vai", v.get("role")) if isinstance(v, dict) else None
+        r = " ".join(str(r).split()) if isinstance(r, (str, int, float)) else ""
+        r = r.replace(ROLE_MARK, "").replace(XH_MARK, "")
+        out.append("" if r.strip(" ?.-–") == "" else r[:ROLE_MAX])
+    return out
+
+
+def split_role(s: str) -> tuple[str, str]:
+    """Bản dịch (có thể kèm XH_MARK đầu) + vai gắn đuôi -> (bản dịch, vai)."""
+    s = s or ""
+    if ROLE_MARK in s:
+        a, _, b = s.partition(ROLE_MARK)
+        return a, b
+    return s, ""
+
+
+def _with_role(s: str, role: str) -> str:
+    return s + ROLE_MARK + role if (s and role) else s
+
+
+def _shown(trans: str) -> str:
+    """Bản dịch dòng NGỮ CẢNH TRƯỚC gửi cho AI: bỏ dấu xưng hô chưa chắc, vai -> ⟨vai⟩ (AI dịch tiếp đúng cặp xưng hô)."""
+    a, r = split_role(trans or "")
+    a = a.replace(XH_MARK, "")
+    return a + (f" ⟨{r}⟩" if r and a else "")
+
+
 def speaker_tag(spk: str, gender: str, target: str = "vi") -> str:
     """Nhãn người nói gửi cho AI: "S2 · nữ" / "S1 · nam" / "S3 · ?" (tiếng khác: male / female)."""
     if langs.norm(target) == "vi":
@@ -1419,6 +1497,7 @@ class Translator:
         # nam / nữ từng người nói (p.data["speaker_gender"], pipeline đặt) -> gửi kèm mỗi dòng cho AI biết ai nói với ai
         self.genders: dict[str, str] = {}
         self.addr_flags: list[bool] = []   # translate_lines: dòng AI báo "không chắc xưng hô" (luật 5f)
+        self.roles: list[str] = []         # translate_lines: "vai" từng dòng AI xác định – người nói→người nghe (2.4.13)
         self.fallback_lines = 0   # số câu AI trả lỗi định dạng, phải dùng Google bù
         # dịch có nhìn hình (2.1.25): gemvideo.VideoSource – mỗi lô gửi kèm khúc video của chính các dòng đó (chỉ Gemini)
         self.video = None
@@ -1478,6 +1557,7 @@ class Translator:
         near = self._near(segs, idx, tags) if self.llm else None
         results = self.translate_lines(texts, progress, cancel, summary=summary, who=who, pos=idx, near=near, **kw)
         flags = self.addr_flags
+        roles = self.roles
         for n, (i, t) in enumerate(zip(idx, results)):
             segs[i].trans = BUDGET_RE.sub(" ", t or "").strip()
             segs[i].extra.pop("trans_user", None)
@@ -1486,10 +1566,17 @@ class Translator:
                     segs[i].extra["addr_unsure"] = True
                 else:
                     segs[i].extra.pop("addr_unsure", None)
+                # 2.4.13 ai nói với ai (AI xác định, luật 5.0) -> tooltip bản dịch
+                role = roles[n] if n < len(roles) and segs[i].trans else ""
+                if role:
+                    segs[i].extra["addr_role"] = role
+                else:
+                    segs[i].extra.pop("addr_role", None)
             if segs[i].trans and not untranslated(segs[i].trans, self.target):   # nhớ theo câu gốc -> không tốn API
                 f = n < len(flags) and flags[n]
+                role = roles[n] if n < len(roles) else ""
                 self.cache.setdefault(self._ckey(texts[n], who[n] if who else ""),
-                                      (XH_MARK if f else "") + segs[i].trans)
+                                      _with_role((XH_MARK if f else "") + segs[i].trans, role))
         return segs
 
     def speaker_tags(self, segs: list[Segment]) -> list[str] | None:
@@ -1679,7 +1766,7 @@ class Translator:
         todo = []
         for i, l in enumerate(lines):
             hit = self.cache.get(keys[i])
-            if hit and not untranslated(hit, self.target):   # bản dịch rỗng / còn chữ Hán (lần trước lỗi) -> dịch lại
+            if hit and not untranslated(split_role(hit)[0], self.target):   # rỗng / còn chữ Hán (lần trước lỗi) -> dịch lại
                 out[i] = hit
             else:
                 todo.append(i)
@@ -1764,7 +1851,7 @@ class Translator:
             def keep(ids, res):
                 for gi, r in zip(ids, res):
                     out[gi] = r
-                    if r and not untranslated(r, self.target):
+                    if r and not untranslated(split_role(r)[0], self.target):
                         self.cache[keys[gi]] = r
             size = self._size()
             if self.parallel and (len(todo) > size or times):
@@ -1796,12 +1883,14 @@ class Translator:
                     done += len(ids)
                     if progress:
                         progress(done / len(lines), f"AI đang dịch {done}/{len(lines)} câu ({self.engine})")
-        flags, res = [], []
+        flags, res, roles = [], [], []
         for k, o in enumerate(out):
-            o = o or ""
+            o, role = split_role(o or "")
             flags.append(o.startswith(XH_MARK))
+            roles.append(role)
             res.append(self._post(o.replace(XH_MARK, ""), BUDGET_RE.sub(" ", lines[k])))
         self.addr_flags = flags
+        self.roles = roles
         if getattr(self, "slang_on", False):
             from . import slang
 
@@ -1908,7 +1997,7 @@ class Translator:
                              + "\n".join(f"{k} = {v}" for k, v in sl.items()))
         if ctx_before:   # gửi cùng lúc: dòng trước chưa dịch xong -> chỉ có câu gốc
             parts.append(f"{lab[2]}:\n" + "\n".join(f"- {BUDGET_RE.sub(' ', a).strip()}"
-                                                     + (f" => {b.replace(XH_MARK, '')}" if b else "")
+                                                     + (f" => {_shown(b)}" if b else "")
                                                      for a, b in ctx_before))
         if ctx_after:
             parts.append(f"{lab[3]}:\n" + "\n".join(f"- {BUDGET_RE.sub(' ', a).strip()}" for a in ctx_after))
@@ -1977,14 +2066,15 @@ class Translator:
                 self._keep_speakers(d)
             res, heads = _answers(d, n)
             xh = _addr_flags(d, n)
-            res = [XH_MARK + r if (xh[i] and r) else r for i, r in enumerate(res)]   # không chắc xưng hô (luật 5f)
+            roles = _roles(d, n)       # 2.4.13 người nói→người nghe AI xác định (luật 5.0)
             bad = shifted_lines(heads, lines)
             miss = [i for i, r in enumerate(res)
                     if lines[i].strip() and (i in bad or not r or untranslated(r, self.target))]
+            ms = set(miss)
+            res = ["" if i in ms else _with_role(XH_MARK + r if (xh[i] and r) else r, roles[i])
+                   for i, r in enumerate(res)]   # không chắc xưng hô (luật 5f) + vai
             if not miss:
                 return res
-            for i in miss:
-                res[i] = ""
             k = n   # AI hết chỗ trả lời giữa chừng (lô dài hơn giới hạn của model): giữ phần đã trả, dịch tiếp phần sau
             if tl is not None and getattr(tl, "cut", False):
                 k = max((i + 1 for i, r in enumerate(res) if r), default=0)

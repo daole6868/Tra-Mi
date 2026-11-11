@@ -408,6 +408,8 @@ class SubsModel(QAbstractTableModel):
                       and str(x[1]) in s.trans]
                 if nf:
                     tip += "\nĐã đổi tên pinyin sang Hán Việt: " + ", ".join(f"{a} → {b}" for a, b in nf)
+                if s.extra.get("addr_role"):   # 2.4.13 ai nói với ai – AI xác định trước khi chọn xưng hô
+                    tip += f"\nAI xác định: {str(s.extra['addr_role']).replace('→', ' → ')}"
                 if s.extra.get("addr_unsure"):
                     tip += ("\n⚠ Xưng hô chưa chắc: AI không rõ ai nói với ai / nam hay nữ nên đã bỏ đại từ hoặc dùng cặp "
                             "trung tính (cậu – tớ, ngươi – ta). Sửa tay câu này, hoặc sửa nam / nữ người nói (bảng người "

@@ -4100,7 +4100,8 @@ def ai_review(p: Project, settings: dict | None = None, engine: str | None = Non
                                 progress, cancel, ctx=[(x.text, x.trans) for x in segs],
                                 genre=genres.form(settings.get("translate_style"), target, settings),
                                 parallel=engine_parallel(settings, eng), who=speaker_tags(p, settings, segs),
-                                addr=addr_mode(settings), fit=fit)
+                                addr=addr_mode(settings), fit=fit,
+                                roles=[str(x.extra.get("addr_role") or "") for x in segs])
     for i, (new, why) in fixes.items():
         segs[i].extra["trans_before_review"] = segs[i].trans
         segs[i].extra["review_note"] = why

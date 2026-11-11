@@ -159,7 +159,10 @@ từng câu, không gộp / chuyển ý sang câu khác:
    Câu gốc không ghi rõ đại từ / cách gọi thì xưng hô phải thống nhất với HỒ SƠ PHIM / các câu khác giữa đúng 2 người đó;
    "nguoi_noi" (S1, S2… + nam / nữ tool đo từ giọng, có thể sai; ? = chưa rõ) và nhãn [S1 · nam] ở NGỮ CẢNH cho biết ai
    đang nói với ai (người nghe thường là người nói khác ở câu trước / sau): nữ nói với nam mà bản dịch gọi người nghe là
-   "em" (随你 -> "Tùy em") -> sửa ("Tùy anh"). Vẫn KHÔNG chắc ai nói với ai, nam hay nữ, ai lớn hơn thì câu đang bỏ đại từ
+   "em" (随你 -> "Tùy em") -> sửa ("Tùy anh"). "vai" / ⟨…⟩ = người nói→người nghe mà lúc dịch AI đã xác định (có thể
+   sai – soát lại theo cách tự xưng / cách gọi trong câu gốc: 为师, 徒儿, 师尊, 本君, 在下…): xưng hô phải đúng cặp vai đó;
+   cùng 1 cặp người giữ 1 cặp xưng hô, cùng 1 người được nhắc tới (ngôi 3) giữ 1 cách gọi trong đoạn ("hắn" câu này,
+   "cậu ta" câu sau -> sửa cho thống nhất). Vẫn KHÔNG chắc ai nói với ai, nam hay nữ, ai lớn hơn thì câu đang bỏ đại từ
    / dùng cặp trung tính (cậu – tớ, ngươi – ta) để nguyên – KHÔNG đổi sang anh / em, chị / em khi chưa chắc.
    KHÔNG đổi xưng hô mà câu gốc đã ghi rõ chỉ để khớp hồ sơ phim / thể loại. Tên riêng, thuật ngữ không thống nhất với
    HỒ SƠ PHIM / các câu khác -> sửa.
@@ -457,12 +460,13 @@ def review_lines(llm, items: list[tuple[int, str, str, int | str]], profile: str
                  target_name: str, unit: str, lang: str = "vi", progress=None, cancel=None,
                  ctx: list[tuple[str, str]] | None = None, genre: str = "",
                  parallel: bool = False, who: list[str] | None = None,
-                 addr: str = "drop", fit: bool = True) -> dict[int, tuple[str, str]]:
+                 addr: str = "drop", fit: bool = True, roles: list[str] | None = None) -> dict[int, tuple[str, str]]:
     """items: (chỉ số câu, câu gốc, bản dịch, độ dài: số tối đa hoặc chữ "M–N tiếng"). ctx: (câu gốc, bản dịch) của MỌI
     câu trong phim – câu ±2 quanh câu kiểm tra mà không có trong lô được gửi kèm làm ngữ cảnh. genre: form thể loại phim.
     parallel: gửi tất cả các lô cùng lúc ("Gửi tất cả cùng lúc" của công cụ dịch, 2.1.23). who: nhãn người nói + nam / nữ
     MỌI câu trong phim ("S2 · nữ", 2.4.0); addr: cách làm khi không chắc xưng hô; fit False (tắt "AI rút gọn bản dịch cho
-    vừa thời gian nói", 2.4.10): không gửi độ dài, AI không rút gọn câu. Trả về {chỉ số: (bản dịch mới, lý do)}."""
+    vừa thời gian nói", 2.4.10): không gửi độ dài, AI không rút gọn câu. roles: "vai" (người nói→người nghe) AI dịch đã
+    xác định MỌI câu trong phim (2.4.13). Trả về {chỉ số: (bản dịch mới, lý do)}."""
     from .ffmpeg import Cancelled
     from .translate import GENRE_HEAD_VI, address_tail, punct_fix, run_parallel
 
@@ -478,7 +482,8 @@ def review_lines(llm, items: list[tuple[int, str, str, int | str]], profile: str
         by_no = {i + 1: (i, zh, tr, mx) for i, zh, tr, mx in chunk}   # khoá = số thứ tự câu trong phim
         payload = {str(i + 1): {"goc": zh, "dich": tr,
                                 **({"do_dai": mx if isinstance(mx, str) else f"≤{mx} {unit}"} if fit and mx else {}),
-                                **({"nguoi_noi": who[i]} if who and i < len(who) else {})}
+                                **({"nguoi_noi": who[i]} if who and i < len(who) else {}),
+                                **({"vai": roles[i]} if roles and i < len(roles) and roles[i] else {})}
                    for i, zh, tr, mx in chunk}
         near = []
         if ctx:
@@ -489,7 +494,9 @@ def review_lines(llm, items: list[tuple[int, str, str, int | str]], profile: str
         if near:
             user += ("NGỮ CẢNH (câu trước / sau – chỉ để hiểu nghĩa, KHÔNG sửa):\n"
                      + "\n".join(f"{j + 1}: " + (f"[{who[j]}] " if who and j < len(who) else "")
-                                 + f"{ctx[j][0]} => {ctx[j][1]}" for j in near) + "\n\n")
+                                 + f"{ctx[j][0]} => {ctx[j][1]}"
+                                 + (f" ⟨{roles[j]}⟩" if roles and j < len(roles) and roles[j] else "")
+                                 for j in near) + "\n\n")
         user += "KIỂM TRA CÁC CÂU SAU:\n" + json.dumps(payload, ensure_ascii=False, indent=0)
         try:
             d = _json(llm.chat(with_skill(sysp, skill) + address_tail("vi", addr), user, max_tokens=8000,

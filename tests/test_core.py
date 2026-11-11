@@ -8746,7 +8746,7 @@ def test_address_follows_source_234():
     from trami import translate as tr
 
     vi = tr.system_prompt("vi")
-    assert "XƯNG HÔ THEO ĐÚNG DÒNG GỐC" in vi and "KHÔNG thành cô ta" in vi and "KHÔNG thành em / chị" in vi
+    assert "THEO ĐÚNG DÒNG GỐC, KHÔNG ĐỔI VAI VẾ" in vi and "KHÔNG thành cô ta" in vi and "KHÔNG thành em / chị" in vi
     assert "KHÔNG coi là nghe nhầm" in vi
     for tg in ("en", "th", "ja", "ko"):
         sp = tr.system_prompt(tg)
@@ -16650,3 +16650,56 @@ def test_sync_force_gui_2412(monkeypatch):
                        "dense_sync_pause_all": True})
         win.timer.stop()
         p.delete()
+
+
+def test_speaker_listener_role_2413(monkeypatch):
+    """2.4.13 form dịch: AI xác định NGƯỜI NÓI→NGƯỜI NGHE mỗi dòng trước khi chọn xưng hô (luật 5.0 + "vai" trong JSON,
+    viết trước "dich"), nhất quán ngôi 3 (luật 5g); "vai" lưu extra["addr_role"] (tooltip), dòng NGỮ CẢNH TRƯỚC gửi kèm
+    ⟨vai⟩ cho lô sau, bộ nhớ dịch giữ vai, "vai" có chữ Hán không làm câu bị coi là chưa dịch; AI kiểm tra nhận "vai"."""
+    from trami import skills
+    from trami import translate as tr
+
+    vi = tr.system_prompt("vi")
+    assert "XÁC ĐỊNH AI NÓI VỚI AI TRƯỚC" in vi and "为师 = sư phụ tự xưng" in vi and "NHẤT QUÁN" in vi
+    assert '"vai": "…", "dich"' in vi and "đệ tử→sư tôn" in vi
+    for lg in ("en", "ja"):
+        sp = tr.system_prompt(lg)
+        assert "WHO SPEAKS TO WHOM" in sp and '"role": "…", "text"' in sp and "CONSISTENCY" in sp
+    assert "NGƯỜI NÓI → NGƯỜI NGHE" in tr.address_tail("vi") and "SPEAKER →" in tr.address_tail("en")
+    sent = []
+
+    def fake_chat(self, system, user, max_tokens=8000, temperature=0.3, **k):
+        sent.append(user)
+        payload = json.loads(user[user.rindex("{\n"):])
+        roles = {"师尊既然我的天赋如此惊人": "đệ tử→sư tôn", "为师早就知道": "sư tôn→đệ tử", "那他便是天地宠儿": "林凡→(tự nói)"}
+        return json.dumps({k_: {"dau": v[:3], "vai": roles.get(v, "?"), "dich": f"Dịch {k_}"} for k_, v in payload.items()},
+                          ensure_ascii=False)
+
+    monkeypatch.setattr(tr.LLMClient, "chat", fake_chat)
+    t = tr.Translator({"openai_api_key": "x", "openai_batch": 2, "dub_fit": False}, "openai", target="vi")
+    segs = [Segment(0, 1, "师尊既然我的天赋如此惊人"), Segment(1, 2, "为师早就知道"), Segment(2, 3, "那他便是天地宠儿")]
+    t.translate_segments(segs, auto_terms=False)
+    assert [s.trans for s in segs] == ["Dịch 1.", "Dịch 2.", "Dịch 1."]
+    assert segs[0].extra["addr_role"] == "đệ tử→sư tôn" and segs[1].extra["addr_role"] == "sư tôn→đệ tử"
+    assert segs[2].extra["addr_role"] == "林凡→(tự nói)"           # vai có chữ Hán: câu vẫn coi là đã dịch
+    assert len(sent) == 2 and "⟨sư tôn→đệ tử⟩" in sent[1]         # lô sau thấy vai + bản dịch đã chốt của dòng trước
+    assert all(tr.ROLE_MARK not in s.trans for s in segs)
+    # bộ nhớ dịch: dịch lại không tốn API, vai vẫn còn
+    sent.clear()
+    s2 = [Segment(0, 1, "师尊既然我的天赋如此惊人")]
+    t.translate_segments(s2, auto_terms=False)
+    assert not sent and s2[0].extra["addr_role"] == "đệ tử→sư tôn" and s2[0].trans == "Dịch 1."
+    # "?" / trống -> không lưu vai
+    assert tr._roles({"1": {"vai": " ? "}, "2": {"role": "A→B"}, "3": "x"}, 3) == ["", "A→B", ""]
+    # AI kiểm tra bản dịch nhận "vai"
+    got = []
+
+    class L:
+        def chat(self, system, user, **k):
+            got.append((system, user))
+            return "{}"
+
+    skills.review_lines(L(), [(0, "师尊", "Sư tôn", None)], "", "", "tiếng Trung", "tiếng Việt", "tiếng",
+                        ctx=[("师尊", "Sư tôn"), ("为师", "Ta")], roles=["đệ tử→sư tôn", "sư tôn→đệ tử"], fit=False)
+    assert '"vai": "đệ tử→sư tôn"' in got[0][1] and "⟨sư tôn→đệ tử⟩" in got[0][1]
+    assert "\"vai\" / ⟨…⟩ = người nói→người nghe" in got[0][0]
