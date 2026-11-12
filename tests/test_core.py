@@ -10130,7 +10130,7 @@ def test_ai_reply_limit_and_cut_reply_2123(monkeypatch):
     assert [n for n, _m in calls] == [20, 14, 8, 2]                 # 6 dòng mỗi lần trả, phần sau gửi tiếp
     assert calls[0][1] == tr.TOK_BASE + tr.TOK_LINE * 20
     monkeypatch.setitem(tr._OUT_CAP, ("deepseek", t.llm.model), 2700)
-    assert t._size() == 20                                           # (2700 − 1500) / 60
+    assert t._size() == (2700 - tr.TOK_BASE) // tr.TOK_LINE           # (2700 − 1500) / 75 = 16
     assert not t.llm.thinking and tr.LLMClient({"gemini_api_key": "k", "gemini_model": "gemini-2.5-pro"},
                                                 "gemini").thinking   # Gemini 2.5: phần suy nghĩ tính vào giới hạn
     # JSON bị cắt giữa chừng vẫn lấy được các dòng đã trả trọn
