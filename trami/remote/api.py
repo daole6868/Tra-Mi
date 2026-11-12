@@ -648,12 +648,7 @@ def preview_voice(pid: str, vid: str, spk: str = "") -> Path:
     eng = st.get("tts_engine", "edge")
     if vid == "@auto":
         vid = ""
-    if not vid and eng == "omnivoice":
-        from .. import voices as vlib
-
-        smp = vlib.list_samples()
-        vid = f"omni:{smp[0]['id']}" if smp else tts.OMNI_CLONE
-    vid = vid or (f"edge:{st.get('tts_voice')}" if eng == "edge" else "vieneu:")
+    vid = vid or pipeline.dub_default_voice(None, eng, st)
     segs = p.segments
     text = next((s.trans for s in segs if (s.speaker or "S1") == spk and s.trans), "") or \
         next((s.trans for s in segs if s.trans), "")
@@ -663,10 +658,10 @@ def preview_voice(pid: str, vid: str, spk: str = "") -> Path:
             raise ApiError(f"Đang chạy '{busy}' trên card đồ hoạ – nghe thử giọng AI sau khi việc đó xong "
                            "(giọng Edge nghe thử được ngay)", 409)
     ref = None
-    if vid in (tts.CLONE, tts.OMNI_CLONE):
+    if vid in (tts.CLONE, tts.OMNI_CLONE, tts.VOX_CLONE):
         stems = pipeline.stems(p)
-        build = tts.build_reference if vid == tts.CLONE else tts.build_reference_text
-        name = f"ref_{spk or 'S1'}.wav" if vid == tts.CLONE else f"omniref_{spk or 'S1'}.wav"
+        build = tts.build_reference_text if vid == tts.OMNI_CLONE else tts.build_reference
+        name = f"omniref_{spk or 'S1'}.wav" if vid == tts.OMNI_CLONE else f"ref_{spk or 'S1'}.wav"
         ref = build(stems.get("vocals") or str(p.source), segs, spk or "S1", p.work / "tts" / name)
         if not ref:
             raise ApiError("Người nói này chưa có câu nào đủ rõ để lấy mẫu giọng")

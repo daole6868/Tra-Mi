@@ -4456,6 +4456,10 @@ def dub_default_voice(voice: str | None, engine: str, settings: dict) -> str:
 
         smp = vlib.list_samples()
         return f"omni:{smp[0]['id']}" if smp else OMNI_CLONE
+    if engine == "voxcpm":   # VoxCPM2: giọng chọn sẵn đầu tiên (📣 nữ thuyết minh)
+        from .vox_design import PREFIX, PRESETS
+
+        return PREFIX + PRESETS[0][0]
     return f"edge:{settings.get('tts_voice')}" if engine == "edge" else "vieneu:"
 
 
@@ -4473,7 +4477,7 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
         only: list[int] | None = None) -> Path:
     """Lồng tiếng Việt. Mỗi người nói có thể có giọng riêng (p.data['voices'][speaker]), mỗi câu cũng có thể có giọng
     riêng (seg.extra['voice']): 'edge:<voice id>' | 'vieneu:<preset>' | 'clone' | 'omni:<id>' | 'omniclone'
-    | 'omnid:<mã giọng chọn sẵn>'.
+    | 'omnid:<mã giọng chọn sẵn>' | 'voxd:<mã>' | 'vox:<id>' | 'voxclone' (VoxCPM2).
     Câu đã đọc được lưu đệm theo (lời, giọng, tốc độ, lần đọc) -> chỉ câu mới / đã sửa mới phải đọc lại.
     inplace: ghi đè bản lồng tiếng đang dùng (sửa vài câu) thay vì thêm bản mới; only: chỉ AI rút gọn các câu này."""
     from .tts import synthesize_dub
@@ -6634,6 +6638,18 @@ def voice_label(spec: str) -> str:
         return "Nhái giọng gốc (VieNeu)"
     if spec == tts.OMNI_CLONE or spec.startswith("omniclone:"):
         return "Nhái giọng gốc (OmniVoice)"
+    if spec == tts.VOX_CLONE or spec.startswith("voxclone:"):
+        return "Nhái giọng gốc (VoxCPM2)"
+    if spec.startswith("voxd:"):
+        from . import vox_design
+
+        d = vox_design.get(spec, load_settings()) or {}
+        return (d.get("name") or spec[5:]) + " (VoxCPM2)"
+    if spec.startswith(tts.VOX_LIB):
+        from . import voices as vlib
+
+        sm = vlib.get(spec[len(tts.VOX_LIB):]) or {}
+        return (sm.get("name") or spec[len(tts.VOX_LIB):]) + " (VoxCPM2)"
     if spec.startswith(tts.VN_SAMPLE):
         return spec[len(tts.VN_SAMPLE):].split(" (")[0] + " (VieNeu)"
     if spec.startswith(tts.VN_TREND):

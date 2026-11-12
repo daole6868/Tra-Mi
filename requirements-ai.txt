@@ -7,3 +7,6 @@ modelscope>=1.15
 speechbrain>=1.0            # nhận diện giọng (phân biệt người nói)
 vieneu>=3.8.3               # VieNeu-TTS: 25 giọng Việt + 6 giọng thu âm sạch + nhái giọng
 omnivoice>=0.2              # OmniVoice: nhái giọng y hệt từ file ghi âm mẫu 3–10 giây
+einops                      # VoxCPM2 (cài riêng: pip install --no-deps voxcpm – xem CaiDat_AI_NangCao.bat;
+pydantic                    #   gói voxcpm kéo theo gradio / datasets / torchcodec không cần cho tool)
+librosa

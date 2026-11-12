@@ -88,8 +88,12 @@ MODELS = [
               ("vieneu",), "volume"),
     ModelInfo("omnivoice", "Nhái giọng – OmniVoice", "Nhái giọng y hệt từ file ghi âm mẫu 3–10 giây (chọn bản ở Cài đặt)",
               "~2–3 GB", ("omnivoice", "torch"), "mic"),
+    ModelInfo("voxcpm", "Giọng đọc – VoxCPM2", "📣 Giọng thuyết minh + giọng tạo theo mô tả + nhái giọng, đọc 30 "
+              "tiếng (cần card ≥ 8 GB; chọn bộ đọc VoxCPM2 ở tab Lồng tiếng)", "~5 GB",
+              ("voxcpm", "torch", "torchaudio", "einops", "librosa", "pydantic"), "mic"),
 ]
 OMNI_TOKENIZER = "eustlb/higgs-audio-v2-tokenizer"
+VOX_FILES = ["*.json", "*.safetensors", "*.txt", "*.model", "*.jinja"]   # bản .pth / .bin chỉ tải khi kho không có safetensors
 BY_KEY = {m.key: m for m in MODELS}
 
 
@@ -291,6 +295,18 @@ def firered_ready() -> bool:
     return _files_ready(FIRERED_REPO, FIRERED_FILES)
 
 
+def vox_ready(repo: str) -> bool:
+    """VoxCPM2 đã tải đủ: config + bộ mã hoá âm thanh (audiovae) + trọng số mô hình (safetensors hoặc bản .pth / .bin)."""
+    snap = _hf_snapshot(repo)
+    if not snap or not (snap / "config.json").is_file():
+        return False
+
+    def has(*names: str) -> bool:
+        return any((snap / n).is_file() and (snap / n).stat().st_size > 1_000_000 for n in names)
+    return has("audiovae.safetensors", "audiovae.pth") and (
+        has("model.safetensors", "pytorch_model.bin") or (snap / "model.safetensors.index.json").is_file())
+
+
 def missing_packages(key: str) -> list[str]:
     miss = [p for p in BY_KEY[key].packages if not installed(p)]
     if key in ("qwen_asr", "qwen_align") and not miss:
@@ -354,6 +370,8 @@ def is_ready(key: str, settings: dict | None = None) -> bool:
         if key == "omnivoice":
             snap = _hf_snapshot((settings or {}).get("omnivoice_model") or "k2-fsa/OmniVoice")
             return bool(snap) and ((snap / "audio_tokenizer").is_dir() or _hf_cached(OMNI_TOKENIZER))
+        if key == "voxcpm":
+            return vox_ready((settings or {}).get("voxcpm_model") or "openbmb/VoxCPM2")
     except Exception:  # noqa: BLE001 – chưa có / chưa cài gói
         return False
     return False
@@ -460,6 +478,19 @@ def download(key: str, progress: Prog | None = None, cancel=None, settings: dict
                                    f"{repo}, bấm đồng ý, rồi dán token (huggingface.co/settings/tokens) vào "
                                    "Cài đặt → HuggingFace token.") from None
             raise
+    elif key == "voxcpm":
+        from . import hf_download
+
+        st = settings or {}
+        repo = st.get("voxcpm_model") or "openbmb/VoxCPM2"
+        token = st.get("hf_token") or None
+        d = hf_download.download(repo, VOX_FILES, token=token, progress=progress, cancel=cancel, label=label, hi=0.9)
+        if not vox_ready(repo):   # kho chỉ có bản trọng số .pth / .bin -> tải thêm
+            hf_download.download(repo, ["*.pth", "*.bin"], token=token, progress=progress, cancel=cancel,
+                                 label=label + " (trọng số)", lo=0.9)
+        if not vox_ready(repo):
+            raise RuntimeError(f"Tải chưa đủ file VoxCPM2 ở {d} (mạng bị ngắt?) – bấm Tải về lần nữa để tải tiếp phần "
+                               "còn thiếu.")
     elif key in ("qwen_asr", "qwen_align", "hymt"):
         from . import hf_download
         from .asr_qwen import ALIGNER

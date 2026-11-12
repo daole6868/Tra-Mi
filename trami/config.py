@@ -197,6 +197,12 @@ DEFAULT_SETTINGS: dict = {
     "dub_level_match": True,          # câu lồng tiếng nhỏ hơn hẳn các câu khác -> tăng lên cho đều
     "omnivoice_model": "k2-fsa/OmniVoice",   # hoặc g-group-ai-lab/g-omnivoice (tối ưu tiếng Việt, cần HF token)
     "hf_token": "",                           # token HuggingFace cho mô hình cần đồng ý điều khoản
+    "voxcpm_model": "openbmb/VoxCPM2",        # bộ đọc VoxCPM2 (2.4.14, Apache-2.0)
+    "voxcpm_quality": "normal",               # fast / normal / best = 6 / 10 / 16 bước khử nhiễu mỗi câu
+    "voxcpm_cfg": 2.0,                        # bám mô tả / giọng mẫu (1–4; cao = sát hơn nhưng dễ gắt)
+    "voxcpm_design": "",                      # "Giọng tự mô tả": mô tả giọng (tiếng Anh) -> voxd:custom
+    "voxcpm_design_gender": "",               # male / female / "" – cho Tự gán giọng nam / nữ
+    "voxcpm_design_seed": 0,                  # đổi số = cùng mô tả nhưng ra người đọc khác
     # Kỹ năng dịch AI (skills.py) – dùng với mọi công cụ dịch AI
     "translate_skill": "chuan",               # kỹ năng đang dùng ("" = không; "chuan" = Dịch chuẩn – giữ đúng số câu)
     "translate_skills": [],                   # kỹ năng của bạn: [{"id", "name", "text"}]

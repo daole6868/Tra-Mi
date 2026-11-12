@@ -17,7 +17,8 @@ PKGS = ("faster_whisper", "ctranslate2", "rapidocr", "omegaconf", "pyclipper", "
         "deep_translator", "imageio_ffmpeg", "funasr", "modelscope", "audio_separator", "speechbrain", "hyperpyyaml",
         "vieneu", "vieneu_utils", "sea_g2p", "omnivoice", "transformers", "tokenizers", "safetensors", "accelerate",
         "huggingface_hub", "hf_xet", "librosa", "soundfile", "torchaudio", "torchcodec", "kaldi_native_fbank",
-        "sentencepiece", "einops", "rotary_embedding_torch", "beartype", "onnx", "pydub", "playwright", "pypinyin")
+        "sentencepiece", "einops", "rotary_embedding_torch", "beartype", "onnx", "pydub", "playwright", "pypinyin",
+        "voxcpm", "pydantic")
 for pkg in PKGS:
     if importlib.util.find_spec(pkg) is None:
         continue
@@ -33,7 +34,8 @@ for pkg in PKGS:
 kw = {}
 try:   # transformers / torch đọc mã nguồn (.py) lúc chạy -> giữ cả file .py
     kw["module_collection_mode"] = {"transformers": "pyz+py", "torch": "pyz+py", "omnivoice": "pyz+py",
-                                    "vieneu": "pyz+py", "funasr": "pyz+py", "speechbrain": "pyz+py"}
+                                    "vieneu": "pyz+py", "funasr": "pyz+py", "speechbrain": "pyz+py",
+                                    "voxcpm": "pyz+py"}
     a = Analysis(
         ["TraMi.py"],
         pathex=["."],

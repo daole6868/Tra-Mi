@@ -169,7 +169,8 @@ WHICH = [("trans", "Chỉ tiếng Việt"), ("both", "Song ngữ Việt + Trung"
          ("none", "Không ghép (chỉ xuất SRT)")]
 TTS_ENGINES = [("edge", "Microsoft Edge (giọng Việt / Anh / Thái / Nhật / Hàn, cần mạng)"),
                ("vieneu", "VieNeu-TTS (25 giọng + 6 giọng thu âm sạch + nhái giọng, offline – chỉ tiếng Việt)"),
-               ("omnivoice", "OmniVoice (23 giọng chọn sẵn + nhái giọng từ file mẫu, offline, đọc được nhiều tiếng)")]
+               ("omnivoice", "OmniVoice (23 giọng chọn sẵn + nhái giọng từ file mẫu, offline, đọc được nhiều tiếng)"),
+               ("voxcpm", "VoxCPM2 (📣 giọng thuyết minh + giọng tạo theo mô tả + nhái giọng, offline, card ≥ 8 GB)")]
 TARGETS = [("vi", "Tiếng Việt"), ("en", "Tiếng Anh (English)"), ("th", "Tiếng Thái (ภาษาไทย)"),
            ("ja", "Tiếng Nhật (日本語)"), ("ko", "Tiếng Hàn (한국어)")]
 OCR_READ_HELP = ("<b>Đọc chữ kỹ</b> (2.1.37)<br>"

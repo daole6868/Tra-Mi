@@ -45,6 +45,31 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - `trami/tts.py` – `synthesize_dub` (giọng mỗi người nói: `edge:<id>` / `vieneu:<preset>` / `clone`; `patch=` vá đúng
   đoạn thay đổi vào bản lồng đang dùng theo bảng `placed` của bản đó – 2.0.73), `clean_tts_text`,
   `preview_voice`, `plan_layout` (xếp giọng theo thời gian, thuần – không đụng âm thanh; `OVERFLOW_MODES`). VieNeu API: `Vieneu(mode="v3turbo").infer(text, voice="<tên preset>" | ref_audio=...)` → numpy 48 kHz.
+- Bộ đọc VoxCPM2 (2.4.14, OpenBMB Apache-2.0, gói `voxcpm` – cài `pip install --no-deps "voxcpm>=2.0.3"` trong
+  CaiDat_AI_NangCao.bat vì Requires-Dist kéo gradio / datasets<4 / torchcodec / funasr; chạy chỉ cần torch, torchaudio,
+  einops, librosa, pydantic, transformers, safetensors – `tts.VOX_PKGS`, `voxcpm_available`): tiến trình riêng
+  `--voxcpm-worker <repo>` (`trami/voxcpm_worker.py`, cùng giao thức VieNeu / Omni; `VoxCPM.from_pretrained(repo,
+  load_denoiser=False, optimize=False)` qua `hfoffline.load_local_first` – optimize = torch.compile cần triton; `make_kwargs`:
+  control -> "(mô tả)lời", ref_audio + ref_text -> `prompt_wav_path` / `prompt_text` (đọc tiếp file mẫu), reference ->
+  `reference_wav_path` (giọng tham chiếu); seed -> `_seed`; ghi 48 kHz `tts_model.sample_rate`; lệnh "trim" = mem_guard)
+  -> `tts.VoxWorker` (`synth(ref_audio, ref_text, reference, control, seed, cfg, steps)`, `_call` dùng chung với VieNeu),
+  `_vox(settings)` / `_vox_model`. Mã giọng: `voxd:<mã>` giọng chọn sẵn (`trami/vox_design.py`: 18 giọng = 6 📣 thuyết minh
+  (`group` "tm", câu mẫu kiểu kể / tóm tắt phim riêng từng giọng – "tm_nu_nhanh" nữ thuyết minh trẻ nhanh có cảm xúc =
+  `dub_default_voice` của VoxCPM2) + 12 nhân vật (câu mẫu hội thoại `TALK_TEXT`) + "custom" = Cài đặt `voxcpm_design` (mô
+  tả tiếng Anh) / `_gender` / `_seed`; như omni_design: `ensure_anchor` tạo câu mẫu 1 lần theo mô tả + hạt cố định
+  (`ANCHOR_CFG` 2 / `ANCHOR_STEPS` 10, hỏng / dài bất thường -> hạt khác ≤ 3 lần) -> data/voices/vox_design/, mọi câu
+  đọc tiếp + tham chiếu câu mẫu -> cả video 1 giọng + nhịp đọc của câu mẫu; tiếng khác: câu mẫu chung `omni_design.
+  ANCHOR_TEXTS`), `vox:<id>` giọng mẫu thư viện (có lời -> đọc tiếp; không lời -> chỉ tham chiếu), `voxclone` nhái giọng
+  nhân vật gốc (`build_reference` 5–12 s -> chỉ tham chiếu, `voxref_<người>.wav`). `synthesize_dub` nhánh `vox_items`
+  (sau OmniVoice, trước Edge; `vox_text` đổi dấu ngoặc -> dấu phẩy – chữ trong ngoặc ở đầu lời là mô tả giọng; mã file
+  + `vox_design.key` / file mẫu / repo / cfg / số bước; `RateWatch` đọc lại câu dài bất thường), `preview_voice`,
+  `list_voices` (`vox_voices` đứng đầu khi cài), `auto_assign` engine "voxcpm" (giọng nhân vật nam / nữ trước, thuyết
+  minh sau). Cài đặt `voxcpm_model`, `voxcpm_quality` (`VOX_STEPS` fast 6 / normal 10 / best 16 bước), `voxcpm_cfg` 2,0 –
+  `vox_opts`; Cài đặt → khung "Lồng tiếng, xoá phụ đề & xuất video" 5 ô. `_free_other_tts(keep)`: trước khi nạp 1 bộ
+  đọc AI (VieNeu / OmniVoice / VoxCPM2, cả nghe thử) tắt bộ đọc AI khác đang để không (card 8 GB). Tab Tài liệu
+  `models` "voxcpm" (`vox_ready`: config + audiovae + model.safetensors | pytorch_model.bin; tải `VOX_FILES` rồi .pth /
+  .bin nếu thiếu; ModelScope `OpenBMB/VoxCPM2` trong `hf_download.MS_MIRRORS`). gpu: `_workers` có `_vox_model`,
+  `vram_need` voxcpm 5500 MB, `WORKER_FLAGS` / `WORKER_CLASS`. `common.TTS_ENGINES` "voxcpm" (điện thoại tự có).
 - `trami/asr_qwen.py` + `qwen_asr_worker.py` (Qwen3-ASR + Qwen3-ForcedAligner, tiến trình riêng `--qwen-asr-worker`,
   transformers ≥ 5.13, mặc định từ 2.0.29; `transcribe_qwen` / `relisten_cuts` / `qwen_decoder` / `align_qwen` nhận
   `engine` "qwen3" | "firered" – `asr_worker(engine)`), FireRedASR2-AED (2.1.0): mã suy luận chép từ FireRedASR2S
@@ -1126,7 +1151,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (357 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (358 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -3215,7 +3240,21 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   / gọi, trường "vai" trước "dich", vai gửi theo ngữ cảnh lô sau + AI kiểm tra, luật g) nhất quán (xem Cấu trúc). Thử với AI
   giả: vai lưu đúng câu, lô sau nhận ⟨vai⟩, bộ nhớ dịch giữ vai, vai có chữ Hán không làm câu thành "chưa dịch", AI kiểm tra
   nhận "vai". Chưa dịch thử bằng API thật (sandbox) – tốn thêm ~10–15 token / dòng.
+- 2.4.14: người dùng hỏi Fish Audio Drama 3 / LarVoice API / tự làm công cụ lồng tiếng / bộ đọc mở khác (VoxCPM2,
+  Gwen-TTS…), gửi 1 đoạn thuyết minh YouTube mẫu (nữ ~240 Hz, đọc nhanh ~4,5 tiếng / s, nhiều cảm xúc, 1 giọng đọc cả
+  phim) "giọng kiểu như này" -> "thêm VoxCPM2 vào tool". Làm bộ đọc thứ 4 (xem Cấu trúc "Bộ đọc VoxCPM2"): 6 giọng 📣
+  thuyết minh tạo theo mô tả (KHÔNG nhái giọng file mẫu của người dùng / người thật – chỉ học kiểu đọc), 12 giọng nhân
+  vật, giọng tự mô tả, giọng mẫu của bạn, nhái giọng nhân vật gốc; tab Tài liệu tải ~5 GB (tự sang ModelScope). Thử:
+  gói voxcpm giả chạy thật qua `TraMi.py --voxcpm-worker` (câu mẫu tạo 1 lần với mô tả, mọi câu đọc tiếp câu mẫu, giọng
+  mẫu có lời -> đọc tiếp, nhái giọng gốc -> chỉ tham chiếu, "3" -> "ba", "(cười)" không thành mô tả, lần sau không đọc
+  lại, nghe thử, trim, tắt bộ đọc khác), giao diện offscreen (Cài đặt lưu 5 ô, 20 giọng ở "Giọng cho tất cả"). Chưa chạy
+  mô hình thật (sandbox chặn HuggingFace + PyTorch CPU) – tốc độ trên RTX 4060 8 GB, giọng Việt của các mô tả chưa nghe.
 ## Vấn đề đang mở
+- 2.4.14: chờ người dùng chạy `.venv\Scripts\python -m pip install --no-deps "voxcpm>=2.0.3"` + `einops librosa
+  pydantic`, tab Tài liệu → Tải "Giọng đọc – VoxCPM2" (~5 GB), tab Lồng tiếng → Bộ đọc VoxCPM2 → Giọng cho tất cả "📣 Nữ
+  thuyết minh – trẻ, nhanh, có cảm xúc" → ▶ nghe thử (lần đầu tạo câu mẫu); báo: giọng có giống kiểu thuyết minh không, tốc
+  độ đọc 1 câu (card 8 GB có tràn không – Task Manager), lỗi nạp (gửi data\logs\voxcpm.txt). Mô tả chưa hợp -> Cài đặt →
+  "Giọng tự mô tả" thử mô tả khác / đổi biến thể.
 - 2.4.13: chờ người dùng chép file, dịch lại 1 tập (tab Phụ đề → Dịch lại tất cả / tích câu → Dịch câu đã tích): rê chuột ô
   bản dịch xem "AI xác định: … → …" có đúng không, xưng hô sư tôn / đệ tử, người ngôi 3 có nhất quán không; phim chưa phân
   biệt người nói (cột Người trống) -> bật "Phân biệt người nói" rồi "1. Nghe & tách câu" lại để AI nhận S1 / S2 + nam / nữ.

@@ -16703,3 +16703,174 @@ def test_speaker_listener_role_2413(monkeypatch):
                         ctx=[("师尊", "Sư tôn"), ("为师", "Ta")], roles=["đệ tử→sư tôn", "sư tôn→đệ tử"], fit=False)
     assert '"vai": "đệ tử→sư tôn"' in got[0][1] and "⟨sư tôn→đệ tử⟩" in got[0][1]
     assert "\"vai\" / ⟨…⟩ = người nói→người nghe" in got[0][0]
+
+
+_FAKE_VOXCPM = '''
+import json, os
+import numpy as np
+
+
+class _TM:
+    sample_rate = 48000
+
+
+class VoxCPM:
+    def __init__(self, repo, kw):
+        self.repo, self.kw, self.tts_model = repo, kw, _TM()
+
+    @classmethod
+    def from_pretrained(cls, hf_model_id="openbmb/VoxCPM2", **kw):
+        return cls(hf_model_id, kw)
+
+    def generate(self, text, **kw):
+        log = os.environ.get("FAKE_VOX_LOG")
+        if log:
+            with open(log, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"text": text, "kw": kw, "load": self.kw, "repo": self.repo},
+                                   ensure_ascii=False) + "\\n")
+        sr = 48000
+        n = int(sr * (0.4 + 0.05 * len(text)))
+        t = np.arange(n) / sr
+        f0 = 160 + 40 * np.sin(2 * np.pi * 1.3 * t)
+        ph = 2 * np.pi * np.cumsum(f0) / sr
+        x = sum(np.sin(k * ph) / k for k in range(1, 9))
+        env = 0.5 + 0.5 * np.sin(2 * np.pi * 2.7 * t) ** 2
+        rng = np.random.default_rng(len(text))
+        x = x * env + 0.05 * rng.standard_normal(n)
+        return (0.25 * x / np.abs(x).max()).astype(np.float32)
+'''
+
+
+def test_voxcpm_engine_2414(tmp_path, monkeypatch):
+    """2.4.14 – bộ đọc VoxCPM2: tiến trình riêng (gói voxcpm giả, chạy thật qua TraMi.py --voxcpm-worker), giọng chọn sẵn
+    theo mô tả = câu mẫu tạo 1 lần rồi mọi câu nhái câu mẫu (đọc tiếp + giọng tham chiếu), giọng mẫu của bạn, nhái giọng
+    gốc, nghe thử, số đọc thành chữ, dấu ngoặc không thành mô tả, tab Tài liệu, Tự gán giọng, card đồ hoạ."""
+    import json as _json
+
+    from trami import gpu, models, pipeline, tts, vox_design
+    from trami import voices as vlib
+    from trami.subtitle import Segment
+    from trami.voxcpm_worker import make_kwargs
+
+    # yêu cầu -> tham số generate
+    t, kw = make_kwargs({"text": "Xin chào", "control": "A young woman", "cfg": 2.5, "steps": 6})
+    assert t == "(A young woman)Xin chào" and kw == {"cfg_value": 2.5, "inference_timesteps": 6}
+    t, kw = make_kwargs({"text": "Đi thôi", "ref_audio": "a.wav", "ref_text": "lời mẫu"})
+    assert kw["prompt_wav_path"] == "a.wav" and kw["prompt_text"] == "lời mẫu" and kw["reference_wav_path"] == "a.wav"
+    t, kw = make_kwargs({"text": "Đi thôi", "ref_audio": "a.wav", "ref_text": ""})   # không có lời: chỉ nhái giọng
+    assert "prompt_wav_path" not in kw and kw["reference_wav_path"] == "a.wav"
+    t, kw = make_kwargs({"text": "Đi thôi", "reference": "r.wav"})
+    assert "prompt_wav_path" not in kw and kw["reference_wav_path"] == "r.wav" and kw["inference_timesteps"] == 10
+    # chữ trong ngoặc ở đầu lời = mô tả giọng của VoxCPM2 -> bỏ dấu ngoặc
+    assert tts.vox_text("(cười) Được thôi") == "cười, Được thôi"
+    assert not set("[]") & set(tts.vox_text("Anh [ấy] đi rồi")) and "ấy" in tts.vox_text("Anh [ấy] đi rồi")
+    assert "(" not in tts.vox_text("（笑）Được") and ")" not in tts.vox_text("Đi (đi) đi")
+    # giọng chọn sẵn: mã / hạt không trùng, 📣 thuyết minh đứng đầu, giọng tự mô tả theo Cài đặt
+    assert len({p[0] for p in vox_design.PRESETS}) == len({p[4] for p in vox_design.PRESETS}) == len(vox_design.PRESETS)
+    vs = vox_design.voices({})
+    assert vs[0]["name"].startswith("📣") and vs[0]["id"] == "voxd:tm_nu_nhanh" and all("tip" in v for v in vs)
+    assert not any(v["id"] == "voxd:custom" for v in vs)
+    st = {"voxcpm_design": "A calm old man,  slow   pace", "voxcpm_design_gender": "male"}
+    c = vox_design.get("voxd:custom", st)
+    assert c["desc"] == "A calm old man, slow pace" and c["gender"] == "male"
+    assert vs[-1]["id"] != "voxd:custom" and vox_design.voices(st)[-1]["id"] == "voxd:custom"
+    assert vox_design.key("voxd:custom", "r", "vi", st) != vox_design.key("voxd:custom", "r", "vi",
+                                                                           dict(st, voxcpm_design_seed=3))
+    assert vox_design.anchor_text("voxd:nu_tre") == vox_design.TALK_TEXT
+    assert vox_design.anchor_text("voxd:tm_nu_nhanh").startswith("Các bạn có biết không")
+    assert vox_design.anchor_text("voxd:tm_nu_nhanh", "en").startswith("Hello")
+    # tab Tài liệu: VoxCPM2 đủ file = config + audiovae + trọng số
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    monkeypatch.setattr(models, "_hf_snapshot", lambda repo: snap)
+    (snap / "config.json").write_text("{}")
+    (snap / "audiovae.safetensors").write_bytes(b"0" * 1_100_000)
+    assert not models.is_ready("voxcpm")
+    (snap / "pytorch_model.bin").write_bytes(b"0" * 1_100_000)
+    assert models.is_ready("voxcpm") and "voxcpm" in models.BY_KEY
+    from trami.hf_download import ms_candidates
+
+    assert ms_candidates("openbmb/VoxCPM2") == ["OpenBMB/VoxCPM2"]
+    # Tự gán giọng nam / nữ: giọng nhân vật trước, thuyết minh sau
+    monkeypatch.setattr(tts, "voxcpm_available", lambda: True)
+    asg = tts.auto_assign(["S1", "S2", "S3"], {"tts_engine": "voxcpm"}, {},
+                          {"S1": {"g": "female"}, "S2": {"g": "male"}, "S3": {"g": "female"}})
+    assert [vox_design.get(asg[k])["gender"] for k in ("S1", "S2", "S3")] == ["female", "male", "female"]
+    assert len(set(asg.values())) == 3 and not any(vox_design.get(v)["group"] for v in asg.values())
+    assert pipeline.dub_default_voice(None, "voxcpm", {}) == "voxd:tm_nu_nhanh"
+    assert "(VoxCPM2)" in pipeline.voice_label("voxd:tm_nu_nhanh") and \
+        pipeline.voice_label("voxclone:S1") == "Nhái giọng gốc (VoxCPM2)"
+    assert gpu.vram_need("dub", {"tts_engine": "voxcpm"}) == 5500
+    from trami.gui import common as C
+
+    assert any(k == "voxcpm" for k, _ in C.TTS_ENGINES)
+    # chạy thật tiến trình VoxCPM2 (gói voxcpm giả)
+    fake = tmp_path / "fakepkg"
+    (fake / "voxcpm").mkdir(parents=True)
+    (fake / "voxcpm" / "__init__.py").write_text(_FAKE_VOXCPM, "utf-8")
+    log = tmp_path / "vox.jsonl"
+    monkeypatch.setenv("PYTHONPATH", str(fake))
+    monkeypatch.setenv("FAKE_VOX_LOG", str(log))
+    monkeypatch.setattr(vox_design, "DESIGN_DIR", tmp_path / "design")
+    monkeypatch.setattr(tts, "_vox_model", None)
+    monkeypatch.setattr(tts, "omnivoice_available", lambda: False)
+    sm = vlib.add_sample(_write_tmp_wav(tmp_path / "mau.wav"), "Mẫu của tôi", "Đây là lời trong file mẫu.")
+    st = {"voxcpm_quality": "fast"}
+    segs = [Segment(0.0, 2.5, "一", "Xin chào các bạn, có 3 người.", "S1"),
+            Segment(3.0, 5.5, "二", "(cười) Được thôi, đi nào.", "S1"),
+            Segment(6.0, 8.5, "三", "Giọng mẫu của tôi đây.", "S2"),
+            Segment(9.0, 11.5, "四", "Nhái giọng nhân vật gốc.", "S3")]
+    ref_src = _write_tmp_wav(tmp_path / "src.wav", dur=14.0)
+    stats: dict = {}
+    try:
+        out = tts.synthesize_dub(segs, tmp_path / "dub.wav", 12.0, tmp_path / "work",
+                                 voices={"S1": "voxd:tm_nu_nhanh", "S2": tts.VOX_LIB + sm["id"], "S3": tts.VOX_CLONE},
+                                 settings=st, stats=stats, ref_audio=str(ref_src))
+        assert Path(out).exists()
+        reqs = [_json.loads(x) for x in log.read_text("utf-8").splitlines()]
+        assert all(r["load"] == {"load_denoiser": False, "optimize": False} and r["repo"] == "openbmb/VoxCPM2"
+                   for r in reqs)
+        anchors = [r for r in reqs if r["text"].startswith("(A young woman narrating")]
+        assert len(anchors) == 1 and anchors[0]["kw"]["inference_timesteps"] == 10   # câu mẫu: thông số cố định
+        lines = [r for r in reqs if r not in anchors]
+        assert len(lines) == 4 and all(r["kw"]["inference_timesteps"] == 6 for r in lines)   # "Nhanh" = 6 bước
+        l1 = next(r for r in lines if "người" in r["text"])
+        apath = l1["kw"]["prompt_wav_path"]
+        assert "ba người" in l1["text"] and Path(apath).parent == tmp_path / "design"
+        assert l1["kw"]["reference_wav_path"] == apath and l1["kw"]["prompt_text"].startswith("Các bạn có biết không")
+        l2 = next(r for r in lines if "Được thôi" in r["text"])
+        assert not l2["text"].startswith("(") and l2["kw"]["prompt_wav_path"] == apath   # cùng câu mẫu -> cùng giọng
+        l3 = next(r for r in lines if "Giọng mẫu" in r["text"])
+        assert l3["kw"]["prompt_text"] == "Đây là lời trong file mẫu." and l3["kw"]["reference_wav_path"].endswith(".wav")
+        l4 = next(r for r in lines if "Nhái giọng" in r["text"])
+        assert "prompt_wav_path" not in l4["kw"] and "voxref_S3" in l4["kw"]["reference_wav_path"]
+        used = stats["voices_used"]
+        assert used["S1"] == {"voxd:tm_nu_nhanh": 2} and used["S3"] == {tts.VOX_CLONE: 1}
+        assert all(s.extra.get("dub_at") for s in segs)
+        # lần sau: không đọc lại (cùng lời + giọng + chất lượng), đổi chất lượng -> đọc lại
+        n0 = len(log.read_text("utf-8").splitlines())
+        tts.synthesize_dub(segs, tmp_path / "dub2.wav", 12.0, tmp_path / "work",
+                           voices={"S1": "voxd:tm_nu_nhanh", "S2": tts.VOX_LIB + sm["id"], "S3": tts.VOX_CLONE},
+                           settings=st, ref_audio=str(ref_src))
+        assert len(log.read_text("utf-8").splitlines()) == n0
+        # nghe thử giọng chọn sẵn: nhái câu mẫu đã có (không tạo lại)
+        got = tts.preview_voice("voxd:tm_nu_nhanh", "Thử 2 câu", tmp_path / "pv", st)
+        r = _json.loads(log.read_text("utf-8").splitlines()[-1])
+        assert Path(got).exists() and "hai câu" in r["text"] and r["kw"]["prompt_wav_path"] == apath
+        w = tts._vox_model
+        assert gpu.WORKER_CLASS[type(w).__name__].startswith("VoxCPM2") and \
+            any(x is w for _, x in gpu._workers({"tts"}))
+        assert w.trim()
+        # nạp bộ đọc AI khác -> VoxCPM2 đang để không được tắt (card 8 GB không chứa nổi 2 mô hình)
+        assert tts._free_other_tts(object()) == 1 and w.proc is None
+    finally:
+        if tts._vox_model is not None:
+            tts._vox_model.stop()
+        vlib.delete(sm["id"])
+
+
+def _write_tmp_wav(path, dur: float = 3.0):
+    from trami import tts
+
+    tts.write_wav(path, _speech_like(24000, dur, seed=7) * 0.5, 24000)
+    return path

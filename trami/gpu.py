@@ -67,11 +67,12 @@ def drop_local_models() -> None:
 
 
 def _workers(kinds: set[str] | None = None):
-    """(loại, tiến trình) đang có: tts (VieNeu / OmniVoice), asr (Qwen3), mt (Hy-MT2)."""
+    """(loại, tiến trình) đang có: tts (VieNeu / OmniVoice / VoxCPM2), asr (Qwen3), mt (Hy-MT2)."""
     out = []
     tts = sys.modules.get("trami.tts")
     if tts is not None:
-        for w in (getattr(tts, "_vn_model", None), getattr(tts, "_omni_model", None)):
+        for w in (getattr(tts, "_vn_model", None), getattr(tts, "_omni_model", None),
+                  getattr(tts, "_vox_model", None)):
             if w is not None:
                 out.append(("tts", w))
     for name in ("trami.asr_qwen", "trami.asr_firered"):
@@ -231,7 +232,7 @@ def vram_need(kind: str, settings: dict | None = None) -> int:
         return 3000 if eng == "whisper" else 1800
     if kind in ("dub", "redub"):
         eng = st.get("tts_engine", "edge")
-        return {"vieneu": 2600, "omnivoice": 4600}.get(eng, 0)
+        return {"vieneu": 2600, "omnivoice": 4600, "voxcpm": 5500}.get(eng, 0)
     if kind == "translate":
         return 4600 if st.get("translate_engine") == "hymt" else 0
     return {"separate": 3000, "inpaint": 1600, "render": 1600, "realign": 2200, "diarize": 900,
@@ -330,9 +331,11 @@ def _local_loaded() -> bool:
 
 # ------------------------------------------------------------------ ai đang chiếm card (2.4.8)
 WORKER_FLAGS = {"--vieneu-worker": "VieNeu (đọc giọng)", "--omni-worker": "OmniVoice (đọc giọng)",
+                "--voxcpm-worker": "VoxCPM2 (đọc giọng)",
                 "--qwen-asr-worker": "Qwen3-ASR (bộ nghe)", "--firered-worker": "FireRedASR2 (bộ nghe)",
                 "--hymt-worker": "Hy-MT2 (dịch trên máy)", "--hf-download": "tải mô hình"}
 WORKER_CLASS = {"VieneuWorker": "VieNeu (đọc giọng)", "OmniWorker": "OmniVoice (đọc giọng)",
+                "VoxWorker": "VoxCPM2 (đọc giọng)",
                 "QwenAsrWorker": "Qwen3-ASR (bộ nghe)", "FireRedWorker": "FireRedASR2 (bộ nghe)",
                 "HymtWorker": "Hy-MT2 (dịch trên máy)"}
 KNOWN_APPS = {"chrome": "trình duyệt Chrome", "msedge": "trình duyệt Edge", "firefox": "trình duyệt Firefox",

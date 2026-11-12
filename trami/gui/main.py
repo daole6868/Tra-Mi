@@ -790,6 +790,8 @@ class SettingsPage(QWidget):
         ("glossary", "glossary", "p"), ("tts_engine", "tts_engine", "c"), ("vn_mode", "vieneu_mode", "c"),
         ("vn_style", "vieneu_style", "c"), ("level_match", "dub_level_match", "b"),
         ("omni_model", "omnivoice_model", "c"), ("hf_token", "hf_token", "t"),
+        ("vox_quality", "voxcpm_quality", "c"), ("vox_cfg", "voxcpm_cfg", "f"), ("vox_design", "voxcpm_design", "t"),
+        ("vox_gender", "voxcpm_design_gender", "c"), ("vox_seed", "voxcpm_design_seed", "i"),
         ("align_words", "align_words", "b"), ("split_spk", "split_speaker_changes", "b"),
         ("dub_fit", "dub_fit", "b"), ("dub_short", "dub_auto_shorten", "b"),
         ("maxspeed", "tts_max_speedup", "f"), ("inpaint", "inpaint_backend", "c"),
@@ -1085,6 +1087,23 @@ class SettingsPage(QWidget):
         self.hf_token = f.row("HuggingFace token", key(),
                               "Chỉ cần cho G-OmniVoice: tạo token ở huggingface.co/settings/tokens và bấm đồng ý "
                               "điều khoản ở trang mô hình g-group-ai-lab/g-omnivoice")
+        self.vox_quality = f.row("VoxCPM2 – chất lượng", combo([("fast", "Nhanh (6 bước)"),
+                                                                ("normal", "Chuẩn (10 bước – khuyên dùng)"),
+                                                                ("best", "Kỹ (16 bước, chậm hơn)")]),
+                                 "Số bước khử nhiễu mỗi câu: nhiều bước giọng sạch hơn chút, đọc chậm hơn. Đổi là đọc "
+                                 "lại các câu VoxCPM2 ở lần lồng sau")
+        self.vox_cfg = f.row("VoxCPM2 – bám giọng mẫu", dspin(1, 4, 0.1),
+                             "2,0 là chuẩn. Cao hơn: sát mô tả / giọng mẫu hơn nhưng dễ gắt, nhanh; thấp hơn: tự nhiên "
+                             "hơn nhưng dễ lệch giọng")
+        self.vox_design = f.row("Giọng tự mô tả (VoxCPM2)", QLineEdit(),
+                                "Mô tả giọng bằng tiếng Anh, VD: A young woman narrating a drama recap, bright clear "
+                                "voice, fast lively pace, expressive. Có mô tả -> danh sách giọng có thêm “✏️ Giọng tự "
+                                "mô tả (VoxCPM2)”. Không ghi tên người thật / nhái giọng người nổi tiếng")
+        self.vox_design.setPlaceholderText("A young woman, warm gentle voice, calm storytelling…")
+        self.vox_gender = f.row("… nam / nữ", combo([("", "Không rõ"), ("female", "Nữ"), ("male", "Nam")]),
+                                "Để “Tự gán giọng nam / nữ” chọn đúng người nói")
+        self.vox_seed = f.row("… biến thể", spin(0, 99),
+                              "Cùng mô tả nhưng ra người đọc khác: đổi số rồi nghe thử lại")
         self.maxspeed = f.row("Tăng tốc giọng tối đa", dspin(1, 2.5, 0.1),
                               "1,3 là vừa tự nhiên; cao hơn nghe vội")
         self.align_words = f.row("Căn thời gian từng chữ", Switch(),

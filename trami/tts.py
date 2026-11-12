@@ -11,6 +11,9 @@ Giọng cho từng người nói (S1, S2…) được ghi dạng chuỗi:
   - "omni:<id>"                : OmniVoice nhái giọng từ FILE GHI ÂM MẪU trong thư viện giọng mẫu (trami/voices.py)
   - "omniclone"                : OmniVoice nhái giọng nhân vật gốc (mẫu 3–10 giây cắt từ video + lời gốc)
   - "omnid:<mã>"               : OmniVoice giọng CHỌN SẴN tạo theo mô tả (trami/omni_design.py, không cần file mẫu)
+  - "voxd:<mã>"                : VoxCPM2 giọng CHỌN SẴN tạo theo mô tả bằng lời (📣 thuyết minh… – trami/vox_design.py)
+  - "vox:<id>"                 : VoxCPM2 nhái giọng từ file ghi âm mẫu trong thư viện giọng mẫu
+  - "voxclone"                 : VoxCPM2 nhái giọng nhân vật gốc (mẫu 5–12 giây cắt từ video, không cần lời)
 
 Mỗi câu được đọc rồi tự co giãn tốc độ cho vừa khung thời gian của phụ đề.
 """
@@ -44,6 +47,10 @@ EDGE_VOICES = [
 ]
 CLONE = "clone"
 OMNI_CLONE = "omniclone"
+VOX_CLONE = "voxclone"
+VOX_LIB = "vox:"            # VoxCPM2 nhái giọng từ thư viện giọng mẫu
+VOX_PREFIXES = ("vox:", "voxd:", "voxclone:")
+AI_PREFIXES = ("edge:", "vieneu:", "omni:", "omnid:", "vox:", "voxd:")
 VN_SAMPLE = "vieneu:mau:"   # giọng thu âm sạch đi kèm gói VieNeu
 VN_LIB = "vieneu:lib:"      # giọng mẫu trong thư viện của người dùng
 VN_TREND = "vieneu:trend:"  # giọng theo trend: giọng dựng sẵn + hiệu ứng (trami/trend_voices.py)
@@ -189,7 +196,21 @@ def list_voices(settings: dict | None = None, lang: str = "vi") -> list[dict]:
         omni.append({"id": OMNI_CLONE, "name": "🎭 Nhái giọng nhân vật gốc (OmniVoice)", "gender": ""})
         omni += omni_design.voices()
         voices = omni + voices
+    if voxcpm_available():
+        voices = vox_voices(settings) + voices
     return voices
+
+
+def vox_voices(settings: dict | None = None) -> list[dict]:
+    """Giọng VoxCPM2 (đọc được 30 tiếng): 📣 thuyết minh + nhân vật chọn sẵn, giọng mẫu của bạn, nhái giọng gốc."""
+    from . import vox_design
+    from . import voices as vlib
+
+    out = [{k: v[k] for k in ("id", "name", "gender", "tip")} for v in vox_design.voices(settings)]
+    out += [{"id": VOX_LIB + v["id"], "name": f"🎙 {v['name']} – giọng mẫu (VoxCPM2)", "gender": ""}
+            for v in vlib.list_samples()]
+    out.append({"id": VOX_CLONE, "name": "🎭 Nhái giọng nhân vật gốc (VoxCPM2)", "gender": ""})
+    return out
 
 
 def auto_assign(speakers: list[str], settings: dict | None = None, current: dict | None = None,
@@ -210,6 +231,13 @@ def auto_assign(speakers: list[str], settings: dict | None = None, current: dict
         # giọng mẫu của bạn trước, rồi giọng chọn sẵn (có nam / nữ -> nhân vật nào nhận giọng đó)
         pool = [(f"omni:{v['id']}", "") for v in vlib.list_samples()] + \
             [(v["id"], v["gender"]) for v in omni_design.voices()]
+    elif engine == "voxcpm" and voxcpm_available():
+        from . import vox_design
+
+        # giọng nhân vật chọn sẵn có nam / nữ trước (thuyết minh để cuối – 1 người đọc cả phim thì chọn ở "Giọng cho tất cả")
+        vs = vox_design.voices(settings)
+        pool = [(v["id"], v["gender"]) for v in vs if not vox_design.get(v["id"], settings).get("group")] + \
+            [(v["id"], v["gender"]) for v in vs if vox_design.get(v["id"], settings).get("group")]
     else:   # Edge (hoặc VieNeu khi lồng tiếng khác tiếng Việt)
         pool = [(v["id"], v["gender"]) for v in edge_voices(lang)]
     gmap = dict(pool)
@@ -714,6 +742,10 @@ class VieneuWorker:
                "duration": duration, "params": params or {}, "seed": seed, "instruct": instruct}
         if language and language != "vi":   # OmniVoice đọc tiếng khác (VieNeu chỉ đọc tiếng Việt)
             req["language"] = language
+        return self._call(req, text, out, on_wait)
+
+    def _call(self, req: dict, text: str, out: str | Path, on_wait=None) -> Path:
+        """Gửi 1 yêu cầu đọc, chờ trả lời (tiến trình chết / treo -> mở lại 1 lần)."""
         req = json.dumps(req, ensure_ascii=False)
         with self.lock:
             for attempt in range(2):
@@ -852,6 +884,98 @@ def _omni(settings: dict | None = None) -> OmniWorker:
 
             atexit.register(_omni_model.stop)
         return _omni_model
+
+
+class VoxWorker(VieneuWorker):
+    """Tiến trình riêng chạy VoxCPM2 (trami/voxcpm_worker.py); mode = tên mô hình trên HuggingFace. Ghi 48 kHz."""
+    title = "VoxCPM2"
+    stall_call = 600.0
+    stall_min = 120.0
+    flag = "--voxcpm-worker"
+    log_name = "voxcpm.txt"
+
+    def __init__(self, repo: str, token: str = ""):
+        super().__init__(repo)
+        self.token = token
+
+    def _extra_env(self) -> dict:
+        return {"HF_TOKEN": self.token} if self.token else {}
+
+    def synth(self, text: str, out: str | Path, ref_audio: str | None = None, ref_text: str | None = None,
+              reference: str | None = None, control: str | None = None, seed: int | None = None,
+              cfg: float | None = None, steps: int | None = None, on_wait=None, **_ignored) -> Path:
+        req = {"text": text, "out": str(out), "ref_audio": ref_audio, "ref_text": ref_text or "",
+               "reference": reference, "control": control or "", "seed": seed, "cfg": cfg, "steps": steps}
+        return self._call(req, text, out, on_wait)
+
+
+_vox_model: VoxWorker | None = None
+VOX_REPO = "openbmb/VoxCPM2"
+VOX_STEPS = {"fast": 6, "normal": 10, "best": 16}   # "Chất lượng" ở Cài đặt -> số bước khử nhiễu mỗi câu
+
+
+VOX_PKGS = ("voxcpm", "torch", "torchaudio", "einops", "librosa", "pydantic")   # cài voxcpm --no-deps: thiếu gói nào
+# thì bộ đọc không nạp được -> không liệt kê giọng VoxCPM2 (tab Tài liệu báo gói thiếu)
+
+
+def voxcpm_available() -> bool:
+    from .config import installed
+
+    return installed(*VOX_PKGS)
+
+
+def vox_opts(settings: dict | None) -> tuple[float, int]:
+    """(cfg, số bước) theo Cài đặt."""
+    st = settings or {}
+    try:
+        cfg = min(4.0, max(1.0, float(st.get("voxcpm_cfg", 2.0) or 2.0)))
+    except (TypeError, ValueError):
+        cfg = 2.0
+    return cfg, VOX_STEPS.get(str(st.get("voxcpm_quality", "normal")), 10)
+
+
+def _vox(settings: dict | None = None) -> VoxWorker:
+    global _vox_model
+    st = settings or {}
+    repo = st.get("voxcpm_model") or VOX_REPO
+    with _vn_lock:
+        if _vox_model is None or _vox_model.mode != repo:
+            if _vox_model is not None:
+                _vox_model.stop()
+            _vox_model = VoxWorker(repo, st.get("hf_token", ""))
+            import atexit
+
+            atexit.register(_vox_model.stop)
+        return _vox_model
+
+
+def _free_other_tts(keep) -> int:
+    """2.4.14: trước khi nạp 1 bộ đọc AI, tắt bộ đọc AI khác đang để không (card 8 GB không chứa nổi VoxCPM2 + VieNeu /
+    OmniVoice cùng lúc – tràn sang RAM thì đọc chậm như treo). Đang đọc dở thì để nguyên."""
+    n = 0
+    for w in (_vn_model, _omni_model, _vox_model):
+        proc, lock = getattr(w, "proc", None), getattr(w, "lock", None)
+        if w is None or w is keep or proc is None or proc.poll() is not None or lock is None:
+            continue
+        if lock.acquire(blocking=False):
+            try:
+                w.stop()
+                n += 1
+            finally:
+                lock.release()
+    return n
+
+
+_VOX_BRACKETS = re.compile(r"[()\[\]（）【】{}]")
+
+
+def vox_text(text: str) -> str:
+    """Lời đọc cho VoxCPM2: chữ trong ngoặc ở ĐẦU lời là mô tả giọng (không được đọc) -> đổi mọi dấu ngoặc thành dấu
+    phẩy để câu phụ đề "(cười) Được thôi" vẫn đọc đủ chữ."""
+    t = _VOX_BRACKETS.sub(", ", text or "")
+    t = re.sub(r"\s*,(\s*,)+", ",", t)
+    t = re.sub(r"^[\s,]+", "", t)
+    return re.sub(r"\s+", " ", t).strip()
 
 
 OMNI_SHORT_WORDS = 10   # câu OmniVoice ≤ 10 tiếng: trước 2.1.5 bị kéo dài gấp 2–2,5 lần (đọc lặp lời)
@@ -1796,19 +1920,23 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     work = Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
     voices = voices or {}
-    if not voice.startswith(("edge:", "vieneu:", "omni:", "omnid:")) and voice not in (CLONE, OMNI_CLONE):
+    if not voice.startswith(AI_PREFIXES) and voice not in (CLONE, OMNI_CLONE, VOX_CLONE):
         voice = "edge:" + voice  # tương thích bản cũ
     mode = settings.get("vieneu_mode", "v3turbo")
 
     edge_items: list[tuple[int, str, Path, str]] = []
     vn_items: list[tuple[int, str, Path, str]] = []
     omni_items: list[tuple[int, str, Path, str]] = []
+    vox_items: list[tuple[int, str, Path, str, str]] = []
     groups: dict[int, str] = {}   # câu -> mã giọng (cân âm lượng giữa các câu cùng giọng)
     vn_params = vieneu_params(settings)
     samples = {}
-    from . import omni_design
+    from . import omni_design, vox_design
 
-    if omnivoice_available():
+    vox_ok = voxcpm_available()
+    vox_repo = settings.get("voxcpm_model") or VOX_REPO
+    vox_cfg, vox_steps = vox_opts(settings)
+    if omnivoice_available() or vox_ok:
         from . import voices as vlib
 
         samples = {v["id"]: v for v in vlib.list_samples()}
@@ -1853,6 +1981,10 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             if not omnivoice_available() or (spec.startswith("omni:") and spec[5:] not in samples) or \
                     (spec.startswith("omnid:") and not omni_design.get(spec)):
                 spec = "edge:vi-VN-HoaiMyNeural"   # chưa cài OmniVoice / giọng mẫu đã bị xoá
+        if spec == VOX_CLONE or spec.startswith(("vox:", "voxd:")):
+            if not vox_ok or (spec.startswith("vox:") and spec[4:] not in samples) or \
+                    (spec.startswith("voxd:") and not vox_design.get(spec, settings)):
+                spec = "edge:vi-VN-HoaiMyNeural"   # chưa cài VoxCPM2 / giọng mẫu đã bị xoá / chưa có mô tả
         if spec != want:   # không đọc được bằng giọng đã chọn -> báo rõ (trước đây đổi im lặng sang Hoài My)
             fallback[want] = fallback.get(want, 0) + 1
         s.extra["voice_used"] = want if spec == want else spec
@@ -1868,15 +2000,26 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             spec = f"clone:{s.speaker or 'S1'}"
         if spec == OMNI_CLONE:
             spec = f"omniclone:{s.speaker or 'S1'}"
+        if spec == VOX_CLONE:
+            spec = f"voxclone:{s.speaker or 'S1'}"
         extra = ""
         if not spec.startswith("edge:") and lg == "vi":
             t = spoken_vi(t)   # bộ đọc AI: số đọc thành chữ ("90.000" -> "chín mươi nghìn"); Edge tự đọc số
+        if spec.startswith(VOX_PREFIXES):
+            t = vox_text(t)    # chữ trong ngoặc ở đầu lời = mô tả giọng của VoxCPM2 -> bỏ dấu ngoặc
         if spec.startswith("omni:"):   # sửa lời / file mẫu thì đọc lại
             sm = samples[spec[5:]]
             extra = f"{sm.get('text', '')}|{sm.get('file')}|{settings.get('omnivoice_model', '')}"
         if spec.startswith("omnid:"):  # đổi mô tả / mô hình -> câu mẫu mới -> đọc lại
             extra = omni_design.key(spec, settings.get("omnivoice_model", ""), lg) + omni_design.fx_key(spec)
-        if spec.startswith(("omni:", "omniclone:", "omnid:")):
+        if spec.startswith(VOX_PREFIXES):   # đổi mô tả / file mẫu / mô hình / chất lượng -> đọc lại
+            if spec.startswith("voxd:"):
+                extra = vox_design.key(spec, vox_repo, lg, settings)
+            elif spec.startswith("vox:"):
+                sm = samples[spec[4:]]
+                extra = f"{sm.get('text', '')}|{sm.get('file')}"
+            extra += f"|{vox_repo}|c{vox_cfg:g}|s{vox_steps}" + ("|" + lg if lg != "vi" else "")
+        elif spec.startswith(("omni:", "omniclone:", "omnid:")):
             extra += "|nofade"          # 2.0.34: bỏ đoạn nhỏ dần 0,1 s cuối câu (mất phụ âm cuối của câu ngắn)
             if lg != "vi":
                 extra += "|" + lg
@@ -1906,6 +2049,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             queued.add(str(path))
             if spec.startswith(("omni:", "omniclone:", "omnid:")):
                 omni_items.append((i, text, path, spec, lg))
+            elif spec.startswith(VOX_PREFIXES):
+                vox_items.append((i, text, path, spec, lg))
             elif spec.startswith("edge:"):
                 edge_items.append((i, text, path, spec[5:]))
             else:
@@ -1942,7 +2087,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             enqueue(t, p)
         s.extra["_tts"] = str(p)
     stats["clauses"] = n_clause
-    total_items = len(edge_items) + len(vn_items) + len(omni_items)
+    total_items = len(edge_items) + len(vn_items) + len(omni_items) + len(vox_items)
     if progress:
         progress(0.0, f"Đang tạo giọng đọc 0/{total_items}")
     errors: list[str] = []
@@ -1952,6 +2097,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         if progress:
             progress(0.01, "Đang nạp VieNeu-TTS…")
         tts = _vieneu(mode)
+        _free_other_tts(tts)
         tts.ensure_started((lambda x, m: progress(0.01 * x, m)) if progress else None, cancel)
         refs: dict[str, Path | None] = {}
         watch = RateWatch() if mode != "v3nano" else None
@@ -2042,6 +2188,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         if progress:
             progress(0.01, "Đang nạp OmniVoice…")
         om = _omni(settings)
+        _free_other_tts(om)
         om.ensure_started((lambda x, m: progress(0.01 * x, m)) if progress else None, cancel)
         speed = _speed_tag(rate)
         base = len(vn_items)
@@ -2078,9 +2225,82 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                     om.note = ""
                 progress((base + n + 1) / max(1, total_items) * 0.8, msg)
 
+    # --- VoxCPM2 (offline): giọng chọn sẵn theo mô tả / giọng mẫu / nhái giọng nhân vật gốc
+    if vox_items:
+        if progress:
+            progress(0.01, "Đang nạp VoxCPM2…")
+        vx = _vox(settings)
+        _free_other_tts(vx)
+        vx.ensure_started((lambda x, m: progress(0.01 * x, m)) if progress else None, cancel)
+        speed = _speed_tag(rate)
+        base = len(vn_items) + len(omni_items)
+        vrefs: dict[tuple, object] = {}
+        vwatch = RateWatch()
+
+        def vox_ref(spec: str, lg: str) -> tuple:
+            """(file mẫu để đọc tiếp, lời file mẫu, file giọng tham chiếu) cho mã giọng VoxCPM2."""
+            ck = (spec, lg if spec.startswith("voxd:") else "")
+            if isinstance(vrefs.get(ck), Exception):   # câu mẫu đã lỗi: không thử lại ở mỗi câu
+                raise vrefs[ck]  # type: ignore[misc]
+            if ck not in vrefs:
+                try:
+                    if spec.startswith("voxd:"):   # câu mẫu tạo 1 lần theo mô tả -> mọi câu nhái nó -> cả video 1 giọng
+                        a, at = vox_design.ensure_anchor(vx, spec, vox_repo, lg, settings)
+                        vrefs[ck] = (a, at, a)
+                    elif spec.startswith("vox:"):
+                        sm = samples[spec[4:]]
+                        f = str(vlib.path_of(sm))
+                        st = (sm.get("text") or "").strip()
+                        vrefs[ck] = (f if st else None, st, f)   # chưa có lời file mẫu: chỉ nhái giọng (không đọc tiếp)
+                    else:   # nhái giọng nhân vật gốc: chỉ làm giọng tham chiếu (nhân vật nói tiếng khác, không đọc tiếp)
+                        spk = spec[9:]
+                        r = build_reference(ref_audio, segs, spk, work / f"voxref_{spk}.wav") if ref_audio else None
+                        vrefs[ck] = (None, "", str(r) if r else None)
+                except Exception as e:  # noqa: BLE001
+                    vrefs[ck] = e
+                    raise
+            return vrefs[ck]  # type: ignore[return-value]
+
+        for n, (i, text, p, spec, lg) in enumerate(vox_items):
+            if cancel and cancel():
+                raise Cancelled()
+            if n and n % DUB_BATCH == 0:
+                vx.stop()
+                vx.ensure_started(None, cancel)
+            rep: dict = {}
+            try:
+                ra, rt, rf = vox_ref(spec, lg)
+                tmp = p.with_suffix(".raw.wav")
+                synth_checked(vx, text, tmp, report=rep, watch=vwatch, wkey=spec, ref_audio=ra, ref_text=rt,
+                              reference=rf, cfg=vox_cfg, steps=vox_steps,
+                              on_wait=lambda sec, n=n: progress and progress(
+                                  (base + n) / max(1, total_items) * 0.8,
+                                  f"VoxCPM2 đang đọc {n + 1}/{len(vox_items)} – câu này đã {sec:.0f} s"))
+                if rep.get("long") == 1:
+                    stats["long_fixed"] = stats.get("long_fixed", 0) + 1
+                elif rep.get("long") == 2:
+                    stats.setdefault("long_left", []).append(i + 1)
+                sr = read_wav_rate(tmp) or vx.sr
+                if abs(speed - 1) > 0.01:
+                    write_wav(p, _decode(tmp, speed, sr), sr)
+                    tmp.unlink(missing_ok=True)
+                else:
+                    tmp.replace(p)
+            except Cancelled:
+                raise
+            except Exception as e:
+                errors.append(f"Câu {i + 1}: {e}")
+            if progress:
+                msg = f"VoxCPM2 đang đọc {n + 1}/{len(vox_items)}"
+                if vx.note:
+                    stats["slow_restarts"] = stats.get("slow_restarts", 0) + 1
+                    msg += " · " + vx.note
+                    vx.note = ""
+                progress((base + n + 1) / max(1, total_items) * 0.8, msg)
+
     # --- Edge (online)
     if edge_items:
-        base = len(vn_items) + len(omni_items)
+        base = len(vn_items) + len(omni_items) + len(vox_items)
         nb = (len(edge_items) + DUB_BATCH - 1) // DUB_BATCH
         for b in range(0, len(edge_items), DUB_BATCH):   # video dài: đọc từng đợt 1000 câu (file đã đọc được giữ)
             if cancel and cancel():
@@ -2429,8 +2649,32 @@ def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,
                                    "kiểm tra mạng rồi bấm nghe lại") from None
             raise
         return out.with_suffix(".mp3")
+    if spec.startswith(("vox:", "voxd:")) or spec == VOX_CLONE:
+        from . import vox_design
+
+        vx = _vox(settings)
+        _free_other_tts(vx)
+        cfg, steps = vox_opts(settings)
+        text = vox_text(text)
+        wav = out.with_suffix(".wav")
+        if spec.startswith("voxd:"):
+            a, at = vox_design.ensure_anchor(vx, spec, settings.get("voxcpm_model") or VOX_REPO, lg, settings)
+            return synth_checked(vx, text, wav, ref_audio=a, ref_text=at, reference=a, cfg=cfg, steps=steps)
+        if spec.startswith("vox:"):
+            from . import voices as vlib
+
+            sm = vlib.get(spec[4:])
+            if not sm:
+                raise ValueError("Giọng mẫu này đã bị xoá")
+            f = str(vlib.path_of(sm))
+            st = (sm.get("text") or "").strip()
+            return synth_checked(vx, text, wav, ref_audio=f if st else None, ref_text=st, reference=f, cfg=cfg,
+                                 steps=steps)
+        ref = ref_audio[0] if isinstance(ref_audio, tuple) else ref_audio
+        return synth_checked(vx, text, wav, reference=str(ref) if ref else None, cfg=cfg, steps=steps)
     if spec.startswith(("omni:", "omnid:")) or spec == OMNI_CLONE:
         om = _omni(settings)
+        _free_other_tts(om)
         if spec.startswith("omnid:"):
             from . import omni_design
 
@@ -2451,6 +2695,7 @@ def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,
         return om.synth(text, out.with_suffix(".wav"), ref_audio=str(ref) if ref else None, ref_text=rtext,
                         language=lg)
     tts = _vieneu(settings.get("vieneu_mode", "v3turbo"))
+    _free_other_tts(tts)
     prm = vieneu_params(settings)
     if spec == CLONE or spec.startswith("clone"):
         return synth_checked(tts, text, out.with_suffix(".wav"), ref_audio=str(ref_audio) if ref_audio else None,

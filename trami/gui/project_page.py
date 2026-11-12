@@ -7090,16 +7090,11 @@ class ProjectPage(QWidget):
     def _preview_voice(self, vid: str, spk: str):
         from .. import tts
 
-        if not vid and self.d_engine.currentData() == "omnivoice":
-            from .. import voices as vlib
-
-            smp = vlib.list_samples()
-            vid = f"omni:{smp[0]['id']}" if smp else tts.OMNI_CLONE
-        vid = vid or (f"edge:{self.settings.get('tts_voice')}" if self.d_engine.currentData() == "edge" else "vieneu:")
+        vid = vid or pipeline.dub_default_voice(None, self.d_engine.currentData() or "edge", self.settings)
         text = next((s.trans for s in self.model.segs if (s.speaker or "S1") == spk and s.trans), "")
         out = self.p.work / f"voice_preview_{int(time.time())}"
         ref = None
-        if vid == tts.CLONE:
+        if vid in (tts.CLONE, tts.VOX_CLONE):
             st = pipeline.stems(self.p)
             ref = tts.build_reference(st.get("vocals") or str(self.p.source), self.model.segs, spk,
                                       self.p.work / "tts" / f"ref_{spk}.wav")

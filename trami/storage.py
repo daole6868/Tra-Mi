@@ -184,7 +184,7 @@ def classify(rel: tuple[str, ...], ctx: _Ctx) -> str:
             return "dub"
         return "dub" if base in ctx.dub_keep else "dub_old"
     if d == "tts" and len(sub) == 2:
-        if name.startswith(("ref_", "omniref_")):
+        if name.startswith(("ref_", "omniref_", "voxref_")):
             return "tts_cache"
         m = _TTS_RE.match(name)
         if not m:

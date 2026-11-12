@@ -15,7 +15,7 @@ from .config import MODELS_DIR
 SKIP_NAMES = {".locks", "__pycache__"}
 SKIP_SUFFIX = (".incomplete", ".tmp", ".lock", ".part")
 # gói có ghi tên kho mô hình phụ trong mã nguồn (VieNeu: bộ mã hoá âm thanh, OmniVoice: Whisper nghe file mẫu…)
-SOURCE_PKGS = ("trami", "vieneu", "vieneu_utils", "omnivoice", "speechbrain")
+SOURCE_PKGS = ("trami", "vieneu", "vieneu_utils", "omnivoice", "speechbrain", "voxcpm")
 
 
 def hf_cache() -> Path:

@@ -49,6 +49,9 @@ if errorlevel 1 (
   echo [!] Mot so goi AI cai loi. Tool van chay duoc, cac tinh nang thieu se tu dung phuong an thay the.
 )
 
+REM ---- 2b. VoxCPM2 (doc giong): cai rieng, khong keo theo gradio / datasets / torchcodec
+"%VPY%" -m pip install --no-deps "voxcpm>=2.0.3"
+
 REM ---- 3. Thu vien CUDA cho Whisper (faster-whisper) neu co GPU
 if defined TORCH_OK (
   "%VPY%" -m pip install nvidia-cublas-cu12 "nvidia-cudnn-cu12>=9,<10"
@@ -57,7 +60,7 @@ if defined TORCH_OK (
 echo.
 echo ---------------- KIEM TRA ----------------
 "%VPY%" -c "import torch;print('PyTorch', torch.__version__, '| GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'KHONG (chay CPU)')"
-"%VPY%" -c "import trami.separate as a, trami.asr_funasr as b, trami.diarize as c, trami.tts as d, trami.lama as e, trami.asr_qwen as q; print('Tach giong:', a.available(), '| Qwen3-ASR:', q.available(), '| SenseVoice:', b.available(), '| Phan nguoi noi:', c.available(), '| VieNeu-TTS:', d.vieneu_available(), '| LaMa:', e.available())"
+"%VPY%" -c "import trami.separate as a, trami.asr_funasr as b, trami.diarize as c, trami.tts as d, trami.lama as e, trami.asr_qwen as q; print('Tach giong:', a.available(), '| Qwen3-ASR:', q.available(), '| SenseVoice:', b.available(), '| Phan nguoi noi:', c.available(), '| VieNeu-TTS:', d.vieneu_available(), '| VoxCPM2:', d.voxcpm_available(), '| LaMa:', e.available())"
 echo.
 echo Cac mo hinh AI se tu tai ve o lan dung dau tien (tong khoang 3-5 GB).
 if not "%1"=="nopause" pause
