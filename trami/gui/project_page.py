@@ -2336,7 +2336,7 @@ class ProjectPage(QWidget):
             ed = self.collect_edit()
         except Exception:  # noqa: BLE001 – giao diện chưa dựng xong
             return
-        st = pipeline.audio_state(self.p, ed, getattr(self, "_audio_srcs", None))
+        st = pipeline.audio_state(self.p, ed, getattr(self, "_audio_srcs", None), segs=self.model.segs)
         pipeline.apply_audio_state(mix, st)
         self.audio_tab.show_state(st, getattr(self, "_audio_srcs", {}) or {})
 
@@ -3103,8 +3103,29 @@ class ProjectPage(QWidget):
             "Đặt cách xếp", "layers", "Cách xử lý riêng cho các câu đã tích khi đọc dài hơn chỗ trống – xếp lại bản lồng "
             "ngay (không đọc lại)", on_click=lambda: self._apply_overflow(sorted(self.model.selected),
                                                                           self.d_line_mode.currentData() or None))))
+        # cảm xúc từng câu cho VoxCPM2 (2.4.15)
+        from .. import emotion as _emo
+
+        self.d_emo = QComboBox()
+        self.d_emo.setEditable(True)
+        self.d_emo.addItems([_emo.NEUTRAL] + _emo.labels())
+        self.d_emo.setMinimumContentsLength(12)
+        self.d_emo.setToolTip("Cảm xúc khi đọc (chỉ VoxCPM2): chọn trong danh sách hoặc gõ (vd: giận dữ, quát to / "
+                              "angry, shouting). VoxCPM2 nghe theo lúc được lúc không; câu có cảm xúc giữ âm sắc giọng "
+                              "nhưng nhịp có thể khác các câu thường một chút")
+        g_pick.row("Cảm xúc (VoxCPM2)", field(self.d_emo, button(
+            "Đặt cảm xúc", "sparkle", "Đặt cảm xúc cho các câu đã tích (bình thường = bỏ cảm xúc) rồi bấm 'Tạo lại giọng "
+            "các câu đã tích' để đọc lại", on_click=self._set_emo)))
+        self.d_emo_auto = Switch(bool(self.settings.get("dub_emotion", True)))
+        self.d_emo_auto.setToolTip("Khi lồng bằng VoxCPM2: câu chưa có cảm xúc được AI (công cụ dịch AI đang chọn) ghi "
+                                   "cảm xúc trước khi đọc. Tắt = mọi câu đọc bình thường trừ câu bạn tự đặt")
+        self.d_emo_auto.toggledOn.connect(self._emo_auto_changed)
+        g_pick.row("… AI tự ghi khi lồng", self.d_emo_auto)
         g_pick.actions(button("Nghe câu", "play", "Phát câu đang chọn trên trình phát", flat=True,
-                              on_click=self._play_line))
+                              on_click=self._play_line),
+                       button("AI ghi cảm xúc", "sparkle", "AI đọc lời gốc + bản dịch + người nói rồi ghi cảm xúc cho "
+                              "câu đã tích (chưa tích = cả phim); đã có bản lồng thì đọc lại giọng các câu đổi cảm xúc "
+                              "(chỉ câu đọc bằng VoxCPM2)", flat=True, on_click=self._ai_emo))
         spk.add(g_pick)
 
         # ---- tốc độ giọng theo loại câu (2.1.38): tích theo loại -> đổi đúng tốc độ (nhanh hay chậm) / % / tối thiểu
@@ -3327,6 +3348,14 @@ class ProjectPage(QWidget):
         self.d_pause_min = g.row("… khi nhân vật ngừng từ", dspin(
             0.15, 2.0, 0.05, st.get("dub_pause_min", 0.3), "", " s", "Chỉ tái hiện chỗ nhân vật ngừng ít nhất bấy nhiêu "
             "giây (ngắn hơn thì để bộ đọc tự ngắt như thường)"))
+        self.d_slow = g.row("Câu ngắn đọc chậm lại", Switch(bool(st.get("dub_slow_short", True))))
+        self.d_slow.setToolTip("Giọng lồng NGẮN hơn lúc nhân vật nói (vd nhân vật nói 2,0 s, giọng Việt 1,7 s): đọc chậm "
+                               "lại cho hết đúng lúc nhân vật thôi nói, miệng không mấp máy mà không có tiếng. Không áp "
+                               "cho câu đặt tốc độ tay, câu kéo tay trên timeline, câu có chỗ nhân vật ngắt hơi (đã chèn "
+                               "lặng) và khi bật Khớp giọng. Chỉ xếp lại, không đọc lại")
+        self.d_slow_min = g.row("… chậm nhất", dspin(
+            0.5, 0.99, 0.05, st.get("dub_slow_min", 0.85), "×", "", "Đọc chậm tối đa còn bấy nhiêu (×0,85 = chậm 15 %). "
+            "Chậm hơn ×0,85 giọng nghe lè nhè"))
         self.d_by_clause = g.row("… Edge đọc từng vế", Switch(bool(st.get("dub_by_clause", True))))
         self.d_by_clause.setToolTip("CHỈ với Edge: câu có chỗ nhân vật ngắt hơi thì mỗi vế (chia ở dấu phẩy tương ứng) "
                                     "đọc riêng rồi ghép lại. VieNeu / OmniVoice LUÔN đọc cả câu 1 lần (đọc vế ngắn riêng "
@@ -3336,9 +3365,10 @@ class ProjectPage(QWidget):
         self.d_autoshort.setToolTip(C.AUTOSHORT_HELP.replace("tab Lồng tiếng mục 3", "tab Tự động bước 3"))
         mix.add(g)
         self.d_overflow.currentIndexChanged.connect(self._dub_layout_changed)
-        for w in (self.d_maxspeed, self.d_lead, self.d_maxlag, self.d_pause_min):
+        for w in (self.d_maxspeed, self.d_lead, self.d_maxlag, self.d_pause_min, self.d_slow_min):
             w.valueChanged.connect(self._dub_layout_changed)
         self.d_pauses.toggledOn.connect(self._dub_layout_changed)
+        self.d_slow.toggledOn.connect(self._dub_layout_changed)
         self.d_by_clause.toggledOn.connect(self._dub_layout_changed)
         self.d_follow.toggledOn.connect(self._dub_follow_changed)
         self.d_autoshort.toggled.connect(lambda on: self._shorten_sw_changed("dub_auto_shorten", on))
@@ -4291,6 +4321,9 @@ class ProjectPage(QWidget):
         self.p.save()
         self._disk_sig = pipeline.seg_sigs(self.model.segs)
         self.saved.setText("✓ đã lưu " + time.strftime("%H:%M"))
+        mix = self.player.live.mix
+        if mix is not None and getattr(mix, "dialog", None) is not None:
+            self._apply_audio_now()     # 2.4.15: thêm / xoá / kéo câu -> đoạn giữ tiếng gốc ngoài câu thoại đổi theo
 
     def _job_touched(self) -> bool:
         """Có việc nền của dự án này đang chạy / đang chờ, hoặc vừa xong mà giao diện chưa nạp lại."""
@@ -6792,6 +6825,7 @@ class ProjectPage(QWidget):
         self.d_overflow_help.setText(self._overflow_help.get(m, ""))
         for w in (self.d_lead, self.d_maxlag):
             w.setEnabled(m == "smart")
+        self.d_slow_min.setEnabled(self.d_slow.isChecked())
 
     def _fill_dub_layout(self):
         """Ô cách xếp giọng theo cài đặt hiện tại (có thể đã đổi ở trang Cài đặt)."""
@@ -6804,6 +6838,9 @@ class ProjectPage(QWidget):
         self.d_pauses.setChecked(bool(st.get("dub_pauses", True)))
         self.d_pause_min.setValue(float(st.get("dub_pause_min", 0.3)))
         self.d_by_clause.setChecked(bool(st.get("dub_by_clause", True)))
+        self.d_slow.setChecked(bool(st.get("dub_slow_short", True)))
+        self.d_emo_auto.setChecked(bool(st.get("dub_emotion", True)))
+        self.d_slow_min.setValue(float(st.get("dub_slow_min", 0.85)))
         self.d_autoshort.setChecked(bool(st.get("dub_auto_shorten", False)))
         self._update_overflow_help()
 
@@ -6818,7 +6855,8 @@ class ProjectPage(QWidget):
                        "tts_max_speedup": round(self.d_maxspeed.value(), 2),
                        "dub_lead_max": round(self.d_lead.value(), 2), "dub_max_lag": round(self.d_maxlag.value(), 2),
                        "dub_pauses": self.d_pauses.isChecked(), "dub_pause_min": round(self.d_pause_min.value(), 2),
-                       "dub_by_clause": self.d_by_clause.isChecked()})
+                       "dub_by_clause": self.d_by_clause.isChecked(), "dub_slow_short": self.d_slow.isChecked(),
+                       "dub_slow_min": round(self.d_slow_min.value(), 2)})
         self.settings = load_settings()
         if self.p and any(x.extra.get("tts_file") for x in self.model.segs) and (self.p.edit.get("dub") or {}).get("wav"):
             self._relayout_timer.start()
@@ -8407,6 +8445,55 @@ class ProjectPage(QWidget):
     def _dub_current_rows(self) -> list[int]:
         rows = sorted({self.dub_proxy.mapToSource(i).row() for i in self.dub_table.selectionModel().selectedRows()})
         return rows or sorted(self.model.selected)
+
+    def _set_emo(self):
+        """Cảm xúc tay cho câu đã tích (2.4.15, VoxCPM2)."""
+        rows = sorted(self.model.selected)
+        if not rows:
+            return self.win.toast("Tích chọn câu cần đặt cảm xúc ở cột Chọn trước", "warn")
+        txt = self.d_emo.currentText().strip()
+        changed = self.model.set_emo(rows, txt)
+        if changed:
+            self._save_segs_now()
+        from .. import emotion
+
+        what = emotion.clean(txt) or "bình thường"
+        self.win.toast(f"{len(rows)} câu đã tích: cảm xúc {what} – bấm 'Tạo lại giọng các câu đã tích' để đọc lại "
+                       "(chỉ câu đọc bằng VoxCPM2)", "ok")
+
+    def _emo_auto_changed(self, on: bool):
+        if self.loading:
+            return
+        from ..config import save_settings
+
+        save_settings({"dub_emotion": bool(on)})
+        self.settings = load_settings()
+
+    def _ai_emo(self):
+        """AI ghi cảm xúc (2.4.15): câu đã tích hoặc cả phim; đã lồng -> đọc lại giọng câu VoxCPM2 đổi cảm xúc."""
+        if not self.p:
+            return
+        rows = sorted(self.model.selected) or None
+        settings = load_settings()
+        try:
+            pipeline.ai_engine(settings)
+        except ValueError as e:
+            return self.win.toast(str(e), "warn")
+        has = pipeline.has_dub(self.p)
+
+        def fn(j, p):
+            r = pipeline.ai_emotions(p, rows, settings, progress=lambda x, m="": j.update(x, m), cancel=j.cancelled)
+            dv = pipeline.dub_default_voice(None, settings.get("tts_engine", "edge"), settings)
+            segs = p.segments
+            vox = [k for k in r["changed"] if pipeline.line_voice(p, segs[k], None, dv).startswith(pipeline.VOX_SPECS)]
+            msg = (f"AI ghi cảm xúc {r['labeled']}/{r['asked']} câu (còn lại bình thường)"
+                   + (f" · đổi {len(r['changed'])} câu" if r["changed"] else ""))
+            out = {"message": msg, "pick": r["changed"]}
+            if has and vox:
+                out["redub"] = vox
+                out["message"] += f" – đang đọc lại giọng {len(vox)} câu VoxCPM2"
+            return out
+        self.submit("clean", "AI ghi cảm xúc", fn)
 
     def _set_line_voice(self):
         rows = sorted(self.model.selected)

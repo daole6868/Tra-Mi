@@ -10,7 +10,7 @@ import re
 import time
 from pathlib import Path
 
-from .. import autoflow, pipeline
+from .. import autoflow, pausetag, pipeline
 from ..config import PROJECTS_DIR, load_settings, save_settings
 from ..hanviet import NAME_MODES
 from ..jobs import manager
@@ -495,7 +495,8 @@ def lines(pid: str, offset: int = 0, limit: int = 60, flt: str = "all", q: str =
         s = segs[i]
         ex = s.extra
         rows.append({"i": i, "start": round(s.start, 2), "end": round(s.end, 2), "spk": s.speaker or "",
-                     "text": s.text, "trans": s.trans, "unsure": i in unsure, "song": bool(ex.get("song")),
+                     "text": s.text, "trans": pausetag.shown(s) if "tag_pause" in ex else s.trans,
+                     "unsure": i in unsure, "song": bool(ex.get("song")),
                      "fit": pipeline.speed_cat(s) or "", "speed": ex.get("fit_speed") or 0,
                      "voice": ex.get("voice_used") or ex.get("voice") or ""})
     return {"total": len(segs), "count": len(idx), "offset": offset, "rows": rows,
@@ -521,7 +522,7 @@ def edit_line(pid: str, i: int, text: str | None, trans: str) -> dict:
     def fn(p):
         segs = p.segments
         r = _check_rows(p, [i], [text])[0]
-        segs[r].trans = trans
+        pausetag.set_text(segs[r], " ".join(trans.split()))   # thẻ [nghỉ …] (2.4.15) tách khỏi bản dịch
         segs[r].extra["trans_user"] = True
         segs[r].extra.pop("addr_unsure", None)
         p.segments = segs

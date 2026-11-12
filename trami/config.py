@@ -171,6 +171,10 @@ DEFAULT_SETTINGS: dict = {
     "sub_join_gap": 0.3,              # khoảng hở giữa 2 câu ngắn hơn -> câu trước giữ tới câu sau (không nháy)
     "snap_edges": True,               # bám mép câu theo giọng đã tách sau khi nghe (2.0.96)
     "dub_pauses": True,               # giọng lồng nghỉ đúng chỗ nhân vật ngắt hơi giữa câu (cần mốc từng chữ)
+    "audio_outside": True,            # dùng bản tách: ngoài câu thoại giữ tiếng gốc nguyên vẹn (2.4.15, mỗi dự án đổi được)
+    "dub_emotion": True,              # VoxCPM2: AI ghi cảm xúc từng câu trước khi đọc (2.4.15)
+    "dub_slow_short": True,           # câu giọng ngắn hơn lúc nhân vật nói -> đọc chậm lại cho hết đúng lúc (2.4.15)
+    "dub_slow_min": 0.85,             # … chậm nhất ×0,85
     "dub_pause_min": 0.3,             # ... khi nhân vật ngừng ít nhất (giây)
     "dub_by_clause": True,            # ... đọc TỪNG VẾ rồi ghép theo giờ gốc (chỗ nghỉ chắc chắn, vế dài đọc nhanh riêng)
     "breath_marks": True,             # chỗ nhân vật ngắt hơi mà câu gốc chưa có dấu câu -> thêm "，" (sau khi nghe / dịch)

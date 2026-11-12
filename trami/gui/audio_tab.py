@@ -117,9 +117,18 @@ class AudioTab(QWidget):
                                  "Không phải nghe, dịch hay đọc lại. Đã khớp thì không đổi gì.",
                                  on_click=lambda: page.run_retime())
         self.sync_status = label("", "muted", wrap=True)
+        self.outside = Switch(True)
+        self.outside.setToolTip("Chỉ khi dùng bản đã tách: CHỈ lúc có câu thoại mới thay tiếng gốc bằng nhạc nền đã tách "
+                                "+ giọng lồng. Ngoài câu thoại (cảnh đánh nhau, nhạc, tiếng động…) nghe TIẾNG GỐC nguyên "
+                                "vẹn – không bị đục / mất tiếng do tách giọng. Chuyển dần 0,25 s ở mép câu. Câu tiếng "
+                                "Trung bị sót phụ đề sẽ nghe thấy lời Trung (thêm câu đó vào phụ đề hoặc tắt ô này)")
+        self.outside.toggledOn.connect(self._outside_changed)
+        self.outside_note = label("", "muted", wrap=True)
         src.add(self.src_status)
         src.add(flow(self.sep_btn, self.retime_btn))
         src.add(self.sync_status)
+        src.add(hbox(label("Ngoài câu thoại giữ tiếng gốc", "muted"), self.outside, None))
+        src.add(self.outside_note)
         v.addWidget(src)
 
         # ---- 2. các lớp
@@ -187,6 +196,14 @@ class AudioTab(QWidget):
         if not self.loading:
             self.changed.emit()
 
+    def _outside_changed(self, on: bool):
+        if self.loading:
+            return
+        from ..config import save_settings
+
+        save_settings({"audio_outside": bool(on)})     # nhớ làm mặc định cho dự án sau
+        self.changed.emit()
+
     def _pitch_changed(self, *_):
         if not self.loading:
             self.changed.emit()
@@ -207,7 +224,8 @@ class AudioTab(QWidget):
         return {"src": self.src.currentData(), "orig": r["orig"].value(), "bg": r["bg"].value(),
                 "voice": r["voice"].value(), "songs": self.songs.isChecked(), "dub": r["dub"].value(),
                 "bgm": r["bgm"].value(), "duck": self.duck.isChecked(), "pitch": float(self.pitch.currentData()),
-                "master": r["master"].value(), "mute": [k for k, row in r.items() if row.muted and k != "master"]}
+                "master": r["master"].value(), "mute": [k for k, row in r.items() if row.muted and k != "master"],
+                "outside": self.outside.isChecked()}
 
     def fill(self, a: dict, dub_on: bool, bgm_path: str):
         self.loading = True
@@ -218,6 +236,12 @@ class AudioTab(QWidget):
                 self.rows[k].set_muted(k in (a.get("mute") or []))
             self.songs.setChecked(bool(a.get("songs", True)))
             self.duck.setChecked(bool(a.get("duck", True)))
+            out = a.get("outside")
+            if out is None:     # dự án chưa chọn: theo Cài đặt (lần chọn gần nhất)
+                from ..config import load_settings
+
+                out = load_settings().get("audio_outside", True)
+            self.outside.setChecked(bool(out))
             p = float(a.get("pitch") or 1.0)
             set_combo(self.pitch, min((x for x, _ in PITCHES), key=lambda x: abs(float(x) - p)))
             self.dub_on.setChecked(dub_on)
@@ -238,6 +262,12 @@ class AudioTab(QWidget):
         else:
             self.src_status.setText("Chưa tách giọng / nhạc nền – đang dùng tiếng gốc nguyên bản")
         self.sep_btn.setVisible(not has_stems)
+        self.outside.setEnabled(bool(stems_on))
+        dl = state.get("dialog")
+        self.outside_note.setText(
+            f"Đang giữ tiếng gốc ngoài {len(dl)} đoạn câu thoại" if dl is not None else
+            ("Đang tắt – nhạc nền đã tách dùng suốt cả phim" if stems_on else
+             "Chỉ dùng được khi nguồn là bản đã tách (tách giọng ở tab Lồng tiếng mục 1)"))
         has_dub = "dub" in srcs
         self.dub_on.setEnabled(has_dub)
         self.rows["dub"].slider.setEnabled(has_dub and not self.rows["dub"].muted)

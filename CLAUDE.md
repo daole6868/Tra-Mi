@@ -70,6 +70,43 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `models` "voxcpm" (`vox_ready`: config + audiovae + model.safetensors | pytorch_model.bin; tải `VOX_FILES` rồi .pth /
   .bin nếu thiếu; ModelScope `OpenBMB/VoxCPM2` trong `hf_download.MS_MIRRORS`). gpu: `_workers` có `_vox_model`,
   `vram_need` voxcpm 5500 MB, `WORKER_FLAGS` / `WORKER_CLASS`. `common.TTS_ENGINES` "voxcpm" (điện thoại tự có).
+- Học từ VoiceStudio (debpalash, AGPL-3.0 – chỉ học ý, 2.4.15) – 4 mục:
+  A "Ngoài câu thoại giữ tiếng gốc": edit["audio"]["outside"] (None = theo Cài đặt `audio_outside`, mặc định bật; công tắc
+  tab Âm thanh mục 1 `audio_tab.outside` – mờ khi chưa dùng bản tách, đổi = lưu cả Cài đặt) -> khi đang dùng bản tách:
+  `audiomix.dialog_spans` (giờ câu ∪ `dub_at`, nới `OUT_PAD` 0,15 s, gộp đoạn cách < `OUT_JOIN` 0,6 s; câu 🎵 không tính khi
+  "giữ giọng hát") + `inside_mask` (1 trong đoạn, chuyển dần `OUT_RAMP` 0,25 s ngoài mép, tìm nhị phân) -> trong đoạn: nhạc
+  nền + giọng gốc đã tách, ngoài đoạn: tiếng gốc (lớp "orig", mức = mức nhạc nền; nghe riêng nhạc nền nghe cả phần này).
+  `pipeline.outside_on` / `outside_spans` -> `audio_state["dialog"]` (+ gains orig = bg) -> `apply_audio_state` ->
+  `LiveMix.dialog` (đổi theo giờ giãn); `_save_segs_now` áp lại khi câu đổi (`audio_state(segs=)` dùng câu trong giao diện).
+  Xuất: `render` ghi `dub["dialog_spans"]` -> `video.build_and_render` nhánh bản tách: `dialog_mask_file` (wav 1 kênh 1000 Hz
+  cùng hàm `inside_mask`, work/render/dialog_mask_<mã>.wav – trang Dung lượng = đệm) đưa vào như file âm thanh ngoài
+  (`ext_audio` + pan stereo, cắt / seek như mọi lớp) -> asplit -> `amultiply` với nhạc nền / giọng gốc, `aeval 1-val` với
+  [a0] tiếng gốc; có giãn khoảng nghỉ: đoạn đổi theo giờ giãn + `warp_audio_files` giãn cả lớp orig.
+  B "Cảm xúc từng câu (VoxCPM2)": `trami/emotion.py` – extra["emo"] = nhãn Việt ("giận dữ, quát to") / chữ tự gõ, "" = bình
+  thường (đã xét), không có khoá = chưa xét; `EMOTIONS` 20 nhãn -> `to_control` chỉ dẫn tiếng Anh ("angry, furious,
+  shouting loudly"), `clean`, `known` (kết quả AI chỉ nhận nhãn trong danh sách, ≤ 2); `PROMPT` + `ai_emotions(llm, items)`
+  lô 60 câu {gốc, dịch, người nói · nam / nữ} -> JSON. `pipeline.ai_emotions` / `auto_emotions` (trong `dub` trước khi đọc:
+  câu đọc bằng VoxCPM2 (`line_voice` + `VOX_SPECS`) chưa có khoá emo, Cài đặt `dub_emotion` mặc định bật; không có AI ->
+  `emo_err` "cần công cụ dịch AI") / `set_emotion`. Đọc: VoxCPM2 chỉ nhận chỉ dẫn ở chế độ GIỌNG THAM CHIẾU (`_generate`
+  chế độ đọc tiếp ghép prompt_text + lời -> chỉ dẫn nằm giữa; CLI voxcpm cấm --control với --prompt-text) -> câu có cảm xúc:
+  bỏ đọc tiếp, `reference` = câu mẫu / file mẫu, `control` = chỉ dẫn (`voxcpm_worker.make_kwargs` có control thì không đọc
+  tiếp); mã file thêm "|emo:<chỉ dẫn>". GUI: tab Lồng tiếng mục 2 khối Câu đã tích hàng "Cảm xúc (VoxCPM2)" `d_emo` (ô sửa
+  được) + "Đặt cảm xúc" `_set_emo` (`SubsModel.set_emo`), "… AI tự ghi khi lồng" `d_emo_auto`, nút "AI ghi cảm xúc"
+  `_ai_emo` (việc "clean": câu đã tích / cả phim, kết quả "pick" + "redub" câu VoxCPM2 đổi cảm xúc khi đã lồng); khung Câu
+  đang chọn ô `emo`; tooltip bản dịch; `dub_summary` "AI ghi cảm xúc k/n câu".
+  C "Câu ngắn đọc chậm lại": Cài đặt `dub_slow_short` (mặc định bật; dict thiếu khoá = tắt) + `dub_slow_min` 0,85 ->
+  `tts.slow_min` -> `mark_talk` (item "talk" = tới lúc nhân vật thôi nói theo giờ giãn; bỏ câu kéo tay / tốc độ tay / có
+  thẻ nghỉ / có chỗ ngắt hơi `orig_pauses` khi bật nghỉ đúng chỗ) -> `plan_layout(slow=)` câu không tràn, không bị đẩy: tốc độ
+  max(slow, dài / min(talk, chỗ trống)) -> "slow" -> extra["fit_slow"] (DUB_MARKS / _DUB_EXTRA), cột Độ vừa "✓ ×0.88",
+  `stats["slowed"]`; không áp khi Khớp giọng (sync). GUI tab Lồng tiếng mục 3 `d_slow` + `d_slow_min`.
+  D thẻ nghỉ: `trami/pausetag.py` – "[nghỉ 0,5s]" / "[nghỉ]" (0,5 s) / "[pause 500ms]" / "[ngừng 1 giây]"… (0,05–5 s, đầu /
+  cuối câu bỏ qua, 2 thẻ liền cộng dồn); seg.trans = bản SẠCH (phụ đề / SRT / karaoke không đổi gì) + extra["tag_pause"] =
+  {"t": bản sạch lúc đặt, "p": [[vị trí ký tự, giây]]} – bản dịch đổi khác "t" (AI dịch lại / rút gọn) -> thẻ hết tác dụng
+  (`of`). `set_text` (SubsModel.setData cột bản dịch, khung Câu đang chọn, điện thoại edit_line), `shown` (bảng câu / khung
+  Câu đang chọn / điện thoại hiện kèm thẻ), `tts_text` (dấu phẩy ở chỗ thẻ -> bộ đọc tự ngắt), `fractions`. `synthesize_dub`:
+  `tagged` -> độ dài câu khi xếp + tổng giây thẻ, không đọc từng vế (Edge), không chèn nghỉ tự động `plan_pauses`, `tag_gaps`
+  (cắt ở chỗ bộ đọc ngắt gần vị trí thẻ nhất – như plan_pauses, lặng = giây / tốc độ đọc) vào bảng gaps của `placed`
+  (`insert_pauses`, karaoke theo đó); `stats["tag_pauses"]`.
 - `trami/asr_qwen.py` + `qwen_asr_worker.py` (Qwen3-ASR + Qwen3-ForcedAligner, tiến trình riêng `--qwen-asr-worker`,
   transformers ≥ 5.13, mặc định từ 2.0.29; `transcribe_qwen` / `relisten_cuts` / `qwen_decoder` / `align_qwen` nhận
   `engine` "qwen3" | "firered" – `asr_worker(engine)`), FireRedASR2-AED (2.1.0): mã suy luận chép từ FireRedASR2S
@@ -1151,7 +1188,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (358 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (362 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -3249,7 +3286,21 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   mẫu có lời -> đọc tiếp, nhái giọng gốc -> chỉ tham chiếu, "3" -> "ba", "(cười)" không thành mô tả, lần sau không đọc
   lại, nghe thử, trim, tắt bộ đọc khác), giao diện offscreen (Cài đặt lưu 5 ô, 20 giọng ở "Giọng cho tất cả"). Chưa chạy
   mô hình thật (sandbox chặn HuggingFace + PyTorch CPU) – tốc độ trên RTX 4060 8 GB, giọng Việt của các mô tả chưa nghe.
+- 2.4.15: người dùng hỏi repo VoiceStudio (debpalash, AGPL-3.0 – ứng dụng nhái giọng / lồng tiếng, mặc định OmniVoice;
+  repo.tinix.ai bị chặn mạng -> đọc trên GitHub) -> đề xuất A–F với ví dụ -> "làm ABCD": A giữ tiếng gốc ngoài câu thoại, B
+  cảm xúc từng câu cho VoxCPM2 (AI ghi / sửa tay), C câu ngắn đọc chậm lại cho vừa lúc nói, D thẻ [nghỉ …] trong bản dịch
+  (xem Cấu trúc "Học từ VoiceStudio"). Thử: tiếng gốc 1000 Hz / nhạc nền đã tách 200 Hz -> bộ trộn nghe thử và video xuất
+  đều 1000 / 200 / 1000 Hz ở trước / trong / sau câu thoại (tắt -> 200 Hz suốt); dự án thật qua `live_mix`; Edge giả: thẻ
+  0,8 s -> bản lồng lặng ~0,9 s đúng chỗ, câu 0,8 s nhân vật nói 2 s -> ×0,85; VoxCPM2 giả qua tiến trình thật: câu có cảm
+  xúc gửi "(angry, furious, shouting loudly)Cút…" + chỉ giọng tham chiếu, câu thường vẫn đọc tiếp câu mẫu, đổi cảm xúc chỉ
+  đọc lại câu đó; AI giả ghi cảm xúc chỉ nhận nhãn trong danh sách; giao diện offscreen. Sửa kèm test 2.1.23 theo TOK_LINE 75.
+  Chưa nghe trên phim thật (VoxCPM2 có theo chỉ dẫn cảm xúc tiếng Việt không chưa biết).
 ## Vấn đề đang mở
+- 2.4.15: chờ người dùng chép file, mở dự án đã tách giọng + lồng tiếng: (A) tab Âm thanh mục 1 "Ngoài câu thoại giữ tiếng
+  gốc" bật -> phát cảnh không lời nghe nhạc / tiếng động gốc, chỗ chuyển ở mép câu có lộ không, có lộ lời Trung câu sót phụ
+  đề không; (C) tab Lồng tiếng mục 3 "Câu ngắn đọc chậm lại" -> xếp lại, câu ✓ ×0,85–0,99 nghe có lè nhè không; (D) gõ
+  "[nghỉ 0,5s]" vào bản dịch 1 câu -> Tạo lại giọng câu này; (B) bộ đọc VoxCPM2: tích vài câu -> Cảm xúc "giận dữ" -> Đặt cảm
+  xúc -> Tạo lại giọng (hoặc "AI ghi cảm xúc") – VoxCPM2 có đọc khác đi không, giọng có lệch các câu khác không.
 - 2.4.14: chờ người dùng chạy `.venv\Scripts\python -m pip install --no-deps "voxcpm>=2.0.3"` + `einops librosa
   pydantic`, tab Tài liệu → Tải "Giọng đọc – VoxCPM2" (~5 GB), tab Lồng tiếng → Bộ đọc VoxCPM2 → Giọng cho tất cả "📣 Nữ
   thuyết minh – trẻ, nhanh, có cảm xúc" → ▶ nghe thử (lần đầu tạo câu mẫu); báo: giọng có giống kiểu thuyết minh không, tốc

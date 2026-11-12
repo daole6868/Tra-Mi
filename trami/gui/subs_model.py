@@ -5,6 +5,7 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, QRectF, QSortFilter
 from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import QStyledItemDelegate
 
+from .. import pausetag
 from ..subtitle import Segment, parse_time
 from . import theme
 from .player import fmt
@@ -68,7 +69,7 @@ def fit_text(s: Segment) -> str:
     if not fit:
         return (mark.strip() + " ×" + f"{float(ex['speed']):.2f}") if ex.get("speed") else ""
     sp = float(ex.get("fit_speed", 1) or 1)
-    out = FIT_TEXT.get(fit, "") + (f" ×{sp:.2f}" if sp > 1.06 or ex.get("speed") else "")
+    out = FIT_TEXT.get(fit, "") + (f" ×{sp:.2f}" if sp > 1.06 or ex.get("speed") or ex.get("fit_slow") else "")
     sh = float(ex.get("fit_shift", 0) or 0)
     if sh <= -0.3:
         out += f" ◀{-sh:.1f}s"
@@ -178,6 +179,9 @@ def fit_tip(s: Segment) -> str:
               }.get(fit, "Chưa lồng tiếng")]
     if fit == "long" and sp > 1.06:
         lines.append(f"Đã tăng tốc ×{sp:.2f}")
+    if ex.get("fit_slow"):
+        lines.append(f"Giọng ngắn hơn lúc nhân vật nói – đọc chậm lại ×{sp:.2f} cho hết đúng lúc thôi nói "
+                     "(tắt ở tab Lồng tiếng mục 3 → Câu ngắn đọc chậm lại)")
     sh = float(ex.get("fit_shift", 0) or 0)
     if sh <= -0.3:
         lines.append(f"◀ Đọc sớm {-sh:.1f} s trước lúc nhân vật nói (để câu sau vào đúng giờ)")
@@ -298,6 +302,21 @@ class SubsModel(QAbstractTableModel):
             self.edited.emit()
         return changed
 
+    def set_emo(self, rows, emo: str) -> list[int]:
+        """Cảm xúc (VoxCPM2, 2.4.15) cho nhiều câu ("" = bình thường), báo đổi 1 lần. Trả các câu đổi."""
+        from .. import emotion
+
+        v = emotion.clean(emo)
+        changed = []
+        for r in rows:
+            if 0 <= r < len(self.segs) and (self.segs[r].extra.get("emo") or "") != v:
+                self.segs[r].extra["emo"] = v
+                changed.append(r)
+        if changed:
+            self.dataChanged.emit(self.index(min(changed), 0), self.index(max(changed), len(COLS) - 1))
+            self.edited.emit()
+        return changed
+
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self.segs)
 
@@ -344,7 +363,7 @@ class SubsModel(QAbstractTableModel):
             if c == C_ZH:
                 return s.text
             if c == C_VI:
-                return s.trans
+                return pausetag.shown(s) if "tag_pause" in s.extra else s.trans   # thẻ [nghỉ …] (2.4.15)
             if c == C_VOICE:
                 v = s.extra.get("voice", "")
                 return v if role == Qt.ItemDataRole.EditRole else (self.voice_names.get(v, v) if v else VOICE_DEFAULT)
@@ -410,6 +429,14 @@ class SubsModel(QAbstractTableModel):
                     tip += "\nĐã đổi tên pinyin sang Hán Việt: " + ", ".join(f"{a} → {b}" for a, b in nf)
                 if s.extra.get("addr_role"):   # 2.4.13 ai nói với ai – AI xác định trước khi chọn xưng hô
                     tip += f"\nAI xác định: {str(s.extra['addr_role']).replace('→', ' → ')}"
+                if s.extra.get("emo"):     # 2.4.15 cảm xúc (VoxCPM2)
+                    tip += f"\nCảm xúc khi đọc (VoxCPM2): {s.extra['emo']}"
+                tp = pausetag.of(s)
+                if tp:      # 2.4.15 thẻ [nghỉ …]: giọng lồng dừng đúng chỗ, phụ đề không hiện thẻ
+                    tip += f"\nGiọng lồng nghỉ {len(tp)} chỗ theo thẻ [nghỉ …] (tổng {pausetag.total(tp):g} s) – phụ đề " \
+                           "không hiện thẻ"
+                else:
+                    tip += "\nGõ [nghỉ 0,5s] giữa câu để giọng lồng dừng đúng chỗ đó"
                 if s.extra.get("addr_unsure"):
                     tip += ("\n⚠ Xưng hô chưa chắc: AI không rõ ai nói với ai / nam hay nữ nên đã bỏ đại từ hoặc dùng cặp "
                             "trung tính (cậu – tớ, ngươi – ta). Sửa tay câu này, hoặc sửa nam / nữ người nói (bảng người "
@@ -484,7 +511,7 @@ class SubsModel(QAbstractTableModel):
                 s.extra.pop("asr_repeat", None)
                 s.extra.pop("asr_same", None)
             elif c == C_VI:
-                s.trans = " ".join(v.split())
+                pausetag.set_text(s, " ".join(v.split()))   # bản dịch sạch + thẻ [nghỉ …] riêng (2.4.15)
                 s.extra.pop("fit", None)   # bản dịch đổi -> cần tạo lại bản lồng để đo lại
                 s.extra["trans_user"] = True   # người dùng tự sửa: AI không tự rút gọn câu này
                 s.extra.pop("addr_unsure", None)   # bạn đã soát xưng hô câu này

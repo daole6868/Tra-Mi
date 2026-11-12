@@ -175,8 +175,8 @@ def classify(rel: tuple[str, ...], ctx: _Ctx) -> str:
             return "misc"
         if name.startswith("inpainted_") and name.endswith(".mp4"):
             return "inpaint" if ctx.inpaint_unknown or name == ctx.inpaint_cur else "inpaint_old"
-        if len(sub) == 2 and name.endswith((".ass", ".txt", ".png", ".json")):
-            return "misc"                    # burn.ass, last_ffmpeg_cmd.txt…
+        if len(sub) == 2 and (name.endswith((".ass", ".txt", ".png", ".json")) or name.startswith("dialog_mask_")):
+            return "misc"                    # burn.ass, last_ffmpeg_cmd.txt, mặt nạ câu thoại (2.4.15)…
         return "other"                       # logo_*.npz (tính lâu) …
     if d == "dubs" and len(sub) == 2:
         base = _dub_base(name)

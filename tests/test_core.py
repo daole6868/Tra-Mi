@@ -10404,6 +10404,7 @@ def test_karaoke_real_word_times_2124(monkeypatch, tmp_path):
         return []
 
     monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    monkeypatch.setattr(tts, "slow_min", lambda st: 1.0)      # 2.4.15: không đọc chậm câu ngắn (mốc đúng ×1)
     p = Project.create("karawords")
     p.data["info"] = {"duration": 6}
     p.segments = [Segment(1.0, 2.2, "a", "Xin chào bạn"), Segment(3.0, 4.2, "b", "Tạm biệt nhé")]
@@ -16874,3 +16875,293 @@ def _write_tmp_wav(path, dur: float = 3.0):
 
     tts.write_wav(path, _speech_like(24000, dur, seed=7) * 0.5, 24000)
     return path
+
+
+def test_slow_short_and_pause_tags_2415(monkeypatch, tmp_path):
+    """2.4.15 C: câu giọng ngắn hơn lúc nhân vật nói đọc chậm lại (≥ ×0,85) cho hết đúng lúc thôi nói; không áp cho câu
+    tốc độ tay / kéo tay / khi tắt. D: thẻ [nghỉ 0,8s] trong bản dịch -> bản dịch sạch (phụ đề không có thẻ), bộ đọc nhận
+    dấu phẩy ở chỗ thẻ, bản lồng có khoảng lặng ~0,8 s đúng chỗ; sửa bản dịch khác -> thẻ hết tác dụng."""
+    from trami import pausetag, tts
+    from trami.gui.subs_model import C_VI, SubsModel
+
+    # --- C: bộ xếp
+    its = [{"k": 0, "want": 1.0, "dur": 1.7, "talk": 2.0}, {"k": 1, "want": 4.0, "dur": 0.5, "talk": 2.0},
+           {"k": 2, "want": 6.0, "dur": 1.0, "talk": 3.0, "user": 1.0}, {"k": 3, "want": 8.0, "dur": 1.0, "talk": 3.0,
+                                                                           "fixed": True}]
+    r = tts.plan_layout(its, 12, slow=0.85)
+    assert abs(r[0]["speed"] - 0.85) < 1e-6 and abs(r[0]["end"] - 3.0) < 1e-6 and r[0]["slow"] and r[0]["fit"] == "ok"
+    assert abs(r[1]["speed"] - 0.85) < 1e-6                          # rất ngắn: chậm nhất ×0,85
+    assert r[2]["speed"] == 1.0 and r[3]["speed"] == 1.0 and not r[2]["slow"]
+    assert all(v["speed"] == 1.0 for v in tts.plan_layout(its, 12).values())       # tắt = như cũ
+    assert tts.slow_min({}) == 1.0 and tts.slow_min({"dub_slow_short": True, "dub_slow_min": 0.9}) == 0.9
+
+    # --- D: thẻ nghỉ
+    clean, tp = pausetag.parse("Ta… [nghỉ 0,8s] ta không cố ý.")
+    assert clean == "Ta… ta không cố ý." and tp == [[3, 0.8]]
+    assert pausetag.render(clean, tp) == "Ta… [nghỉ 0,8s] ta không cố ý."
+    assert pausetag.parse("Đi [pause 500ms] đi [NGHI] nào")[1] == [[2, 0.5], [5, 0.5]]
+    assert pausetag.tts_text("Đi đi nào", [[2, 0.5], [5, 0.5]]) == "Đi, đi, nào"
+    assert pausetag.parse("[nghỉ] Xin chào [nghỉ 2]") == ("Xin chào", [])          # đầu / cuối câu: bỏ
+    seg = Segment(1.0, 4.0, "我…我不是故意的", "")
+    m = SubsModel([seg])
+    m.setData(m.index(0, C_VI), "Ta… [nghỉ 0,8s] ta không cố ý.")
+    assert seg.trans == "Ta… ta không cố ý." and pausetag.of(seg) == [[3, 0.8]]
+    assert m.data(m.index(0, C_VI)) == "Ta… [nghỉ 0,8s] ta không cố ý."
+    assert "nghỉ" not in st.to_srt([seg], "trans")                  # phụ đề / SRT không có thẻ
+
+    sent = []
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, p, voice in items:
+            sent.append(text)
+            if "," in text or "…" in text:     # bộ đọc ngắt ở dấu phẩy: 2 cụm tiếng cách 0,12 s
+                a = np.sin(2 * np.pi * 300 * np.arange(int(0.5 * tts.SR)) / tts.SR).astype(np.float32) * 0.5
+                tts.write_wav(p.with_suffix(".wav"), np.concatenate([a, np.zeros(int(0.12 * tts.SR), np.float32), a]))
+                subprocess.run([ff.ffmpeg_bin(), "-loglevel", "error", "-y", "-i", str(p.with_suffix(".wav")), str(p)],
+                               check=True)
+            else:
+                _fake_audio(p, 0.8)
+        return []
+
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    segs = [Segment(1.0, 4.0, "a", "Ta… ta không cố ý."), Segment(6.0, 8.0, "b", "Được thôi")]
+    pausetag.set_text(segs[0], "Ta… [nghỉ 0,8s] ta không cố ý.")
+    stats: dict = {}
+    out = tmp_path / "dub.wav"
+    tts.synthesize_dub(segs, out, 10.0, tmp_path / "tts", voice="edge:vi-VN-HoaiMyNeural",
+                       settings={"dub_slow_short": True, "dub_slow_min": 0.85}, stats=stats)
+    assert any(t.startswith("Ta…") for t in sent) and stats["tag_pauses"] == 1
+    a = tts._decode_cached(out)
+    env = np.abs(a).reshape(-1, tts.SR // 100).max(axis=1) if len(a) % (tts.SR // 100) == 0 else \
+        np.abs(a[:len(a) // (tts.SR // 100) * (tts.SR // 100)]).reshape(-1, tts.SR // 100).max(axis=1)
+    t0, t1 = segs[0].extra["dub_at"]
+    quiet = env[int(t0 * 100):int(t1 * 100)] < 0.02
+    runs, cur = [], 0
+    for q in quiet:
+        cur = cur + 1 if q else 0
+        runs.append(cur)
+    assert 0.75 <= max(runs) / 100 <= 1.05                          # lặng ~0,8 s (+ 0,12 s bộ đọc tự ngắt)
+    # câu 2: giọng 0,8 s, nhân vật nói 2 s -> đọc chậm ×0,85
+    assert segs[1].extra.get("fit_slow") and abs(segs[1].extra["fit_speed"] - 0.85) < 0.01
+    assert stats["slowed"] >= 1
+    # sửa bản dịch khác (không thẻ) -> thẻ hết tác dụng
+    segs[0].trans = "Ta không cố ý mà."
+    assert pausetag.of(segs[0]) == [] and pausetag.shown(segs[0]) == "Ta không cố ý mà."
+
+
+def _dominant_hz(a: np.ndarray, sr: int) -> float:
+    a = np.asarray(a, np.float64)
+    if a.ndim == 2:
+        a = a.mean(axis=1)
+    f = np.abs(np.fft.rfft(a * np.hanning(len(a))))
+    return float(np.argmax(f) * sr / len(a))
+
+
+def test_keep_original_outside_dialog_2415(tmp_path):
+    """2.4.15 A: đang dùng bản tách mà bật "giữ tiếng gốc ngoài câu thoại" -> trong đoạn câu thoại nghe nhạc nền đã tách,
+    ngoài đoạn nghe tiếng gốc nguyên vẹn, chuyển dần ở mép; bộ trộn nghe thử và video xuất giống nhau; tắt = như cũ."""
+    from trami import audiomix
+    from trami.config import load_settings
+    from trami.video import build_and_render, dialog_mask_file
+
+    segs = [Segment(2.0, 2.6, "你好", "Xin chào"), Segment(2.7, 3.0, "嗯", "Ừ"),
+            Segment(4.5, 5.0, "啦啦", "", extra={"song": True})]
+    assert audiomix.dialog_spans(segs) == [[1.85, 3.15]]                 # 2 câu sát nhau gộp, câu 🎵 không tính
+    assert audiomix.dialog_spans(segs, keep_songs=False)[-1] == [4.35, 5.15]
+    segs[0].extra["dub_at"] = [1.9, 3.4]                                  # giọng lồng dài hơn câu -> đoạn theo giọng
+    assert audiomix.dialog_spans(segs) == [[1.75, 3.55]]
+    w = audiomix.inside_mask(np.array([0.0, 1.6, 2.5, 3.7, 5.0]), [[1.75, 3.55]])
+    assert w[0] == 0 and 0 < w[1] < 1 and w[2] == 1 and 0 < w[3] < 1 and w[4] == 0
+
+    sr = audiomix.SR
+    n = 6 * sr
+    tt = np.arange(n) / sr
+    orig = (np.stack([np.sin(2 * np.pi * 1000 * tt)] * 2, 1) * 12000).astype(np.int16)
+    bg = (np.stack([np.sin(2 * np.pi * 200 * tt)] * 2, 1) * 12000).astype(np.int16)
+    mix = audiomix.LiveMix()
+    mix.set_tracks({"orig": orig, "bg": bg})
+    mix.g = {"orig": 1.0, "bg": 1.0}
+    mix.dialog = [[2.0, 3.0]]
+    a, _ = mix.render(0, n)
+    for t0, hz in ((0.5, 1000), (2.5, 200), (4.5, 1000)):
+        assert abs(_dominant_hz(a[int(t0 * sr):int(t0 * sr) + 4410], sr) - hz) < 30
+    mix.solo = "bg"                                                       # nghe riêng nhạc nền: ngoài đoạn = tiếng gốc
+    a2, _ = mix.render(int(0.5 * sr), 4410)
+    assert abs(_dominant_hz(a2, sr) - 1000) < 30
+
+    # video xuất: tiếng gốc 1000 Hz, nhạc nền đã tách 200 Hz, giọng gốc đã tách 400 Hz (tắt)
+    src = tmp_path / "v.mp4"
+    subprocess.run([ff.ffmpeg_bin(), "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:s=320x240:d=6:r=25",
+                    "-f", "lavfi", "-i", "sine=frequency=1000:duration=6", "-shortest", "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", str(src)], check=True)
+    for name, f in (("bg.wav", 200), ("voc.wav", 400)):
+        _fake_audio(tmp_path / name, 6, f)
+    mk = dialog_mask_file([[2.0, 3.0]], 6.0, tmp_path / "w")
+    assert mk.exists() and dialog_mask_file([[2.0, 3.0]], 6.0, tmp_path / "w") == mk
+    for outside in (True, False):
+        spec = {"audio": {"src": "stems", "outside": outside},
+                "dub": {"enabled": False, "bg_wav": str(tmp_path / "bg.wav"), "vocals_wav": str(tmp_path / "voc.wav"),
+                        "song_spans": [], "dialog_spans": [[2.0, 3.0]] if outside else None}}
+        out = build_and_render(src, tmp_path / f"o{int(outside)}.mp4", spec, load_settings(), tmp_path / "w", [])
+        wav = tmp_path / f"o{int(outside)}.wav"
+        subprocess.run([ff.ffmpeg_bin(), "-loglevel", "error", "-y", "-i", str(out), "-ac", "1", "-ar", "44100",
+                        str(wav)], check=True)
+        import wave as _w
+
+        with _w.open(str(wav)) as f:
+            x = np.frombuffer(f.readframes(f.getnframes()), np.int16).astype(np.float32)
+        got = [_dominant_hz(x[int(t0 * sr):int(t0 * sr) + 4410], sr) for t0 in (0.5, 2.5, 4.5)]
+        want = [1000, 200, 1000] if outside else [200, 200, 200]
+        assert all(abs(g - h) < 30 for g, h in zip(got, want)), (outside, got)
+
+
+def test_emotion_voxcpm_2415(tmp_path, monkeypatch):
+    """2.4.15 B: cảm xúc từng câu cho VoxCPM2 – nhãn tiếng Việt -> chỉ dẫn tiếng Anh, AI ghi cảm xúc (chỉ nhận nhãn có
+    trong danh sách), câu có cảm xúc đọc ở chế độ giọng tham chiếu + "(chỉ dẫn)lời" (không đọc tiếp file mẫu), lần sau
+    không đọc lại; đổi cảm xúc -> đọc lại đúng câu đó."""
+    import json as _json
+
+    from trami import emotion, pipeline, tts, vox_design
+    from trami.project import Project
+    from trami.voxcpm_worker import make_kwargs
+
+    assert emotion.to_control("giận dữ, Quát To") == "angry, furious, shouting loudly"
+    assert emotion.to_control("bình thường") == "" and emotion.to_control("") == ""
+    assert emotion.to_control("sad and (tired)") == "sad and tired"            # chữ tự gõ giữ nguyên, bỏ ngoặc
+    assert emotion.clean("Giận Dữ, bình thường, gian du") == "giận dữ"
+    assert emotion.known("vui, abc, khóc, buồn") == "vui, khóc"
+    t, kw = make_kwargs({"text": "Cút!", "control": "angry", "ref_audio": "a.wav", "ref_text": "mẫu", "reference": "a.wav"})
+    assert t == "(angry)Cút!" and "prompt_wav_path" not in kw and kw["reference_wav_path"] == "a.wav"
+
+    class FakeLLM:
+        def __init__(self, *a, **k):
+            pass
+
+        def chat(self, system, user, max_tokens=8000, temperature=0.3, images=None):
+            d = _json.loads(user)
+            assert "giận dữ" in system and all("dich" in v for v in d.values())
+            return _json.dumps({k: ("giận dữ, quát to" if "Cút" in v["dich"] else "khó hiểu" if "?" in v["dich"] else "")
+                                for k, v in d.items()})
+
+    monkeypatch.setattr("trami.translate.LLMClient", FakeLLM)
+    p = Project.create("emo")
+    p.segments = [Segment(0.0, 2.0, "滚出去！", "Cút ra ngoài!", "S1"), Segment(3.0, 5.0, "你好", "Chào cậu.", "S2"),
+                  Segment(6.0, 8.0, "什么？", "Gì cơ?", "S1")]
+    p.save()
+    st = {"translate_engine": "deepseek", "deepseek_api_key": "k"}
+    r = pipeline.ai_emotions(p, None, st)
+    segs = p.segments
+    assert r["asked"] == 3 and r["labeled"] == 1 and r["changed"] == [0]
+    assert segs[0].extra["emo"] == "giận dữ, quát to" and segs[1].extra["emo"] == "" and segs[2].extra["emo"] == ""
+    assert pipeline.set_emotion(segs, [1], "Vui") == [1] and segs[1].extra["emo"] == "vui"
+    # tự ghi trước khi lồng: chỉ câu đọc bằng VoxCPM2, chưa có khoá "emo"
+    segs2 = [Segment(0, 1, "a", "Cút!", "S1"), Segment(1, 2, "b", "Cút!", "S2")]
+    info = pipeline.auto_emotions(p, segs2, {"S1": "voxd:nu_tre", "S2": "edge:vi-VN-HoaiMyNeural"}, "", st)
+    assert info == {"emo_ai": 1, "emo_asked": 1} and "emo" in segs2[0].extra and "emo" not in segs2[1].extra
+    assert pipeline.auto_emotions(p, segs2, {"S1": "voxd:nu_tre"}, "", dict(st, dub_emotion=False)) == {}
+    assert pipeline.auto_emotions(p, [Segment(0, 1, "a", "Cút!", "S1")], {"S1": "voxd:nu_tre"}, "",
+                                  {"translate_engine": "google"})["emo_err"].startswith("cần công cụ dịch AI")
+
+    # đọc thật qua tiến trình VoxCPM2 (gói voxcpm giả)
+    fake = tmp_path / "fakepkg"
+    (fake / "voxcpm").mkdir(parents=True)
+    (fake / "voxcpm" / "__init__.py").write_text(_FAKE_VOXCPM, "utf-8")
+    log = tmp_path / "vox.jsonl"
+    monkeypatch.setenv("PYTHONPATH", str(fake))
+    monkeypatch.setenv("FAKE_VOX_LOG", str(log))
+    monkeypatch.setattr(vox_design, "DESIGN_DIR", tmp_path / "design")
+    monkeypatch.setattr(tts, "_vox_model", None)
+    monkeypatch.setattr(tts, "omnivoice_available", lambda: False)
+    monkeypatch.setattr(tts, "voxcpm_available", lambda: True)
+    lines = [Segment(0.0, 2.5, "一", "Cút ra ngoài cho ta!", "S1", extra={"emo": "giận dữ, quát to"}),
+             Segment(3.0, 5.5, "二", "Được thôi, đi nào.", "S1")]
+    sv = {"voxcpm_quality": "fast"}
+    try:
+        tts.synthesize_dub(lines, tmp_path / "dub.wav", 6.0, tmp_path / "work", voices={"S1": "voxd:nu_tre"},
+                           settings=sv)
+        reqs = [_json.loads(x) for x in log.read_text("utf-8").splitlines()]
+        emo = next(q for q in reqs if "Cút" in q["text"])
+        plain = next(q for q in reqs if "Được thôi" in q["text"])
+        assert emo["text"].startswith("(angry, furious, shouting loudly)Cút")
+        assert "prompt_wav_path" not in emo["kw"] and emo["kw"]["reference_wav_path"] == plain["kw"]["prompt_wav_path"]
+        assert not plain["text"].startswith("(")
+        n0 = len(reqs)
+        tts.synthesize_dub(lines, tmp_path / "dub2.wav", 6.0, tmp_path / "work", voices={"S1": "voxd:nu_tre"},
+                           settings=sv)
+        assert len(log.read_text("utf-8").splitlines()) == n0                 # không đọc lại
+        lines[0].extra["emo"] = "buồn"
+        tts.synthesize_dub(lines, tmp_path / "dub3.wav", 6.0, tmp_path / "work", voices={"S1": "voxd:nu_tre"},
+                           settings=sv)
+        new = [_json.loads(x) for x in log.read_text("utf-8").splitlines()][n0:]
+        assert len(new) == 1 and new[0]["text"].startswith("(sad, sorrowful)Cút")
+    finally:
+        if tts._vox_model is not None:
+            tts._vox_model.stop()
+
+
+def test_abcd_gui_2415():
+    """2.4.15 giao diện: tab Lồng tiếng mục 3 'Câu ngắn đọc chậm lại' + mức (lưu Cài đặt); mục 2 'Cảm xúc (VoxCPM2)' đặt
+    cho câu đã tích + công tắc AI tự ghi; khung Câu đang chọn: thẻ [nghỉ …] hiện / sửa được, ô cảm xúc; tab Âm thanh
+    'Ngoài câu thoại giữ tiếng gốc' (mờ khi chưa dùng bản tách, lưu Cài đặt làm mặc định)."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from trami import pausetag
+    from trami.config import load_settings, save_settings
+    from trami.gui import theme
+    from trami.gui.main import MainWindow
+    from trami.gui.subs_model import C_VI
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    keep = {k: load_settings().get(k) for k in ("dub_slow_short", "dub_slow_min", "dub_emotion", "audio_outside")}
+    p = Project.create("abcdgui")
+    p.segments = [Segment(0, 2, "我…我不是故意的", "Ta… ta không cố ý.", "S1"), Segment(3, 4, "滚", "Cút!", "S1")]
+    p.save()
+    win = MainWindow()
+    try:
+        win.show()
+        win.open_project(p.id)
+        pp = win.project_page
+        app.processEvents()
+        # C
+        assert pp.d_slow.isChecked() and abs(pp.d_slow_min.value() - 0.85) < 1e-6
+        pp.d_slow.setChecked(False)
+        app.processEvents()
+        assert load_settings()["dub_slow_short"] is False and not pp.d_slow_min.isEnabled()
+        pp.d_slow.setChecked(True)
+        pp.d_slow_min.setValue(0.9)
+        assert load_settings()["dub_slow_min"] == 0.9
+        # D: sửa bản dịch có thẻ ở khung Câu đang chọn
+        m = pp.model
+        m.setData(m.index(0, C_VI), "Ta… [nghỉ 0,8s] ta không cố ý.")
+        s0 = m.segs[0]
+        assert s0.trans == "Ta… ta không cố ý." and pausetag.of(s0) == [[3, 0.8]]
+        pp._select_line(0)
+        app.processEvents()
+        assert "[nghỉ 0,8s]" in pp.inspector.vi.toPlainText()
+        # B: cảm xúc câu đã tích + khung Câu đang chọn
+        m.set_picked([1])
+        pp.d_emo.setCurrentText("Giận dữ")
+        pp._set_emo()
+        assert m.segs[1].extra["emo"] == "giận dữ"
+        pp.d_emo_auto.setChecked(False)
+        assert load_settings()["dub_emotion"] is False
+        pp._select_line(1)
+        app.processEvents()
+        assert pp.inspector.emo.currentText() == "giận dữ"
+        pp.inspector.emo.setCurrentText("buồn")
+        pp.inspector._set_emo()
+        assert m.segs[1].extra["emo"] == "buồn"
+        # A: chưa tách giọng -> ô mờ + dòng nhắc
+        at = pp.audio_tab
+        assert not at.outside.isEnabled() and "bản đã tách" in at.outside_note.text()
+        at.outside.setEnabled(True)
+        at.outside.setChecked(False)
+        app.processEvents()
+        assert load_settings()["audio_outside"] is False and at.collect()["outside"] is False
+    finally:
+        save_settings(keep)
+        win.timer.stop()
+        win.close()

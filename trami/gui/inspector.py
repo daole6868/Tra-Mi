@@ -6,7 +6,11 @@ from __future__ import annotations
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import QComboBox, QGridLayout, QLineEdit, QPlainTextEdit, QSizePolicy, QVBoxLayout, QWidget
 
+from .. import pausetag
 from . import theme
+
+PAUSE_TAG_TIP = ("Gõ [nghỉ 0,5s] vào giữa câu để giọng lồng dừng đúng chỗ đó (vd: Ta… [nghỉ 0,8s] ta không cố ý.). "
+                 "Phụ đề / SRT không hiện thẻ. [nghỉ] = 0,5 s; tối đa 5 s. Xong bấm Tạo lại giọng câu này")
 from .player import fmt
 from .subs_model import (C_END, C_NODUB, C_SPK, C_START, C_VI, C_VOICE, C_ZH, FIT_TEXT, VOICE_DEFAULT, SubsModel,
                          fit_tip, spk_color)
@@ -65,6 +69,7 @@ class LineInspector(Card):
         v.addWidget(self.vi_lbl)
         self.vi = _TextBox()
         self.vi.setMinimumHeight(84)
+        self.vi.setToolTip(PAUSE_TAG_TIP)
         v.addWidget(self.vi, 1)
         self._vi_timer = QTimer(self, singleShot=True, interval=700, timeout=lambda: self._set(C_VI, self.vi.toPlainText()))
         self._zh_timer = QTimer(self, singleShot=True, interval=700, timeout=lambda: self._set(C_ZH, self.zh.toPlainText()))
@@ -74,6 +79,17 @@ class LineInspector(Card):
         self.voice.setMinimumContentsLength(12)
         self.voice.activated.connect(lambda _i: self._set(C_VOICE, self.voice.currentData() or ""))
         v.addLayout(hbox(label("Giọng", "muted"), self.voice))
+        from .. import emotion
+
+        self.emo = QComboBox()      # cảm xúc khi đọc – chỉ VoxCPM2 (2.4.15)
+        self.emo.setEditable(True)
+        self.emo.addItems([emotion.NEUTRAL] + emotion.labels())
+        self.emo.setMinimumContentsLength(10)
+        self.emo.setToolTip("Cảm xúc khi đọc (chỉ VoxCPM2): chọn hoặc gõ rồi Enter. Đổi xong bấm Tạo lại giọng câu này")
+        self.emo.activated.connect(lambda _i: self._set_emo())
+        if self.emo.lineEdit() is not None:
+            self.emo.lineEdit().editingFinished.connect(self._set_emo)
+        v.addLayout(hbox(label("Cảm xúc", "muted"), self.emo))
         self.nodub = Switch(False)
         self.nodub.toggledOn.connect(self._set_nodub)
         self.fit = label("", "muted", wrap=True)
@@ -132,6 +148,11 @@ class LineInspector(Card):
             return
         self.model.setData(self.model.index(self.row, col), value)
 
+    def _set_emo(self):
+        if self._filling or not (0 <= self.row < len(self.model.segs)):
+            return
+        self.model.set_emo([self.row], self.emo.currentText())
+
     def _set_nodub(self, on: bool):
         if not self._filling and 0 <= self.row < len(self.model.segs):
             st = Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
@@ -178,10 +199,12 @@ class LineInspector(Card):
             if not self.zh.hasFocus():
                 self.zh.setPlainText(s.text)
             if not self.vi.hasFocus():
-                self.vi.setPlainText(s.trans)
+                self.vi.setPlainText(pausetag.shown(s))     # có thẻ [nghỉ …] nếu đã đặt (2.4.15)
             if self.voice.count() <= 1:
                 self.refresh_voices()
             self.voice.setCurrentIndex(max(0, self.voice.findData(s.extra.get("voice", ""))))
+            if not self.emo.hasFocus():
+                self.emo.setCurrentText(s.extra.get("emo") or "bình thường")
             self.nodub.setChecked(bool(s.extra.get("nodub")))
             self.overflow.setCurrentIndex(max(0, self.overflow.findData(s.extra.get("overflow", ""))))
             fit = s.extra.get("fit")

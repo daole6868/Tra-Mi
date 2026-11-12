@@ -868,7 +868,7 @@ def diarize(p: Project, settings: dict | None = None, progress: Prog | None = No
 
 
 DUB_MARKS = ("dub_at", "fit", "fit_speed", "fit_shift", "fit_over", "fit_need", "fit_have", "fit_auto", "fit_auto_speed",
-             "fit_pause", "fit_talk")
+             "fit_pause", "fit_talk", "fit_slow")
 
 
 def forget_stale_voice(old_texts: set, segs: list, moved: bool) -> int:
@@ -4524,6 +4524,8 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
             dropped = drop_interjections(p, segs, settings)
         if settings.get("interj_inline", True):     # "Ừm, đúng vậy." -> "Đúng vậy." (chỉ từ trong danh sách)
             trimmed = len(trim_interjections(segs, settings))
+    # 2.4.15: câu đọc bằng VoxCPM2 chưa có cảm xúc -> AI ghi cảm xúc trước khi đọc (Cài đặt dub_emotion)
+    emo_info = auto_emotions(p, segs, voices, default_voice, settings, only, _sub(progress, 0.0, 0.02), cancel)
     st = stems(p)
     # mẫu giọng để nhái: lấy từ giọng đã tách (sạch) hoặc âm thanh gốc
     ref_audio = st.get("vocals") or str(p.source)
@@ -4610,6 +4612,7 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     stats["interj"] = dropped
     stats["interj_trim"] = trimmed
     stats["auto_voiced"] = auto_voiced
+    stats.update(emo_info)
     if full[0]:
         try:
             tmp_out.replace(target)
@@ -4687,9 +4690,96 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
     return out
 
 
+VOX_SPECS = ("vox:", "voxd:", "voxclone")
+
+
+def line_voice(p: Project, s, voices: dict | None = None, default_voice: str = "") -> str:
+    """Mã giọng câu sẽ đọc (giọng riêng câu > giọng người nói > giọng mặc định)."""
+    v = voices if voices is not None else (p.data.get("voices") or {})
+    return s.extra.get("voice") or v.get(s.speaker or "S1") or default_voice or ""
+
+
+def emotion_items(p: Project, segs: list, rows) -> list[dict]:
+    """Câu gửi AI ghi cảm xúc: chữ gốc + bản dịch + người nói (nam / nữ nếu đã biết)."""
+    gd = p.data.get("speaker_gender") or {}
+    out = []
+    for k in sorted(set(rows)):
+        s = segs[k]
+        g = (gd.get(s.speaker or "S1") or {}).get("g", "")
+        who = (s.speaker or "S1") + {"male": " · nam", "female": " · nữ"}.get(g, "")
+        out.append({"n": k, "goc": s.text or "", "dich": s.trans or "", "nguoi_noi": who})
+    return out
+
+
+def ai_emotions(p: Project, rows: list[int] | None = None, settings: dict | None = None, engine: str | None = None,
+                progress: Prog | None = None, cancel=None, segs: list | None = None, save: bool = True) -> dict:
+    """AI ghi cảm xúc cho các câu (2.4.15 – dùng khi đọc bằng VoxCPM2). rows None = mọi câu đã dịch. Ghi
+    extra["emo"] (""= bình thường) -> {"asked", "labeled", "changed": [câu đổi cảm xúc]}."""
+    from . import emotion
+    from .translate import LLMClient
+
+    settings = settings or load_settings()
+    eng = ai_engine(settings, engine)
+    own = segs is None
+    segs = p.segments if own else segs
+    rows = [k for k in (range(len(segs)) if rows is None else rows)
+            if 0 <= k < len(segs) and (segs[k].trans or "").strip() and not segs[k].extra.get("nodub")]
+    if not rows:
+        return {"asked": 0, "labeled": 0, "changed": []}
+    got = emotion.ai_emotions(LLMClient(settings, eng), emotion_items(p, segs, rows), progress, cancel)
+    changed = []
+    for k, v in got.items():
+        old = segs[k].extra.get("emo")
+        segs[k].extra["emo"] = v
+        if (old or "") != v:
+            changed.append(k)
+    if own and save:
+        p.segments = segs
+        p.save()
+    return {"asked": len(rows), "labeled": sum(1 for v in got.values() if v), "changed": changed}
+
+
+def auto_emotions(p: Project, segs: list, voices: dict, default_voice: str, settings: dict, only=None,
+                  progress: Prog | None = None, cancel=None) -> dict:
+    """Trước khi lồng: câu đọc bằng VoxCPM2 chưa có khoá "emo" -> AI ghi cảm xúc (không chặn việc lồng khi lỗi)."""
+    if not settings.get("dub_emotion", True):
+        return {}
+    rows = [k for k, s in enumerate(segs) if (only is None or k in only) and (s.trans or "").strip()
+            and not s.extra.get("nodub") and not s.extra.get("song") and "emo" not in s.extra
+            and line_voice(p, s, voices, default_voice).startswith(VOX_SPECS)]
+    if not rows:
+        return {}
+    try:
+        ai_engine(settings)
+    except ValueError:
+        return {"emo_err": "cần công cụ dịch AI – đang dùng Google / Hy-MT2"}
+    try:
+        r = ai_emotions(p, rows, settings, progress=progress, cancel=cancel, segs=segs)
+        return {"emo_ai": r["labeled"], "emo_asked": r["asked"]}
+    except ff.Cancelled:
+        raise
+    except Exception as e:  # noqa: BLE001 – không có AI / lỗi mạng: đọc bình thường
+        log_error("AI ghi cảm xúc trước khi lồng tiếng")
+        return {"emo_err": str(e)[:160]}
+
+
+def set_emotion(segs: list, rows: list[int], emo: str) -> list[int]:
+    """Đặt cảm xúc tay cho các câu ("" = bình thường). Trả câu đổi."""
+    from . import emotion
+
+    v = emotion.clean(emo)
+    out = []
+    for k in rows:
+        if 0 <= k < len(segs) and (segs[k].extra.get("emo") or "") != v:
+            segs[k].extra["emo"] = v
+            out.append(k)
+    return out
+
+
 # kết quả lồng tiếng ghi vào từng câu (xếp lại / đọc lại) – được ghép vào câu tương ứng khi người dùng sửa song song
 _DUB_EXTRA = ("tts_file", "dub_at", "fit", "fit_speed", "fit_need", "fit_have", "fit_shift", "fit_over", "voice_used",
-              "take", "take_pending", "dub_pauses", "fit_auto", "fit_auto_speed", "fit_pause", "fit_talk")
+              "take", "take_pending", "dub_pauses", "fit_auto", "fit_auto_speed", "fit_pause", "fit_talk",
+              "fit_slow")
 
 
 def _seg_sig(s) -> tuple:
@@ -6402,7 +6492,35 @@ def audio_sources(p: Project, edit: dict | None = None) -> dict:
     return out
 
 
-def audio_state(p: Project, edit: dict | None = None, srcs: dict | None = None) -> dict:
+def outside_on(edit: dict, settings: dict | None = None) -> bool:
+    """2.4.15 "Giữ tiếng gốc ngoài câu thoại": ô của dự án (tab Âm thanh) – chưa chọn thì theo Cài đặt audio_outside."""
+    from .audiomix import audio_settings
+
+    v = audio_settings(edit).get("outside")
+    if v is None:
+        v = (settings if settings is not None else load_settings()).get("audio_outside", True)
+    return bool(v)
+
+
+def outside_spans(p: Project, edit: dict | None = None, srcs: dict | None = None, stems_on: bool | None = None,
+                  settings: dict | None = None, segs: list | None = None) -> list | None:
+    """Đoạn câu thoại (giây gốc) khi giữ tiếng gốc ngoài câu thoại đang có tác dụng: đang dùng bản tách + có tiếng gốc
+    + bật ô. None = không áp (trộn như cũ)."""
+    from .audiomix import audio_settings, dialog_spans, use_stems
+
+    ed = edit or p.edit
+    srcs = audio_sources(p, ed) if srcs is None else srcs
+    if "orig" not in srcs or "bg" not in srcs:
+        return None
+    if stems_on is None:
+        d = ed.get("dub") or {}
+        stems_on = use_stems(audio_settings(ed), True, bool(d.get("enabled")) and "dub" in srcs)
+    if not stems_on or not outside_on(ed, settings):
+        return None
+    return dialog_spans(p.segments if segs is None else segs, bool(audio_settings(ed).get("songs", True)))
+
+
+def audio_state(p: Project, edit: dict | None = None, srcs: dict | None = None, segs: list | None = None) -> dict:
     """Cách trộn hiện tại (âm lượng thật từng lớp, đoạn hát, đoạn giữ lại, mờ dần, giảm nhạc) – giống hệt khi xuất."""
     from .audiomix import audio_settings, gains, use_stems
     from .video import keep_ranges
@@ -6419,10 +6537,15 @@ def audio_state(p: Project, edit: dict | None = None, srcs: dict | None = None) 
     except Exception:  # noqa: BLE001
         keep = []
     fade = ed.get("fade") or {}
-    return {"gains": gains(a, stems_on, dub_on, "bgm" in srcs), "stems_on": stems_on, "dub_on": dub_on,
+    g = gains(a, stems_on, dub_on, "bgm" in srcs)
+    dialog = outside_spans(p, ed, srcs, stems_on, segs=segs)
+    if dialog is not None:      # 2.4.15: ngoài câu thoại = tiếng gốc ở mức nhạc nền
+        g["orig"] = g["bg"]
+    return {"gains": g, "stems_on": stems_on, "dub_on": dub_on,
             "songs": song_spans(p) if stems_on else [], "keep": keep, "duck": bool(a.get("duck", True)),
             "fade": (float(fade.get("in") or 0), float(fade.get("out") or 0)), "settings": a,
-            "mute": [list(x) for x in ed.get("mute_spans") or []], "dub_rate": float(d.get("vspeed") or 1.0)}
+            "mute": [list(x) for x in ed.get("mute_spans") or []], "dub_rate": float(d.get("vspeed") or 1.0),
+            "dialog": dialog}
 
 
 def mix_warp(p: Project, edit: dict | None = None):
@@ -6493,6 +6616,8 @@ def apply_audio_state(mix, state: dict) -> None:
     mix.fade = state["fade"]
     mix.duck = state["duck"]
     mix.mute = mp(state.get("mute") or [])
+    dl = state.get("dialog")
+    mix.dialog = None if dl is None else mp(dl)      # 2.4.15 ngoài câu thoại nghe tiếng gốc
     mix.dub_rate = 1.0 if w is not None else float(state.get("dub_rate") or 1.0)
     if w is not None:
         mix.rate = 1.0
@@ -6578,6 +6703,15 @@ def dub_summary(p: Project) -> str:
                      "chỗ nhân vật nói giữ ×1")
     if st.get("pauses"):
         extra.append(f"nghỉ đúng chỗ nhân vật ngắt hơi {st['pauses']} chỗ")
+    if st.get("slowed"):
+        extra.append(f"{st['slowed']} câu ngắn đọc chậm lại (≥ ×{float(st.get('slow') or 0.85):.2f}) cho vừa lúc nhân vật "
+                     "nói")
+    if st.get("tag_pauses"):
+        extra.append(f"chèn {st['tag_pauses']} chỗ nghỉ theo thẻ [nghỉ …] trong bản dịch")
+    if st.get("emo_asked"):
+        extra.append(f"AI ghi cảm xúc {st.get('emo_ai', 0)}/{st['emo_asked']} câu VoxCPM2 (còn lại đọc bình thường)")
+    if st.get("emo_err"):
+        extra.append(f"⚠ AI chưa ghi được cảm xúc ({st['emo_err']}) – các câu đọc bình thường")
     if st.get("clauses"):
         extra.append(f"{st['clauses']} câu đọc từng vế theo nhịp ngắt của nhân vật" +
                      (f" ({st['part_fast']} vế dài đọc nhanh riêng)" if st.get("part_fast") else ""))
@@ -6938,6 +7072,8 @@ def render(p: Project, settings: dict | None = None, progress: Prog | None = Non
         d["bg_wav"] = srcs["bg"][0]
         d["vocals_wav"] = srcs.get("voice", ("",))[0]
         d["song_spans"] = song_spans(p, settings)
+    # 2.4.15: giữ tiếng gốc ngoài câu thoại (video xuất trộn y như bộ trộn nghe thử)
+    d["dialog_spans"] = outside_spans(p, edit, srcs, settings=settings)
     from . import timewarp
 
     if timewarp.mode_of(edit) != "all":
@@ -7010,6 +7146,8 @@ def warp_audio_files(p: Project, w, edit: dict, progress: Prog | None = None, ca
         want["bg"] = d["bg_wav"]
         if ok(d.get("vocals_wav")):
             want["voice"] = d["vocals_wav"]
+        if d.get("dialog_spans") is not None and "orig" in srcs:    # 2.4.15 ngoài câu thoại = tiếng gốc
+            want["orig"] = srcs["orig"][0]
     elif "orig" in srcs:
         want["orig"] = srcs["orig"][0]
     out = {}

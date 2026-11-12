@@ -536,6 +536,41 @@ def _render_chunked(src: Path, out: Path, spec: dict, settings: dict, work: Path
     return out
 
 
+MASK_SR = 1000     # mặt nạ câu thoại (2.4.15): 1 mẫu / ms, FFmpeg lấy mẫu lại lên 44,1 kHz (đã chuyển dần 0,25 s)
+
+
+def dialog_mask_file(spans: list, dur: float, work: str | Path) -> Path:
+    """File wav 1 kênh: 1 trong đoạn câu thoại, 0 ngoài đoạn, chuyển dần ở mép (audiomix.inside_mask – y như bộ trộn
+    nghe thử). Cùng đoạn -> dùng lại file."""
+    import hashlib
+    import wave
+
+    import numpy as np
+
+    from .audiomix import inside_mask
+
+    key = hashlib.md5(json.dumps([[round(float(a), 3), round(float(b), 3)] for a, b in spans] + [round(dur, 2)])
+                      .encode()).hexdigest()[:12]
+    Path(work).mkdir(parents=True, exist_ok=True)
+    out = Path(work) / f"dialog_mask_{key}.wav"
+    if out.exists():
+        return out
+    for old in Path(work).glob("dialog_mask_*.wav"):
+        old.unlink(missing_ok=True)
+    n = int(max(0.0, dur) * MASK_SR) + MASK_SR
+    tmp = out.with_suffix(".tmp")
+    with wave.open(str(tmp), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(MASK_SR)
+        step = MASK_SR * 600
+        for a in range(0, n, step):
+            t = (a + np.arange(min(step, n - a))) / MASK_SR
+            w.writeframes((inside_mask(t, spans) * 32767).astype("<i2").tobytes())
+    tmp.replace(out)
+    return out
+
+
 def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dict, work_dir: str | Path,
                      segments: list[Segment] | None = None, progress: ProgressCB | None = None,
                      cancel: Callable[[], bool] | None = None, _part: dict | None = None):
@@ -937,23 +972,54 @@ def build_and_render(src: str | Path, out: str | Path, spec: dict, settings: dic
             return lab
 
         if stems_on:
+            voc = dub.get("vocals_wav")
+            spans = dub.get("song_spans") or []
+            use_voice = bool(voc and Path(voc).exists() and (not tw or wfiles.get("voice")) and
+                             (g["voice"] > 0.001 or (spans and g["voice_song"] > 0.001)))
+            # 2.4.15 giữ tiếng gốc ngoài câu thoại: nhạc nền / giọng gốc đã tách CHỈ trong đoạn câu thoại, ngoài đoạn
+            # là tiếng gốc (ở mức nhạc nền) – nhân với mặt nạ 0..1 chuyển dần (cùng hàm với bộ trộn nghe thử)
+            dlg = dub.get("dialog_spans")
+            g_out = g["bg"]
+            users = []
+            if dlg is not None and has_a:
+                users = [u for u, on in (("bg", g["bg"] > 0.001), ("voice", use_voice), ("orig", g_out > 0.001)) if on]
+            mk: dict[str, str] = {}
+            if users:
+                mspans = tw.map_ranges(dlg) if tw else dlg
+                mlen = tw.fwd(dur) if tw else dur
+                mlab = ext_audio(str(dialog_mask_file(mspans, mlen, work)), "pan=stereo|c0=c0|c1=c0")
+                fc.append(f"[{mlab}]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
+                          f"asplit={len(users)}" + "".join(f"[mk_{u}]" for u in users))
+                for u in users:
+                    mk[u] = f"[mk_{u}]"
+                if "orig" in mk:
+                    fc.append("[mk_orig]aeval=exprs=1-val(0)|1-val(1):channel_layout=stereo[mk_out]")
+                    mk["orig"] = "[mk_out]"
+            af32 = "aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
             # nền = nhạc + hiệu ứng đã tách (không còn giọng Trung)
             if g["bg"] > 0.001:
                 lab = ext_audio(wfiles.get("bg") if tw else dub["bg_wav"], mute_f.rstrip(","))
-                fc.append(f"[{lab}]volume={g['bg']:.3f}{tempo}[bgx]")
+                if "bg" in mk:
+                    fc.append(f"[{lab}]volume={g['bg']:.3f},{af32}[bgv];[bgv]{mk['bg']}amultiply{tempo}[bgx]")
+                else:
+                    fc.append(f"[{lab}]volume={g['bg']:.3f}{tempo}[bgx]")
                 amix_inputs.append("[bgx]")
             # giọng gốc đã tách: nhỏ / tắt, riêng đoạn hát giữ to (nếu bật "giữ nguyên đoạn hát")
-            voc = dub.get("vocals_wav")
-            spans = dub.get("song_spans") or []
-            if voc and Path(voc).exists() and (not tw or wfiles.get("voice")) and \
-                    (g["voice"] > 0.001 or (spans and g["voice_song"] > 0.001)):
+            if use_voice:
                 # mốc thời gian lúc này là của file gốc (trước khi cắt) vì -ss đã dời về 0 tại seek0
                 cond = "+".join(f"between(t,{a - seek0:.3f},{b - seek0:.3f})" for a, b in spans) or "0"
                 pre = f"volume='if({cond},{g['voice_song']:.3f},{g['voice']:.3f})':eval=frame" + (f",{pf}" if pf else "") \
                     + (f",{mute_f.rstrip(',')}" if mute_f else "")
                 lab = ext_audio(wfiles.get("voice") if tw else voc, pre)
-                fc.append(f"[{lab}]anull{tempo}[vcx]")
+                if "voice" in mk:
+                    fc.append(f"[{lab}]{af32}[vcv];[vcv]{mk['voice']}amultiply{tempo}[vcx]")
+                else:
+                    fc.append(f"[{lab}]anull{tempo}[vcx]")
                 amix_inputs.append("[vcx]")
+            if "orig" in mk:      # tiếng gốc ngoài câu thoại ([a0] đã cắt / tắt theo đoạn như mọi lớp)
+                af = ([pf] if pf else []) + [f"volume={g_out:.3f}", af32]
+                fc.append(f"[a0]aresample=44100,{','.join(af)}[aov];[aov]{mk['orig']}amultiply{tempo}[ao]")
+                amix_inputs.append("[ao]")
         elif has_a and g["orig"] > 0.001:
             af = [f"volume={g['orig']:.3f}"] + _atempo_chain(speed)
             if pf:

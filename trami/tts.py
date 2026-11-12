@@ -1252,14 +1252,16 @@ def _pairs(items: list[dict]):
 
 
 def plan_layout(items: list[dict], total: float, mode: str = "smart", max_speedup: float = 1.3,
-                lead_max: float = 1.0, max_lag: float = 2.0) -> dict[int, dict]:
+                lead_max: float = 1.0, max_lag: float = 2.0, slow: float = 1.0) -> dict[int, dict]:
     """Xếp các đoạn giọng lồng theo thời gian (chỉ tính toán, không đụng âm thanh).
 
     items: {"k": số câu, "want": lúc nên bắt đầu (giây), "dur": thời lượng giọng ở ×1, "user": tốc độ tối thiểu đặt tay
     (0 = không), "lock": tốc độ "user" là ĐÚNG tốc độ (2.1.38 – nhanh hay chậm đều theo, không tự tăng tốc cho vừa;
     dài hơn chỗ trống thì xử lý như câu dài: đọc sớm / câu sau lùi / đè theo cách xếp), "fixed": người dùng đã kéo đoạn
     giọng (giữ đúng chỗ, không đọc sớm), "mode": cách xếp riêng ("" = chung), "pause": nghỉ tối thiểu trước đoạn này (vế
-    sau của câu dài đã tách ở dấu phẩy – không có = GAP)}.
+    sau của câu dài đã tách ở dấu phẩy – không có = GAP), "talk": nhân vật nói bao lâu tính từ "want" (0 = không xét)}.
+    slow < 1 (2.4.15): câu giọng NGẮN hơn lúc nhân vật nói (không tốc độ tay, không bị đẩy, không kéo tay) đọc chậm lại
+    cho hết đúng lúc nhân vật thôi nói, chậm nhất ×slow ("slow": True trong kết quả).
     Trả về {k: {"start", "end", "speed", "keep" (giây giữ lại khi phải cắt, None = đủ), "fit" ok/fast/long,
     "shift" (bắt đầu − lúc nên bắt đầu: âm = đọc sớm, dương = bị lùi), "over" (giây đè lên câu sau), "mode"}}.
 
@@ -1287,6 +1289,8 @@ def plan_layout(items: list[dict], total: float, mode: str = "smart", max_speedu
     end = [0.0] * n
     speed = list(base)
     keep: list[float | None] = [None] * n
+    talk = [max(0.0, float(x.get("talk") or 0)) for x in its]
+    slowed = [False] * n
 
     def after(i: int, st: float, en: float) -> float:
         """Lúc câu sau được phép bắt đầu khi câu i đọc từ st tới en (không bao giờ trước câu i)."""
@@ -1388,6 +1392,14 @@ def plan_layout(items: list[dict], total: float, mode: str = "smart", max_speedu
         if need > slot * 1.03:
             # tua nhanh (giữ cao độ). KHÔNG bắt OmniVoice đọc lại với thời lượng ép (duration=): hay ra tiếng "bíp" (2.0.34)
             sp = max(sp, min(cap[i], dur[i] / slot))
+        elif slow < 1.0 and not has_user[i] and not fixed[i] and talk[i] > 0 and st <= want[i] + 1e-3:
+            # 2.4.15: giọng ngắn hơn lúc nhân vật nói -> đọc chậm lại cho hết đúng lúc thôi nói (không quá chỗ trống)
+            room = min(talk[i], slot)
+            if dur[i] < room - 0.05:
+                sp = max(max(0.5, slow), dur[i] / room)
+                slowed[i] = sp < 0.995
+                if not slowed[i]:
+                    sp = 1.0
         en = st + dur[i] / sp
         if m == "cut":
             hard = nxt[i] + DELAY - ga[i]          # câu sau được lùi tối đa 0,25 s
@@ -1410,9 +1422,49 @@ def plan_layout(items: list[dict], total: float, mode: str = "smart", max_speedu
                                     else "fast")
         out[int(x["k"])] = {"start": start[i], "end": end[i], "speed": speed[i], "keep": keep[i], "fit": fit,
                             "shift": start[i] - want[i], "over": over[i], "mode": modes[i], "lock": lock[i],
+                            "slow": slowed[i],
                             "have": max(0.3, nxt[i] - ga[i] - start[i]),
                             "slot": max(0.3, nxt[i] - ga[i] - want[i])}   # chỗ trống của chính câu (không tính bị đẩy)
     return out
+
+
+SLOW_MIN = 0.85    # câu ngắn đọc chậm lại tối đa còn ×0,85 (chậm hơn nghe lè nhè – 2.4.15)
+
+
+def slow_min(settings: dict) -> float:
+    """Mức đọc chậm nhất cho câu giọng ngắn hơn lúc nhân vật nói (Cài đặt dub_slow_short / dub_slow_min); 1 = tắt.
+    Cài đặt của tool luôn có khoá này (mặc định bật – config.DEFAULT_SETTINGS); dict thiếu khoá = tắt như trước 2.4.15."""
+    if not settings.get("dub_slow_short", False):
+        return 1.0
+    try:
+        return min(1.0, max(0.5, float(settings.get("dub_slow_min", SLOW_MIN))))
+    except (TypeError, ValueError):
+        return SLOW_MIN
+
+
+def mark_talk(items: list[dict], segs: list, lang: str = "vi", min_gap: float = 0.0, tw=None) -> int:
+    """Gắn "talk" (nhân vật nói bao lâu tính từ lúc giọng nên vào) cho câu giọng ngắn hơn lúc nói -> plan_layout đọc chậm
+    lại. Bỏ qua câu kéo tay / tốc độ tay, câu có thẻ [nghỉ …] và câu có chỗ nhân vật ngắt hơi (min_gap > 0: chèn lặng
+    lấp chỗ đó thay vì đọc chậm cả câu). Trả số câu được xét."""
+    n = 0
+    for it in items:
+        s = segs[int(it["k"])]
+        if it.get("fixed") or it.get("user"):
+            continue
+        end = tw.fwd(float(s.end)) if tw else float(s.end)
+        talk = end - float(it["want"])
+        if talk <= float(it["dur"]) + 0.05:
+            continue
+        if min_gap > 0 and "ct" in s.extra and orig_pauses(s, langs.detect(s.trans or "", lang), min_gap):
+            continue
+        if "tag_pause" in s.extra:      # thẻ [nghỉ …]: người dùng tự đặt nhịp -> không kéo chậm (lặng giữ đúng số giây)
+            from . import pausetag
+
+            if pausetag.of(s):
+                continue
+        it["talk"] = round(talk, 3)
+        n += 1
+    return n
 
 
 def soft_limit(a: np.ndarray, thr: float = 0.9) -> np.ndarray:
@@ -1808,6 +1860,36 @@ def plan_pauses(s: Segment, x: dict, runs: list, n1: int, speed: float, room: fl
     return out
 
 
+def tag_gaps(fracs: list, runs: list, n1: int, speed: float, sr: int = SR) -> list[list[int]]:
+    """Chỗ chèn lặng theo thẻ [nghỉ …] (2.4.15): fracs = [(tỉ lệ vị trí trong câu dịch, giây)], runs = chỗ bộ đọc tự
+    ngắt trên đoạn giọng ×1 (mẫu), n1 = độ dài ×1. Cắt ở giữa chỗ ngắt gần vị trí thẻ nhất (ưu tiên chỗ lặng dài – như
+    plan_pauses), không có thì cắt đúng tỉ lệ. Lặng co theo tốc độ đọc (bộ xếp đã tính cả lặng vào độ dài câu). Trả
+    [[mẫu cắt theo tốc độ, số mẫu lặng]]."""
+    out, last_j, prev = [], -1, 0.0
+    sp = max(1e-3, float(speed))
+    for frac, sec in fracs:
+        exp = float(frac) * n1
+        best = None
+        for j, (a, b) in enumerate(runs or []):
+            if j <= last_j:
+                continue
+            d = abs((a + b) / 2 - exp)
+            if d > max(0.25 * n1, 0.4 * sr):
+                continue
+            score = d - 4.0 * (b - a)
+            if best is None or score < best[0]:
+                best = (score, j, a, b)
+        if best is not None:
+            last_j = best[1]
+            cut = (best[2] + best[3]) / 2
+        else:
+            cut = exp
+        cut = min(max(cut, prev), n1)
+        prev = cut
+        out.append([int(cut / sp), int(float(sec) * sr / sp)])
+    return out
+
+
 def _gk(e) -> tuple:
     """Khoá so sánh 1 mục bảng đoạn giọng đã đặt (cả khoảng nghỉ chèn thêm – mục cũ không có)."""
     return tuple(e[:5]) + (tuple(tuple(int(v) for v in q) for q in (e[6] if len(e) > 6 and e[6] else ())),)
@@ -1952,9 +2034,18 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     joins: dict[int, tuple[Path, list[Path]]] = {}
     queued: set[str] = set()
     n_clause = 0
+    from . import pausetag
+
+    from . import emotion
+
+    tagged: dict[int, list] = {}      # 2.4.15: câu có thẻ [nghỉ …] -> chèn lặng đúng chỗ, không tự chèn nghỉ khác
+    vox_emo: dict[int, str] = {}      # 2.4.15: câu VoxCPM2 có cảm xúc -> chỉ dẫn cho bộ đọc
     for i, s in enumerate(segs):
         lg = langs.detect(s.trans or "", lang)
-        t = clean_tts_text(s.trans or "", lg)
+        tp = pausetag.of(s)
+        if tp:     # dấu phẩy ở chỗ đặt thẻ -> bộ đọc tự ngắt đúng chỗ đó (dễ cắt chèn lặng)
+            tagged[i] = tp
+        t = clean_tts_text(pausetag.tts_text(s.trans or "", tp) if tp else (s.trans or ""), lg)
         s.extra.pop("_tts", None)
         if not t:
             n_empty += 1
@@ -2019,6 +2110,10 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                 sm = samples[spec[4:]]
                 extra = f"{sm.get('text', '')}|{sm.get('file')}"
             extra += f"|{vox_repo}|c{vox_cfg:g}|s{vox_steps}" + ("|" + lg if lg != "vi" else "")
+            ec = emotion.to_control(s.extra.get("emo"))    # 2.4.15 cảm xúc từng câu -> chỉ dẫn "(angry, …)"
+            if ec:
+                extra += "|emo:" + ec
+                vox_emo[i] = ec
         elif spec.startswith(("omni:", "omniclone:", "omnid:")):
             extra += "|nofade"          # 2.0.34: bỏ đoạn nhỏ dần 0,1 s cuối câu (mất phụ âm cuối của câu ngắn)
             if lg != "vi":
@@ -2060,7 +2155,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         # 2.1.12: CHỈ Edge đọc từng vế. Bộ đọc AI (VieNeu / OmniVoice) tự quyết lúc dừng -> vế càng ngắn càng hay trượt
         # chỗ dừng rồi đọc lặp lời (2.1.5–2.1.7) -> đọc CẢ CÂU 1 lần như bản 2.0.90; chỗ nghỉ vẫn đúng lúc nhân vật nói
         # tiếp nhờ chèn lặng vào đúng chỗ bộ đọc tự ngắt ở dấu phẩy (plan_pauses, như 2.0.96).
-        if by_clause and spec.startswith("edge:") and not keep and "ct" in s.extra:
+        if by_clause and spec.startswith("edge:") and not keep and "ct" in s.extra and i not in tagged:
             cuts = [pt for _a, _b, _pz, pt in pause_points(s, lg, min_gap)]
             if cuts:
                 parts = [clean_tts_text(x, lg) for x in clause_texts(s.trans or "", cuts)]
@@ -2270,9 +2365,12 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             rep: dict = {}
             try:
                 ra, rt, rf = vox_ref(spec, lg)
+                ec = vox_emo.get(i, "")
+                if ec:   # có chỉ dẫn cảm xúc: chỉ dùng giọng tham chiếu (chế độ đọc tiếp không nhận chỉ dẫn)
+                    ra, rt, rf = None, "", rf or ra
                 tmp = p.with_suffix(".raw.wav")
-                synth_checked(vx, text, tmp, report=rep, watch=vwatch, wkey=spec, ref_audio=ra, ref_text=rt,
-                              reference=rf, cfg=vox_cfg, steps=vox_steps,
+                synth_checked(vx, text, tmp, report=rep, watch=vwatch, wkey=spec + ("|emo" if ec else ""),
+                              ref_audio=ra, ref_text=rt, reference=rf, control=ec, cfg=vox_cfg, steps=vox_steps,
                               on_wait=lambda sec, n=n: progress and progress(
                                   (base + n) / max(1, total_items) * 0.8,
                                   f"VoxCPM2 đang đọc {n + 1}/{len(vox_items)} – câu này đã {sec:.0f} s"))
@@ -2367,7 +2465,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         s = segs[k]
         p = s.extra.pop("_tts", None)
         for key in ("fit", "fit_shift", "fit_over", "fit_need", "fit_have", "dub_at", "dub_pauses", "fit_auto",
-                    "fit_auto_speed", "fit_pause", "fit_talk"):
+                    "fit_auto_speed", "fit_pause", "fit_talk", "fit_slow"):
             s.extra.pop(key, None)
         if not p or not Path(p).exists():
             continue
@@ -2391,7 +2489,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         s = segs[k]
         # tốc độ người dùng đặt cho câu (tab Lồng tiếng / timeline): mặc định là mức TỐI THIỂU (câu vốn phải đọc nhanh
         # hơn để vừa thì giữ tốc độ đó; < 1 = đọc chậm lại nếu còn chỗ); speed_lock (2.1.38) = ĐÚNG tốc độ này
-        items.append({"k": k, "want": want(k), "dur": meta.n(files[k]) / SR * vspeed,
+        # thẻ [nghỉ …] (2.4.15): chỗ lặng chèn thêm tính vào độ dài câu khi xếp
+        items.append({"k": k, "want": want(k), "dur": (meta.n(files[k]) / SR + pausetag.total(tagged.get(k) or [])) * vspeed,
                       "user": float(s.extra.get("speed") or 0), "lock": bool(s.extra.get("speed_lock")),
                       "fixed": bool(s.extra.get("dub_shift")), "mode": s.extra.get("overflow") or "",
                       "pause": float(s.extra.get("pause_before") or 0)})
@@ -2433,8 +2532,13 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             total = tw.fwd(total)
     stats["warp"] = tw.to_list() if tw else []
     back = (lambda v: round(tw.inv(v), 3)) if tw else (lambda v: v)   # giờ giãn -> giây video gốc
+    # câu ngắn đọc chậm lại cho vừa lúc nhân vật nói (2.4.15) – không áp khi "Khớp giọng" (giọng đúng ×T đã đặt)
+    slow = slow_min(settings) if not (warp and warp.get("mode") == "sync") else 1.0
+    if slow < 1.0:
+        mark_talk(items, segs, lang, min_gap if settings.get("dub_pauses", True) else 0.0, tw)
+    stats["slow"] = slow
     lay_args = (total, settings.get("dub_overflow", "smart"), max_speedup,
-                float(settings.get("dub_lead_max", 1.0)), float(settings.get("dub_max_lag", 2.0)))
+                float(settings.get("dub_lead_max", 1.0)), float(settings.get("dub_max_lag", 2.0)), slow)
     plan = plan_layout(items, *lay_args)
     # loại câu "gốc" (2.1.38): tool tự xếp khi CHƯA đặt tốc độ tay -> nút "Tích loại câu" vẫn đúng nhóm sau khi đổi tốc độ
     if any(it["user"] for it in items):
@@ -2453,7 +2557,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         nxt = {k: starts[j + 1][0] for j, (_a, k) in enumerate(starts[:-1])}
         for k, x in plan.items():
             s = segs[k]
-            if x["keep"] is not None or "ct" not in s.extra:
+            if x["keep"] is not None or "ct" not in s.extra or k in tagged:
                 continue
             room = min(nxt.get(k, total), total) - max(GAP, force_gap.get(k, 0.0)) - x["end"]
             spd = _clip_speed(x["speed"])
@@ -2465,7 +2569,19 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                             max_speedup, vspeed, tw.fwd if tw else None)
             if g:
                 pauses[k] = g
-    stats["pauses"] = sum(1 for v in pauses.values() for q in v if q[1] > 0)
+    n_tag = 0
+    for k, tp in tagged.items():    # thẻ [nghỉ …]: lặng đúng giây người dùng ghi, ở chỗ bộ đọc ngắt gần vị trí thẻ nhất
+        x = plan.get(k)
+        if x is None or x["keep"] is not None:
+            continue
+        lg = langs.detect(segs[k].trans or "", lang)
+        g = tag_gaps(pausetag.fractions(segs[k].trans or "", tp, lg), meta.gaps(files[k]), meta.n(files[k]),
+                     _clip_speed(x["speed"]))
+        if g:
+            pauses[k] = g
+            n_tag += len(g)
+    stats["tag_pauses"] = n_tag
+    stats["pauses"] = sum(1 for k, v in pauses.items() if k not in tagged for q in v if q[1] > 0)
     stats["part_fast"] = sum(1 for v in pauses.values() for q in v if len(q) > 2)
 
     def assemble(patch_on: bool):
@@ -2523,6 +2639,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                     s.extra["fit_over"] = round(x["over"], 2)
             s.extra["fit"] = x["fit"]
             s.extra["fit_speed"] = round(x["speed"], 2)
+            if x.get("slow"):       # 2.4.15: giọng ngắn hơn lúc nói -> đã đọc chậm lại cho vừa
+                s.extra["fit_slow"] = 1
             s.extra["fit_need"] = round(durs[k], 2)     # giọng ở ×1 cần bao lâu / chỗ trống của chính câu -> AI rút gọn
             s.extra["fit_have"] = round(x["slot"], 2)
             if tw:      # 2.3.8: thời gian nhân vật nói theo giờ đã giãn (giãn cả đoạn -> nói chậm hơn) cho AI rút gọn
@@ -2570,6 +2688,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     stats["layout"] = layout
     stats["too_long"] = too_long
     stats["level_fixed"] = sum(1 for e in tab if e[3] > 1.0)
+    stats["slowed"] = sum(1 for x in plan.values() if x.get("slow"))
     stats["fit"] = {"ok": sum(1 for x in layout if x[3] == "ok"), "fast": sum(1 for x in layout if x[3] == "fast"),
                     "long": sum(1 for x in layout if x[3] == "long")}
     lay_segs = [segs[int(r[2])].extra for r in layout]

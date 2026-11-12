@@ -30,7 +30,7 @@ def make_kwargs(req: dict) -> tuple[str, dict]:
         text = f"({control}){text}"
     kw: dict = {"cfg_value": float(req.get("cfg") or 2.0), "inference_timesteps": int(req.get("steps") or 10)}
     ref, rtext = req.get("ref_audio"), str(req.get("ref_text") or "").strip()
-    if ref and rtext:       # đọc tiếp file mẫu (phải có cả file lẫn lời)
+    if ref and rtext and not control:   # đọc tiếp file mẫu (cả file lẫn lời); có chỉ dẫn thì không (voxcpm không nhận)
         kw["prompt_wav_path"] = ref
         kw["prompt_text"] = rtext
     reference = req.get("reference") or (ref if ref else None)

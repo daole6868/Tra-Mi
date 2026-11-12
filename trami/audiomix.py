@@ -8,6 +8,9 @@ Các lớp âm thanh (edit["audio"]):
   dub   : giọng lồng tiếng Việt (bật / tắt = edit["dub"]["enabled"])
   bgm   : nhạc thêm (file ở edit["bgm"]["path"]); "duck" = tự nhỏ xuống khi có lời lồng tiếng
   master: âm lượng tổng;  pitch: đổi cao độ giọng gốc;  mute: các lớp đang tắt
+  outside: (2.4.15) đang dùng bản tách mà bật -> CHỈ trong lúc có câu thoại mới thay bằng nhạc nền đã tách (+ giọng
+           lồng); ngoài câu thoại giữ TIẾNG GỐC nguyên vẹn (nhạc / tiếng động không bị "đục" do tách giọng), chuyển
+           dần OUT_RAMP. None = theo Cài đặt "audio_outside"
 """
 from __future__ import annotations
 
@@ -23,7 +26,10 @@ import numpy as np
 SR = 44100
 TRACKS = ("orig", "bg", "voice", "dub", "bgm")
 DEFAULT = {"src": "auto", "orig": 1.0, "bg": 1.0, "voice": 0.0, "songs": True, "dub": 1.0, "bgm": 0.2,
-           "duck": True, "pitch": 1.0, "master": 1.0, "mute": []}
+           "duck": True, "pitch": 1.0, "master": 1.0, "mute": [], "outside": None}
+OUT_PAD = 0.15      # câu thoại nới mỗi bên 0,15 s (mép câu hay hụt tiếng)
+OUT_JOIN = 0.6      # 2 câu cách nhau < 0,6 s -> 1 đoạn (không chuyển qua lại liên tục giữa 2 câu sát nhau)
+OUT_RAMP = 0.25     # chuyển dần tiếng gốc <-> nhạc nền đã tách trong 0,25 s ngay ngoài mép đoạn
 DUCK_DB = -16.0                 # nhạc thêm nhỏ đi khi có lời lồng tiếng (giống sidechaincompress khi xuất)
 DUCK_THR, DUCK_RELEASE = 0.02, 0.4
 
@@ -71,6 +77,51 @@ def gains(a: dict, stems_on: bool, dub_on: bool, has_bgm: bool) -> dict:
     g["dub"] = v("dub") if dub_on else 0.0
     g["bgm"] = v("bgm") if has_bgm else 0.0
     return g
+
+
+def dialog_spans(segs, keep_songs: bool = True, pad: float = OUT_PAD, join: float = OUT_JOIN) -> list[list[float]]:
+    """Các đoạn có câu thoại (giây video gốc) – nơi tiếng gốc được thay bằng nhạc nền đã tách + giọng lồng: giờ câu
+    ∪ đoạn giọng lồng đang phát (dub_at), nới `pad` mỗi bên, gộp đoạn cách nhau < `join`. keep_songs: câu 🎵 giữ giọng
+    hát gốc -> không tính là câu thoại (ngoài đoạn = tiếng gốc có cả giọng hát)."""
+    raw = []
+    for s in segs:
+        if not ((s.text or "").strip() or (s.trans or "").strip()):
+            continue
+        if keep_songs and s.extra.get("song") and not s.extra.get("dub_at"):
+            continue
+        a, b = float(s.start), float(s.end)
+        da = s.extra.get("dub_at")
+        if da and len(da) == 2:
+            a, b = min(a, float(da[0])), max(b, float(da[1]))
+        if b > a:
+            raw.append((max(0.0, a - pad), b + pad))
+    out: list[list[float]] = []
+    for a, b in sorted(raw):
+        if out and a <= out[-1][1] + join:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [[round(a, 3), round(b, 3)] for a, b in out]
+
+
+def inside_mask(t: np.ndarray, spans, ramp: float = OUT_RAMP) -> np.ndarray:
+    """Hệ số 0..1 tại các thời điểm t: 1 trong đoạn câu thoại, 0 xa đoạn, giảm dần trong `ramp` giây ngay ngoài mép
+    (tính bằng tìm nhị phân – phim 2 giờ ~1.500 đoạn vẫn nhanh cho từng khối âm thanh)."""
+    t = np.asarray(t, dtype=np.float64)
+    sp = np.asarray(spans if spans is not None else [], dtype=np.float64).reshape(-1, 2)
+    if not len(sp) or not len(t):
+        return np.zeros(len(t), np.float32)
+    st, en = sp[:, 0], sp[:, 1]
+    i = np.searchsorted(st, t, side="right") - 1
+    ic = np.clip(i, 0, len(st) - 1)
+    inside = (i >= 0) & (t <= en[ic])
+    dprev = np.where(i >= 0, t - en[ic], np.inf)
+    j = np.clip(i + 1, 0, len(st) - 1)
+    dnext = np.where(i + 1 < len(st), st[j] - t, np.inf)
+    d = np.minimum(dprev, dnext)
+    w = np.clip(1.0 - d / max(1e-3, ramp), 0.0, 1.0)
+    w[inside] = 1.0
+    return w.astype(np.float32)
 
 
 def pitch_filter(pitch: float, rate: int = SR) -> str:
@@ -264,6 +315,8 @@ class LiveMix:
         self.dub_rate = 1.0                       # bản lồng ghi theo giờ video đã đổi tốc độ này (2.1.24; 1 = giờ gốc)
         self.skip: set = set()                    # lớp bỏ qua khi trộn (xuất MP3 trộn riêng bản lồng)
         self.warp = None                          # timewarp.Warp: mọi lớp theo giờ giãn (2.1.27) – rate = 1
+        self.dialog = None                        # 2.4.15: đoạn câu thoại [[a, b]] (giờ của bộ trộn) – ngoài đoạn
+        #                                           nghe tiếng gốc thay nhạc nền / giọng gốc đã tách; None = tắt
         self._dub_env = None                      # độ to giọng lồng mỗi 0,05 s (để giảm nhạc thêm)
         self._duck_cs = None                      # (âm lượng lồng tiếng, tổng tích luỹ các khối có lời)
 
@@ -314,8 +367,11 @@ class LiveMix:
         t = (start + np.arange(span)) / SR
         dr = float(self.dub_rate or 1.0)
         natural = abs(dr - 1) > 1e-3        # bản lồng giữ tốc độ tự nhiên: đọc theo giờ của chính nó, không co giãn
+        w_in = inside_mask(t, self.dialog) if self.dialog is not None and "orig" in self.tracks else None
         for name, arr in self.tracks.items():
-            if (self.solo and name != self.solo) or name in self.skip or (natural and name == "dub"):
+            # nghe riêng nhạc nền khi giữ tiếng gốc ngoài câu thoại: tiếng gốc ngoài câu thoại là phần "nền" -> nghe cùng
+            solo_ok = not self.solo or name == self.solo or (name == "orig" and self.solo == "bg" and w_in is not None)
+            if not solo_ok or name in self.skip or (natural and name == "dub"):
                 continue
             gain = self.g.get(name, 0.0)
             if name == "voice":
@@ -343,6 +399,9 @@ class LiveMix:
                 gv = np.full(span, gain, np.float32)
                 for s0, s1 in self.songs:
                     gv[(t >= s0) & (t < s1)] = gs
+            if w_in is not None and name in ("bg", "voice", "orig"):
+                wm = (1.0 - w_in) if name == "orig" else w_in
+                gv = (gv if gv is not None else np.full(span, gain, np.float32)) * wm
             if name in ORIGINAL and self.mute:
                 m = mute_mask(t, self.mute)
                 if m is not None:
