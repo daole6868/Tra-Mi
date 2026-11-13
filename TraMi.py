@@ -11,7 +11,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--vieneu-worker":   # tiến trình riêng đọc giọng VieNeu
         from trami.vieneu_worker import main as vn_main
 
-        vn_main(sys.argv[2] if len(sys.argv) > 2 else "v3turbo")
+        vn_main(sys.argv[2] if len(sys.argv) > 2 else "v3turbo", sys.argv[3] if len(sys.argv) > 3 else "")
     elif len(sys.argv) > 1 and sys.argv[1] == "--omni-worker":   # tiến trình riêng nhái giọng OmniVoice
         from trami.omni_worker import main as omni_main
 

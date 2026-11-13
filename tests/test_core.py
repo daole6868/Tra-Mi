@@ -374,7 +374,7 @@ def test_multi_voice_clone_and_skip_song(monkeypatch, tmp_path):
         return []
 
     monkeypatch.setattr(tts, "vieneu_available", lambda: True)
-    monkeypatch.setattr(tts, "_vieneu", lambda mode: FakeVieneu())
+    monkeypatch.setattr(tts, "_vieneu", lambda mode, *_a: FakeVieneu())
     monkeypatch.setattr(tts, "_edge_all", fake_edge)
     ref = tmp_path / "vocals.wav"
     _fake_audio(ref, 12, 300)
@@ -1187,7 +1187,7 @@ def test_vieneu_short_lines_repeat_guard(monkeypatch, tmp_path):
 
     fake = Fake(1, "Mất điện rồi.")
     monkeypatch.setattr(tts, "vieneu_available", lambda: True)
-    monkeypatch.setattr(tts, "_vieneu", lambda mode: fake)
+    monkeypatch.setattr(tts, "_vieneu", lambda mode, *_a: fake)
     ct = [[1.0, 1.2], [1.2, 1.4], [1.4, 1.6], [1.6, 1.8], [2.8, 3.0], [3.0, 3.2]]
     segs = [Segment(1.0, 3.3, "我们走吧，快点。", "Được thôi, nhanh lên nào các bạn ơi.", "S1", {"ct": [list(x) for x in ct]}),
             Segment(4.0, 6.3, "我们走吧，快点。", "Chúng ta đi thôi nào các bạn, nhanh lên nào các bạn ơi.", "S1",
@@ -4361,7 +4361,7 @@ def test_trend_voices_vieneu(monkeypatch, tmp_path):
     monkeypatch.setattr(tts, "vieneu_available", lambda: True)
     monkeypatch.setattr(tts, "vieneu_presets", lambda mode="v3turbo": presets)
     monkeypatch.setattr(tts, "vieneu_sample_voices", lambda: [])
-    monkeypatch.setattr(tts, "_vieneu", lambda mode: FakeVieneu())
+    monkeypatch.setattr(tts, "_vieneu", lambda mode, *_a: FakeVieneu())
     monkeypatch.setattr(tts, "_edge_all", fake_edge)
     assert any(v["id"] == "vieneu:trend:de_thuong" and v.get("tip") for v in tts.list_voices({}, "vi"))
     segs = [Segment(0, 1.5, "a", "Xin chào cả nhà", "S1"), Segment(2, 3.5, "b", "Hôm nay vui quá", "S2"),
@@ -4443,7 +4443,7 @@ def test_hk_dub_voices_247(monkeypatch, tmp_path):
     monkeypatch.setattr(tts, "vieneu_available", lambda: True)
     monkeypatch.setattr(tts, "vieneu_presets", lambda mode="v3turbo": presets)
     monkeypatch.setattr(tts, "vieneu_sample_voices", lambda: [])
-    monkeypatch.setattr(tts, "_vieneu", lambda mode: FakeVieneu())
+    monkeypatch.setattr(tts, "_vieneu", lambda mode, *_a: FakeVieneu())
     segs = [Segment(0, 3, "a", "Năm ấy, trời vừa vào thu.", "S1"), Segment(4, 7, "b", "Anh à, em biết rồi.", "S2")]
     tts.synthesize_dub(segs, tmp_path / "dub.wav", 9.0, tmp_path / "t",
                        voices={"S1": "vieneu:trend:hk_dan_truyen", "S2": "vieneu:trend:hk_nu_chinh"},
@@ -17165,3 +17165,308 @@ def test_abcd_gui_2415():
         save_settings(keep)
         win.timer.stop()
         win.close()
+
+
+def test_pronounce_dict_2416():
+    """2.4.16 Từ điển đọc: thay nguyên từ (có / không phân biệt hoa thường, dài trước ngắn), khớp bản kéo dài của tiếng
+    cảm thán, tách tiếng cười viết liền; không đụng chữ thường ("ai", "m" sau số, "Good"); CSV vào / ra; tắt = không đổi."""
+    from trami import pronounce as P
+
+    d = P.Dict(P.DEFAULT_ENTRIES)
+    assert d.apply("Hm, thật sao?") == "hừm, thật sao?"
+    assert d.apply("Hmmmm… được rồi.") == "hừm… được rồi."
+    assert d.apply("Mmmm ngon quá") == "ừm ngon quá" and d.apply("Mm.") == "ừm."
+    assert d.apply("Ừmmm để tôi nghĩ.") == "ừm để tôi nghĩ." and d.apply("Ừm.") == "Ừm."
+    assert d.apply("Aaaa! Cứu!") == "a! Cứu!" and d.apply("A, anh đến rồi.") == "A, anh đến rồi."
+    assert d.apply("Hahaha, buồn cười quá") == "ha ha ha, buồn cười quá" and d.apply("HIHI") == "hi hi"
+    assert d.apply("Hahaha", "en") == "Hahaha"                 # luật có sẵn chỉ cho câu tiếng Việt
+    for t in ("chạy 5 m nữa", "Good morning", "Anna, mama", "ha ha"):
+        assert d.apply(t) == t
+    d2 = P.Dict([{"w": "KTX", "r": "ký túc xá", "c": True}, {"w": "AI", "r": "ây ai", "c": True},
+                 {"w": "Lin Fan", "r": "Lâm Phàm", "c": False}, {"w": "API", "r": "ây pi ai", "c": True}])
+    assert d2.apply("Về KTX đi") == "Về ký túc xá đi"
+    assert d2.apply("OpenAI và AI, API") == "OpenAI và ây ai, ây pi ai" and d2.apply("ai đấy?") == "ai đấy?"
+    assert d2.apply("LIN FAN đến rồi") == "Lâm Phàm đến rồi"
+    # chuẩn hoá: dòng trống / trùng / có ngoặc vuông bị bỏ
+    v = P.validate([{"w": "KTX", "r": "ký túc xá"}, {"w": "KTX", "r": "khác"}, {"w": "", "r": "x"},
+                    {"w": "[cười]", "r": "x"}, {"word": "hm", "reading": "hừm", "match_case": "false"}])
+    assert v == [{"w": "KTX", "r": "ký túc xá", "c": True}, {"w": "hm", "r": "hừm", "c": False}]
+    # CSV
+    assert P.from_csv(P.to_csv(v)) == v
+    assert P.from_csv("KTX=ký túc xá\nSGK=sách giáo khoa")[1] == {"w": "SGK", "r": "sách giáo khoa", "c": True}
+    assert P.from_csv("﻿từ;cách đọc\nKTX;ký túc xá\n")[0]["r"] == "ký túc xá"
+    # Cài đặt
+    assert P.entries({}) == P.validate(P.DEFAULT_ENTRIES) and P.entries({"tts_dict": []}) == []
+    assert P.apply("Hm.", {"tts_dict_on": False}) == "Hm." and P.apply("Hm.", {}) == "hừm."
+    segs = [Segment(0, 1, "a", "Hmm, đi thôi"), Segment(1, 2, "b", "Không sao"), Segment(2, 3, "c", "")]
+    assert P.changed_rows(segs, {}) == [0] and P.changed_rows(segs, {"tts_dict_on": False}) == []
+
+
+def test_pausetag_cues_2416():
+    """2.4.16 thẻ âm [cười] / [thở dài] / [hắng giọng] (cả không dấu / tiếng Anh): bản dịch sạch (phụ đề không có thẻ),
+    vị trí nhớ trong extra["tag_pause"]["c"]; tts_text chèn lại thẻ khi được yêu cầu, sửa từng đoạn bằng fix; parse cũ
+    vẫn trả 2 phần."""
+    from trami import pausetag as P
+    from trami.gui.subs_model import C_VI, SubsModel
+
+    c, p, q = P.parse_all("Ha ha [cười] thật sao? [nghỉ 0,5s] Được.")
+    assert c == "Ha ha thật sao? Được." and p == [[15, 0.5]] and q == [[5, "cười"]]
+    assert P.parse("Ha ha [cười] thật sao?") == ("Ha ha thật sao?", [])
+    assert P.parse_all("[Thở Dài] Thôi được rồi.")[2] == [[0, "thở dài"]]
+    assert P.parse_all("Khụ [hang giong] xin lỗi")[2] == [[3, "hắng giọng"]]
+    assert P.parse_all("Mệt quá [sigh]") == ("Mệt quá", [], [[7, "thở dài"]])
+    assert P.parse_all("Cái [gì] thế") == ("Cái [gì] thế", [], [])        # ngoặc lạ giữ nguyên
+    s = Segment(0, 2, "x", "")
+    assert P.set_text(s, "Ha ha [cười] thật sao?")
+    assert s.trans == "Ha ha thật sao?" and P.cues_of(s) == [[5, "cười"]] and P.of(s) == []
+    assert P.shown(s) == "Ha ha [cười] thật sao?"
+    assert P.tts_text(s.trans, [], fix=str.upper, cues=P.cues_of(s)) == "HA HA [cười] THẬT SAO?"
+    assert P.tts_text(s.trans, [], fix=str.upper) == "HA HA THẬT SAO?"
+    assert P.tts_text("Đi đi nào", [[2, 0.5]], cues=[[5, "cười"]]) == "Đi, đi [cười] nào"
+    s.trans = "Thật sao?"                                   # bản dịch đổi -> thẻ hết tác dụng
+    assert P.cues_of(s) == [] and P.shown(s) == "Thật sao?"
+    seg = Segment(1.0, 3.0, "哈哈", "")
+    m = SubsModel([seg])
+    m.setData(m.index(0, C_VI), "Ha ha [cười] thật sao?")
+    assert seg.trans == "Ha ha thật sao?" and m.data(m.index(0, C_VI)) == "Ha ha [cười] thật sao?"
+    assert "cười]" not in st.to_srt([seg], "trans")
+
+
+def test_dub_dictionary_and_cues_2416(monkeypatch, tmp_path):
+    """Lồng tiếng: từ điển đọc đổi chữ đưa cho MỌI bộ đọc (phụ đề giữ chữ gốc), thẻ âm chỉ gửi cho VieNeu; tắt từ điển /
+    sửa từ điển -> mã file giọng đổi (đọc lại); thông báo đếm câu."""
+    from trami import pausetag, pipeline, tts
+
+    vn_sent, edge_sent = [], []
+
+    class FakeVieneu:
+        sr = 48000
+
+        def ensure_started(self, progress=None, cancel=None):
+            pass
+
+        def synth(self, text, out, voice=None, ref_audio=None, **kw):
+            vn_sent.append(text)
+            return tts.write_wav(out, _speech_like(48000), 48000)
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, p, voice in items:
+            edge_sent.append(text)
+            _fake_audio(p, 0.6)
+        return []
+
+    monkeypatch.setattr(tts, "vieneu_available", lambda: True)
+    monkeypatch.setattr(tts, "_vieneu", lambda mode, *_a: FakeVieneu())
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    segs = [Segment(0.5, 2.5, "a", "", "S1"), Segment(3.0, 5.0, "b", "Về KTX đi", "S2"),
+            Segment(5.5, 7.5, "c", "Hmmm, được", "S1")]
+    pausetag.set_text(segs[0], "Hahaha [cười] thật sao?")
+    st_ = {"tts_dict": [{"w": "KTX", "r": "ký túc xá", "c": True}] + list(
+        __import__("trami.pronounce", fromlist=["x"]).DEFAULT_ENTRIES)}
+    stats: dict = {}
+    voices = {"S1": "vieneu:Ngọc Huyền", "S2": "edge:vi-VN-NamMinhNeural"}
+    tts.synthesize_dub(segs, tmp_path / "dub.wav", 8, tmp_path / "t", voices=voices, settings=st_, stats=stats)
+    assert "ha ha ha [cười] thật sao?" in vn_sent                      # VieNeu: luật tiếng cười + thẻ âm
+    assert any(t.startswith("hừm") for t in vn_sent)
+    assert edge_sent == ["Về ký túc xá đi"]                           # Edge: từ điển, không thẻ
+    assert segs[0].trans == "Hahaha thật sao?" and segs[1].trans == "Về KTX đi"   # phụ đề giữ chữ gốc
+    assert stats["pron"] == 3 and stats["cues"] == 1
+    f1 = segs[1].extra["tts_file"]
+    # câu Edge có thẻ âm: Edge không nhận thẻ
+    pausetag.set_text(segs[1], "Về KTX [cười] đi")
+    edge_sent.clear()
+    tts.synthesize_dub(segs, tmp_path / "dub2.wav", 8, tmp_path / "t", voices=voices, settings=st_, stats={})
+    assert edge_sent == [] and segs[1].extra["tts_file"] == f1        # cùng chữ đọc -> dùng lại file cũ
+    # tắt từ điển -> chữ gốc -> file khác (đọc lại)
+    tts.synthesize_dub(segs, tmp_path / "dub3.wav", 8, tmp_path / "t", voices=voices,
+                       settings=dict(st_, tts_dict_on=False), stats={})
+    assert edge_sent == ["Về KTX đi"] and segs[1].extra["tts_file"] != f1
+    msg = pipeline.dub_summary(type("P", (), {"data": {"dub_stats": {"total": 3, "placed": 3, "pron": 3, "cues": 1}}})())
+    assert "từ điển đọc đổi cách đọc 3 câu" in msg and "thẻ âm" in msg
+
+
+def test_vieneu_cpu_device_2416(monkeypatch):
+    """2.4.16 VieNeu chạy CPU: tham số tạo VieNeu theo nơi chạy, lệnh mở tiến trình có thêm nơi chạy, giấu card khỏi tiến
+    trình, đổi nơi chạy -> mở tiến trình mới; không chờ chỗ trống trên card."""
+    from trami import gpu, tts, vieneu_worker as vw
+
+    assert vw.make_kwargs("v3turbo", "cpu_int8") == {"backend": "onnx", "precision": "int8"}
+    assert vw.make_kwargs("v3turbo", "cpu") == {"backend": "onnx", "precision": "fp32"}
+    assert vw.make_kwargs("v3turbo", "") == {} and vw.make_kwargs("v3nano", "cpu_int8") == {}
+    assert tts.vn_device({}) == "auto" and tts.vn_device({"vieneu_device": "cpu_int8"}) == "cpu_int8"
+    assert tts.vn_device({"vieneu_device": "lạ"}) == "auto"
+    stopped = []
+    monkeypatch.setattr(tts.VieneuWorker, "stop", lambda self: stopped.append(self.device))
+    monkeypatch.setattr(tts, "_vn_model", None)
+    w1 = tts._vieneu("v3turbo", "auto")
+    assert w1.device == "" and not w1.on_cpu and "CUDA_VISIBLE_DEVICES" not in w1._extra_env()
+    assert w1._cmd()[-2:] == ["--vieneu-worker", "v3turbo"]
+    assert tts._vieneu("v3turbo") is w1
+    w2 = tts._vieneu("v3turbo", "cpu_int8")
+    assert w2 is not w1 and stopped == [""] and w2.on_cpu and w2._extra_env() == {"CUDA_VISIBLE_DEVICES": ""}
+    assert w2._cmd()[-3:] == ["--vieneu-worker", "v3turbo", "cpu_int8"]
+    w3 = tts._vieneu("v3nano", "cpu_int8")          # Nano luôn CPU, không thêm nơi chạy
+    assert w3.on_cpu and w3._cmd()[-2:] == ["--vieneu-worker", "v3nano"]
+    assert issubclass(tts.OmniWorker, tts.VieneuWorker) and tts.OmniWorker("x")._cmd()[-2:] == ["--omni-worker", "x"]
+    assert gpu.vram_need("dub", {"tts_engine": "vieneu"}) == 2600
+    assert gpu.vram_need("dub", {"tts_engine": "vieneu", "vieneu_device": "cpu"}) == 0
+    monkeypatch.setattr(tts, "_vn_model", None)
+
+
+def test_korva_engine_2416(monkeypatch, tmp_path):
+    """2.4.16 KorvaTTS (giả lập gói korvatts): giọng trong danh sách, tự gán nam / nữ, lồng tiếng đọc bằng CPU trong tiến
+    trình tool (câu tiếng Anh -> Edge cùng nam / nữ), nghe thử, chưa tải mô hình -> đọc bằng Edge + báo; tab Tài liệu."""
+    import types
+
+    from trami import korva, models, pipeline, tts
+
+    assets = tmp_path / "korva"
+    (assets / "onnx").mkdir(parents=True)
+    for f in korva.ONNX_FILES:
+        (assets / "onnx" / f).write_text("x")
+    (assets / "voice_styles").mkdir()
+    for v, _n, _g in korva.VOICES:
+        (assets / "voice_styles" / f"{v}.json").write_text("{}")
+    calls = []
+
+    class FakeTTS:
+        sample_rate = 44100
+
+        def __init__(self, assets_dir=None, device="auto", auto_download=True, num_threads=None):
+            assert Path(assets_dir) == assets and device == "cpu" and auto_download is False
+
+        def synthesize(self, text, voice, lang="vi", total_steps=32, speed=1.05, seed=None):
+            calls.append((text, voice, lang, total_steps, round(speed, 3)))
+            a = _speech_like(44100)
+            return a, len(a) / 44100
+
+    monkeypatch.setitem(sys.modules, "korvatts", types.SimpleNamespace(TTS=FakeTTS))
+    monkeypatch.setattr(korva, "installed", lambda: True)
+    monkeypatch.setattr(korva, "assets_dir", lambda: assets)
+    monkeypatch.setattr(korva, "_tts", None)
+    ids = [v["id"] for v in tts.list_voices({}, "vi")]
+    assert "korva:khanh_vy" in ids and "korva:hoang_nam" in ids
+    assert not any(i.startswith("korva:") for i in (v["id"] for v in tts.list_voices({}, "en")))
+    a = tts.auto_assign(["S1", "S2"], {"tts_engine": "korva"}, {}, {"S1": {"g": "male"}, "S2": {"g": "female"}})
+    assert korva.gender_of(a["S1"]) == "male" and korva.gender_of(a["S2"]) == "female"
+    assert pipeline.dub_default_voice(None, "korva", {}) == "korva:khanh_vy"
+    assert pipeline.voice_label("korva:gia_bao") == "Gia Bảo (KorvaTTS)"
+    edge = []
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for i, text, p, voice in items:
+            edge.append(voice)
+            _fake_audio(p, 0.6)
+        return []
+
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    segs = [Segment(0.5, 2.5, "a", "Xin chào 3 bạn", "S1"), Segment(3.0, 5.0, "b", "Hello everyone, nice day.", "S1")]
+    stats: dict = {}
+    tts.synthesize_dub(segs, tmp_path / "dub.wav", 6, tmp_path / "t", voice="korva:hoang_nam",
+                       settings={"korva_quality": "fast", "korva_speed": 1.1}, stats=stats)
+    assert calls and calls[0][0] == "Xin chào ba bạn" and calls[0][1] == "hoang_nam" and calls[0][3] == 12
+    assert calls[0][4] == 1.1
+    assert not edge and calls[1][0] == "Hello everyone, nice day."     # câu chữ Latin trong phim tiếng Việt: Korva đọc
+    assert segs[0].extra.get("dub_at") and segs[0].extra["voice_used"] == "korva:hoang_nam"
+    tts.synthesize_dub([Segment(0.5, 2.5, "a", "Hello there.", "S1")], tmp_path / "dub_en.wav", 3, tmp_path / "t",
+                       voice="korva:hoang_nam", settings={}, stats={}, lang="en")
+    assert len(edge) == 1 and edge[0].startswith("en-")                 # dịch sang tiếng Anh: Edge cùng nam / nữ
+    edge.clear()
+    out = tts.preview_voice("korva:khanh_vy", "Thử giọng", tmp_path / "pv", {})
+    assert Path(out).exists() and calls[-1][1] == "khanh_vy"
+    # chưa tải mô hình -> đọc bằng Edge, báo trong thông báo
+    monkeypatch.setattr(korva, "assets_dir", lambda: None)
+    stats2: dict = {}
+    edge.clear()
+    tts.synthesize_dub([Segment(0.5, 2.5, "a", "Câu mới", "S1")], tmp_path / "dub2.wav", 3, tmp_path / "t",
+                       voice="korva:hoang_nam", settings={}, stats=stats2)
+    assert edge and stats2["fallback"] == {"korva:hoang_nam": 1}
+    assert models.BY_KEY["korva"].packages == ("korvatts", "onnxruntime")
+    monkeypatch.setattr(korva, "assets_dir", lambda: assets)
+    assert models.is_ready("korva")
+    korva._last = 0.0
+    assert korva.release_idle(1.0) and korva._tts is None
+
+
+def test_pronounce_gui_2416(tmp_path, monkeypatch):
+    """Hộp Từ điển đọc: bảng mặc định, thêm dòng, thử 1 câu, nhập CSV (thay dòng trùng), Lưu -> Cài đặt; về mặc định thì
+    Cài đặt không lưu bảng (None). Tab Lồng tiếng: khối Từ điển đọc, tích câu bị đổi cách đọc, công tắc lưu Cài đặt."""
+    from PySide6.QtWidgets import QApplication
+
+    from trami import pronounce
+    from trami.config import load_settings, save_settings
+    from trami.gui.pronounce_dialog import PronounceDialog
+
+    app = QApplication.instance() or QApplication([])
+    save_settings({"tts_dict": None, "tts_dict_on": True})
+    d = PronounceDialog(None, preview=lambda t: heard.append(t))
+    heard: list = []
+    assert d.items() == pronounce.validate(pronounce.DEFAULT_ENTRIES)
+    d._add_row("KTX", "ký túc xá", True)
+    d.test.setText("Hmmm, về KTX thôi")
+    d._try()
+    assert "hừm, về ký túc xá thôi" in d.result.text()
+    d._listen()
+    assert heard == ["hừm, về ký túc xá thôi"]
+    csvf = tmp_path / "d.csv"
+    csvf.write_text("word,reading,match_case\nKTX,kí túc xá,true\nSGK,sách giáo khoa,true\n", encoding="utf-8")
+    from PySide6.QtWidgets import QFileDialog
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (str(csvf), ""))
+    d._import()
+    items = d.items()
+    assert {"w": "KTX", "r": "kí túc xá", "c": True} in items and len([e for e in items if e["w"] == "KTX"]) == 1
+    d._save()
+    assert load_settings()["tts_dict"] == items and d.saved
+    d2 = PronounceDialog(None)
+    assert d2.items() == items
+    d2._reset()
+    d2._save()
+    assert load_settings()["tts_dict"] is None
+    for w in (d, d2):
+        w.deleteLater()
+    app.processEvents()
+
+
+def test_pron_project_gui_2416(monkeypatch):
+    """Tab Lồng tiếng mục 3 khối Từ điển đọc: dòng tóm tắt đếm câu bị đổi cách đọc, Tích câu bị đổi cách đọc, công tắc lưu
+    Cài đặt; Cài đặt có ô VieNeu chạy trên + KorvaTTS; bộ đọc KorvaTTS trong danh sách bộ đọc."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QDialog
+
+    from trami.config import load_settings, save_settings
+    from trami.gui import common as C, theme
+
+    monkeypatch.setattr(QDialog, "exec", lambda self, *a: 0)
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    app.setStyleSheet(theme.stylesheet())
+    save_settings({"tts_dict": None, "tts_dict_on": True})
+    p = Project.create("prongui")
+    p.segments = [Segment(0, 2, "嗯", "Hmmm, được", "S1"), Segment(3, 4, "好", "Đi thôi", "S1"),
+                  Segment(5, 6, "哈哈", "Hahaha", "S1")]
+    p.save()
+    win = MainWindow()
+    try:
+        win.show()
+        win.open_project(p.id)
+        pp = win.project_page
+        app.processEvents()
+        assert pp.d_pron.isChecked() and "2 câu được đổi cách đọc" in pp.d_pron_note.text()
+        assert pp._pick_pron() == 2 and sorted(pp.model.selected) == [0, 2]
+        pp.d_pron.setChecked(False)
+        app.processEvents()
+        assert load_settings()["tts_dict_on"] is False and "Đang tắt" in pp.d_pron_note.text()
+        assert pp._pick_pron() == 0
+        pp.d_pron.setChecked(True)
+        pp._edit_pron()                                # hộp thoại (exec giả không chặn trong test khác) – không lỗi
+        assert any(k == "korva" for k, _n in C.TTS_ENGINES)
+        sp = win.settings_page if hasattr(win, "settings_page") else None
+        if sp is not None:
+            assert sp.vn_device.count() == 3 and sp.korva_quality.count() == 3
+    finally:
+        win.close()
+        win.deleteLater()
+        app.processEvents()

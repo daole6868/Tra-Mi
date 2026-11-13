@@ -107,6 +107,42 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `tagged` -> độ dài câu khi xếp + tổng giây thẻ, không đọc từng vế (Edge), không chèn nghỉ tự động `plan_pauses`, `tag_gaps`
   (cắt ở chỗ bộ đọc ngắt gần vị trí thẻ nhất – như plan_pauses, lặng = giây / tốc độ đọc) vào bảng gaps của `placed`
   (`insert_pauses`, karaoke theo đó); `stats["tag_pauses"]`.
+- Học từ CIT Voice Studio (Cuongyd196, Apache-2.0 – học ý, 2.4.16) + KorvaTTS:
+  A Từ điển đọc `trami/pronounce.py`: Cài đặt `tts_dict` [{"w" từ, "r" cách đọc, "c" phân biệt hoa thường}] (None = bộ mặc
+  định `DEFAULT_ENTRIES` Hm / Hmm -> hừm, Mm / Ừmm -> ừm, Aaa -> a – chữ VieNeu đọc sai ở 2.4.0) + `tts_dict_on` (mặc định
+  bật). `Dict.apply(text, lang)`: 1 regex khớp NGUYÊN TỪ (dài trước ngắn, `(?<!\w)…(?!\w)`), từ chỉ có nguyên âm + h / m
+  khớp cả bản kéo dài (`_stretchy` + `_collapse`: "Hmmmm" = "Hmm"; từ không có chữ lặp không xét – "5 m" giữ); câu tiếng
+  Việt: tiếng cười viết liền `_LAUGH` "Hahaha" / "Hehe" / "Kaka" -> "ha ha ha". `for_settings` (nhớ theo nội dung),
+  `changed_rows`, `validate`, `to_csv` / `from_csv` (cột từ, cách đọc, true/false; cũng nhận "từ=cách đọc"). Áp ở
+  `tts.synthesize_dub` (`pausetag.tts_text(fix=)` từng đoạn giữa thẻ, cả vế Edge đọc từng vế) + `preview_voice` – mọi bộ
+  đọc; phụ đề / SRT / karaoke giữ chữ gốc; chữ đọc đổi -> mã file giọng đổi -> đọc lại. `stats["pron"]` -> `dub_summary`.
+  GUI tab Lồng tiếng mục 3 khối "Từ điển đọc" (`d_pron` công tắc, `d_pron_note` "N mục · K câu được đổi cách đọc",
+  "Sửa từ điển…" `_edit_pron` -> `gui/pronounce_dialog.PronounceDialog` (bảng Từ / Cách đọc / Hoa thường, Thêm / Xoá / Nhập
+  CSV (thay dòng trùng) / Xuất CSV / Về mặc định, ô Thử + Nghe thử = `_preview_voice(text=, settings=)`), lưu xong đã lồng
+  thì tích sẵn câu bị đổi; "Tích câu bị đổi cách đọc" `_pick_pron`).
+  E Thẻ âm VieNeu: `pausetag.CUES` / `CUE_RE` / `ANY_RE` – "[cười]" / "[thở dài]" / "[hắng giọng]" (+ không dấu, chuckle /
+  sigh / clear throat, "hắc giọng") -> `parse_all` (bản sạch, thẻ nghỉ, thẻ âm), extra["tag_pause"]["c"] [[vị trí, tên]]
+  (`cues_of`, `shown` / `render` hiện cả 2 loại thẻ, `set_text`); `tts_text(text, pauses, fix=, cues=)` chèn lại "[cười]"
+  -> chỉ câu VieNeu v3 Turbo (không Nano, tiếng Việt) – VieNeu 3.8.x đổi thành `<|emotion_k|>` (`phonemize_text_with_emotions`),
+  bộ đọc khác bỏ thẻ; `stats["cues"]`. Lọc nhạc đoạn mẫu nhái giọng: VieNeu 3.8.x `infer(ref_audio=, denoise=True)` mặc
+  định đã tự lọc -> không làm thêm.
+  B VieNeu chạy CPU: Cài đặt `vieneu_device` (`tts.VN_DEVICES` auto = card nếu có / cpu_int8 / cpu) -> `tts.vn_device` ->
+  `_vieneu(mode, device)` (đổi nơi chạy = tiến trình mới), `VieneuWorker.device` / `on_cpu` (`_cmd` thêm tham số, `_extra_env`
+  CUDA_VISIBLE_DEVICES="" ), `vieneu_worker.main(mode, device)` + `make_kwargs` (`Vieneu(mode="v3turbo", backend="onnx",
+  precision="int8" | "fp32")` – ONNX Runtime CPU của chính VieNeu, int8 cần CPU có VNNI; bản cũ TypeError -> báo rõ),
+  không batch_size=1, không tắt bộ đọc khác (`_free_other_tts`), `gpu.vram_need` dub = 0. Cài đặt ô "VieNeu chạy trên".
+  C VieNeu 3.8.4 (10/11/2026: khoá chụp đồ thị CUDA `capture_lock`, kiểm tham số lấy mẫu, 1 bộ lô) – mã tool vẫn khớp
+  (`_batch_engine._fused` / `_graphs`, `max_expected_frames`); requirements-ai `vieneu>=3.8.4`, KHÔNG `vieneu[cuda]` (ghim
+  torch 2.8.0).
+  D Bộ đọc KorvaTTS `trami/korva.py` (dogenthq, Apache-2.0 mã + mô hình, gói `korvatts` 0.1.3 – cài `--no-deps` trong
+  CaiDat_AI_NangCao.bat để không kéo onnxruntime CPU đè onnxruntime-gpu): 99M flow matching ONNX trên CPU, 44,1 kHz, 10 giọng
+  `VOICES` (5 nữ / 5 nam), mã `korva:<giọng>`, chỉ tiếng Việt (câu tiếng khác -> Edge cùng nam / nữ), không nhái giọng. Chạy
+  TRONG tiến trình tool (`KorvaWorker.synth` cùng cách gọi để dùng `synth_checked`; khoá 1 câu / lúc; `TTS(assets_dir=kho HF,
+  device="cpu", auto_download=False)`), `release_idle` (gpu.reap_idle, để không 5 phút -> bỏ). Mô hình `REPO` dogenthq/KorvaTTS
+  `FILES` onnx/* + voice_styles/* (tab Tài liệu "korva", `assets_dir` kiểm đủ `ONNX_FILES`); chưa tải -> đọc bằng Edge +
+  ⚠ trong thông báo. Cài đặt `korva_quality` (`QUALITY` fast 12 / normal 20 / best 32 bước) + `korva_speed` 1,05 (× ô Tốc
+  độ đọc tab Lồng tiếng); mã file thêm "|k<bước>|v<tốc độ>". `common.TTS_ENGINES` "korva", `auto_assign`,
+  `pipeline.dub_default_voice` (khanh_vy) / `voice_label`, Subvideo.spec gom korvatts.
 - `trami/asr_qwen.py` + `qwen_asr_worker.py` (Qwen3-ASR + Qwen3-ForcedAligner, tiến trình riêng `--qwen-asr-worker`,
   transformers ≥ 5.13, mặc định từ 2.0.29; `transcribe_qwen` / `relisten_cuts` / `qwen_decoder` / `align_qwen` nhận
   `engine` "qwen3" | "firered" – `asr_worker(engine)`), FireRedASR2-AED (2.1.0): mã suy luận chép từ FireRedASR2S
@@ -1188,7 +1224,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (362 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (369 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -3295,7 +3331,24 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   xúc gửi "(angry, furious, shouting loudly)Cút…" + chỉ giọng tham chiếu, câu thường vẫn đọc tiếp câu mẫu, đổi cảm xúc chỉ
   đọc lại câu đó; AI giả ghi cảm xúc chỉ nhận nhãn trong danh sách; giao diện offscreen. Sửa kèm test 2.1.23 theo TOK_LINE 75.
   Chưa nghe trên phim thật (VoxCPM2 có theo chỉ dẫn cảm xúc tiếng Việt không chưa biết).
+- 2.4.16: người dùng hỏi 5 repo TTS tiếng Việt (VieNeu-TTS, Valtec V-TTS – CC BY-NC, KorvaTTS, VietTTS – mô hình CC
+  BY-NC + giọng mang tên người nổi tiếng, VietVoice-TTS – giấy phép mô hình chưa rõ) rồi CIT Voice Studio (Cuongyd196,
+  Apache-2.0; đọc mã tải về thư mục riêng, không chạy: lõi là bản chép VieNeu 3.8.4 + từ điển phát âm + thẻ nghỉ + lồng theo
+  SRT đơn giản) -> "làm luôn": A từ điển đọc, B VieNeu chạy CPU (ONNX int8 / fp32), C hướng dẫn + requirements VieNeu 3.8.4,
+  D bộ đọc KorvaTTS, E thẻ âm [cười] / [thở dài] / [hắng giọng] (xem Cấu trúc "Học từ CIT Voice Studio"). Không làm
+  VietVoice-TTS (chưa xem được giấy phép mô hình – huggingface.co bị chặn ở máy thử), V-TTS / VietTTS (cấm kiếm tiền).
+  Thử: từ điển (hoa thường, nguyên từ, kéo dài, tiếng cười, CSV), Edge + VieNeu giả (Edge nhận chữ đã thay, VieNeu nhận thẻ
+  âm, phụ đề giữ chữ gốc, tắt từ điển -> đọc lại), tiến trình VieNeu CPU (lệnh, biến môi trường, đổi nơi chạy), gói korvatts
+  giả (đọc, gán nam / nữ, nghe thử, chưa tải -> Edge), giao diện (hộp từ điển, khối tab Lồng tiếng). Chưa chạy VieNeu ONNX
+  / KorvaTTS thật (huggingface.co bị chặn ở máy thử).
+
 ## Vấn đề đang mở
+- 2.4.16: chờ người dùng chép file + `.venv\Scripts\python -m pip install -U --no-deps "vieneu==3.8.4"` và
+  `.venv\Scripts\python -m pip install --no-deps korvatts` (tắt tool trước): (A) tab Lồng tiếng mục 3 → Từ điển đọc → Sửa
+  từ điển… thêm chữ hay đọc sai, Thử / Nghe thử, Lưu -> Tạo lại giọng các câu đã tích; (E) gõ "[cười]" vào bản dịch 1 câu
+  VieNeu -> Tạo lại giọng câu này (VieNeu có cười thật không); (B) Cài đặt → VieNeu chạy trên "CPU – int8" -> tạo lại vài
+  câu: tốc độ, giọng có méo không (méo -> fp32); (D) tab Tài liệu tải "Giọng đọc – KorvaTTS" (~0,4 GB) -> bộ đọc KorvaTTS ->
+  nghe thử 10 giọng.
 - 2.4.15: chờ người dùng chép file, mở dự án đã tách giọng + lồng tiếng: (A) tab Âm thanh mục 1 "Ngoài câu thoại giữ tiếng
   gốc" bật -> phát cảnh không lời nghe nhạc / tiếng động gốc, chỗ chuyển ở mép câu có lộ không, có lộ lời Trung câu sót phụ
   đề không; (C) tab Lồng tiếng mục 3 "Câu ngắn đọc chậm lại" -> xếp lại, câu ✓ ×0,85–0,99 nghe có lè nhè không; (D) gõ

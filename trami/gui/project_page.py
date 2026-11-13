@@ -3309,6 +3309,20 @@ class ProjectPage(QWidget):
                          on_click=self._goto_voices))
         mix.add(f)
         mix.add(fi)
+        fp = Group("Từ điển đọc", "wand")       # 2.4.16: cách đọc riêng cho bộ đọc, phụ đề giữ chữ gốc
+        self.d_pron = fp.row("Dùng từ điển đọc", Switch(bool(self.settings.get("tts_dict_on", True))),
+                             "Thay chữ bộ đọc hay đọc sai bằng cách đọc bạn ghi (KTX -> ký túc xá, Hm -> hừm, tên riêng…) "
+                             "TRƯỚC khi đọc – phụ đề / SRT vẫn giữ chữ gốc. Tiếng cười viết liền (Hahaha) tự tách "
+                             "\"ha ha ha\". Áp cho mọi bộ đọc")
+        self.d_pron.toggledOn.connect(self._pron_toggled)
+        self.d_pron_note = label("", "muted", wrap=True)
+        fp.add(self.d_pron_note)
+        fp.actions(button("Sửa từ điển…", "wand", "Bảng chữ -> cách đọc, nhập / xuất CSV, thử 1 câu", on_click=self._edit_pron),
+                   button("Tích câu bị đổi cách đọc", "check", "Tích các câu có chữ trong từ điển – bấm 'Tạo lại giọng "
+                          "các câu đã tích' (mục 2) để đọc lại theo cách đọc mới", flat=True, on_click=self._pick_pron))
+        fp.add(label("Thẻ âm trong bản dịch (chỉ VieNeu): [cười], [thở dài], [hắng giọng] – gõ vào bản dịch ở bảng câu, "
+                     "phụ đề không hiện thẻ.", "muted", wrap=True))
+        mix.add(fp)
         g = Group("Khi câu đọc dài hơn chỗ trống", "layers")
         st = self.settings
         self.d_overflow = g.row("Cách xếp", combo(OVERFLOW_MODES, st.get("dub_overflow", "smart")))
@@ -4571,6 +4585,8 @@ class ProjectPage(QWidget):
             iw = st.get("interj_words")
             self.d_interj_words.setText(INTERJ_DEFAULT if iw is None else str(iw))
             self.d_interj_words.setCursorPosition(0)
+            self.d_pron.setChecked(bool(st.get("tts_dict_on", True)))
+            self._pron_note()
             self.a_parallel.setChecked(bool(st.get("auto_parallel", False)))
             self._sync_follow(st)
             self._sync_dsplit(st)
@@ -6653,6 +6669,7 @@ class ProjectPage(QWidget):
             b.clicked.connect(lambda _=False, c=cb, spk=s["speaker"]: self._preview_voice(c.currentData(), spk))
             self.spk_table.setCellWidget(r, 4, wrap(hbox(b)))
         self._update_voice_note()
+        self._pron_note()
 
     def _fill_auto_voices(self, voices: list[dict]):
         """Ô "Giọng lồng" ở tab Tự động = danh sách giọng của mục 2 (+ tự gán nam / nữ)."""
@@ -7125,11 +7142,13 @@ class ProjectPage(QWidget):
 
         save_settings({"dub_skip_songs": on})
 
-    def _preview_voice(self, vid: str, spk: str):
+    def _preview_voice(self, vid: str, spk: str, text: str | None = None, settings: dict | None = None):
         from .. import tts
 
         vid = vid or pipeline.dub_default_voice(None, self.d_engine.currentData() or "edge", self.settings)
-        text = next((s.trans for s in self.model.segs if (s.speaker or "S1") == spk and s.trans), "")
+        if text is None:
+            text = next((s.trans for s in self.model.segs if (s.speaker or "S1") == spk and s.trans), "")
+        settings = settings if settings is not None else self.settings
         out = self.p.work / f"voice_preview_{int(time.time())}"
         ref = None
         if vid in (tts.CLONE, tts.VOX_CLONE):
@@ -7151,7 +7170,7 @@ class ProjectPage(QWidget):
                                       "(giọng Edge nghe thử được ngay)", "warn")
         self.win.toast("Đang tạo giọng nghe thử…")
         lang = pipeline.target_lang(self.p, self.settings)
-        run_async(lambda: tts.preview_voice(vid, text, out, self.settings, ref, lang),
+        run_async(lambda: tts.preview_voice(vid, text, out, settings, ref, lang),
                   lambda path: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))),
                   lambda m: self.win.toast("Không tạo được giọng: " + m, "err"))
 
@@ -7838,6 +7857,68 @@ class ProjectPage(QWidget):
             return
         self._sub_op("delete", rows)
         self._save_segs_now()
+
+    def _pron_note(self):
+        """Dòng tóm tắt khối Từ điển đọc: số mục + số câu bị đổi cách đọc."""
+        from .. import pronounce
+
+        if not hasattr(self, "d_pron_note"):
+            return
+        n = len(pronounce.entries(self.settings))
+        if not pronounce.enabled(self.settings):
+            self.d_pron_note.setText(f"Đang tắt – {n} mục trong từ điển không được dùng.")
+            return
+        rows = pronounce.changed_rows(self.model.segs, self.settings,
+                                      pipeline.target_lang(self.p, self.settings) if self.p else "vi")
+        self.d_pron_note.setText(f"{n} mục" + (f" · {len(rows)} câu được đổi cách đọc" if rows else
+                                              " · chưa câu nào có chữ trong từ điển"))
+
+    def _pron_toggled(self, on: bool):
+        if self.loading:
+            return
+        self._save_setting("tts_dict_on", bool(on))
+        self._pron_note()
+        self.win.toast("Từ điển đọc: " + ("bật" if on else "tắt") + " – câu có chữ trong từ điển đọc lại khi bấm 'Tạo bản "
+                       "lồng tiếng' / 'Tạo lại giọng các câu đã tích'", "ok")
+
+    def _edit_pron(self):
+        from ..config import load_settings
+        from .pronounce_dialog import PronounceDialog
+
+        def listen(text: str):
+            vid = self.d_voice_all.currentData() if hasattr(self, "d_voice_all") else ""
+            if not vid or vid == "@auto":
+                vid = (self.p.data.get("voices") or {}).get("S1", "") if self.p else ""
+            self._preview_voice(vid, "S1", text=text, settings=dict(self.settings, tts_dict_on=False))
+
+        dlg = PronounceDialog(self, preview=listen if self.p else None)
+        if dlg.exec() and dlg.saved:
+            fresh = load_settings()
+            self.settings["tts_dict"] = fresh.get("tts_dict")
+            self._pron_note()
+            if self.p and pipeline.has_dub(self.p):
+                rows = self._pick_pron(quiet=True)
+                if rows:
+                    self.win.toast(f"Đã lưu từ điển – tích sẵn {rows} câu có chữ trong từ điển: bấm 'Tạo lại giọng các "
+                                   "câu đã tích' (mục 2) để đọc lại", "ok")
+                    return
+            self.win.toast("Đã lưu từ điển đọc", "ok")
+
+    def _pick_pron(self, quiet: bool = False) -> int:
+        from .. import pronounce
+
+        rows = pronounce.changed_rows(self.model.segs, self.settings,
+                                      pipeline.target_lang(self.p, self.settings) if self.p else "vi")
+        if not rows:
+            if not quiet:
+                self.win.toast("Không câu nào có chữ trong từ điển đọc" +
+                               ("" if pronounce.enabled(self.settings) else " (từ điển đang tắt)"), "warn")
+            return 0
+        self.model.set_picked(range(len(self.model.segs)), False)
+        self.model.set_picked(rows)
+        if not quiet:
+            self.win.toast(f"Đã tích {len(rows)} câu có chữ trong từ điển đọc", "ok")
+        return len(rows)
 
     def _interj_words_changed(self):
         if self.loading:

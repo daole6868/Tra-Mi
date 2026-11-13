@@ -159,7 +159,16 @@ def _reply(out, obj: dict) -> None:
     out.flush()
 
 
-def main(mode: str = "v3turbo") -> None:
+DEVICE_KW = {"cpu_int8": {"backend": "onnx", "precision": "int8"},   # 2.4.16: VieNeu v3 Turbo chạy ONNX trên CPU
+             "cpu": {"backend": "onnx", "precision": "fp32"}}           # (không chiếm card; int8 cần CPU có VNNI)
+
+
+def make_kwargs(mode: str, device: str = "") -> dict:
+    """Tham số tạo VieNeu theo nơi chạy. v3 Nano vốn chỉ chạy CPU -> không thêm gì."""
+    return dict(DEVICE_KW.get(device or "", {})) if mode == "v3turbo" else {}
+
+
+def main(mode: str = "v3turbo", device: str = "") -> None:
     # stdout dành cho giao thức: chuyển mọi print/log của thư viện sang stderr (hiện trong cửa sổ đen)
     proto = sys.stdout
     if sys.stderr is None:
@@ -192,8 +201,20 @@ def main(mode: str = "v3turbo") -> None:
 
         # 2.3.3: nạp bản ĐÃ CÓ trên máy trước (không hỏi HuggingFace) – kho VieNeu có bản mới thì thư viện tự tải lại
         # ~400 MB mỗi lần mở, mạng chặn -> đứng "0/415319040" mãi
-        with tqdm_progress(prog, 0.0, 1.0, "Đang nạp VieNeu-TTS", download="Đang tải VieNeu-TTS"):
-            tts = load_local_first(lambda: Vieneu(mode=mode), ("vieneu", "moss-audio", "neucodec"), "VieNeu-TTS",
+        kw = make_kwargs(mode, device)
+
+        def make():
+            if not kw:
+                return Vieneu(mode=mode)
+            try:
+                return Vieneu(mode=mode, **kw)
+            except TypeError:     # bản VieNeu cũ chưa có đường ONNX / CPU
+                raise RuntimeError("Bản VieNeu đang cài chưa chạy được bằng CPU (cần vieneu ≥ 3.8) – cập nhật VieNeu "
+                                   "hoặc chọn 'Card đồ hoạ' ở Cài đặt → VieNeu chạy trên") from None
+
+        what = "VieNeu-TTS" + (" (CPU)" if kw else "")
+        with tqdm_progress(prog, 0.0, 1.0, f"Đang nạp {what}", download=f"Đang tải {what}"):
+            tts = load_local_first(make, ("vieneu", "moss-audio", "neucodec"), "VieNeu-TTS",
                                    report=prog, on_stall=stalled)
         sr = int(getattr(tts, "sample_rate", 48000))
     except Exception as e:  # noqa: BLE001
@@ -201,8 +222,11 @@ def main(mode: str = "v3turbo") -> None:
         return
     if mode != "v3nano" and short_caps():
         print("[Subvideo] VieNeu: câu ≤ 4 tiếng dùng trần số khung thấp (chống đọc lặp lời)", file=sys.stderr, flush=True)
-    _reply(proto, {"ready": True, "sr": sr})
-    one_chunk = {"batch_size": 1} if _small_card() else {}
+    if kw:
+        print(f"[Subvideo] VieNeu chạy trên CPU ({kw.get('precision')}) – không dùng card đồ hoạ", file=sys.stderr,
+              flush=True)
+    _reply(proto, {"ready": True, "sr": sr, "device": "cpu" if kw or mode == "v3nano" else "auto"})
+    one_chunk = {"batch_size": 1} if _small_card() and not kw else {}
     base = reserved()     # bộ nhớ card của riêng mô hình (lúc vừa nạp)
     for line in sys.stdin:
         line = line.strip()
@@ -237,4 +261,4 @@ def main(mode: str = "v3turbo") -> None:
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else "v3turbo")
+    main(sys.argv[1] if len(sys.argv) > 1 else "v3turbo", sys.argv[2] if len(sys.argv) > 2 else "")

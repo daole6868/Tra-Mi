@@ -437,6 +437,11 @@ class SubsModel(QAbstractTableModel):
                            "không hiện thẻ"
                 else:
                     tip += "\nGõ [nghỉ 0,5s] giữa câu để giọng lồng dừng đúng chỗ đó"
+                cu = pausetag.cues_of(s)
+                if cu:      # 2.4.16 thẻ âm VieNeu
+                    tip += "\nVieNeu đọc thêm: " + ", ".join(f"[{c}]" for _p, c in cu) + " (bộ đọc khác bỏ qua)"
+                else:
+                    tip += "\nVieNeu: gõ [cười] / [thở dài] / [hắng giọng] để giọng lồng cười / thở dài đúng chỗ đó"
                 if s.extra.get("addr_unsure"):
                     tip += ("\n⚠ Xưng hô chưa chắc: AI không rõ ai nói với ai / nam hay nữ nên đã bỏ đại từ hoặc dùng cặp "
                             "trung tính (cậu – tớ, ngươi – ta). Sửa tay câu này, hoặc sửa nam / nữ người nói (bảng người "

@@ -788,10 +788,11 @@ class SettingsPage(QWidget):
         ("an_model", "anthropic_model", "t"), ("ge_model", "gemini_model", "t"),
         ("ol_base", "ollama_base_url", "t"), ("ol_model", "ollama_model", "t"),
         ("glossary", "glossary", "p"), ("tts_engine", "tts_engine", "c"), ("vn_mode", "vieneu_mode", "c"),
-        ("vn_style", "vieneu_style", "c"), ("level_match", "dub_level_match", "b"),
+        ("vn_style", "vieneu_style", "c"), ("vn_device", "vieneu_device", "c"), ("level_match", "dub_level_match", "b"),
         ("omni_model", "omnivoice_model", "c"), ("hf_token", "hf_token", "t"),
         ("vox_quality", "voxcpm_quality", "c"), ("vox_cfg", "voxcpm_cfg", "f"), ("vox_design", "voxcpm_design", "t"),
         ("vox_gender", "voxcpm_design_gender", "c"), ("vox_seed", "voxcpm_design_seed", "i"),
+        ("korva_quality", "korva_quality", "c"), ("korva_speed", "korva_speed", "f"),
         ("align_words", "align_words", "b"), ("split_spk", "split_speaker_changes", "b"),
         ("dub_fit", "dub_fit", "b"), ("dub_short", "dub_auto_shorten", "b"),
         ("maxspeed", "tts_max_speedup", "f"), ("inpaint", "inpaint_backend", "c"),
@@ -1078,6 +1079,14 @@ class SettingsPage(QWidget):
         self.vn_style = f.row("Kiểu đọc VieNeu", combo([("clear", "Rõ ràng, ổn định (khuyên dùng)"),
                                                         ("natural", "Tự nhiên, nhiều ngữ điệu (mặc định VieNeu)")]),
                               "Rõ ràng: bớt ngẫu nhiên khi đọc -> phát âm rõ, ít đọc nhịu / lạc giọng")
+        from ..tts import VN_DEVICES
+
+        self.vn_device = f.row("VieNeu chạy trên", combo(VN_DEVICES),
+                               "Card đồ hoạ: nhanh nhất. CPU: không chiếm card (để card cho VoxCPM2 / bộ nghe / OCR), chậm "
+                               "hơn – theo số đo của VieNeu ~0,4–0,6 giây cho mỗi giây giọng trên CPU 4–6 nhân. int8 nhanh "
+                               "gấp ~3 lần fp32 nhưng cần CPU đời mới (có VNNI, Intel đời 12 / AMD Ryzen 7000 trở lên) – "
+                               "CPU cũ giọng có thể méo thì chọn fp32. Lần đầu chạy CPU tải thêm bản ONNX của VieNeu. "
+                               "v3 Nano luôn chạy CPU")
         self.level_match = f.row("Cân âm lượng giọng lồng", Switch(),
                                  "Câu nào nhỏ hơn hẳn các câu khác cùng giọng (hoặc giọng nhỏ hơn hẳn giọng khác) "
                                  "được tăng lên cho đều, tối đa +9 dB")
@@ -1104,6 +1113,12 @@ class SettingsPage(QWidget):
                                 "Để “Tự gán giọng nam / nữ” chọn đúng người nói")
         self.vox_seed = f.row("… biến thể", spin(0, 99),
                               "Cùng mô tả nhưng ra người đọc khác: đổi số rồi nghe thử lại")
+        self.korva_quality = f.row("KorvaTTS – chất lượng", combo([("fast", "Nhanh (12 bước)"),
+                                                                  ("normal", "Vừa (20 bước, khuyên dùng)"),
+                                                                  ("best", "Tốt nhất (32 bước, chậm gấp ~1,6)")]),
+                                   "KorvaTTS chạy CPU: nhiều bước hơn = giọng mượt hơn nhưng đọc lâu hơn")
+        self.korva_speed = f.row("KorvaTTS – tốc độ đọc", dspin(0.8, 1.4, 0.05),
+                                 "Tốc độ đọc gốc của KorvaTTS (gói tự đặt 1,05). Ô Tốc độ đọc ở tab Lồng tiếng nhân thêm")
         self.maxspeed = f.row("Tăng tốc giọng tối đa", dspin(1, 2.5, 0.1),
                               "1,3 là vừa tự nhiên; cao hơn nghe vội")
         self.align_words = f.row("Căn thời gian từng chữ", Switch(),

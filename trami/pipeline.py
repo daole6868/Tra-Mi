@@ -4460,6 +4460,10 @@ def dub_default_voice(voice: str | None, engine: str, settings: dict) -> str:
         from .vox_design import PREFIX, PRESETS
 
         return PREFIX + PRESETS[0][0]
+    if engine == "korva":    # KorvaTTS (2.4.16): giọng nữ đầu tiên
+        from .korva import PREFIX as KP, VOICES
+
+        return KP + VOICES[0][0]
     return f"edge:{settings.get('tts_voice')}" if engine == "edge" else "vieneu:"
 
 
@@ -6708,6 +6712,10 @@ def dub_summary(p: Project) -> str:
                      "nói")
     if st.get("tag_pauses"):
         extra.append(f"chèn {st['tag_pauses']} chỗ nghỉ theo thẻ [nghỉ …] trong bản dịch")
+    if st.get("pron"):
+        extra.append(f"từ điển đọc đổi cách đọc {st['pron']} câu")
+    if st.get("cues"):
+        extra.append(f"VieNeu đọc thẻ âm ([cười] / [thở dài] / [hắng giọng]) ở {st['cues']} câu")
     if st.get("emo_asked"):
         extra.append(f"AI ghi cảm xúc {st.get('emo_ai', 0)}/{st['emo_asked']} câu VoxCPM2 (còn lại đọc bình thường)")
     if st.get("emo_err"):
@@ -6748,8 +6756,8 @@ def dub_summary(p: Project) -> str:
     if st.get("auto_voiced"):
         extra.append(f"chưa chọn giọng nên đã tự gán giọng khác nhau cho {st['auto_voiced']} người nói")
     for spec, n in (st.get("fallback") or {}).items():
-        extra.append(f"⚠ {n} câu chọn giọng {voice_label(spec)} nhưng bộ đọc này chưa cài / giọng mẫu đã xoá – "
-                     "đã đọc bằng Hoài My (Edge)")
+        extra.append(f"⚠ {n} câu chọn giọng {voice_label(spec)} nhưng bộ đọc này chưa cài / chưa tải mô hình (tab "
+                     "Tài liệu) / giọng mẫu đã xoá – đã đọc bằng Hoài My (Edge)")
     miss = int(st.get("total", 0)) - int(st.get("placed", 0)) - sum(
         int(st.get(k, 0) or 0) for k in ("songs", "empty", "nodub"))
     if miss > 0:
@@ -6792,6 +6800,10 @@ def voice_label(spec: str) -> str:
         return ((trend_voices.get(spec) or {}).get("name") or spec[len(tts.VN_TREND):]) + " (VieNeu)"
     if spec.startswith("vieneu:"):
         return (spec[7:] or "mặc định") + " (VieNeu)"
+    if spec.startswith("korva:"):
+        from . import korva
+
+        return next((n for v, n, _g in korva.VOICES if v == spec[6:]), spec[6:]) + " (KorvaTTS)"
     if spec.startswith("edge:"):
         import re as _re
 

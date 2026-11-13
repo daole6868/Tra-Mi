@@ -91,6 +91,9 @@ MODELS = [
     ModelInfo("voxcpm", "Giọng đọc – VoxCPM2", "📣 Giọng thuyết minh + giọng tạo theo mô tả + nhái giọng, đọc 30 "
               "tiếng (cần card ≥ 8 GB; chọn bộ đọc VoxCPM2 ở tab Lồng tiếng)", "~5 GB",
               ("voxcpm", "torch", "torchaudio", "einops", "librosa", "pydantic"), "mic"),
+    ModelInfo("korva", "Giọng đọc – KorvaTTS", "10 giọng Việt dựng sẵn (5 nam, 5 nữ), chạy CPU – không chiếm card, đọc "
+              "tự nhiên tiếng Anh xen trong câu Việt (chọn bộ đọc KorvaTTS ở tab Lồng tiếng)", "~0,4 GB",
+              ("korvatts", "onnxruntime"), "volume"),
 ]
 OMNI_TOKENIZER = "eustlb/higgs-audio-v2-tokenizer"
 VOX_FILES = ["*.json", "*.safetensors", "*.txt", "*.model", "*.jinja"]   # bản .pth / .bin chỉ tải khi kho không có safetensors
@@ -372,6 +375,10 @@ def is_ready(key: str, settings: dict | None = None) -> bool:
             return bool(snap) and ((snap / "audio_tokenizer").is_dir() or _hf_cached(OMNI_TOKENIZER))
         if key == "voxcpm":
             return vox_ready((settings or {}).get("voxcpm_model") or "openbmb/VoxCPM2")
+        if key == "korva":
+            from .korva import assets_dir
+
+            return assets_dir() is not None
     except Exception:  # noqa: BLE001 – chưa có / chưa cài gói
         return False
     return False
@@ -491,6 +498,14 @@ def download(key: str, progress: Prog | None = None, cancel=None, settings: dict
         if not vox_ready(repo):
             raise RuntimeError(f"Tải chưa đủ file VoxCPM2 ở {d} (mạng bị ngắt?) – bấm Tải về lần nữa để tải tiếp phần "
                                "còn thiếu.")
+    elif key == "korva":
+        from . import hf_download, korva
+
+        d = hf_download.download(korva.REPO, korva.FILES, token=(settings or {}).get("hf_token") or None,
+                                 progress=progress, cancel=cancel, label=label)
+        if korva.assets_dir() is None:
+            raise RuntimeError(f"Tải chưa đủ file KorvaTTS ở {d} (mạng bị ngắt?) – bấm Tải về lần nữa để tải tiếp phần "
+                               "còn thiếu.")
     elif key in ("qwen_asr", "qwen_align", "hymt"):
         from . import hf_download
         from .asr_qwen import ALIGNER
@@ -520,9 +535,9 @@ def download(key: str, progress: Prog | None = None, cancel=None, settings: dict
         with tqdm_progress(progress, 0.0, 1.0, label, cancel, download=label):
             model_path(download=True)
     elif key == "vieneu":
-        from .tts import _vieneu
+        from .tts import _vieneu, vn_device
 
-        w = _vieneu((settings or {}).get("vieneu_mode", "v3turbo"))
+        w = _vieneu((settings or {}).get("vieneu_mode", "v3turbo"), vn_device(settings))
         w.ensure_started(progress, cancel)
         w.stop()   # chỉ để tải + kiểm tra nạp được; không giữ mô hình trên card (lúc lồng tiếng mở lại)
     if progress:

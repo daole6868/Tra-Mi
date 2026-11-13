@@ -14,6 +14,7 @@ Giọng cho từng người nói (S1, S2…) được ghi dạng chuỗi:
   - "voxd:<mã>"                : VoxCPM2 giọng CHỌN SẴN tạo theo mô tả bằng lời (📣 thuyết minh… – trami/vox_design.py)
   - "vox:<id>"                 : VoxCPM2 nhái giọng từ file ghi âm mẫu trong thư viện giọng mẫu
   - "voxclone"                 : VoxCPM2 nhái giọng nhân vật gốc (mẫu 5–12 giây cắt từ video, không cần lời)
+  - "korva:<giọng>"            : KorvaTTS – 10 giọng Việt dựng sẵn, chạy CPU (trami/korva.py, 2.4.16)
 
 Mỗi câu được đọc rồi tự co giãn tốc độ cho vừa khung thời gian của phụ đề.
 """
@@ -50,7 +51,7 @@ OMNI_CLONE = "omniclone"
 VOX_CLONE = "voxclone"
 VOX_LIB = "vox:"            # VoxCPM2 nhái giọng từ thư viện giọng mẫu
 VOX_PREFIXES = ("vox:", "voxd:", "voxclone:")
-AI_PREFIXES = ("edge:", "vieneu:", "omni:", "omnid:", "vox:", "voxd:")
+AI_PREFIXES = ("edge:", "vieneu:", "omni:", "omnid:", "vox:", "voxd:", "korva:")
 VN_SAMPLE = "vieneu:mau:"   # giọng thu âm sạch đi kèm gói VieNeu
 VN_LIB = "vieneu:lib:"      # giọng mẫu trong thư viện của người dùng
 VN_TREND = "vieneu:trend:"  # giọng theo trend: giọng dựng sẵn + hiệu ứng (trami/trend_voices.py)
@@ -186,6 +187,10 @@ def list_voices(settings: dict | None = None, lang: str = "vi") -> list[dict]:
 
         voices += [{"id": VN_LIB + v["id"], "name": f"🎙 {v['name']} – giọng mẫu của bạn (VieNeu)", "gender": ""}
                    for v in vlib.list_samples()]
+    from . import korva
+
+    if lang == "vi" and korva.available():
+        voices += korva.voices()
     if omnivoice_available():
         from . import voices as vlib
 
@@ -231,6 +236,10 @@ def auto_assign(speakers: list[str], settings: dict | None = None, current: dict
         # giọng mẫu của bạn trước, rồi giọng chọn sẵn (có nam / nữ -> nhân vật nào nhận giọng đó)
         pool = [(f"omni:{v['id']}", "") for v in vlib.list_samples()] + \
             [(v["id"], v["gender"]) for v in omni_design.voices()]
+    elif engine == "korva" and lang == "vi":
+        from . import korva
+
+        pool = [(v["id"], v["gender"]) for v in korva.voices()] or [(korva.PREFIX + v, g) for v, _n, g in korva.VOICES]
     elif engine == "voxcpm" and voxcpm_available():
         from . import vox_design
 
@@ -614,6 +623,7 @@ class VieneuWorker:
 
     def __init__(self, mode: str):
         self.mode = mode
+        self.device = ""      # 2.4.16 VieNeu: "" / "auto" = card nếu có; "cpu_int8" / "cpu" = ONNX trên CPU (không chiếm card)
         self.sr = 48000
         self.proc: subprocess.Popen | None = None
         self.lock = threading.Lock()
@@ -633,14 +643,20 @@ class VieneuWorker:
     # mọi câu sau cũng chậm như treo (GPU vẫn 98 %) -> mở lại tiến trình (trả sạch bộ nhớ card) trước câu sau
 
     def _extra_env(self) -> dict:
-        return {}
+        # VieNeu chạy CPU: giấu card khỏi tiến trình -> PyTorch (nếu thư viện có nạp) không tạo ngữ cảnh CUDA trên card
+        return {"CUDA_VISIBLE_DEVICES": ""} if self.on_cpu else {}
+
+    @property
+    def on_cpu(self) -> bool:
+        return self.device.startswith("cpu") or self.mode == "v3nano"
 
     def _cmd(self) -> list[str]:
         from .config import APP_DIR, FROZEN
 
+        dev = [self.device] if self.device and self.device != "auto" else []
         if FROZEN:
-            return [sys.executable, self.flag, self.mode]
-        return [sys.executable, str(APP_DIR / "TraMi.py"), self.flag, self.mode]
+            return [sys.executable, self.flag, self.mode] + dev
+        return [sys.executable, str(APP_DIR / "TraMi.py"), self.flag, self.mode] + dev
 
     def _start(self, progress=None, cancel=None):
         from .config import APP_DIR, DATA_DIR, no_console
@@ -833,13 +849,25 @@ class VieneuWorker:
                 pass
 
 
-def _vieneu(mode: str) -> VieneuWorker:
+VN_DEVICES = [("auto", "Card đồ hoạ (nhanh nhất)"), ("cpu_int8", "CPU – int8 (nhanh, cần CPU đời mới)"),
+              ("cpu", "CPU – fp32 (chậm hơn, chuẩn nhất)")]
+
+
+def vn_device(settings: dict | None) -> str:
+    """Nơi chạy VieNeu v3 Turbo (Cài đặt "vieneu_device", 2.4.16). v3 Nano luôn chạy CPU."""
+    d = str((settings or {}).get("vieneu_device", "auto") or "auto")
+    return d if d in dict(VN_DEVICES) else "auto"
+
+
+def _vieneu(mode: str, device: str = "auto") -> VieneuWorker:
     global _vn_model
+    device = "" if mode == "v3nano" or device == "auto" else device
     with _vn_lock:
-        if _vn_model is None or _vn_model.mode != mode:
+        if _vn_model is None or _vn_model.mode != mode or _vn_model.device != device:
             if _vn_model is not None:
                 _vn_model.stop()
             _vn_model = VieneuWorker(mode)
+            _vn_model.device = device
             import atexit
 
             atexit.register(_vn_model.stop)
@@ -2010,6 +2038,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     vn_items: list[tuple[int, str, Path, str]] = []
     omni_items: list[tuple[int, str, Path, str]] = []
     vox_items: list[tuple[int, str, Path, str, str]] = []
+    korva_items: list[tuple[int, str, Path, str]] = []
     groups: dict[int, str] = {}   # câu -> mã giọng (cân âm lượng giữa các câu cùng giọng)
     vn_params = vieneu_params(settings)
     samples = {}
@@ -2022,8 +2051,10 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         from . import voices as vlib
 
         samples = {v["id"]: v for v in vlib.list_samples()}
-    from . import trend_voices
+    from . import korva, trend_voices
 
+    korva_ok = korva.ready()        # đã cài gói + đã tải mô hình (chưa -> đọc bằng Edge, báo trong thông báo)
+    korva_steps, korva_speed = korva.opts(settings)
     vn_presets = vieneu_presets(mode) if vieneu_available() else []
     vn_gender = {v["id"]: v.get("gender", "") for v in (vn_presets + vieneu_sample_voices() + trend_voices.voices())} \
         if vieneu_available() else {}
@@ -2034,18 +2065,25 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     joins: dict[int, tuple[Path, list[Path]]] = {}
     queued: set[str] = set()
     n_clause = 0
-    from . import pausetag
+    from . import pausetag, pronounce
 
     from . import emotion
 
     tagged: dict[int, list] = {}      # 2.4.15: câu có thẻ [nghỉ …] -> chèn lặng đúng chỗ, không tự chèn nghỉ khác
     vox_emo: dict[int, str] = {}      # 2.4.15: câu VoxCPM2 có cảm xúc -> chỉ dẫn cho bộ đọc
+    pron = pronounce.for_settings(settings)   # 2.4.16 từ điển đọc: cách đọc riêng cho bộ đọc, phụ đề giữ nguyên
+    n_pron = n_cue = 0
     for i, s in enumerate(segs):
         lg = langs.detect(s.trans or "", lang)
         tp = pausetag.of(s)
+        cues = pausetag.cues_of(s)
+
+        def fix_txt(x: str, lg: str = lg) -> str:
+            return pron.apply(x, lg) if pron else x
         if tp:     # dấu phẩy ở chỗ đặt thẻ -> bộ đọc tự ngắt đúng chỗ đó (dễ cắt chèn lặng)
             tagged[i] = tp
-        t = clean_tts_text(pausetag.tts_text(s.trans or "", tp) if tp else (s.trans or ""), lg)
+        t = clean_tts_text(pausetag.tts_text(s.trans or "", tp, fix=fix_txt), lg)
+        pron_hit = bool(pron) and t != clean_tts_text(pausetag.tts_text(s.trans or "", tp), lg)
         s.extra.pop("_tts", None)
         if not t:
             n_empty += 1
@@ -2062,6 +2100,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             if old and Path(old).exists():
                 s.extra["_tts"] = old
                 continue
+        n_pron += pron_hit
         spec = s.extra.get("voice") or voices.get(s.speaker or "S1") or voice   # giọng riêng của câu (nếu có)
         want = spec
         if spec in (CLONE,) or spec.startswith("vieneu:"):
@@ -2076,12 +2115,14 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             if not vox_ok or (spec.startswith("vox:") and spec[4:] not in samples) or \
                     (spec.startswith("voxd:") and not vox_design.get(spec, settings)):
                 spec = "edge:vi-VN-HoaiMyNeural"   # chưa cài VoxCPM2 / giọng mẫu đã bị xoá / chưa có mô tả
+        if spec.startswith(korva.PREFIX) and not korva_ok:
+            spec = "edge:vi-VN-HoaiMyNeural"       # chưa cài KorvaTTS / chưa tải mô hình (tab Tài liệu)
         if spec != want:   # không đọc được bằng giọng đã chọn -> báo rõ (trước đây đổi im lặng sang Hoài My)
             fallback[want] = fallback.get(want, 0) + 1
         s.extra["voice_used"] = want if spec == want else spec
-        if lg != "vi" and (spec == CLONE or spec.startswith("vieneu:")):
-            # VieNeu chỉ đọc tiếng Việt -> câu tiếng Anh / Thái / Nhật / Hàn đọc bằng Edge cùng nam / nữ
-            g = vn_gender.get(spec) or (genders.get(s.speaker or "S1") or {}).get("g", "")
+        if lg != "vi" and (spec == CLONE or spec.startswith(("vieneu:", korva.PREFIX))):
+            # VieNeu / KorvaTTS chỉ đọc tiếng Việt -> câu tiếng Anh / Thái / Nhật / Hàn đọc bằng Edge cùng nam / nữ
+            g = vn_gender.get(spec) or korva.gender_of(spec) or (genders.get(s.speaker or "S1") or {}).get("g", "")
             spec = langs.edge_voice(lg, g, _spk_index(s.speaker))
             n_lang += 1
         if spec.startswith("edge:"):
@@ -2094,6 +2135,10 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         if spec == VOX_CLONE:
             spec = f"voxclone:{s.speaker or 'S1'}"
         extra = ""
+        if cues and lg == "vi" and mode != "v3nano" and spec.startswith(("vieneu:", "clone:")):
+            # 2.4.16 thẻ âm [cười] / [thở dài] / [hắng giọng]: VieNeu v3 Turbo đọc thành tiếng cười / thở dài đúng chỗ
+            t = pausetag.tts_text(s.trans or "", tp, fix=lambda x: clean_tts_text(fix_txt(x), lg), cues=cues)
+            n_cue += 1
         if not spec.startswith("edge:") and lg == "vi":
             t = spoken_vi(t)   # bộ đọc AI: số đọc thành chữ ("90.000" -> "chín mươi nghìn"); Edge tự đọc số
         if spec.startswith(VOX_PREFIXES):
@@ -2114,6 +2159,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             if ec:
                 extra += "|emo:" + ec
                 vox_emo[i] = ec
+        elif spec.startswith(korva.PREFIX):     # đổi chất lượng / tốc độ KorvaTTS -> đọc lại
+            extra += f"|k{korva_steps}|v{korva_speed:g}"
         elif spec.startswith(("omni:", "omniclone:", "omnid:")):
             extra += "|nofade"          # 2.0.34: bỏ đoạn nhỏ dần 0,1 s cuối câu (mất phụ âm cuối của câu ngắn)
             if lg != "vi":
@@ -2146,6 +2193,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                 omni_items.append((i, text, path, spec, lg))
             elif spec.startswith(VOX_PREFIXES):
                 vox_items.append((i, text, path, spec, lg))
+            elif spec.startswith(korva.PREFIX):
+                korva_items.append((i, text, path, spec))
             elif spec.startswith("edge:"):
                 edge_items.append((i, text, path, spec[5:]))
             else:
@@ -2158,7 +2207,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         if by_clause and spec.startswith("edge:") and not keep and "ct" in s.extra and i not in tagged:
             cuts = [pt for _a, _b, _pz, pt in pause_points(s, lg, min_gap)]
             if cuts:
-                parts = [clean_tts_text(x, lg) for x in clause_texts(s.trans or "", cuts)]
+                parts = [clean_tts_text(fix_txt(x), lg) for x in clause_texts(s.trans or "", cuts)]
                 if len(parts) < 2 or not all(re.search(r"\w", x) for x in parts):
                     parts = []
         if parts:
@@ -2182,7 +2231,9 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             enqueue(t, p)
         s.extra["_tts"] = str(p)
     stats["clauses"] = n_clause
-    total_items = len(edge_items) + len(vn_items) + len(omni_items) + len(vox_items)
+    stats["pron"] = n_pron
+    stats["cues"] = n_cue
+    total_items = len(edge_items) + len(vn_items) + len(omni_items) + len(vox_items) + len(korva_items)
     if progress:
         progress(0.0, f"Đang tạo giọng đọc 0/{total_items}")
     errors: list[str] = []
@@ -2191,8 +2242,9 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     if vn_items:
         if progress:
             progress(0.01, "Đang nạp VieNeu-TTS…")
-        tts = _vieneu(mode)
-        _free_other_tts(tts)
+        tts = _vieneu(mode, vn_device(settings))
+        if not getattr(tts, "on_cpu", False):
+            _free_other_tts(tts)
         tts.ensure_started((lambda x, m: progress(0.01 * x, m)) if progress else None, cancel)
         refs: dict[str, Path | None] = {}
         watch = RateWatch() if mode != "v3nano" else None
@@ -2396,9 +2448,29 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                     vx.note = ""
                 progress((base + n + 1) / max(1, total_items) * 0.8, msg)
 
+    # --- KorvaTTS (offline, CPU – 2.4.16): 10 giọng Việt dựng sẵn, chạy ngay trong tiến trình tool
+    if korva_items:
+        if progress:
+            progress(0.01, "Đang nạp KorvaTTS (CPU)…")
+        kw_ = korva.KorvaWorker(settings)
+        kw_.ensure_started()
+        base = len(vn_items) + len(omni_items) + len(vox_items)
+        rate_k = korva_speed * _speed_tag(rate)
+        for n, (i, text, p, spec) in enumerate(korva_items):
+            if cancel and cancel():
+                raise Cancelled()
+            try:
+                synth_checked(kw_, text, p, voice=spec, steps=korva_steps, speed=min(2.0, max(0.5, rate_k)))
+            except Cancelled:
+                raise
+            except Exception as e:
+                errors.append(f"Câu {i + 1}: {e}")
+            if progress:
+                progress((base + n + 1) / max(1, total_items) * 0.8, f"KorvaTTS đang đọc {n + 1}/{len(korva_items)}")
+
     # --- Edge (online)
     if edge_items:
-        base = len(vn_items) + len(omni_items) + len(vox_items)
+        base = len(vn_items) + len(omni_items) + len(vox_items) + len(korva_items)
         nb = (len(edge_items) + DUB_BATCH - 1) // DUB_BATCH
         for b in range(0, len(edge_items), DUB_BATCH):   # video dài: đọc từng đợt 1000 câu (file đã đọc được giữ)
             if cancel and cancel():
@@ -2748,8 +2820,15 @@ def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,
     """Tạo file nghe thử 1 giọng (lời đọc theo tiếng của câu / tiếng đích `lang`)."""
     settings = settings or {}
     lang = langs.norm(lang)
-    lg = langs.detect(text, lang) if (text or "").strip() else lang
-    text = clean_tts_text(text, lg) or PREVIEW_TEXT[lg]
+    from . import pausetag, pronounce
+
+    raw, tps, cues = pausetag.parse_all(text or "")   # câu thử có thể kèm thẻ [nghỉ …] / [cười] (2.4.16)
+    lg = langs.detect(raw, lang) if raw.strip() else lang
+    pron = pronounce.for_settings(settings)
+    vn_cue = lg == "vi" and settings.get("vieneu_mode", "v3turbo") != "v3nano" and \
+        (spec == CLONE or spec.startswith(("vieneu:", "clone")))
+    text = pausetag.tts_text(raw, tps, fix=lambda x: clean_tts_text(pron.apply(x, lg) if pron else x, lg),
+                             cues=cues if vn_cue else None) or PREVIEW_TEXT[lg]
     if lg != "vi" and (spec == CLONE or spec.startswith(("vieneu:", "clone"))):
         raise ValueError(f"VieNeu chỉ đọc tiếng Việt – {langs.name(lg).lower()} hãy chọn giọng Edge hoặc OmniVoice "
                          "(khi lồng tiếng, câu không phải tiếng Việt tự đọc bằng Edge)")
@@ -2768,6 +2847,16 @@ def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,
                                    "kiểm tra mạng rồi bấm nghe lại") from None
             raise
         return out.with_suffix(".mp3")
+    if spec.startswith("korva:"):
+        from . import korva
+
+        if lg != "vi":
+            raise ValueError("KorvaTTS chỉ đọc tiếng Việt – chọn giọng Edge / OmniVoice cho tiếng khác")
+        if not korva.available():
+            raise ValueError("Chưa cài KorvaTTS: .venv\\Scripts\\python -m pip install --no-deps korvatts")
+        steps, speed = korva.opts(settings)
+        return synth_checked(korva.KorvaWorker(settings), text, out.with_suffix(".wav"), voice=spec, steps=steps,
+                             speed=speed)
     if spec.startswith(("vox:", "voxd:")) or spec == VOX_CLONE:
         from . import vox_design
 
@@ -2813,8 +2902,9 @@ def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,
         ref, rtext = (ref_audio if isinstance(ref_audio, tuple) else (ref_audio, ""))
         return om.synth(text, out.with_suffix(".wav"), ref_audio=str(ref) if ref else None, ref_text=rtext,
                         language=lg)
-    tts = _vieneu(settings.get("vieneu_mode", "v3turbo"))
-    _free_other_tts(tts)
+    tts = _vieneu(settings.get("vieneu_mode", "v3turbo"), vn_device(settings))
+    if not getattr(tts, "on_cpu", False):
+        _free_other_tts(tts)
     prm = vieneu_params(settings)
     if spec == CLONE or spec.startswith("clone"):
         return synth_checked(tts, text, out.with_suffix(".wav"), ref_audio=str(ref_audio) if ref_audio else None,

@@ -18,7 +18,7 @@ PKGS = ("faster_whisper", "ctranslate2", "rapidocr", "omegaconf", "pyclipper", "
         "vieneu", "vieneu_utils", "sea_g2p", "omnivoice", "transformers", "tokenizers", "safetensors", "accelerate",
         "huggingface_hub", "hf_xet", "librosa", "soundfile", "torchaudio", "torchcodec", "kaldi_native_fbank",
         "sentencepiece", "einops", "rotary_embedding_torch", "beartype", "onnx", "pydub", "playwright", "pypinyin",
-        "voxcpm", "pydantic")
+        "voxcpm", "pydantic", "korvatts")
 for pkg in PKGS:
     if importlib.util.find_spec(pkg) is None:
         continue

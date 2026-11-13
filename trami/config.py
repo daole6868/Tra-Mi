@@ -175,6 +175,9 @@ DEFAULT_SETTINGS: dict = {
     "dub_emotion": True,              # VoxCPM2: AI ghi cảm xúc từng câu trước khi đọc (2.4.15)
     "dub_slow_short": True,           # câu giọng ngắn hơn lúc nhân vật nói -> đọc chậm lại cho hết đúng lúc (2.4.15)
     "dub_slow_min": 0.85,             # … chậm nhất ×0,85
+    "vieneu_device": "auto",          # 2.4.16 VieNeu v3 Turbo chạy trên: auto (card nếu có) / cpu_int8 / cpu (ONNX)
+    "tts_dict_on": True,              # 2.4.16 Từ điển đọc: cách đọc riêng cho bộ đọc (phụ đề giữ chữ gốc) – trami/pronounce.py
+    "tts_dict": None,                 # [{"w": từ, "r": cách đọc, "c": phân biệt hoa thường}]; None = bộ mặc định
     "dub_pause_min": 0.3,             # ... khi nhân vật ngừng ít nhất (giây)
     "dub_by_clause": True,            # ... đọc TỪNG VẾ rồi ghép theo giờ gốc (chỗ nghỉ chắc chắn, vế dài đọc nhanh riêng)
     "breath_marks": True,             # chỗ nhân vật ngắt hơi mà câu gốc chưa có dấu câu -> thêm "，" (sau khi nghe / dịch)
@@ -207,6 +210,8 @@ DEFAULT_SETTINGS: dict = {
     "voxcpm_design": "",                      # "Giọng tự mô tả": mô tả giọng (tiếng Anh) -> voxd:custom
     "voxcpm_design_gender": "",               # male / female / "" – cho Tự gán giọng nam / nữ
     "voxcpm_design_seed": 0,                  # đổi số = cùng mô tả nhưng ra người đọc khác
+    "korva_quality": "normal",                # KorvaTTS (2.4.16): fast / normal / best = 12 / 20 / 32 bước mỗi câu
+    "korva_speed": 1.05,                      # KorvaTTS: tốc độ đọc gốc (gói mặc định 1,05)
     # Kỹ năng dịch AI (skills.py) – dùng với mọi công cụ dịch AI
     "translate_skill": "chuan",               # kỹ năng đang dùng ("" = không; "chuan" = Dịch chuẩn – giữ đúng số câu)
     "translate_skills": [],                   # kỹ năng của bạn: [{"id", "name", "text"}]

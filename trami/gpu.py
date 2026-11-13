@@ -232,6 +232,9 @@ def vram_need(kind: str, settings: dict | None = None) -> int:
         return 3000 if eng == "whisper" else 1800
     if kind in ("dub", "redub"):
         eng = st.get("tts_engine", "edge")
+        if eng == "vieneu" and (str(st.get("vieneu_device", "auto")).startswith("cpu") or
+                                st.get("vieneu_mode") == "v3nano"):
+            return 0      # 2.4.16: VieNeu chạy CPU – không cần chờ card
         return {"vieneu": 2600, "omnivoice": 4600, "voxcpm": 5500}.get(eng, 0)
     if kind == "translate":
         return 4600 if st.get("translate_engine") == "hymt" else 0
@@ -296,6 +299,12 @@ def reap_idle(max_idle: float = IDLE_STOP, max_idle_ai: float = IDLE_STOP_AI) ->
     if oe is not None and hasattr(oe, "release_idle"):
         try:
             n += int(oe.release_idle(max_idle_ai))
+        except Exception:  # noqa: BLE001
+            pass
+    kv = sys.modules.get("trami.korva")       # 2.4.16 KorvaTTS (CPU, trong cửa sổ chính) – để không lâu thì bỏ, trả RAM
+    if kv is not None and hasattr(kv, "release_idle"):
+        try:
+            n += int(kv.release_idle(max_idle))
         except Exception:  # noqa: BLE001
             pass
     # mô hình nạp trong cửa sổ chính ngoài việc GPU (Xem thử 1 khung xoá chữ = LaMa, nghe thử…) -> để không quá

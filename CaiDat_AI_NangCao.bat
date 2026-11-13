@@ -52,6 +52,9 @@ if errorlevel 1 (
 REM ---- 2b. VoxCPM2 (doc giong): cai rieng, khong keo theo gradio / datasets / torchcodec
 "%VPY%" -m pip install --no-deps "voxcpm>=2.0.3"
 
+REM ---- 2c. KorvaTTS (doc giong tren CPU): --no-deps de khong cai de onnxruntime-gpu cua OCR
+"%VPY%" -m pip install --no-deps "korvatts>=0.1.3"
+
 REM ---- 3. Thu vien CUDA cho Whisper (faster-whisper) neu co GPU
 if defined TORCH_OK (
   "%VPY%" -m pip install nvidia-cublas-cu12 "nvidia-cudnn-cu12>=9,<10"

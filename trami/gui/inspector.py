@@ -10,7 +10,8 @@ from .. import pausetag
 from . import theme
 
 PAUSE_TAG_TIP = ("Gõ [nghỉ 0,5s] vào giữa câu để giọng lồng dừng đúng chỗ đó (vd: Ta… [nghỉ 0,8s] ta không cố ý.). "
-                 "Phụ đề / SRT không hiện thẻ. [nghỉ] = 0,5 s; tối đa 5 s. Xong bấm Tạo lại giọng câu này")
+                 "Phụ đề / SRT không hiện thẻ. [nghỉ] = 0,5 s; tối đa 5 s. Bộ đọc VieNeu còn nhận [cười], [thở dài], "
+                 "[hắng giọng]. Xong bấm Tạo lại giọng câu này")
 from .player import fmt
 from .subs_model import (C_END, C_NODUB, C_SPK, C_START, C_VI, C_VOICE, C_ZH, FIT_TEXT, VOICE_DEFAULT, SubsModel,
                          fit_tip, spk_color)
