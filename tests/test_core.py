@@ -17397,6 +17397,7 @@ def test_korva_engine_2416(monkeypatch, tmp_path):
 def test_pronounce_gui_2416(tmp_path, monkeypatch):
     """Hộp Từ điển đọc: bảng mặc định, thêm dòng, thử 1 câu, nhập CSV (thay dòng trùng), Lưu -> Cài đặt; về mặc định thì
     Cài đặt không lưu bảng (None). Tab Lồng tiếng: khối Từ điển đọc, tích câu bị đổi cách đọc, công tắc lưu Cài đặt."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")    # chạy riêng 1 test: không có màn hình
     from PySide6.QtWidgets import QApplication
 
     from trami import pronounce
