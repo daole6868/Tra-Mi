@@ -1117,7 +1117,13 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   nhanh / tích sẵn). `pipeline.SHORTEN_MIN_SHARE` 0,5 -> 0,6 (cả tầng 3b khi lồng); `shorten_lines` res["rejected"] ->
   `shorten_fit` ("rejected", shorten_info "rj") -> `shorten_note` / `shorten_line_note` "bỏ bản rút gọn đổi nghĩa / cụt câu";
   tầng 3b `stats["short_rejected"]` -> `dub_summary`. Luật 8 lúc dịch, mục 3 `skills.REVIEW_LEN_RULE`, kỹ năng `dub_short`
-  cùng cách nói (viết lại giữ ý chính, không xoá chữ làm câu cụt).
+  cùng cách nói (viết lại giữ ý chính, không xoá chữ làm câu cụt). 2.4.19 (người dùng: "AI trực tiếp sửa cả câu cho đúng
+  nghĩa, không chỉ bỏ bớt từ – bỏ từ rất hay lỗi"): `SHORTEN_PROMPT(_EN)` = VIẾT LẠI CẢ CÂU / dịch lại thành 1 câu mới
+  ngắn hơn từ nghĩa câu gốc (4 bước: hiểu ý + ngữ khí -> viết câu mới từ đầu theo cách ngắn nhất -> bản dịch cũ chỉ để giữ
+  tên / xưng hô / thuật ngữ -> đọc lại), ví dụ ĐÚNG là câu viết lại ("… tùy tiện đồng ý sao?" -> "Vợ à, sao đồng ý dễ thế
+  được?"), SAI là câu xoá chữ hỏng; `SHORTEN_RETRY_VI/EN` "viết lại cả câu theo cách khác"; `SHORTEN_CHECK_VI/EN` câu viết
+  lại khác chữ vẫn đạt nếu đúng nghĩa, bản chỉ xoá chữ đọc kỹ; `only_deleted(cũ, mới)` (mọi chữ bản mới có trong câu cũ đúng
+  thứ tự) -> `_best_short` có bản viết lại vừa số tiếng thì lấy trước bản chỉ xoá chữ; luật 8 "dịch thành 1 câu ngắn hơn".
 - Rút gọn bản dịch – 2 công tắc, MẶC ĐỊNH TẮT (2.4.10 – tắt = giữ bản dịch sát nghĩa, "bản gốc"): (1) Cài đặt `dub_fit`
   "AI rút gọn bản dịch cho vừa thời gian nói" = rút gọn LÚC DỊCH + ở "AI kiểm tra lại bản dịch": bật -> `Translator`
   (`fit_dub`) gửi ⟪≤N⟫ / ⟪M–N⟫ (`length_marker`) + luật 8 cũ; tắt -> không gửi ký hiệu, `system_prompt(fit=False)` thay khối
@@ -3387,8 +3393,11 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   / ngược nghĩa bị loại, chọn bản trọn nghĩa, hỏi lại kèm lý do, hết bản đạt thì giữ câu cũ, lượt sau gửi bản đầy đủ. Chưa thử
   với AI thật – AI soát có khắt khe quá (loại cả bản người dùng chấp nhận) không cần xem trên phim thật.
 
+- 2.4.19: "hoặc AI trực tiếp sửa cả câu sao cho câu nói phải đúng nghĩa, không được chỉ bỏ bớt từ – bỏ bớt từ rất hay lỗi"
+  -> rút gọn = viết lại cả câu (xem Cấu trúc "AI rút gọn = VIẾT LẠI giữ ý chính", đoạn 2.4.19).
+
 ## Vấn đề đang mở
-- 2.4.18: chờ người dùng chép file, tích vài câu ⚠ → AI rút gọn: câu mới có còn cụt / vô nghĩa không, thông báo có "bỏ bản
+- 2.4.18/19: chờ người dùng chép file, tích vài câu ⚠ → AI rút gọn (giờ AI viết lại cả câu): câu mới có còn cụt / vô nghĩa không, thông báo có "bỏ bản
   rút gọn đổi nghĩa / cụt câu ở N câu" nhiều không (nhiều quá -> AI soát khắt khe, nới lời nhắc soát); câu không rút được thì
   tool đọc nhanh ≤ ×1,2 / tích sẵn như cũ.
 - 2.4.17: chờ người dùng chép file, bấm lại Tạo lại giọng (VoxCPM2): dòng tiến độ phải đổi "Đang nạp VoxCPM2 – đã N s"

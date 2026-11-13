@@ -17678,6 +17678,17 @@ def test_shorten_keep_meaning_2418(monkeypatch):
     assert "GIỮ Ý CHÍNH" in tr.SHORTEN_PROMPT and '"Nhỡ đâu bị lừa thì sao?"' in tr.SHORTEN_PROMPT
     assert "Vợ à, chuyện này có thể sao?" in tr.SHORTEN_CHECK_VI and "xé đôi từ ghép" in tr.SHORTEN_CHECK_VI
     assert "KHÔNG xoá chữ làm câu cụt" in tr.system_prompt("vi", fill=False)
+    # 2.4.19: viết lại CẢ CÂU (không lấy câu cũ xoá bớt chữ); bản viết lại được chọn trước bản chỉ xoá chữ
+    assert "VIẾT LẠI CẢ CÂU" in tr.SHORTEN_PROMPT and "VIẾT LẠI CẢ CÂU" in tr.SHORTEN_RETRY_VI
+    assert "REWRITE THE WHOLE LINE" in tr.SHORTEN_PROMPT_EN and "Câu VIẾT LẠI khác hẳn chữ" in tr.SHORTEN_CHECK_VI
+    assert tr.only_deleted("Ta không muốn tự dưng lại có thêm…", "Ta không muốn có thêm…")
+    assert not tr.only_deleted("Nhỡ đâu lại là một cái hố thì sao?", "Nhỡ đâu bị lừa thì sao?")
+    assert not tr.only_deleted("Đi thôi.", "Đi thôi.")
+    t0 = tr.Translator({"openai_api_key": "x"}, "openai", target="vi")
+    old = "Vợ à, chuyện này có thể tùy tiện đồng ý sao?"
+    assert t0._best_short(["Vợ à, chuyện này đồng ý sao?", "Vợ à, sao đồng ý dễ thế?"], old, 8) == \
+        ("Vợ à, sao đồng ý dễ thế?", True)                            # bản viết lại thắng bản xoá chữ dài hơn
+    assert t0._best_short(["Vợ à, chuyện này đồng ý sao?"], old, 8) == ("Vợ à, chuyện này đồng ý sao?", True)
 
     seen: list = []
 

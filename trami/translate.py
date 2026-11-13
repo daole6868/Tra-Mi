@@ -105,9 +105,9 @@ Luật bắt buộc:
 7. Dòng gốc do máy nghe có thể sai vài chữ đồng âm: hiểu theo ngữ cảnh (luật 2) và dịch đúng ý. Đại từ 他 / 她 / 它 và
    cách gọi (哥, 姐, 弟, 妹…) KHÔNG coi là nghe nhầm – dịch đúng chữ đang ghi (luật 5).
 8. ĐỘ DÀI: ký hiệu ⟪≤N tiếng⟫ cuối dòng là giới hạn để giọng LỒNG TIẾNG vừa thời gian nhân vật nói: cố viết KHÔNG vượt N
-   tiếng (âm tiết). Dài quá thì VIẾT LẠI ngắn hơn mà GIỮ Ý CHÍNH, câu vẫn trọn nghĩa, tự nhiên: bỏ từ phụ (tự dưng, lại,
-   tùy tiện, người, cái…), nói thẳng thay cách nói hình ảnh dài, dùng từ ngắn cùng nghĩa – KHÔNG xoá chữ làm câu cụt / vô
-   nghĩa / sai ngữ pháp, không mất ý chính, phủ định, câu hỏi. Không viết ngắn được mà vẫn trọn nghĩa thì giữ câu trọn
+   tiếng (âm tiết). Dài quá thì dịch thành 1 câu NGẮN HƠN mà GIỮ Ý CHÍNH, câu vẫn trọn nghĩa, tự nhiên (đổi cấu trúc câu,
+   từ / thành ngữ ngắn, nói thẳng thay cách nói hình ảnh dài) – KHÔNG xoá chữ làm câu cụt / vô nghĩa / sai ngữ pháp, không
+   mất ý chính, phủ định, câu hỏi. Không viết ngắn được mà vẫn trọn nghĩa thì giữ câu trọn
    nghĩa (được dài hơn N). Câu dịch ngắn thì để ngắn, KHÔNG thêm từ cho dài ra.{fill}
    KHÔNG chép ký hiệu ⟪⟫ vào bản dịch.
 9. Dòng chắc chắn là LỜI BÀI HÁT (nhạc phim, nhân vật đang hát – câu văn vần, điệp khúc lặp lại, không trả lời / không
@@ -312,9 +312,8 @@ Mandatory rules:
 7. Source lines may contain speech-recognition errors (homophones): use the context (rule 2) to get the intended meaning.
    Pronouns 他 / 她 / 它 and kinship / rank terms are NOT treated as recognition errors – translate what is written (rule 5).
 8. LENGTH: a line ending with ⟪≤N {L['unit_ai']}⟫ is a limit so the DUBBED voice fits the character's speaking time: the
-   translation should NOT exceed N {L['unit_ai']}. If too long, REWRITE it shorter while KEEPING THE MAIN MEANING, still
-   a complete natural sentence: drop minor words, say a long figurative phrase plainly, use shorter words of the same
-   meaning – never delete words so the line becomes clipped / meaningless / ungrammatical, never lose the main point,
+   translation should NOT exceed N {L['unit_ai']}. If too long, translate it as ONE SHORTER sentence KEEPING THE MAIN MEANING,
+   still complete and natural (restructure, short words / idioms, say a long figurative phrase plainly) – never delete words so the line becomes clipped / meaningless / ungrammatical, never lose the main point,
    negation or question. If it cannot be shorter and still complete, keep the complete line (it may exceed N). A short
    translation stays short – never add words to make it longer.{fill_en}
    NEVER copy the ⟪⟫ marker into the translation.
@@ -362,45 +361,49 @@ SYL_PER_SEC = 4.6      # tiếng Việt lồng tiếng tự nhiên ~4–5 tiến
 BUDGET_RE = re.compile(r"\s*⟪[^⟫]*⟫\s*")
 HAN_RE = re.compile(r"[㐀-鿿]")
 
-SHORTEN_PROMPT = """Bạn là biên tập viên lồng tiếng phim. Việc của bạn: VIẾT LẠI câu dịch NGẮN HƠN mà vẫn GIỮ Ý CHÍNH –
-câu mới phải trọn nghĩa, tự nhiên, người nghe hiểu đúng điều nhân vật muốn nói. KHÔNG phải xoá chữ bừa cho đủ số tiếng.
+SHORTEN_PROMPT = """Bạn là biên tập viên lồng tiếng phim. Việc của bạn: VIẾT LẠI CẢ CÂU – dịch lại câu thoại thành 1 câu
+tiếng Việt MỚI, NGẮN HƠN, GIỮ Ý CHÍNH, đúng nghĩa câu gốc. KHÔNG lấy câu dịch cũ rồi xoá bớt chữ: xoá chữ rất dễ làm câu
+cụt, sai nghĩa, vô nghĩa.
 Mỗi mục là 1 câu thoại: câu gốc tiếng Trung ("goc"), bản dịch tiếng Việt hiện tại ("dich", dài "so_tieng" tiếng), có
-thể kèm bản dịch đầy đủ ban đầu ("ban_day_du" – ý chính phải như bản này), số tiếng (âm tiết) nên dùng tối đa
-("toi_da"), thời gian giọng lồng đang đọc ("giong_dang_doc"), thời gian nhân vật nói / chỗ trống ("nhan_vat_noi" /
-"cho_trong") và số tiếng nên bớt ("can_bot") – để giọng lồng đọc xong đúng lúc.
-CÁCH LÀM NGẮN ĐÚNG:
-- Bỏ từ phụ không cần cho ý chính: tự dưng, lại, tùy tiện, thật sự, đã, rồi đấy, người / cái / con (lượng từ)…
-- Nói thẳng thay cách nói hình ảnh / vòng vo dài ("là một cái hố" -> "bị lừa", "không biết phải làm thế nào" -> "chẳng
-  biết làm sao").
-- Dùng từ ngắn cùng nghĩa, câu gọn hơn; bỏ chủ ngữ khi câu trước đã rõ ai nói.
+thể kèm bản dịch đầy đủ ban đầu ("ban_day_du"), số tiếng (âm tiết) nên dùng tối đa ("toi_da"), thời gian giọng lồng đang
+đọc ("giong_dang_doc"), thời gian nhân vật nói / chỗ trống ("nhan_vat_noi" / "cho_trong") và số tiếng nên bớt
+("can_bot") – để giọng lồng đọc xong đúng lúc.
+CÁCH LÀM:
+1. Đọc câu gốc + bản dịch, hiểu nhân vật muốn nói gì và nói thế nào (hỏi, phủ định, mỉa mai, ngạc nhiên, ra lệnh…).
+2. Viết 1 câu MỚI từ đầu nói đúng ý đó theo cách NGẮN NHẤT mà tự nhiên: đổi cấu trúc câu, dùng từ / thành ngữ ngắn, nói
+   thẳng thay cách nói hình ảnh / vòng vo, lược chi tiết phụ không cần cho ý chính, bỏ chủ ngữ khi đã rõ ai nói.
+3. Bản dịch cũ chỉ dùng để giữ đúng tên riêng, xưng hô, thuật ngữ, giọng văn.
+4. Đọc lại câu mới: đứng riêng vẫn trọn nghĩa, đúng ngữ pháp, nghe là hiểu ngay, đúng nghĩa câu gốc.
 PHẢI GIỮ: ý chính (ai, làm gì, với ai / cái gì), phủ định (không / chưa / chẳng / đừng / đâu…), câu hỏi, xưng hô, tên
-riêng, dấu câu cuối. Câu mới đứng riêng vẫn có nghĩa, đúng ngữ pháp.
+riêng, dấu câu cuối.
 KHÔNG ĐƯỢC: câu cụt / vô nghĩa / sai ngữ pháp, xé đôi 1 từ ghép, mất hoặc đổi ý chính, ngược nghĩa, đổi câu hỏi thành câu
 kể, thêm ý, đổi / bỏ tên riêng, đổi xưng hô (không đổi nam / nữ, anh / em, ngôi).
-Ví dụ ĐÚNG:
-- "Vợ à, chuyện này có thể tùy tiện đồng ý sao?" -> "Vợ à, chuyện này có thể sao?"
+Ví dụ ĐÚNG (viết lại cả câu):
+- "Vợ à, chuyện này có thể tùy tiện đồng ý sao?" -> "Vợ à, sao đồng ý dễ thế được?"
 - "Nhỡ đâu lại là một cái hố thì sao?" -> "Nhỡ đâu bị lừa thì sao?"
-- "Ta không muốn tự dưng lại có thêm…" -> "Ta không muốn có thêm…"
-- "Một người sư phụ muốn đoạt xá ta đâu." -> "Một sư phụ muốn đoạt xá ta đâu."
-Ví dụ SAI:
+- "Tôi thật sự không biết bây giờ phải làm thế nào nữa." -> "Giờ tôi chẳng biết làm sao nữa."
+- "Cái tên đó đã lừa hết toàn bộ số tiền của chúng ta rồi!" -> "Hắn lừa sạch tiền của ta rồi!"
+Ví dụ SAI (xoá chữ làm hỏng câu):
 - "Nhỡ đâu lại là một cái hố thì sao?" -> "Nhỡ đâu cái hố?" (cụt, vô nghĩa)
 - "Ta không muốn tự dưng lại có thêm…" -> "Ta muốn có thêm…" (mất "không" – ngược nghĩa)
 - "Một người sư phụ muốn đoạt xá ta đâu." -> "Sư phụ đoạt ta đâu." (xé từ "đoạt xá", vô nghĩa)
 Không viết được tới "toi_da" mà câu vẫn trọn nghĩa -> viết bản NGẮN NHẤT còn trọn nghĩa (được dài hơn "toi_da" – giọng
 lồng sẽ đọc nhanh hơn chút). Câu không thể ngắn hơn mà vẫn trọn nghĩa -> trả lại y nguyên "dich".
-Mỗi mục viết 2 CÁCH NÓI KHÁC NHAU, cả 2 đều trọn nghĩa: "a" = ngắn nhất có thể, "b" = cách nói khác giữ thêm chút ý
-(có thể dài hơn "a" một chút). Chỉ trả về JSON {"1": {"a": "…", "b": "…"}, ...} không kèm giải thích."""
+Mỗi mục viết 2 CÁCH NÓI KHÁC NHAU (2 câu viết lại khác nhau), cả 2 đều trọn nghĩa: "a" = ngắn nhất có thể, "b" = cách nói
+khác giữ thêm chút ý (có thể dài hơn "a" một chút). Chỉ trả về JSON {"1": {"a": "…", "b": "…"}, ...} không kèm giải thích."""
 
 SHORTEN_RETRY_VI = ("CÁC BẢN SAU VẪN DÀI HƠN \"toi_da\" HOẶC BỊ LOẠI – \"ban_vua_viet\" là bản bạn vừa viết (dài "
                     "\"ban_vua_viet_dai\"; có \"ban_vua_viet_bi_loai\" = bản đó bị loại vì mất ý chính / cụt câu, kèm lý do). "
-                    "Thử 1 CÁCH NÓI KHÁC ngắn hơn mà vẫn giữ ý chính, câu trọn nghĩa, tự nhiên, đúng ngữ pháp. Không ngắn "
-                    "hơn được thì trả lại bản ngắn nhất còn trọn nghĩa – KHÔNG xoá chữ làm câu cụt cho đủ số tiếng:")
+                    "VIẾT LẠI CẢ CÂU theo 1 cách nói khác, ngắn hơn, giữ ý chính, đúng nghĩa câu gốc, trọn nghĩa, đúng ngữ "
+                    "pháp. Không ngắn hơn được thì trả lại bản ngắn nhất còn trọn nghĩa – KHÔNG xoá chữ làm câu cụt cho đủ "
+                    "số tiếng:")
 
 SHORTEN_CHECK_VI = """Bạn soát bản RÚT GỌN câu thoại lồng tiếng. Mỗi mục: câu gốc tiếng Trung ("goc"), bản dịch đầy đủ
 ("day_du") và các bản rút gọn ("rut_gon": {"a": …, "b": …}).
 Bản rút gọn ĐẠT khi: (1) giữ ý chính – người nghe vẫn hiểu đúng điều nhân vật muốn nói; giữ phủ định, câu hỏi, xưng hô,
-tên riêng; không thêm ý; (2) là câu trọn nghĩa, tự nhiên, đúng ngữ pháp. Bỏ từ phụ (tự dưng, lại, tùy tiện, người, cái…),
-nói thẳng thay cách nói hình ảnh, dùng từ ngắn cùng nghĩa vẫn ĐẠT.
+tên riêng; không thêm ý; (2) là câu trọn nghĩa, tự nhiên, đúng ngữ pháp. Câu VIẾT LẠI khác hẳn chữ của bản đầy đủ vẫn
+ĐẠT nếu đúng nghĩa câu gốc; bỏ từ phụ (tự dưng, lại, tùy tiện, người, cái…), nói thẳng thay cách nói hình ảnh, dùng từ
+ngắn cùng nghĩa vẫn ĐẠT. Bản chỉ xoá bớt chữ của bản đầy đủ: đọc kỹ xem còn trọn câu, đúng nghĩa không.
 SAI khi: câu cụt / vô nghĩa / sai ngữ pháp, xé đôi từ ghép, mất hoặc đổi ý chính, ngược nghĩa, câu hỏi thành câu kể, đổi
 xưng hô / tên riêng.
 Ví dụ ĐẠT: "Vợ à, chuyện này có thể tùy tiện đồng ý sao?" -> "Vợ à, chuyện này có thể sao?"; "Nhỡ đâu lại là một cái hố
@@ -410,36 +413,40 @@ Ví dụ SAI: "Nhỡ đâu cái hố?" (cụt); "Ta muốn có thêm…" thay ch
 Chỉ trả về JSON {"1": {"a": "dat", "b": "sai: lý do ngắn"}, ...} – mỗi bản "dat" hoặc "sai: …"."""
 
 
-SHORTEN_PROMPT_EN = """You are a film dubbing script editor. Your job: REWRITE the translation SHORTER while KEEPING THE
-MAIN MEANING – the new line must be a complete, natural sentence that says what the character means. NEVER just delete
-words to hit the count. Each item is one line: the source line ("source"), the current {lang} translation
-("translation", "length" {unit} long), maybe the original full translation ("full" – the main meaning must match it),
-the length to aim for at most ("max"), how long the dubbed voice reads now ("voice_now"), how long the character speaks
-/ the room it must fit ("speech" / "room") and how many {unit} to cut ("cut").
-SHORTEN THE RIGHT WAY: drop minor words the main meaning does not need (suddenly, again, really, just, fillers…); say a
-long figurative / roundabout phrase plainly; use shorter words of the same meaning; drop a subject already clear.
+SHORTEN_PROMPT_EN = """You are a film dubbing script editor. Your job: REWRITE THE WHOLE LINE – translate it again as ONE NEW,
+SHORTER {lang} sentence KEEPING THE MAIN MEANING of the source line. Do NOT take the current translation and delete words
+from it: deleting words easily leaves a clipped, wrong or meaningless line. Each item is one line: the source line
+("source"), the current {lang} translation ("translation", "length" {unit} long), maybe the original full translation
+("full"), the length to aim for at most ("max"), how long the dubbed voice reads now ("voice_now"), how long the
+character speaks / the room it must fit ("speech" / "room") and how many {unit} to cut ("cut").
+HOW: 1) understand what the character means and how (question, negation, sarcasm, surprise, order…); 2) write a NEW
+sentence from scratch that says exactly that in the SHORTEST natural way – restructure, use short words / idioms, say a
+figurative or roundabout phrase plainly, leave out minor details the main meaning does not need, drop a subject already
+clear; 3) use the current translation only to keep names, forms of address, terms and tone; 4) re-read it: complete on its
+own, grammatical, understood at once, true to the source.
 MUST KEEP: the main meaning (who, does what, to whom / what), negation, question, forms of address, names, the final
-punctuation. The new line must make sense on its own and be grammatical.
+punctuation.
 NOT ALLOWED: clipped / meaningless / ungrammatical lines, splitting a compound word, losing or changing the main point,
 reversing the meaning, turning a question into a statement, adding ideas, changing / dropping names, changing forms of
 address (never change he / she, older / younger, or the grammatical person).
 If it cannot reach "max" and still be complete -> write the SHORTEST complete version (it may exceed "max" – the voice
 will read a little faster). If it cannot be shorter at all -> return "translation" unchanged.
-Write 2 DIFFERENT phrasings per item, both complete: "a" = as short as possible, "b" = an alternative keeping a bit more
+Write 2 DIFFERENT rewrites per item, both complete: "a" = as short as possible, "b" = an alternative keeping a bit more
 (may be slightly longer than "a"). Return ONLY JSON {{"1": {{"a": "…", "b": "…"}}, ...}} with no explanation."""
 
 SHORTEN_RETRY_EN = ("THESE ARE STILL LONGER THAN \"max\" OR WERE REJECTED – \"your_last\" is the version you just wrote "
                     "(\"your_last_length\" long; \"your_last_rejected\" = it was rejected for losing the main meaning / "
-                    "sounding clipped, with the reason). Try ONE DIFFERENT shorter phrasing that keeps the main meaning and "
-                    "is complete, natural and grammatical. If it cannot be shorter, return the shortest complete version – "
-                    "do NOT delete words so the line becomes clipped just to hit the count:")
+                    "sounding clipped, with the reason). REWRITE THE WHOLE LINE a different way – shorter, keeping the main "
+                    "meaning of the source, complete and grammatical. If it cannot be shorter, return the shortest complete "
+                    "version – do NOT delete words so the line becomes clipped just to hit the count:")
 
 SHORTEN_CHECK_EN = """You check SHORTENED dubbing lines. Each item: the source line ("source"), the full translation
 ("full") and the shortened versions ("short": {{"a": …, "b": …}}), in {lang}.
 A shortened version PASSES when: (1) it keeps the main meaning – the listener still understands what the character means;
 negation, question, forms of address and names are kept; nothing is added; (2) it is a complete, natural, grammatical
-sentence. Dropping minor words, saying a figurative phrase plainly or using shorter words of the same meaning still
-PASSES. It FAILS when it is clipped / meaningless / ungrammatical, splits a compound word, loses or changes the main
+sentence. A REWRITE worded quite differently from the full translation still PASSES if it is true to the source;
+dropping minor words, saying a figurative phrase plainly or using shorter words of the same meaning still PASSES. A
+version that only deletes words from the full translation: check carefully that it is still complete and correct. It FAILS when it is clipped / meaningless / ungrammatical, splits a compound word, loses or changes the main
 point, reverses the meaning, turns a question into a statement, or changes forms of address / names.
 Return ONLY JSON {{"1": {{"a": "pass", "b": "fail: short reason"}}, ...}} – each version "pass" or "fail: …"."""
 
@@ -587,6 +594,16 @@ def meaning_lost(full: str, new: str, lang: str = "vi") -> str:
     if na >= 6 and nb < SHORT_KEEP_MIN * na:
         return f"ngắn còn {nb}/{na} tiếng – chắc chắn mất ý"
     return ""
+
+
+def only_deleted(old: str, new: str) -> bool:
+    """Bản mới chỉ là câu cũ bị xoá bớt chữ (mọi chữ của bản mới có trong câu cũ, đúng thứ tự) – không viết lại."""
+    a = [w.lower() for w in _words(old)]
+    b = [w.lower() for w in _words(new)]
+    if not b or len(b) >= len(a):
+        return False
+    it = iter(a)
+    return all(w in it for w in b)
 
 
 def budget_for(duration: float, speedup: float = 1.0, lang: str = "vi") -> int:
@@ -1798,12 +1815,14 @@ class Translator:
         return out
 
     def _best_short(self, cands: list[str], tr: str, n: int) -> tuple[str | None, bool]:
-        """Chọn bản rút gọn: bản DÀI NHẤT mà không quá n (giữ nhiều ý nhất) -> (bản, True); không bản nào đủ ngắn ->
-        bản ngắn nhất mà vẫn ngắn hơn bản cũ -> (bản, False); không có -> (None, False)."""
+        """Chọn bản rút gọn: bản DÀI NHẤT mà không quá n (giữ nhiều ý nhất) -> (bản, True) – 2.4.19: có bản VIẾT LẠI thì
+        lấy bản viết lại trước bản chỉ xoá bớt chữ của câu cũ (`only_deleted`, dễ cụt / sai nghĩa); không bản nào đủ
+        ngắn -> bản ngắn nhất mà vẫn ngắn hơn bản cũ -> (bản, False); không có -> (None, False)."""
         cur = syllables(tr, self.target)
         ok = [c for c in cands if syllables(c, self.target) < cur]
         fit = [c for c in ok if syllables(c, self.target) <= n]
         if fit:
+            fit = [c for c in fit if not only_deleted(tr, c)] or fit
             return max(fit, key=lambda c: syllables(c, self.target)), True
         if ok:
             return min(ok, key=lambda c: syllables(c, self.target)), False
