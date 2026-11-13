@@ -69,10 +69,14 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   đọc AI (VieNeu / OmniVoice / VoxCPM2, cả nghe thử) tắt bộ đọc AI khác đang để không (card 8 GB). Tab Tài liệu
   `models` "voxcpm" (`vox_ready`: config + audiovae + model.safetensors | pytorch_model.bin; tải `VOX_FILES` rồi .pth /
   .bin nếu thiếu; ModelScope `OpenBMB/VoxCPM2` trong `hf_download.MS_MIRRORS`). gpu: `_workers` có `_vox_model`,
-  `vram_need` voxcpm 6500 MB (2.4.17; README VoxCPM2 ghi ~8 GB), `WORKER_FLAGS` / `WORKER_CLASS`. `common.TTS_ENGINES`
+  `vram_need` voxcpm 6500 MB (2.4.17; README VoxCPM2 ghi ~8 GB), `WORKER_FLAGS` / `WORKER_CLASS`. Trả card (2.4.20):
+  `gpu.release_vox(settings, force)` (`_is_vox`, `_vox_keep` = Cài đặt `voxcpm_keep` mặc định TẮT – ô "VoxCPM2 – giữ trên
+  card" Cài đặt) -> `after_job` việc lồng tiếng / auto tắt tiến trình VoxCPM2 ngay (trước giữ 5 phút), `pipeline.auto` tắt
+  sau bước lồng (trước khi xuất), `reap_idle` nghe thử xong để không `IDLE_STOP_VOX` 60 s -> tắt; đang đọc dở (khoá bận) để
+  nguyên; bật giữ -> như bộ đọc khác (trim + 5 phút). `common.TTS_ENGINES`
   "voxcpm" (điện thoại tự có). Card 8 GB (2.4.17): `voxcpm_worker.cap_kv` (trước khi nạp bọc `MiniCPMModel.setup_cache`
   -> bộ nhớ KV ≤ `KV_LEN` 4096 vị trí, thư viện dựng 8192 lên card trước cả trọng số; `shrink_kv` dự phòng sau khi nạp;
-  câu quá dài "KV cache is full" -> `restore_kv` cỡ gốc + đọc lại), `_load_beat` (nạp mà thư viện im 5 s -> "Đang nạp
+  câu quá dài "KV cache is full" -> `restore_kv` cỡ gốc + đọc lại, đọc xong câu đó thu nhỏ lại `KV_LEN` – 2.4.20), `_load_beat` (nạp mà thư viện im 5 s -> "Đang nạp
   VoxCPM2 – đã N s · card đã nhận x GB", ≤ 15 phút), `Steps` thay `voxcpm.model.voxcpm2.tqdm` của vòng sinh (`hook_steps`)
   -> tin {"beat": {i, n, t}} ≤ 2 lần / s + `VramSpill` khi sau 20 s 1 giây giọng mất > `SPILL_RTF` 8 giây (không biết độ
   dài bước: < 0,5 bước / s) VÀ card còn < 4 % -> {"error", "vram": true}; `max_len_for` (giới hạn bước mỗi câu = (0,5 s ×
@@ -975,7 +979,9 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `_use_ocr_text`; "Dùng bản AI" = `_use_alt`); bảng câu `subs_model.AI_FIX_COLOR` #7ED9B0 / `NOVOICE_COLOR` #C9A6FF,
   `ocr_ai_tip` (3 bản + `KIND_LABEL`), `ENGINE_LABEL["ai"]`; Cài đặt 3 ô; `autoflow.summary` "(lọc màu chữ, AI đọc lại +
   nghe câu không đạt)"; `C.OCR_LISTEN_HELP` viết lại.
-- Lọc từ (2.1.33, `trami/wordfilter.py`): `parse` (ô cách nhau bằng , ， ; | xuống dòng), `find` (khớp theo NFKC + chữ
+- Lọc từ (2.1.33, `trami/wordfilter.py`; NGUYÊN TỪ 2.4.20 – cụm đầu / cuối là chữ cái / số tiếng viết cách từ `_SPACED`
+  (Latin + tiếng Việt, Hy Lạp, Kirin, Hàn, dấu kết hợp) thì `_compile` thêm `(?<![…])` / `(?![…])`: "á" bắt "Á!" không bắt
+  "cách"; chữ Hán / Nhật / Thái vẫn khớp ở bất kỳ đâu, "AGC" vẫn khớp sau chữ Hán "@黄AGC"): `parse` (ô cách nhau bằng , ， ; | xuống dòng), `find` (khớp theo NFKC + chữ
   thường, bỏ khoảng trắng – "＠ 纵横" = "@纵横"; cụm dài trước), `strip_words` (bỏ cụm, `_tidy`: khoảng trắng đôi, 2 dấu ngắt
   liền nhau, cụm ở đầu / cuối câu thì bỏ dấu ngắt còn sót), `empty` (không còn chữ / số), `plan` (xem trước, không sửa),
   `apply` (chữ gốc + bản dịch nếu có cụm; câu gốc rỗng -> bỏ câu; giờ giữ nguyên; `ct` bỏ đúng mốc chữ đã xoá – `_ct_after`;
@@ -1151,7 +1157,15 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - Từ cảm thán (2.0.96): `voicefix.interj_list` (Cài đặt `interj_words`, chưa đặt -> `INTERJ_DEFAULT`; chỉ đúng từ / cụm
   trong danh sách), `lone_interjection(text, phrases)`, `strip_interjections` (bỏ vế toàn cảm thán trong câu dài);
   `pipeline.drop_interjections` / `trim_interjections` (`trans_before_interj`) / `restore_interjections`; `dub` đầy đủ
-  (`dub_drop_interj`, `interj_inline`), nút "Lọc câu cảm thán" (đọc lại giọng câu bị bỏ vế).
+  (`dub_drop_interj`, `interj_inline`), nút "Lọc câu cảm thán" (đọc lại giọng câu bị bỏ vế). 2.4.20: danh sách từ = nút
+  "Danh sách từ (N)…" `d_interj_btn` + dòng xem nhanh `d_interj_sum` (thay ô 1 dòng dài `d_interj_words`; `_interj_text`,
+  `_interj_label`, `_interj_words_changed(txt)`) -> `gui/interj_dialog.InterjWordsDialog` (bảng Từ / cụm + Số câu đang có từ
+  đó `pipeline.interj_counts`, ô Thêm nhiều từ cách dấu phẩy, Xoá dòng / Về mặc định / Xoá hết / Sắp xếp, Lưu / "Lưu && lọc…"
+  `then_filter`); nút "Lọc từ" (khối Từ cảm thán mục 3) + "Lọc câu cảm thán" (mục 2) = `_interj_filter`: `pipeline.
+  interj_scan` (xem trước, không sửa: {row, kind drop | trim, old, new, kept}) -> `InterjFilterDialog` (☑ / # / Giờ / Bản
+  dịch hiện tại / Sau khi lọc / Việc; tích sẵn – câu bỏ vế theo "Bỏ vế cảm thán…", câu đã khôi phục trước đây bỏ tích; Tích
+  hết / Bỏ hết / Chỉ câu xoá cả câu / Chỉ câu bỏ vế; bấm đúp = nghe) -> `_drop_interj_now(rows, trim_rows)` chỉ câu đã tích
+  (`trim_interjections(rows=)` – cả câu đã khôi phục), 1 bước Ctrl+Z.
 - `trami/voicecheck.py` – lọc câu nghe nhầm theo cao độ giọng (hồ sơ p10–p90 từng người nói từ câu chắc là lời thoại, ± `pitch_tol` nửa cung) -> `extra["noise"]` + thu đầu / cuối câu thừa; `pipeline.check_voices` / bước 2e của `recognize`.
 - Xuất chia đoạn (`video._render_chunked`, `export_chunks`): phim ≥ 10 phút, đoạn 60 s theo lưới khung xuất, mã đoạn = lệnh +
   file nguồn + dòng ASS trong đoạn -> `work/render/chunks/c_<mã>.mp4`, âm thanh trộn 1 lần `a_<mã>.m4a`, concat `-c copy`.
@@ -1259,7 +1273,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (371 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (375 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -3396,7 +3410,18 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
 - 2.4.19: "hoặc AI trực tiếp sửa cả câu sao cho câu nói phải đúng nghĩa, không được chỉ bỏ bớt từ – bỏ bớt từ rất hay lỗi"
   -> rút gọn = viết lại cả câu (xem Cấu trúc "AI rút gọn = VIẾT LẠI giữ ý chính", đoạn 2.4.19).
 
+- 2.4.20: ảnh Lọc từ "á" hiện 641/2465 câu kể cả "Đề xuất cách đây không lâu sao?" + "phải lọc đúng chữ chỉ có Á, á; thêm
+  nút Lọc từ ở khối Từ cảm thán: thêm từ rồi quét lại, hiện bảng tích để xem trước khi xoá; ô từ cảm thán hàng dài không
+  thấy gì -> thành nút có bảng" -> Lọc từ khớp nguyên từ cho chữ Latin / tiếng Việt (chữ Hán như cũ), bảng từ cảm thán (đếm
+  số câu mỗi từ), bảng xem trước Lọc từ cảm thán (cả nút "Lọc câu cảm thán" mục 2 – trước xoá luôn không hỏi). Kèm: ảnh Task
+  Manager card 6,8 / 8 GB sau khi VoxCPM2 đọc xong "vẫn liên tục chiếm GPU không nhả" -> do thiết kế giữ bộ đọc 5 phút cho
+  'Tạo lại giọng' (VoxCPM2 ~7 GB = gần hết card) -> đọc xong tắt ngay, nghe thử 1 phút, ô "VoxCPM2 – giữ trên card" (tắt);
+  bộ nhớ KV dựng lại cỡ 8192 cho câu dài giờ thu nhỏ lại sau câu đó.
+
 ## Vấn đề đang mở
+- 2.4.20: chờ người dùng chép file, tạo lại vài câu VoxCPM2 -> xong việc mở Task Manager: bộ nhớ GPU chuyên dụng phải về ~0,5–1
+  GB (còn cao -> trang Việc đang làm → "Xem ai đang chiếm card", gửi ảnh); tab Phụ đề Lọc từ "á" chỉ còn câu có chữ Á đứng
+  riêng; tab Lồng tiếng mục 3 → "Danh sách từ (N)…" thêm từ → "Lưu & lọc…" → bỏ tích câu muốn giữ → Áp dụng.
 - 2.4.18/19: chờ người dùng chép file, tích vài câu ⚠ → AI rút gọn (giờ AI viết lại cả câu): câu mới có còn cụt / vô nghĩa không, thông báo có "bỏ bản
   rút gọn đổi nghĩa / cụt câu ở N câu" nhiều không (nhiều quá -> AI soát khắt khe, nới lời nhắc soát); câu không rút được thì
   tool đọc nhanh ≤ ×1,2 / tích sẵn như cũ.

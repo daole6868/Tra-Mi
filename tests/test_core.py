@@ -7563,9 +7563,9 @@ def test_gui_snap_follow_pauses_interj(sample_video, monkeypatch):
         assert sub == [("snap", "Căn mép câu theo giọng"), ("realign", "Căn mép câu theo giọng")]
         pp.settings["asr_edge_fix"] = True
         # từ cảm thán: danh sách người dùng -> Lọc
-        pp.d_interj_words.setText("hả, ừm")
-        pp._interj_words_changed()
+        pp._interj_words_changed("hả, ừm")
         assert load_settings()["interj_words"] == "hả, ừm"
+        assert pp.d_interj_btn.text() == "Danh sách từ (2)…" and pp.d_interj_sum.text() == "hả, ừm"
         monkeypatch.setattr(pipeline, "has_dub", lambda pr: False)
         pp._drop_interj_now()
         assert [s.trans for s in pp.model.segs] == ["Xin chào"]
@@ -8781,7 +8781,9 @@ def test_address_follows_source_234():
     t.llm = LLM()
     t.shorten([("哥，你走吧。", "Anh à, anh đi đi nhé.", 3)])
     t.match_clauses([(["哥", "你走吧"], "Anh đi đi.")])
-    assert len(seen) == 2 and all(x.endswith(tr.address_tail("vi")) for x in seen)
+    # 2.4.18: bản "Anh đi." còn < 40 % số tiếng -> bị loại, hỏi lại 1 lần (lượt hỏi lại cũng kèm câu nhắc)
+    seen[:] = [x for x in seen if x != tr.SHORTEN_CHECK_VI]
+    assert len(seen) == 3 and all(x.endswith(tr.address_tail("vi")) for x in seen)
     seen.clear()
     skills.review_lines(LLM(), [(0, "他来了。", "Cô ta tới rồi.", 6)], "", "", "tiếng Trung", "tiếng Việt", "tiếng",
                         genre="- x")
@@ -17759,3 +17761,188 @@ def test_shorten_keep_meaning_2418(monkeypatch):
         assert pipeline.SHORTEN_MIN_SHARE == 0.6
     finally:
         p.delete()
+
+
+# ------------------------------------------------------------------ 2.4.20: lọc từ nguyên từ + bảng từ cảm thán
+
+def test_word_filter_whole_word_2420():
+    """Lọc từ "á" chỉ bắt chữ á ĐỨNG RIÊNG ("Á!", "Á, đi thôi") – không bắt chữ á trong "cách", "lá"; chữ Hán vẫn khớp
+    ở bất kỳ đâu ("@纵横" dính câu, "AGC" sau chữ Hán); cụm nhiều chữ cũng nguyên từ ("ha ha" không ở giữa "hahaha")."""
+    from trami import wordfilter as wf
+
+    lines = ["Đề xuất cách đây không lâu sao?", "Á!", "Á, đi thôi", "lá cây", "Ông à, Á", "AI á?"]
+    assert [t for t in lines if wf.contains(t, ["á"])] == ["Á!", "Á, đi thôi", "Ông à, Á", "AI á?"]
+    assert wf.strip_words("Đề xuất cách đây không lâu sao?", ["á"])[1] == 0
+    assert wf.strip_words("Á, đi thôi", ["á"])[0] == "đi thôi"
+    assert wf.empty(wf.strip_words("Á!", ["á"])[0])
+    assert wf.contains("@纵横排队一个个的进来", ["@纵横"]) and wf.contains("仅剩下两块元石@黄AGC", ["AGC"])
+    assert not wf.contains("XAGC", ["AGC"]) and not wf.contains("5m", ["m"]) and wf.contains("3 m", ["m"])
+    assert wf.contains("ha ha ha", ["ha ha"]) and not wf.contains("hahaha", ["ha ha"])
+    assert wf.contains("仅剩下两块元石@黄AGC", ["@*"])
+    segs = [Segment(0, 1, "啊", "Á!"), Segment(1, 2, "提议", "Đề xuất cách đây không lâu sao?")]
+    for x in segs:
+        x.text = x.trans
+    assert wf.plan(segs, ["á"]) == {"changed": [], "dropped": [0], "hits": 2}      # chữ gốc + bản dịch
+
+
+def test_interj_scan_counts_2420():
+    """Xem trước Lọc từ cảm thán: câu chỉ có cảm thán -> "drop", câu dài có vế cảm thán -> "trim" (kèm lời sau khi lọc),
+    câu đã khôi phục ghi "kept"; không sửa gì. trim_interjections(rows=) chỉ sửa câu đã tích (kể cả câu đã khôi phục).
+    interj_counts đếm câu có từ đứng riêng ("á" không đếm "cách")."""
+    from trami import pipeline
+
+    st = {"interj_words": "á, ừm, ha ha"}
+    segs = [Segment(0, 1, "啊", "Á!"), Segment(1, 2, "嗯", "Ừm, đúng vậy."), Segment(2, 3, "提议", "Cách đây không lâu."),
+            Segment(3, 4, "哈哈", "Ha ha!", "S1", {"keep_interj": True}), Segment(4, 5, "", "")]
+    got = pipeline.interj_scan(segs, st)
+    assert [(x["row"], x["kind"], x["new"], x["kept"]) for x in got] == [
+        (0, "drop", "", False), (1, "trim", "Đúng vậy.", False), (3, "drop", "", True)]
+    assert segs[1].trans == "Ừm, đúng vậy."                                   # chỉ xem trước
+    assert pipeline.interj_scan(segs, {"interj_words": ""}) == []
+    segs[2].trans = "Ừm, cách đây không lâu."
+    segs[2].extra["keep_interj"] = True
+    assert pipeline.trim_interjections(segs, st, rows=[2]) == [2]
+    assert segs[2].trans == "Cách đây không lâu." and segs[1].trans == "Ừm, đúng vậy."
+    from trami.voicefix import interj_list
+
+    cnt = pipeline.interj_counts(segs, interj_list(st))
+    assert cnt[("á",)] == 1 and cnt[("ừm",)] == 1 and cnt[("ha", "ha")] == 1
+
+
+def test_gui_interj_dialogs_2420(sample_video, monkeypatch):
+    """Giao diện 2.4.20: nút "Danh sách từ (N)…" mở bảng từ cảm thán (thêm nhiều từ 1 lần, đếm số câu, Lưu -> Cài đặt;
+    Lưu & lọc -> mở luôn bảng xem trước); nút "Lọc từ" mở bảng xem trước tích sẵn, chỉ lọc câu còn tích."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication, QDialog
+
+    from trami import pipeline
+    from trami.config import load_settings, save_settings
+    from trami.gui import interj_dialog as idlg
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    keys = ("interj_words", "interj_inline")
+    old = load_settings()
+    win = MainWindow()
+    try:
+        p = Project.create("cam than 2420")
+        p.data["info"] = {"duration": 10}
+        p.segments = [Segment(0, 1, "啊", "Á!", "S1"), Segment(1, 2, "嗯", "Ừm, xin chào.", "S1"),
+                      Segment(2, 3, "提议", "Đề xuất cách đây không lâu sao?", "S1"), Segment(3, 4, "嗯", "Ừm.", "S1")]
+        p.save()
+        win.open_project(p.id)
+        app.processEvents()
+        pp = win.project_page
+        monkeypatch.setattr(pipeline, "has_dub", lambda pr: False)
+        # bảng từ: thêm nhiều từ 1 lần, đếm câu, trùng thì không thêm
+        d = idlg.InterjWordsDialog(pp, "ừm", pp.model.segs)
+        d.add_edit.setText("á, Ừm, ha ha")
+        d._add_typed()
+        assert d.words() == ["ừm", "á", "ha ha"] and d.text() == "ừm, á, ha ha"
+        assert [d.table.item(i, 1).text() for i in range(3)] == ["2", "1", "0"]
+        d.table.selectRow(2)
+        d._del_rows()
+        assert d.text() == "ừm, á"
+        d._sort()
+        assert d.words() == ["ừm", "á"]
+        d.close()
+        # nút trên tab: Lưu & lọc -> lưu Cài đặt rồi mở bảng xem trước (Huỷ -> không đổi gì)
+        seen = []
+
+        def fake_words_exec(self):
+            self.add_edit.setText("á")
+            self._add_typed()
+            self._save(True)
+            return 1
+
+        def fake_filter_exec(self):
+            seen.append([(x["row"], x["kind"]) for x in self.items])
+            return 0
+        monkeypatch.setattr(idlg.InterjWordsDialog, "exec", fake_words_exec)
+        monkeypatch.setattr(idlg.InterjFilterDialog, "exec", fake_filter_exec)
+        pp._interj_words_changed("ừm")
+        pp._edit_interj()
+        assert load_settings()["interj_words"] == "ừm, á" and pp.d_interj_btn.text() == "Danh sách từ (2)…"
+        assert seen == [[(0, "drop"), (1, "trim"), (3, "drop")]]           # "cách" không bị bắt
+        assert len(pp.model.segs) == 4
+        # Lọc từ: bỏ tích câu 4 ("Ừm.") -> chỉ xoá "Á!" + bỏ vế "Ừm," của câu 2
+
+        def pick_exec(self):
+            assert self.table.item(2, 0).checkState() == Qt.Checked
+            self.table.item(2, 0).setCheckState(Qt.Unchecked)
+            assert self.chosen() == ([0], [1]) and self.b_apply.text() == "Áp dụng 2 câu"
+            return QDialog.Accepted
+        monkeypatch.setattr(idlg.InterjFilterDialog, "exec", pick_exec)
+        pp._interj_filter()
+        assert [s.trans for s in pp.model.segs] == ["Xin chào.", "Đề xuất cách đây không lâu sao?", "Ừm."]
+        assert [d["trans"] for d in Project(p.id).data["interj_removed"]] == ["Á!"]
+        pp.undo()
+        assert [s.trans for s in pp.model.segs][:2] == ["Á!", "Ừm, xin chào."]
+    finally:
+        save_settings({k: old.get(k) for k in keys if k in old} | {k: None for k in keys if k not in old})
+        win.close()
+        app.processEvents()
+
+
+def test_voxcpm_release_after_dub_2420(monkeypatch):
+    """2.4.20: VoxCPM2 (~7 GB = gần hết card 8 GB) đọc xong việc lồng tiếng thì tắt tiến trình ngay (trước giữ 5 phút);
+    nghe thử xong để không 1 phút là tắt; Cài đặt voxcpm_keep bật -> giữ như bộ đọc khác; VieNeu vẫn giữ; đang đọc dở thì
+    không tắt."""
+    import threading
+    import time as _t
+
+    from trami import asr_qwen, gpu, translate, tts
+
+    class FakeProc:
+        def __init__(self):
+            self.alive = True
+
+        def poll(self):
+            return None if self.alive else 0
+
+    class VoxWorker:
+        def __init__(self):
+            self.proc, self.lock, self.last_used, self.stopped, self.trims = FakeProc(), threading.Lock(), _t.time(), 0, 0
+
+        def stop(self):
+            self.stopped += 1
+            self.proc.alive = False
+
+        def trim(self):
+            self.trims += 1
+            return True
+
+    class VieneuWorker(VoxWorker):
+        pass
+
+    vox, vn = VoxWorker(), VieneuWorker()
+    monkeypatch.setattr(tts, "_vox_model", vox)
+    monkeypatch.setattr(tts, "_vn_model", vn)
+    monkeypatch.setattr(tts, "_omni_model", None)
+    monkeypatch.setattr(asr_qwen, "_worker", None)
+    monkeypatch.setattr(translate, "_hymt", None)
+    keep = {"v": False}
+    monkeypatch.setattr(gpu, "_vox_keep", lambda settings=None: keep["v"] if settings is None
+                        else bool(settings.get("voxcpm_keep")))
+    gpu.after_job("recognize")                      # việc không đọc giọng -> không đụng bộ đọc
+    assert vox.stopped == 0
+    gpu.after_job("redub")
+    assert vox.stopped == 1 and vn.stopped == 0 and vn.trims == 1
+    # đang đọc dở (khoá bận) -> không tắt
+    vox.proc.alive = True
+    with vox.lock:
+        assert not gpu.release_vox()
+    # nghe thử: để không 1 phút -> tắt; VieNeu 1 phút vẫn giữ
+    vox.last_used = vn.last_used = _t.time() - gpu.IDLE_STOP_VOX - 5
+    assert gpu.reap_idle() == 1 and vox.stopped == 2 and vn.stopped == 0
+    # chọn giữ trên card -> sau việc lồng tiếng chỉ trả bộ nhớ đệm, để không 5 phút mới tắt
+    keep["v"] = True
+    vox.proc.alive, vox.last_used = True, _t.time()
+    gpu.after_job("dub")
+    assert vox.stopped == 2 and vox.trims >= 1
+    vox.last_used = _t.time() - gpu.IDLE_STOP_VOX - 5
+    assert gpu.reap_idle() == 0 and vox.stopped == 2
+    assert gpu.release_vox({"voxcpm_keep": True}) is False and gpu.release_vox(force=True) and vox.stopped == 3

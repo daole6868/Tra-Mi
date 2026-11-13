@@ -4856,21 +4856,71 @@ def drop_interjections(p: Project, segs: list | None = None, settings: dict | No
     return len(gone)
 
 
-def trim_interjections(segs: list, settings: dict | None = None) -> list[int]:
+def trim_interjections(segs: list, settings: dict | None = None, rows=None) -> list[int]:
     """Bỏ các vế CHỈ gồm từ cảm thán trong danh sách khỏi câu dịch có lời thật ("Ừm, đúng vậy." -> "Đúng vậy.");
-    bản cũ cất ở extra["trans_before_interj"] (Khôi phục câu cảm thán đưa lại). Trả số thứ tự các câu đã sửa lời."""
+    bản cũ cất ở extra["trans_before_interj"] (Khôi phục câu cảm thán đưa lại). Trả số thứ tự các câu đã sửa lời.
+    rows (2.4.20 – hộp Lọc từ cảm thán): chỉ các câu đó, kể cả câu đã khôi phục trước đây (người dùng đã tích)."""
     from .voicefix import interj_list, strip_interjections
 
     phrases = interj_list(settings if settings is not None else load_settings())
+    only = None if rows is None else set(rows)
     out = []
     for i, s in enumerate(segs):
-        if not s.trans.strip() or s.extra.get("keep_interj"):
+        if only is not None and i not in only:
+            continue
+        if not s.trans.strip() or (only is None and s.extra.get("keep_interj")):
             continue
         new = strip_interjections(s.trans, phrases)
         if new != s.trans and new.strip():
             s.extra.setdefault("trans_before_interj", s.trans)
             s.trans = new
             out.append(i)
+    return out
+
+
+def interj_scan(segs: list, settings: dict | None = None) -> list[dict]:
+    """Xem trước "Lọc từ cảm thán" (2.4.20, không sửa gì): mỗi câu dịch có từ / cụm trong danh sách ĐỨNG RIÊNG ->
+    {"row", "kind": "drop" (câu chỉ có cảm thán – xoá cả câu) | "trim" (bỏ vế cảm thán trong câu dài), "old", "new"
+    ("" khi xoá), "kept": câu đã khôi phục trước đây (lồng tiếng tự động không lọc lại)}. Chỉ đúng từ trong danh sách,
+    khớp nguyên từ ("á" không đụng "cách")."""
+    from .voicefix import interj_list, lone_interjection, strip_interjections
+
+    phrases = interj_list(settings if settings is not None else load_settings())
+    out: list[dict] = []
+    if not phrases:
+        return out
+    for i, s in enumerate(segs):
+        t = (s.trans or "").strip()
+        if not t:
+            continue
+        kept = bool(s.extra.get("keep_interj"))
+        if lone_interjection(t, phrases):
+            out.append({"row": i, "kind": "drop", "old": s.trans, "new": "", "kept": kept})
+            continue
+        new = strip_interjections(s.trans, phrases)
+        if new != s.trans and new.strip():
+            out.append({"row": i, "kind": "trim", "old": s.trans, "new": new, "kept": kept})
+    return out
+
+
+def interj_counts(segs: list, phrases: list[tuple[str, ...]]) -> dict[tuple, int]:
+    """Số câu dịch có từ / cụm cảm thán đứng riêng thành từ (bảng "Danh sách từ cảm thán", 2.4.20)."""
+    import unicodedata
+
+    from .voicefix import _WORD
+
+    out = {ph: 0 for ph in phrases}
+    if not phrases:
+        return out
+    for s in segs:
+        t = unicodedata.normalize("NFC", s.trans or "").lower()
+        if not t.strip():
+            continue
+        ws = _WORD.findall(t)
+        for ph in phrases:
+            n = len(ph)
+            if any(tuple(ws[k:k + n]) == ph for k in range(len(ws) - n + 1)):
+                out[ph] += 1
     return out
 
 
@@ -7359,6 +7409,9 @@ def _auto_steps(p: Project, opts: dict, steps: list, weights: dict, total_w: flo
                     separate_audio(p, settings, _sub(pr, 0, 0.4), cancel)
                     pr = _sub(pr, 0.4, 1.0)
             dub(p, opts.get("voice"), opts.get("rate"), settings, pr, cancel, opts.get("tts_engine"))
+            from . import gpu
+
+            gpu.release_vox(settings)   # 2.4.20: đọc xong -> trả card trước bước xuất (VoxCPM2 ~7 GB)
         elif st == "export":
             ed = p.edit
             if opts.get("hardsub_mode"):

@@ -792,6 +792,7 @@ class SettingsPage(QWidget):
         ("omni_model", "omnivoice_model", "c"), ("hf_token", "hf_token", "t"),
         ("vox_quality", "voxcpm_quality", "c"), ("vox_cfg", "voxcpm_cfg", "f"), ("vox_design", "voxcpm_design", "t"),
         ("vox_gender", "voxcpm_design_gender", "c"), ("vox_seed", "voxcpm_design_seed", "i"),
+        ("vox_keep", "voxcpm_keep", "b"),
         ("korva_quality", "korva_quality", "c"), ("korva_speed", "korva_speed", "f"),
         ("align_words", "align_words", "b"), ("split_spk", "split_speaker_changes", "b"),
         ("dub_fit", "dub_fit", "b"), ("dub_short", "dub_auto_shorten", "b"),
@@ -1113,6 +1114,10 @@ class SettingsPage(QWidget):
                                 "Để “Tự gán giọng nam / nữ” chọn đúng người nói")
         self.vox_seed = f.row("… biến thể", spin(0, 99),
                               "Cùng mô tả nhưng ra người đọc khác: đổi số rồi nghe thử lại")
+        self.vox_keep = f.row("VoxCPM2 – giữ trên card", Switch(),
+                              "Tắt (nên dùng với card 8 GB): đọc xong là VoxCPM2 tự tắt, trả ~7 GB card ngay (nghe thử: "
+                              "sau 1 phút không dùng); lần đọc sau nạp lại ~vài chục giây. Bật: giữ mô hình trên card 5 "
+                              "phút để 'Tạo lại giọng' vài câu khỏi nạp lại – card gần đầy suốt lúc đó")
         self.korva_quality = f.row("KorvaTTS – chất lượng", combo([("fast", "Nhanh (12 bước)"),
                                                                   ("normal", "Vừa (20 bước, khuyên dùng)"),
                                                                   ("best", "Tốt nhất (32 bước, chậm gấp ~1,6)")]),

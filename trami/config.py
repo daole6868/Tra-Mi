@@ -210,6 +210,7 @@ DEFAULT_SETTINGS: dict = {
     "voxcpm_design": "",                      # "Giọng tự mô tả": mô tả giọng (tiếng Anh) -> voxd:custom
     "voxcpm_design_gender": "",               # male / female / "" – cho Tự gán giọng nam / nữ
     "voxcpm_design_seed": 0,                  # đổi số = cùng mô tả nhưng ra người đọc khác
+    "voxcpm_keep": False,                     # 2.4.20: giữ VoxCPM2 trên card sau khi đọc xong (tắt = trả ~7 GB card ngay)
     "korva_quality": "normal",                # KorvaTTS (2.4.16): fast / normal / best = 12 / 20 / 32 bước mỗi câu
     "korva_speed": 1.05,                      # KorvaTTS: tốc độ đọc gốc (gói mặc định 1,05)
     # Kỹ năng dịch AI (skills.py) – dùng với mọi công cụ dịch AI

@@ -117,7 +117,8 @@ OCR_MODEL_HELP = ("PP-OCRv6 có sẵn (không phải tải) đủ tốt cho ph�
 WORD_FILTER_HELP = ("Xoá đúng cụm chữ này ở mọi câu phụ đề – logo / watermark bị đọc dính vào câu (\"@纵横排队一个个的进来\" "
                     "-> \"排队一个个的进来\"); câu chỉ có cụm đó thì xoá cả câu. Giờ các câu không đổi. Bấm \"Lọc\" trước để "
                     "bảng chỉ hiện các câu có cụm đó (xem trước). Không phân biệt chữ hoa / thường, ＠ / @, khoảng trắng giữa "
-                    "các chữ. Nhiều cụm cách nhau bằng dấu phẩy. OCR đọc logo mỗi lần 1 kiểu (@纵横 / @凯横 / @黄AGC): "
+                    "các chữ. Chữ Latin / tiếng Việt khớp NGUYÊN TỪ: \"á\" bắt \"Á!\", \"Á, đi thôi\" nhưng không đụng chữ á "
+                    "trong \"cách\"; chữ Hán khớp ở bất kỳ đâu. Nhiều cụm cách nhau bằng dấu phẩy. OCR đọc logo mỗi lần 1 kiểu (@纵横 / @凯横 / @黄AGC): "
                     "@* = @ và tối đa 8 chữ sau nó, tới hết câu / dấu câu / khoảng trắng (logo dính cuối câu); @?? = @ "
                     "và đúng 2 chữ sau nó (logo dính đầu câu). Ctrl+Z hoàn tác")
 OCR_EQ_HELP = ("Chỉnh ảnh trước khi bộ đọc chữ quét (độ sáng / tương phản / gamma như tab Chỉnh sửa → Màu sắc, + làm nét): "

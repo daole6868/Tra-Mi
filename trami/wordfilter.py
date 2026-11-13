@@ -7,7 +7,10 @@ các chữ ("@ 纵横" = "@纵横").
 Ký tự đại diện (2.1.34, gõ * ? kiểu thường – "＊" "？" toàn khổ là chữ thường): "?" = đúng 1 chữ bất kỳ, "*" = tối đa
 `ANY_MAX` 8 chữ liền sau, phải chạm khoảng trắng / dấu câu / hết câu. OCR đọc logo mỗi lần 1 kiểu ("@纵横" / "@凯横" /
 "@黄AGC") -> "@*" bắt cả 3 khi logo dính ở CUỐI câu (hoặc đứng riêng / trước dấu phẩy), không đụng "@纵横排队一个个的进来";
-"@??" = "@" + 2 chữ (logo dính ở đầu câu). Cụm phải có ít nhất 1 chữ thật (không nhận "*")."""
+"@??" = "@" + 2 chữ (logo dính ở đầu câu). Cụm phải có ít nhất 1 chữ thật (không nhận "*").
+
+Nguyên từ (2.4.20): cụm có chữ cái / số Latin (tiếng Việt, Anh…) ở đầu / cuối chỉ khớp khi đứng riêng thành từ – "á"
+bắt "Á!", "Á, đi thôi" nhưng không bắt chữ á trong "cách" / "lá"; chữ Hán vẫn khớp ở bất kỳ đâu."""
 from __future__ import annotations
 
 import re
@@ -25,6 +28,10 @@ _ANY, _ONE = "\ue000", "\ue001"        # ký tự đại diện sau khi tách (k
 ANY_MAX = 8      # "*" bắt tối đa 8 chữ (logo ngắn) – "@*" không nuốt cả câu "@纵横排队一个个的进来" (logo dính đầu câu)
 # "*" dừng ở khoảng trắng / dấu câu (cả dấu toàn khổ sau NFKC)
 _STOP = r"\s,.!?;:、。…\"'“”‘’()（）\[\]{}《》〈〉【】「」『』<>|/\\·•\-–—~"
+# chữ cái / số / dấu thanh kết hợp của tiếng viết cách từ (Latin + tiếng Việt, Hy Lạp, Kirin, Hàn) – xem _spaced
+_SPACED = ("0-9a-z\u00aa\u00b5\u00ba\u00c0-\u024f\u0250-\u02af\u0300-\u036f\u0370-\u03ff\u0400-\u052f"
+           "\u1e00-\u1eff\u1100-\u11ff\u3130-\u318f\uac00-\ud7af")
+_SPACED_RE = re.compile(f"[{_SPACED}]")
 
 
 def parse(text: str | None) -> list[str]:
@@ -64,6 +71,12 @@ def literal_len(word: str) -> int:
     return sum(1 for t in _tokens(word) if t not in (_ANY, _ONE))
 
 
+def _spaced(ch: str) -> bool:
+    """Chữ / số của tiếng viết cách từ (Latin, tiếng Việt, Hàn, Nga…) – 2.4.20: cụm bắt đầu / kết thúc bằng chữ này chỉ
+    khớp NGUYÊN TỪ. Chữ Hán / Nhật / Thái (viết liền, không có ranh giới từ) vẫn khớp ở bất kỳ đâu."""
+    return bool(_SPACED_RE.match(ch))
+
+
 @lru_cache(maxsize=64)
 def _compile(word: str):
     toks = _tokens(word)
@@ -78,6 +91,13 @@ def _compile(word: str):
         else:
             parts.append(re.escape(t))
     pat = r"\s*".join(parts)
+    # 2.4.20: "á" không khớp chữ á trong "cách", "ha ha" không khớp giữa "hahaha" – đầu / cuối cụm là chữ cái / số của
+    # tiếng viết cách từ thì chữ liền trước / liền sau trong câu không được là chữ cái / số (dấu câu, khoảng trắng, chữ
+    # Hán thì được: "AGC" vẫn khớp trong "@黄AGC")
+    if _spaced(toks[0]):
+        pat = f"(?<![{_SPACED}])" + pat
+    if _spaced(toks[-1]):
+        pat += f"(?![{_SPACED}])"
     if toks[-1] == _ANY:       # "*" cuối cụm phải chạm hết câu / dấu câu / khoảng trắng (không cắt giữa chữ câu)
         pat += f"(?=[{_STOP}]|$)"
     return re.compile(pat)

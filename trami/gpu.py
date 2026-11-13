@@ -18,6 +18,8 @@ import time
 
 IDLE_STOP = 300.0            # tiến trình đọc giọng (VieNeu / OmniVoice) không dùng 5 phút -> tắt, trả card (2.4.8: 10 -> 5)
 IDLE_STOP_AI = 120.0         # bộ nghe (Qwen3 / FireRed), dịch trên máy (Hy-MT2), OCR trên card: không dùng 2 phút -> tắt
+IDLE_STOP_VOX = 60.0         # 2.4.20: VoxCPM2 (~7 GB = gần hết card 8 GB) nghe thử xong để không 1 phút -> tắt (Cài đặt
+                             # voxcpm_keep bật = như bộ đọc khác, IDLE_STOP)
 TTS_KINDS = {"dub", "redub"}  # việc dùng tiến trình đọc giọng
 
 
@@ -104,6 +106,31 @@ def stop_workers(kinds: set[str] | None = None) -> int:
     return sum(_stop_if_idle(w) for _, w in _workers(kinds))
 
 
+def _is_vox(w) -> bool:
+    tts = sys.modules.get("trami.tts")
+    return w is not None and (w is getattr(tts, "_vox_model", None) or type(w).__name__ == "VoxWorker")
+
+
+def _vox_keep(settings: dict | None = None) -> bool:
+    if settings is None:
+        try:
+            from .config import load_settings
+
+            settings = load_settings()
+        except Exception:  # noqa: BLE001
+            settings = {}
+    return bool((settings or {}).get("voxcpm_keep", False))
+
+
+def release_vox(settings: dict | None = None, force: bool = False) -> bool:
+    """2.4.20 – VoxCPM2 đọc xong thì tắt tiến trình, trả ~7 GB card ngay (trước đây giữ mô hình 5 phút để 'Tạo lại
+    giọng' vài câu khỏi nạp lại – card 8 GB thì gần như đầy suốt lúc đó). Cài đặt voxcpm_keep bật -> giữ (trừ force).
+    Đang đọc dở thì để nguyên."""
+    if not force and _vox_keep(settings):
+        return False
+    return any(_stop_if_idle(w) for _, w in _workers({"tts"}) if _is_vox(w))
+
+
 def before_job(kind: str) -> None:
     """Trước 1 việc GPU: tắt tiến trình AI mà việc này không dùng -> việc này có đủ chỗ trên card."""
     if kind in TTS_KINDS:
@@ -121,6 +148,7 @@ def after_job(kind: str) -> None:
     stop_workers({"asr", "mt"})
     if kind in TTS_KINDS or kind == "auto":   # đọc giọng xong: tiến trình đọc giọng trả đồ thị CUDA / Whisper / bộ nhớ đệm, giữ mô hình
         trim_workers()
+        release_vox()                         # 2.4.20: VoxCPM2 chiếm gần hết card 8 GB -> tắt luôn (trừ khi chọn giữ)
     drop_local_models()
 
 
@@ -291,8 +319,12 @@ def reap_idle(max_idle: float = IDLE_STOP, max_idle_ai: float = IDLE_STOP_AI) ->
     không max_idle_ai. Chỉ gọi khi không có việc GPU nào đang chạy."""
     n = 0
     now = time.time()
+    keep = None
     for k, w in _workers():
         lim = max_idle if k == "tts" else max_idle_ai
+        if k == "tts" and _is_vox(w):         # 2.4.20: nghe thử VoxCPM2 xong -> 1 phút không dùng là trả card
+            keep = _vox_keep() if keep is None else keep
+            lim = lim if keep else min(lim, IDLE_STOP_VOX)
         if getattr(w, "proc", None) and w.proc.poll() is None and now - getattr(w, "last_used", now) > lim:
             n += _stop_if_idle(w)
     oe = sys.modules.get("trami.ocr_engine")

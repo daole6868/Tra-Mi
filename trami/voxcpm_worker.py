@@ -353,8 +353,11 @@ def main(repo: str = DEFAULT_REPO) -> None:
                 if not (kv_small and _kv_full(e)):
                     raise
                 restore_kv(model)          # lời / file mẫu quá dài cho bộ nhớ KV đã thu nhỏ: dựng lại cỡ gốc, đọc lại
-                kv_small = False
-                wav = model.generate(text=text, **kw)
+                try:
+                    wav = model.generate(text=text, **kw)
+                finally:                   # 2.4.20: đọc xong câu đó -> thu nhỏ lại (trước đây giữ cỡ 8192 tới khi tắt)
+                    _KV_CAP[0] = KV_LEN
+                    shrink_kv(model)
             write_wav(req["out"], np.asarray(wav, dtype=np.float32).reshape(-1), sr)
             send(dict({"ok": True, "sr": sr}, **mem_guard(base, None, False, "VoxCPM2")))
         except VramSpill as e:

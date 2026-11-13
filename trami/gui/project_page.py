@@ -3077,10 +3077,10 @@ class ProjectPage(QWidget):
             button("Bỏ lồng / lồng lại", "x", "Không đọc các câu đã tích (vd. tiếng hét, tiếng động); bấm lần nữa để lồng "
                    "lại", flat=True, on_click=lambda: self._toggle_flag("nodub"))))
         g_lines.row("Xoá câu", flow(
-            button("Lọc câu cảm thán", "wand", "Theo ô 'Từ cảm thán cần lọc' (mục 3): xoá ngay câu CHỈ gồm các từ đó "
-                   "(\"A!\", \"Ừm.\", \"Hả?\") – cả phụ đề lẫn giọng lồng – và (nếu bật) bỏ vế cảm thán đứng riêng trong "
-                   "câu dài rồi đọc lại giọng câu đó. Khôi phục được ở mục 3", flat=True,
-                   on_click=self._drop_interj_now),
+            button("Lọc câu cảm thán", "wand", "Theo danh sách từ cảm thán (mục 3): hiện bảng các câu CHỈ gồm các từ đó "
+                   "(\"A!\", \"Ừm.\", \"Hả?\") và câu dài có vế cảm thán – bỏ tích câu muốn giữ rồi Áp dụng (xoá cả "
+                   "phụ đề lẫn giọng lồng, câu bỏ vế thì đọc lại giọng). Khôi phục được ở mục 3", flat=True,
+                   on_click=self._interj_filter),
             button("Xoá câu đã tích", "trash", "Xoá các câu đã tích: cả phụ đề lẫn giọng lồng của chúng (bản lồng tiếng "
                    "được xếp lại ngay, không đọc lại câu nào)", danger=True, on_click=self._delete_picked)))
         g_lines.add(dt)
@@ -3288,20 +3288,21 @@ class ProjectPage(QWidget):
         self.d_interj_in.toggledOn.connect(lambda on: None if self.loading else self._save_setting("interj_inline", on))
         from ..voicefix import INTERJ_DEFAULT
 
+        # 2.4.20: danh sách từ = nút mở bảng (ô 1 dòng dài trước đây không đọc được) + nút Lọc từ có bảng xem trước
         iw = self.settings.get("interj_words")
-        self.d_interj_words = QLineEdit(INTERJ_DEFAULT if iw is None else str(iw))
-        self.d_interj_words.setPlaceholderText("Mỗi từ / cụm cách nhau dấu phẩy, VD: a, ừm, hả, ha ha, ui da")
-        self.d_interj_words.setToolTip("Chỉ lọc ĐÚNG các từ / cụm này (không phân biệt hoa thường) – từ cảm thán khác giữ "
-                                       "nguyên. Cụm nhiều chữ (\"ui da\", \"ha ha\") phải khớp cả cụm. Để trống = không lọc")
-        self.d_interj_words.editingFinished.connect(self._interj_words_changed)
-        self.d_interj_words.setCursorPosition(0)    # ô hẹp: hiện đầu danh sách, không phải đuôi
-        fi.add(label("Từ cảm thán cần lọc", "muted"))
-        fi.add(field(self.d_interj_words, button(
-            "Mặc định", "refresh", "Về danh sách có sẵn", flat=True, on_click=lambda: (
-                self.d_interj_words.setText(INTERJ_DEFAULT), self._interj_words_changed()))))
-        fi.actions(button("Khôi phục câu cảm thán đã xoá", "refresh", "Đưa lại các câu 'A!', 'Ừm.'… đã bị xoá và lời "
+        self._interj_text = INTERJ_DEFAULT if iw is None else str(iw)
+        self.d_interj_btn = button("Danh sách từ", "list", "Mở bảng các từ / cụm cảm thán cần lọc: thêm / xoá từ, xem "
+                                   "mỗi từ đang có trong bao nhiêu câu", flat=True, on_click=self._edit_interj)
+        self.d_interj_sum = label("", "muted", wrap=True)
+        fi.row("Từ cần lọc", self.d_interj_btn)
+        fi.span(self.d_interj_sum)
+        fi.actions(button("Lọc từ", "wand", "Quét lại phụ đề theo danh sách từ: hiện bảng các câu sẽ bị xoá (chỉ có tiếng "
+                          "cảm thán) / bỏ vế cảm thán – xem, bỏ tích câu muốn giữ rồi mới áp dụng", flat=True,
+                          on_click=self._interj_filter),
+                   button("Khôi phục câu cảm thán đã xoá", "refresh", "Đưa lại các câu 'A!', 'Ừm.'… đã bị xoá và lời "
                           "cũ của câu dài đã bỏ vế cảm thán (lần lồng sau không lọc các câu này nữa)", flat=True,
                           on_click=self._restore_interj))
+        self._interj_label()
         self.d_voice_note = label("", "muted", wrap=True)
         f.add(self.d_voice_note)
         f.actions(button("Đổi giọng ở mục 2", "users", "Giọng đọc lấy từ bảng 'Giọng đọc cho từng người nói' (mục 2) – "
@@ -4583,8 +4584,8 @@ class ProjectPage(QWidget):
             from ..voicefix import INTERJ_DEFAULT
 
             iw = st.get("interj_words")
-            self.d_interj_words.setText(INTERJ_DEFAULT if iw is None else str(iw))
-            self.d_interj_words.setCursorPosition(0)
+            self._interj_text = INTERJ_DEFAULT if iw is None else str(iw)
+            self._interj_label()
             self.d_pron.setChecked(bool(st.get("tts_dict_on", True)))
             self._pron_note()
             self.a_parallel.setChecked(bool(st.get("auto_parallel", False)))
@@ -7920,32 +7921,86 @@ class ProjectPage(QWidget):
             self.win.toast(f"Đã tích {len(rows)} câu có chữ trong từ điển đọc", "ok")
         return len(rows)
 
-    def _interj_words_changed(self):
+    def _interj_label(self):
+        """Nút "Danh sách từ (N)" + dòng xem nhanh vài từ đầu (2.4.20)."""
+        from .interj_dialog import split_words
+
+        ws = split_words(self._interj_text)
+        self.d_interj_btn.setText(f"Danh sách từ ({len(ws)})…")
+        head = ", ".join(ws[:10]) + (f", … (+{len(ws) - 10})" if len(ws) > 10 else "")
+        self.d_interj_sum.setText(head if ws else "Danh sách trống – không lọc câu cảm thán nào")
+
+    def _interj_words_changed(self, txt: str | None = None):
         if self.loading:
             return
-        txt = self.d_interj_words.text().strip()
+        if txt is not None:
+            self._interj_text = txt
+        txt = (self._interj_text or "").strip()
         self._save_setting("interj_words", txt)
+        self._interj_label()
         from ..voicefix import interj_list
 
         n = len(interj_list({"interj_words": txt}))
         self.win.toast(f"Danh sách từ cảm thán: {n} từ / cụm" if n else "Danh sách trống – không lọc câu cảm thán", "ok")
 
-    def _drop_interj_now(self):
-        """Nút "Lọc câu cảm thán" (theo danh sách từ người dùng điền): xoá ngay câu CHỈ gồm từ cảm thán (phụ đề + giọng
-        lồng) và bỏ vế cảm thán đứng riêng trong câu dài (đọc lại giọng câu đó nếu đã lồng); cất để khôi phục."""
+    def _edit_interj(self):
+        """Bảng từ cảm thán cần lọc (2.4.20): Lưu -> Cài đặt; Lưu & lọc -> mở luôn bảng xem trước Lọc từ."""
+        from .interj_dialog import InterjWordsDialog
+
+        dlg = InterjWordsDialog(self, self._interj_text, self.model.segs if self.p else [])
+        if not dlg.exec() or not dlg.saved:
+            return
+        self._interj_words_changed(dlg.text())
+        if dlg.then_filter:
+            self._interj_filter()
+
+    def _interj_filter(self):
+        """Nút "Lọc từ" / "Lọc câu cảm thán" (2.4.20): quét lại phụ đề theo danh sách từ -> bảng xem trước (tích sẵn)
+        -> chỉ lọc các câu đã tích."""
+        from .interj_dialog import InterjFilterDialog
+
+        if not self.p or not self.model.segs:
+            return self.win.toast("Chưa có phụ đề", "warn")
+        from ..voicefix import interj_list
+
+        if not interj_list(self.settings):
+            return self.win.toast("Danh sách từ cảm thán (mục 3) đang trống – bấm 'Danh sách từ' để thêm", "warn")
+        items = pipeline.interj_scan(self.model.segs, self.settings)
+        if not items:
+            return self.win.toast("Không có câu nào chứa từ cảm thán trong danh sách đứng riêng", "ok")
+        dlg = InterjFilterDialog(self, items, self.model.segs, bool(self.settings.get("interj_inline", True)),
+                                 play=self._play_line)
+        if not dlg.exec():
+            return
+        drop, trim = dlg.chosen()
+        if not drop and not trim:
+            return self.win.toast("Chưa tích câu nào – không lọc gì", "info")
+        self._drop_interj_now(drop, trim)
+
+    def _drop_interj_now(self, rows: list[int] | None = None, trim_rows: list[int] | None = None):
+        """Lọc từ cảm thán (không hỏi): xoá câu CHỈ gồm từ cảm thán (phụ đề + giọng lồng) và bỏ vế cảm thán đứng riêng
+        trong câu dài (đọc lại giọng câu đó nếu đã lồng); cất để khôi phục. rows / trim_rows (2.4.20 – câu đã tích ở
+        bảng xem trước) None = mọi câu theo danh sách."""
         from ..voicefix import interj_list, lone_interjection
 
         segs = self.model.segs
         phrases = interj_list(self.settings)
-        if not phrases:
-            return self.win.toast("Danh sách 'Từ cảm thán cần lọc' (mục 3) đang trống", "warn")
-        rows = [i for i, x in enumerate(segs) if x.trans.strip() and not x.extra.get("keep_interj")
-                and lone_interjection(x.trans, phrases)]
+        if rows is None:
+            if not phrases:
+                return self.win.toast("Danh sách 'Từ cảm thán cần lọc' (mục 3) đang trống", "warn")
+            rows = [i for i, x in enumerate(segs) if x.trans.strip() and not x.extra.get("keep_interj")
+                    and lone_interjection(x.trans, phrases)]
+        rows = sorted({r for r in rows if 0 <= r < len(segs)})
         self.flush()
         trimmed = []
-        if self.settings.get("interj_inline", True):
-            gone = set(rows)
-            trimmed = [segs[i] for i in pipeline.trim_interjections(segs, self.settings) if i not in gone]
+        gone = set(rows)
+        if trim_rows is None:
+            if self.settings.get("interj_inline", True):
+                trimmed = [segs[i] for i in pipeline.trim_interjections(segs, self.settings) if i not in gone]
+        else:
+            tr = [r for r in trim_rows if 0 <= r < len(segs) and r not in gone]
+            if tr:
+                trimmed = [segs[i] for i in pipeline.trim_interjections(segs, self.settings, rows=tr)]
         if not rows and not trimmed:
             return self.win.toast("Không có câu nào chứa từ cảm thán trong danh sách đứng riêng", "ok")
         self.p.reload()
