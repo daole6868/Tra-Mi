@@ -4595,11 +4595,14 @@ def dub(p: Project, voice: str | None = None, rate: str | None = None, settings:
             for k, need, have in long_:
                 cur = segs[k].trans
                 n = min(syllables(cur, lg) - 1,
-                        max(2, int(syllables(cur, lg) * max(0.4, have / max(need, 0.1)) * 0.95)))
+                        max(2, int(syllables(cur, lg) * max(SHORTEN_MIN_SHARE, have / max(need, 0.1)) * 0.95)))
                 n = max(2, min(n, budget_for(have, 1.25, lg)))
                 items.append((segs[k].text, cur, n))
-                infos.append({"now": need, "have": have, "cut": max(1, syllables(cur, lg) - n), "what": "slot"})
+                full = segs[k].extra.get("trans_long")
+                infos.append({"now": need, "have": have, "cut": max(1, syllables(cur, lg) - n), "what": "slot",
+                              "full": full if full and full != cur else ""})
             new = tr.shorten(items, info=infos)
+            stats["short_rejected"] = len({r["k"] for r in tr.short_rejected})
             for (k, _, _), t in zip(long_, new):
                 if t != segs[k].trans:
                     segs[k].extra.setdefault("trans_long", segs[k].trans)   # giữ bản dài để người dùng xem lại
@@ -5744,7 +5747,7 @@ def needs_shorten(s, lang: str = "vi") -> bool:
 SHORTEN_MODES = (("speech", "Thời gian nhân vật nói"), ("slot", "Chỗ trống tới câu sau"))
 SHORTEN_FALLBACKS = (("both", "Đọc nhanh + tích sẵn"), ("speed", "Chỉ đọc nhanh"), ("mark", "Chỉ tích sẵn"))
 SHORTEN_TOL = 0.12          # giọng dài hơn mục tiêu ≤ max(0,12 s, 5 %) coi là vừa
-SHORTEN_MIN_SHARE = 0.5     # không rút còn dưới 1/2 số tiếng của bản dịch ban đầu (ngắn hơn nữa là mất ý)
+SHORTEN_MIN_SHARE = 0.6     # không rút còn dưới 60 % số tiếng của bản dịch ban đầu (ngắn hơn nữa là mất ý – 2.4.18)
 SHORTEN_STATE = {"fit": "đã vừa sẵn", "ok": "đã vừa", "sped": "đọc nhanh vừa đủ", "left": "vẫn dài",
                  "same": "AI không rút ngắn được", "est": "đã rút theo ước tính (chưa có giọng để đo)"}
 
@@ -5897,12 +5900,15 @@ def shorten_lines(p: Project, rows: list[int], settings: dict | None = None) -> 
             floor.append(k)
             continue
         items.append((k, (s.text, s.trans, pl["n"])))
-        infos.append({"now": pl["now"], "have": pl["have"], "cut": pl["syl"] - pl["n"], "what": o["mode"]})
-    res = {"changed": [], "fit": fits, "same": [], "floor": floor, "plans": plans}
+        full = s.extra.get("trans_long")   # bản dịch đầy đủ ban đầu: chuẩn nghĩa cho lượt rút sau (không rút chồng)
+        infos.append({"now": pl["now"], "have": pl["have"], "cut": pl["syl"] - pl["n"], "what": o["mode"],
+                      "full": full if full and full != s.trans else ""})
+    res = {"changed": [], "fit": fits, "same": [], "floor": floor, "plans": plans, "rejected": []}
     if not items:
         return res
     tr = Translator(settings, target=lg, source=source_lang(p), skill=_skill(settings))
     new = tr.shorten([x for _, x in items], info=infos)
+    res["rejected"] = sorted({items[r["k"]][0] for r in tr.short_rejected if 0 <= r["k"] < len(items)})
     for (k, _), t in zip(items, new):
         if t and t != segs[k].trans:
             ex = segs[k].extra
@@ -5940,6 +5946,7 @@ def shorten_fit(p: Project, rows: list[int], settings: dict | None = None, rate:
     changed: list[int] = []
     fit0: list[int] = []
     floor_hit: set[int] = set()
+    rejected: set[int] = set()
     active = rows
     done = 0
     span = 0.92 / rounds
@@ -5955,6 +5962,7 @@ def shorten_fit(p: Project, rows: list[int], settings: dict | None = None, rate:
         if r == 0:
             fit0 = list(res["fit"])
         floor_hit.update(res["floor"])
+        rejected.update(res.get("rejected") or [])
         for k in res["same"] + res["floor"]:
             state[k] = "left" if k in round_of else "same"
         ch = res["changed"]
@@ -6023,6 +6031,8 @@ def shorten_fit(p: Project, rows: list[int], settings: dict | None = None, rate:
             info["sp"] = sped[k]
         if k in floor_hit:
             info["floor"] = True
+        if k in rejected:
+            info["rj"] = True
         s.extra["shorten_info"] = info
     p.segments = segs
     p.save()
@@ -6030,6 +6040,7 @@ def shorten_fit(p: Project, rows: list[int], settings: dict | None = None, rate:
     pick = marked or (changed + [k for k in sped if k not in changed])
     return {"changed": changed, "fit": by["fit"], "ok": by["ok"], "sped": sorted(sped), "left": by["left"],
             "same": by["same"], "est": by["est"], "marked": marked, "floor": sorted(floor_hit), "rounds": done,
+            "rejected": sorted(rejected),
             "state": state, "opts": o, "dubbed": dubbed, "pick": sorted(set(pick))}
 
 
@@ -6060,6 +6071,8 @@ def shorten_line_note(s, lang: str = "vi") -> str:
         mark += f" (đã đọc nhanh tối đa ×{float(info['sp']):.2f})".replace(".", ",")
     if info.get("floor") and st in ("left", "same", "sped"):
         mark += " – đã rút tới mức giữ ý"
+    if info.get("rj") and st in ("left", "same", "sped"):
+        mark += " – đã bỏ bản rút gọn đổi nghĩa / cụt câu"
     parts.append(mark)
     if info.get("r", 0) > 1:
         parts.append(f"{info['r']} lượt")
@@ -6100,6 +6113,8 @@ def shorten_note(res: dict, segs: list, lang: str = "vi") -> str:
         if ch and res.get("same"):
             txt += f" – AI không rút ngắn được {len(res['same'])} câu"
         bits.append(txt)
+    if res.get("rejected"):
+        bits.append(f"bỏ bản rút gọn đổi nghĩa / cụt câu ở {len(res['rejected'])} câu (giữ câu đủ nghĩa)")
     if res.get("fit"):
         bits.append(f"bỏ qua {len(res['fit'])} câu đã vừa sẵn")
     if res.get("est"):
@@ -6725,6 +6740,8 @@ def dub_summary(p: Project) -> str:
                      (f" ({st['part_fast']} vế dài đọc nhanh riêng)" if st.get("part_fast") else ""))
     if st.get("shortened"):
         extra.append(f"AI đã rút gọn {st['shortened']} câu")
+    if st.get("short_rejected"):
+        extra.append(f"bỏ bản rút gọn đổi nghĩa / cụt câu ở {st['short_rejected']} câu (giữ câu đủ nghĩa)")
     if st.get("songs"):
         extra.append(f"{st['songs']} câu bài hát giữ nguyên")
     if st.get("empty"):

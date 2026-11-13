@@ -1101,6 +1101,23 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   dùng, phát câu đầu); có câu chưa dịch -> 1 việc "redub": `pipeline.translate(only_empty, rows=câu chưa dịch)` rồi
   `pipeline.redub` mọi câu đã có lời ("pick" tích sẵn); phim chưa có bản lồng -> toast chỉ đường "Tạo bản lồng tiếng" (đọc
   riêng vài câu khi chưa có bản lồng sẽ đọc cả phim).
+- AI rút gọn = VIẾT LẠI giữ ý chính (2.4.18 – người dùng: "AI chỉ tự bớt từ nên câu bị vô nghĩa"; ví dụ người dùng chấp
+  nhận: "Vợ à, chuyện này có thể tùy tiện đồng ý sao?" -> "Vợ à, chuyện này có thể sao?", "Nhỡ đâu lại là một cái hố thì
+  sao?" -> "Nhỡ đâu bị lừa thì sao?", "Ta không muốn tự dưng lại có thêm…" -> "Ta không muốn có thêm…", "Một người sư phụ
+  muốn đoạt xá ta đâu." -> "Một sư phụ muốn đoạt xá ta đâu." = bỏ từ phụ / nói thẳng thay hình ảnh được, câu cụt / vô nghĩa /
+  ngược nghĩa thì không). `translate.SHORTEN_PROMPT(_EN)` viết lại (cách làm ngắn đúng, PHẢI GIỮ ý chính / phủ định / câu
+  hỏi / xưng hô / tên, KHÔNG ĐƯỢC câu cụt / xé từ ghép, ví dụ ĐÚNG = 4 ví dụ người dùng + SAI; không ngắn được mà trọn nghĩa
+  -> bản ngắn nhất trọn nghĩa, được dài hơn "toi_da"; "a" / "b" = 2 cách nói đều trọn nghĩa); `SHORTEN_RETRY_VI/EN` không ép
+  "ngắn hơn nữa" (thử cách nói khác, kèm "ban_vua_viet_bi_loai" = lý do bản trước bị loại); info "full" = `trans_long` ->
+  "ban_day_du" / "full" (lượt rút sau không rút chồng lên bản đã rút). Soát: `meaning_lost(full, new, lang)` (máy: mất phủ
+  định `_NEG` – "không" hỏi cuối câu không tính, câu hỏi thành câu kể, mất số, mất tên riêng `_names_in` (chữ viết hoa không
+  đầu câu), còn < `SHORT_KEEP_MIN` 40 % số tiếng khi câu ≥ 6 tiếng) -> `_check_short` (AI soát từng bản `SHORTEN_CHECK_VI/EN`
+  {"a": "dat" | "sai: …"}, `_CHECK_FAIL`; AI không trả lời / lỗi gửi -> coi như đạt; Cài đặt `shorten_check` mặc định bật,
+  chưa có ô) -> `_vet` -> `Translator.short_rejected` [{k, text, why}]; không bản đạt nào ngắn hơn -> giữ câu cũ (bước sau đọc
+  nhanh / tích sẵn). `pipeline.SHORTEN_MIN_SHARE` 0,5 -> 0,6 (cả tầng 3b khi lồng); `shorten_lines` res["rejected"] ->
+  `shorten_fit` ("rejected", shorten_info "rj") -> `shorten_note` / `shorten_line_note` "bỏ bản rút gọn đổi nghĩa / cụt câu";
+  tầng 3b `stats["short_rejected"]` -> `dub_summary`. Luật 8 lúc dịch, mục 3 `skills.REVIEW_LEN_RULE`, kỹ năng `dub_short`
+  cùng cách nói (viết lại giữ ý chính, không xoá chữ làm câu cụt).
 - Rút gọn bản dịch – 2 công tắc, MẶC ĐỊNH TẮT (2.4.10 – tắt = giữ bản dịch sát nghĩa, "bản gốc"): (1) Cài đặt `dub_fit`
   "AI rút gọn bản dịch cho vừa thời gian nói" = rút gọn LÚC DỊCH + ở "AI kiểm tra lại bản dịch": bật -> `Translator`
   (`fit_dub`) gửi ⟪≤N⟫ / ⟪M–N⟫ (`length_marker`) + luật 8 cũ; tắt -> không gửi ký hiệu, `system_prompt(fit=False)` thay khối
@@ -1236,7 +1253,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (370 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (371 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -3363,7 +3380,17 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Thử: gói voxcpm giả chạy thật qua tiến trình (nạp 6 s -> "đã 5 s", KV 4096, giới hạn 44 bước cho câu 8 tiếng, tin bước
   tới tool), vòng sinh chậm + card đầy -> lỗi rõ, tool tắt bộ đọc không mở lại, dừng cả lượt VoxCPM2. Chưa chạy VoxCPM2 thật.
 
+- 2.4.18: người dùng xem các bước AI rút gọn câu: "khi bớt AI chỉ tự bớt đi từ nên câu bị vô nghĩa – phải đổi câu ngắn hơn
+  mà ý nghĩa không đổi" + 4 ví dụ được chấp nhận (bỏ từ phụ, nói thẳng thay hình ảnh). Lời nhắc cũ cho bỏ từ thừa / chủ ngữ /
+  "phương án b ngắn hơn nữa (vẫn đủ ý chính)", hỏi lại thì ép "NGẮN HƠN NỮA", lượt 2–3 rút chồng lên bản đã rút, mức tối
+  thiểu 50 % số tiếng, không ai soát kết quả. Sửa: xem Cấu trúc "AI rút gọn = VIẾT LẠI giữ ý chính". Thử với AI giả: bản cụt
+  / ngược nghĩa bị loại, chọn bản trọn nghĩa, hỏi lại kèm lý do, hết bản đạt thì giữ câu cũ, lượt sau gửi bản đầy đủ. Chưa thử
+  với AI thật – AI soát có khắt khe quá (loại cả bản người dùng chấp nhận) không cần xem trên phim thật.
+
 ## Vấn đề đang mở
+- 2.4.18: chờ người dùng chép file, tích vài câu ⚠ → AI rút gọn: câu mới có còn cụt / vô nghĩa không, thông báo có "bỏ bản
+  rút gọn đổi nghĩa / cụt câu ở N câu" nhiều không (nhiều quá -> AI soát khắt khe, nới lời nhắc soát); câu không rút được thì
+  tool đọc nhanh ≤ ×1,2 / tích sẵn như cũ.
 - 2.4.17: chờ người dùng chép file, bấm lại Tạo lại giọng (VoxCPM2): dòng tiến độ phải đổi "Đang nạp VoxCPM2 – đã N s"
   -> "đang tạo câu mẫu giọng … · bước i/n" -> "đang đọc 1/7 · bước …"; thông báo có ⚠ card chỉ còn N MB / VoxCPM2 dừng vì
   card hết bộ nhớ -> trang Việc đang làm → "Xem ai đang chiếm card" (gửi ảnh) hoặc dùng VieNeu / KorvaTTS; xin

@@ -14610,6 +14610,8 @@ def _shorten_env(monkeypatch, ai):
         return []
 
     def chat(self, system, user, *a, **k):
+        if user.startswith(("SOÁT CÁC BẢN RÚT GỌN", "CHECK THESE SHORTENED")):   # 2.4.18 AI soát nghĩa: cho đạt hết
+            return "{}"
         calls.append((system, user))
         d = json.loads(user.split("\n", 1)[1])
         return json.dumps({key: ai(it, "ban_vua_viet" in it) for key, it in d.items()}, ensure_ascii=False)
@@ -14659,19 +14661,21 @@ def test_shorten_fit_speech_time_236(monkeypatch):
         spoken.clear()
         res = pipeline.shorten_fit(p, [0, 1, 2], st, engine="edge")
         segs = p.segments
-        assert res["changed"] == [0, 2] and res["ok"] == [0, 2] and res["fit"] == [1] and res["pick"] == [0, 2]
+        assert res["changed"] == [0, 2] and res["fit"] == [1] and res["pick"] == [0, 2]
+        # câu 3 (8 tiếng, nói 1 s): 2.4.18 không rút dưới 60 % số tiếng (còn 5 tiếng = 1,25 s) -> đọc nhanh vừa đủ
+        assert res["ok"] == [0] and res["sped"] == [2] and segs[2].extra["shorten_info"]["s"] == [8, 5]
         assert len(calls) == 2 and tr.SHORTEN_RETRY_VI.split(" –")[0] in calls[1][1]        # 1 lần + hỏi lại
-        assert "2 phương án" in calls[0][0] and "không đổi nam / nữ" in calls[0][0]
-        assert segs[0].trans == "Một hai ba bốn năm sáu bảy tám." and segs[0].extra["trans_long"].startswith("một")
+        assert "2 CÁCH NÓI KHÁC NHAU" in calls[0][0] and "không đổi nam / nữ" in calls[0][0]
+        assert segs[0].trans == "Một hai ba bốn năm sáu bảy tám chín." and segs[0].extra["trans_long"].startswith("một")
         assert sorted(i for i, _ in spoken) == [0, 2]                  # chỉ đọc lại 2 câu đã rút gọn
         assert pipeline.voice_secs(segs[0]) <= 2.0 + pipeline.SHORTEN_TOL and pipeline.long_rows(segs, st) == []
         info = segs[0].extra["shorten_info"]
-        assert info["st"] == "ok" and info["s"] == [14, 8] and info["m"] == "speech"
+        assert info["st"] == "ok" and info["s"] == [14, 9] and info["m"] == "speech"     # ≥ 60 % (2.4.18)
         note = pipeline.shorten_line_note(segs[0])
-        assert note.startswith("14 → 8 tiếng · giọng 3,2 → 1,8 s / nói 2,0 s") and note.endswith("✓")
+        assert note.startswith("14 → 9 tiếng · giọng 3,2 → 2,0 s / nói 2,0 s") and note.endswith("✓")
         msg = pipeline.shorten_note(res, segs)
         assert "AI rút gọn 2/3 câu cho vừa thời gian nhân vật nói" in msg and "bỏ qua 1 câu đã vừa sẵn" in msg
-        assert "#1 14 → 8 tiếng" in msg
+        assert "#1 14 → 9 tiếng" in msg
         # cách cũ (chỗ trống tới câu sau): câu đã vừa chỗ trống thì giữ
         assert pipeline.long_rows(segs, {"shorten_mode": "slot"}) == []
     finally:
@@ -14746,7 +14750,7 @@ def test_shorten_pick_variant_236():
             seen.append(user)
             return self.replies.pop(0)
 
-    t = tr.Translator({"openai_api_key": "x"}, "openai", target="vi")
+    t = tr.Translator({"openai_api_key": "x", "shorten_check": False}, "openai", target="vi")   # soát nghĩa: test riêng
     items = [("你好", "một hai ba bốn năm sáu bảy tám", 5), ("走", "một hai ba", 2), ("吃", "một hai ba bốn", 3)]
     t.llm = LLM(['{"1": {"a": "một hai ba bốn năm", "b": "một hai ba"}, "2": "một hai ba", '
                  '"3": {"a": "một hai ba bốn năm", "b": "một hai"}}', '{"1": "một hai ba"}'])
@@ -14760,7 +14764,7 @@ def test_shorten_pick_variant_236():
     out = t.shorten([items[0]])
     assert out == ["Một hai ba bốn năm sáu."] and len(seen) == 2 and '"ban_vua_viet": "Một hai ba bốn năm sáu bảy."' \
         in seen[1] and '"ban_vua_viet_dai": "7 tiếng"' in seen[1]
-    te = tr.Translator({"openai_api_key": "x"}, "openai", target="en")
+    te = tr.Translator({"openai_api_key": "x", "shorten_check": False}, "openai", target="en")
     seen.clear()
     te.llm = LLM(['{"1": {"a": "go now", "b": "go"}}'])
     assert te.shorten([("走吧", "we should go right now", 2)], info=[{"now": 2.5, "have": 1.0, "what": "slot"}]) == \
@@ -17646,3 +17650,101 @@ def test_voxcpm_vram_2417(tmp_path, monkeypatch):
     except Exception:   # noqa: BLE001 – dự án giả thiếu khoá khác: chỉ cần câu báo có trong mã
         txt = ""
     assert not txt or "card đồ hoạ hết bộ nhớ" in txt
+
+
+def test_shorten_keep_meaning_2418(monkeypatch):
+    """2.4.18 – AI rút gọn = VIẾT LẠI ngắn hơn, giữ ý chính, câu trọn nghĩa (không xoá chữ bừa): lời nhắc có ví dụ của
+    người dùng; soát máy (mất phủ định / câu hỏi / số / tên riêng / cụt < 40 %) + AI soát từng bản -> bản hỏng bị loại,
+    hỏi lại kèm lý do, không bản nào đạt thì giữ câu cũ; lượt sau gửi bản đầy đủ ban đầu làm chuẩn ý."""
+    from trami import pipeline
+    from trami import translate as tr
+    from trami.subtitle import Segment
+
+    # 4 ví dụ của người dùng: đạt soát máy
+    for a, b in (("Vợ à, chuyện này có thể tùy tiện đồng ý sao?", "Vợ à, chuyện này có thể sao?"),
+                 ("Nhỡ đâu lại là một cái hố thì sao?", "Nhỡ đâu bị lừa thì sao?"),
+                 ("Ta không muốn tự dưng lại có thêm...", "Ta không muốn có thêm.."),
+                 ("Một người sư phụ muốn đoạt xá ta đâu.", "Một sư phụ muốn đoạt xá ta đâu")):
+        assert tr.meaning_lost(a, b) == "", (a, b)
+    assert "phủ định" in tr.meaning_lost("Ta không muốn tự dưng lại có thêm...", "Ta muốn có thêm...")
+    assert "câu hỏi" in tr.meaning_lost("Nhỡ đâu lại là một cái hố thì sao?", "Nhỡ đâu cái hố.")
+    assert "con số" in tr.meaning_lost("Ta có 3 người con trai ở nhà.", "Ta có con trai ở nhà.")
+    assert "Phàm" in tr.meaning_lost("Này Lâm Phàm, ngươi đi đâu vậy?", "Ngươi đi đâu?")
+    assert "mất ý" in tr.meaning_lost("Hôm nay trời mưa rất to nên chúng ta ở nhà nhé.", "Ở nhà nhé.")
+    assert tr.meaning_lost("Có đi không?", "Đi chứ?") == ""          # "không" hỏi cuối câu không phải phủ định
+    assert "phủ định" in tr.meaning_lost("I do not want it.", "I want it.", "en")
+    assert tr.meaning_lost("I don't want it.", "I won't take it.", "en") == ""
+    # lời nhắc: viết lại giữ ý chính + ví dụ của người dùng; soát nghĩa có ví dụ ĐẠT / SAI
+    assert "GIỮ Ý CHÍNH" in tr.SHORTEN_PROMPT and '"Nhỡ đâu bị lừa thì sao?"' in tr.SHORTEN_PROMPT
+    assert "Vợ à, chuyện này có thể sao?" in tr.SHORTEN_CHECK_VI and "xé đôi từ ghép" in tr.SHORTEN_CHECK_VI
+    assert "KHÔNG xoá chữ làm câu cụt" in tr.system_prompt("vi", fill=False)
+
+    seen: list = []
+
+    class LLM:
+        def __init__(self, replies):
+            self.replies = list(replies)
+
+        def chat(self, sysp, user, **k):
+            seen.append((sysp, user))
+            r = self.replies.pop(0)
+            return r(user) if callable(r) else r
+
+    t = tr.Translator({"openai_api_key": "x"}, "openai", target="vi")
+    items = [("万一是个坑呢？", "Nhỡ đâu lại là một cái hố thì sao?", 6),
+             ("我可不想平白多个…", "Ta không muốn tự dưng lại có thêm…", 6)]
+    t.llm = LLM(['{"1": {"a": "Nhỡ đâu cái hố?", "b": "Nhỡ đâu bị lừa thì sao?"}, '
+                 '"2": {"a": "Ta muốn có thêm…", "b": "Ta không muốn có thêm…"}}',
+                 '{"1": {"a": "sai: cụt câu, vô nghĩa", "b": "dat"}, "2": {"a": "dat"}}'])
+    out = t.shorten(items, info=[{"full": "Nhỡ đâu lại là một cái hố to thì sao?"}, None])
+    assert out == ["Nhỡ đâu bị lừa thì sao?", "Ta không muốn có thêm…"] and len(seen) == 2
+    assert '"ban_day_du": "Nhỡ đâu lại là một cái hố to thì sao?"' in seen[0][1]
+    assert seen[1][1].startswith("SOÁT CÁC BẢN RÚT GỌN") and '"Ta muốn có thêm…"' not in seen[1][1]   # soát máy loại trước
+    why = {r["text"]: r["why"] for r in t.short_rejected}
+    assert why["Nhỡ đâu cái hố?"].startswith("AI soát: cụt câu") and "phủ định" in why["Ta muốn có thêm…"]
+    # mọi bản bị loại -> hỏi lại kèm lý do; vẫn hỏng -> giữ câu cũ (đọc nhanh hơn / tích sẵn ở bước sau)
+    seen.clear()
+    t.llm = LLM(['{"1": {"a": "Nhỡ đâu cái hố?"}}', '{"1": {"a": "sai: cụt câu"}}',
+                 '{"1": {"a": "Nhỡ cái hố?"}}'])
+    assert t.shorten(items[:1]) == [items[0][1]] and len(seen) == 3      # bản 2 cụt < 40 %: soát máy loại, không hỏi AI
+    assert '"ban_vua_viet_bi_loai": "AI soát: cụt câu"' in seen[2][1] and "HOẶC BỊ LOẠI" in seen[2][1]
+    # AI soát lỗi (mất mạng / trả sai dạng) -> chỉ dùng soát máy; AI không trả lời 1 bản -> coi như đạt
+    t.llm = LLM(['{"1": {"a": "Nhỡ đâu bị lừa thì sao?"}}', "không phải JSON"])
+    assert t.shorten(items[:1]) == ["Nhỡ đâu bị lừa thì sao?"]
+    t.llm = LLM(['{"1": {"a": "Nhỡ đâu bị lừa thì sao?"}}', '{"1": "none"}'])
+    assert t.shorten(items[:1]) == ["Nhỡ đâu bị lừa thì sao?"]
+    # tắt soát AI (Cài đặt shorten_check) -> chỉ soát máy, không gửi thêm
+    t2 = tr.Translator({"openai_api_key": "x", "shorten_check": False}, "openai", target="vi")
+    seen.clear()
+    t2.llm = LLM(['{"1": {"a": "Nhỡ đâu bị lừa thì sao?"}}'])
+    assert t2.shorten(items[:1]) == ["Nhỡ đâu bị lừa thì sao?"] and len(seen) == 1
+    # tiếng khác: lời nhắc / soát tiếng Anh
+    te = tr.Translator({"openai_api_key": "x"}, "openai", target="en")
+    seen.clear()
+    te.llm = LLM(['{"1": {"a": "Want it.", "b": "I don\'t want it."}}', '{"1": {"b": "pass"}}'])
+    assert te.shorten([("我不要", "I really do not want it at all.", 4)]) == ["I don't want it."]
+    assert "KEEPING THE" in seen[0][0] and seen[1][1].startswith("CHECK THESE SHORTENED")
+
+    # pipeline: lượt sau gửi bản đầy đủ ban đầu (trans_long), thông báo bản bị loại
+    got: list = []
+
+    def ai(it, retry):
+        got.append(it)
+        return {"a": "một hai."}
+
+    spoken, calls = _shorten_env(monkeypatch, ai)
+    p, st = _shorten_project("sh2418", [Segment(0.5, 1.5, "a", "một hai ba bốn năm sáu bảy tám", "S1")])
+    try:
+        segs = p.segments
+        segs[0].extra["trans_long"] = "một hai ba bốn năm sáu bảy tám chín mười"
+        p.segments = segs
+        p.save()
+        res = pipeline.shorten_lines(p, [0], st)
+        assert got and got[0]["ban_day_du"] == "một hai ba bốn năm sáu bảy tám chín mười"
+        assert res["rejected"] == [0] and res["same"] == [0]          # "một hai." cụt (< 40 %) -> giữ câu cũ
+        assert p.segments[0].trans == "một hai ba bốn năm sáu bảy tám"
+        note = pipeline.shorten_note({"rejected": [0], "state": {0: "same"}, "same": [0], "opts": None}, p.segments)
+        assert "bỏ bản rút gọn đổi nghĩa / cụt câu ở 1 câu" in note
+        assert pipeline.SHORTEN_MIN_SHARE == 0.6
+    finally:
+        p.delete()

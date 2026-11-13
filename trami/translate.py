@@ -104,9 +104,11 @@ Luật bắt buộc:
    dịch. Tuân thủ tuyệt đối BẢNG THUẬT NGỮ. Thuật ngữ trong THỂ LOẠI PHIM chỉ dùng khi dòng gốc có đúng chữ đó.
 7. Dòng gốc do máy nghe có thể sai vài chữ đồng âm: hiểu theo ngữ cảnh (luật 2) và dịch đúng ý. Đại từ 他 / 她 / 它 và
    cách gọi (哥, 姐, 弟, 妹…) KHÔNG coi là nghe nhầm – dịch đúng chữ đang ghi (luật 5).
-8. ĐỘ DÀI: ký hiệu ⟪≤N tiếng⟫ cuối dòng là giới hạn để giọng LỒNG TIẾNG vừa thời gian nhân vật nói: bản dịch KHÔNG vượt N
-   tiếng (âm tiết). Dài quá thì chọn từ / cách nói ngắn hơn mà VẪN ĐỦ Ý – không bỏ ý để cho ngắn. Câu dịch ngắn thì để
-   ngắn, KHÔNG thêm từ cho dài ra.{fill}
+8. ĐỘ DÀI: ký hiệu ⟪≤N tiếng⟫ cuối dòng là giới hạn để giọng LỒNG TIẾNG vừa thời gian nhân vật nói: cố viết KHÔNG vượt N
+   tiếng (âm tiết). Dài quá thì VIẾT LẠI ngắn hơn mà GIỮ Ý CHÍNH, câu vẫn trọn nghĩa, tự nhiên: bỏ từ phụ (tự dưng, lại,
+   tùy tiện, người, cái…), nói thẳng thay cách nói hình ảnh dài, dùng từ ngắn cùng nghĩa – KHÔNG xoá chữ làm câu cụt / vô
+   nghĩa / sai ngữ pháp, không mất ý chính, phủ định, câu hỏi. Không viết ngắn được mà vẫn trọn nghĩa thì giữ câu trọn
+   nghĩa (được dài hơn N). Câu dịch ngắn thì để ngắn, KHÔNG thêm từ cho dài ra.{fill}
    KHÔNG chép ký hiệu ⟪⟫ vào bản dịch.
 9. Dòng chắc chắn là LỜI BÀI HÁT (nhạc phim, nhân vật đang hát – câu văn vần, điệp khúc lặp lại, không trả lời / không
    nối tiếp lời thoại trước – sau) thì bắt đầu bản dịch bằng "♪ ". Lời thoại bình thường KHÔNG thêm ♪.
@@ -310,8 +312,11 @@ Mandatory rules:
 7. Source lines may contain speech-recognition errors (homophones): use the context (rule 2) to get the intended meaning.
    Pronouns 他 / 她 / 它 and kinship / rank terms are NOT treated as recognition errors – translate what is written (rule 5).
 8. LENGTH: a line ending with ⟪≤N {L['unit_ai']}⟫ is a limit so the DUBBED voice fits the character's speaking time: the
-   translation must NOT exceed N {L['unit_ai']}. If too long, choose shorter wording that STILL keeps all the meaning –
-   never drop meaning to save length. A short translation stays short – never add words to make it longer.{fill_en}
+   translation should NOT exceed N {L['unit_ai']}. If too long, REWRITE it shorter while KEEPING THE MAIN MEANING, still
+   a complete natural sentence: drop minor words, say a long figurative phrase plainly, use shorter words of the same
+   meaning – never delete words so the line becomes clipped / meaningless / ungrammatical, never lose the main point,
+   negation or question. If it cannot be shorter and still complete, keep the complete line (it may exceed N). A short
+   translation stays short – never add words to make it longer.{fill_en}
    NEVER copy the ⟪⟫ marker into the translation.
 9. A line that is clearly SONG LYRICS (theme song, a character singing – verse, not dialogue) must start with "♪ ".
    Never add ♪ to normal dialogue.
@@ -357,36 +362,86 @@ SYL_PER_SEC = 4.6      # tiếng Việt lồng tiếng tự nhiên ~4–5 tiến
 BUDGET_RE = re.compile(r"\s*⟪[^⟫]*⟫\s*")
 HAN_RE = re.compile(r"[㐀-鿿]")
 
-SHORTEN_PROMPT = """Bạn là biên tập viên lồng tiếng phim. Mỗi mục là 1 câu thoại: câu gốc tiếng Trung ("goc"), bản dịch
-tiếng Việt hiện tại ("dich", dài "so_tieng" tiếng), số tiếng (âm tiết) TỐI ĐA được dùng ("toi_da"); có thể kèm thời gian
-giọng lồng đang đọc ("giong_dang_doc"), thời gian nhân vật nói / chỗ trống phải vừa ("nhan_vat_noi" / "cho_trong") và số
-tiếng cần bớt ("can_bot"). Giọng lồng phải đọc xong trong thời gian đó, nên câu mới KHÔNG ĐƯỢC dài hơn "toi_da" tiếng
-(đếm từng tiếng cách nhau bằng dấu cách, kể cả từ đệm).
-ĐƯỢC: bỏ từ thừa / từ đệm / chữ lặp, bỏ chủ ngữ hoặc tân ngữ khi đã rõ, dùng từ ngắn hơn cùng nghĩa, nói gọn hơn, gộp
-2 ý nhỏ thành 1.
-KHÔNG ĐƯỢC: bỏ ý chính, đổi nghĩa, thêm ý mới, đổi câu hỏi thành câu kể, bỏ dấu câu cuối, đổi / bỏ tên riêng, đổi xưng hô
-(đại từ, cách gọi – không đổi nam / nữ, anh / em, ngôi).
-Mỗi mục viết 2 phương án: "a" = ngắn vừa đủ (không quá "toi_da" tiếng, giữ được nhiều ý nhất), "b" = ngắn hơn nữa
-(vẫn đủ ý chính). Chỉ trả về JSON {"1": {"a": "…", "b": "…"}, ...} không kèm giải thích."""
+SHORTEN_PROMPT = """Bạn là biên tập viên lồng tiếng phim. Việc của bạn: VIẾT LẠI câu dịch NGẮN HƠN mà vẫn GIỮ Ý CHÍNH –
+câu mới phải trọn nghĩa, tự nhiên, người nghe hiểu đúng điều nhân vật muốn nói. KHÔNG phải xoá chữ bừa cho đủ số tiếng.
+Mỗi mục là 1 câu thoại: câu gốc tiếng Trung ("goc"), bản dịch tiếng Việt hiện tại ("dich", dài "so_tieng" tiếng), có
+thể kèm bản dịch đầy đủ ban đầu ("ban_day_du" – ý chính phải như bản này), số tiếng (âm tiết) nên dùng tối đa
+("toi_da"), thời gian giọng lồng đang đọc ("giong_dang_doc"), thời gian nhân vật nói / chỗ trống ("nhan_vat_noi" /
+"cho_trong") và số tiếng nên bớt ("can_bot") – để giọng lồng đọc xong đúng lúc.
+CÁCH LÀM NGẮN ĐÚNG:
+- Bỏ từ phụ không cần cho ý chính: tự dưng, lại, tùy tiện, thật sự, đã, rồi đấy, người / cái / con (lượng từ)…
+- Nói thẳng thay cách nói hình ảnh / vòng vo dài ("là một cái hố" -> "bị lừa", "không biết phải làm thế nào" -> "chẳng
+  biết làm sao").
+- Dùng từ ngắn cùng nghĩa, câu gọn hơn; bỏ chủ ngữ khi câu trước đã rõ ai nói.
+PHẢI GIỮ: ý chính (ai, làm gì, với ai / cái gì), phủ định (không / chưa / chẳng / đừng / đâu…), câu hỏi, xưng hô, tên
+riêng, dấu câu cuối. Câu mới đứng riêng vẫn có nghĩa, đúng ngữ pháp.
+KHÔNG ĐƯỢC: câu cụt / vô nghĩa / sai ngữ pháp, xé đôi 1 từ ghép, mất hoặc đổi ý chính, ngược nghĩa, đổi câu hỏi thành câu
+kể, thêm ý, đổi / bỏ tên riêng, đổi xưng hô (không đổi nam / nữ, anh / em, ngôi).
+Ví dụ ĐÚNG:
+- "Vợ à, chuyện này có thể tùy tiện đồng ý sao?" -> "Vợ à, chuyện này có thể sao?"
+- "Nhỡ đâu lại là một cái hố thì sao?" -> "Nhỡ đâu bị lừa thì sao?"
+- "Ta không muốn tự dưng lại có thêm…" -> "Ta không muốn có thêm…"
+- "Một người sư phụ muốn đoạt xá ta đâu." -> "Một sư phụ muốn đoạt xá ta đâu."
+Ví dụ SAI:
+- "Nhỡ đâu lại là một cái hố thì sao?" -> "Nhỡ đâu cái hố?" (cụt, vô nghĩa)
+- "Ta không muốn tự dưng lại có thêm…" -> "Ta muốn có thêm…" (mất "không" – ngược nghĩa)
+- "Một người sư phụ muốn đoạt xá ta đâu." -> "Sư phụ đoạt ta đâu." (xé từ "đoạt xá", vô nghĩa)
+Không viết được tới "toi_da" mà câu vẫn trọn nghĩa -> viết bản NGẮN NHẤT còn trọn nghĩa (được dài hơn "toi_da" – giọng
+lồng sẽ đọc nhanh hơn chút). Câu không thể ngắn hơn mà vẫn trọn nghĩa -> trả lại y nguyên "dich".
+Mỗi mục viết 2 CÁCH NÓI KHÁC NHAU, cả 2 đều trọn nghĩa: "a" = ngắn nhất có thể, "b" = cách nói khác giữ thêm chút ý
+(có thể dài hơn "a" một chút). Chỉ trả về JSON {"1": {"a": "…", "b": "…"}, ...} không kèm giải thích."""
 
-SHORTEN_RETRY_VI = ("CÁC BẢN SAU VẪN DÀI HƠN \"toi_da\" – \"ban_vua_viet\" là bản bạn vừa viết (dài \"ban_vua_viet_dai\"). "
-                    "Viết lại NGẮN HƠN NỮA cho không quá \"toi_da\" tiếng, vẫn giữ ý chính:")
+SHORTEN_RETRY_VI = ("CÁC BẢN SAU VẪN DÀI HƠN \"toi_da\" HOẶC BỊ LOẠI – \"ban_vua_viet\" là bản bạn vừa viết (dài "
+                    "\"ban_vua_viet_dai\"; có \"ban_vua_viet_bi_loai\" = bản đó bị loại vì mất ý chính / cụt câu, kèm lý do). "
+                    "Thử 1 CÁCH NÓI KHÁC ngắn hơn mà vẫn giữ ý chính, câu trọn nghĩa, tự nhiên, đúng ngữ pháp. Không ngắn "
+                    "hơn được thì trả lại bản ngắn nhất còn trọn nghĩa – KHÔNG xoá chữ làm câu cụt cho đủ số tiếng:")
+
+SHORTEN_CHECK_VI = """Bạn soát bản RÚT GỌN câu thoại lồng tiếng. Mỗi mục: câu gốc tiếng Trung ("goc"), bản dịch đầy đủ
+("day_du") và các bản rút gọn ("rut_gon": {"a": …, "b": …}).
+Bản rút gọn ĐẠT khi: (1) giữ ý chính – người nghe vẫn hiểu đúng điều nhân vật muốn nói; giữ phủ định, câu hỏi, xưng hô,
+tên riêng; không thêm ý; (2) là câu trọn nghĩa, tự nhiên, đúng ngữ pháp. Bỏ từ phụ (tự dưng, lại, tùy tiện, người, cái…),
+nói thẳng thay cách nói hình ảnh, dùng từ ngắn cùng nghĩa vẫn ĐẠT.
+SAI khi: câu cụt / vô nghĩa / sai ngữ pháp, xé đôi từ ghép, mất hoặc đổi ý chính, ngược nghĩa, câu hỏi thành câu kể, đổi
+xưng hô / tên riêng.
+Ví dụ ĐẠT: "Vợ à, chuyện này có thể tùy tiện đồng ý sao?" -> "Vợ à, chuyện này có thể sao?"; "Nhỡ đâu lại là một cái hố
+thì sao?" -> "Nhỡ đâu bị lừa thì sao?"; "Một người sư phụ muốn đoạt xá ta đâu." -> "Một sư phụ muốn đoạt xá ta đâu."
+Ví dụ SAI: "Nhỡ đâu cái hố?" (cụt); "Ta muốn có thêm…" thay cho "Ta không muốn tự dưng lại có thêm…" (ngược nghĩa);
+"Sư phụ đoạt ta đâu." (xé từ "đoạt xá").
+Chỉ trả về JSON {"1": {"a": "dat", "b": "sai: lý do ngắn"}, ...} – mỗi bản "dat" hoặc "sai: …"."""
 
 
-SHORTEN_PROMPT_EN = """You are a film dubbing script editor. Each item is one line: the source line ("source"), the current
-{lang} translation ("translation", "length" {unit} long) and the MAXIMUM length in {unit} ("max"); it may also give how
-long the dubbed voice reads now ("voice_now"), how long the character speaks / the room it must fit ("speech" / "room")
-and how many {unit} to cut ("cut"). The voice must finish within that time, so the new line must NOT exceed "max".
-ALLOWED: drop filler / repeated words, drop a subject or object that is already clear, use shorter words with the same
-meaning, phrase it tighter, merge 2 small ideas into 1.
-NOT ALLOWED: dropping the core meaning, changing the meaning, adding new ideas, turning a question into a statement,
-dropping the final punctuation, changing / dropping names, changing forms of address (never change he / she, older /
-younger, or the grammatical person).
-Write 2 versions per item: "a" = just short enough (within "max", keeping as much meaning as possible), "b" = shorter
-still (core meaning kept). Return ONLY JSON {{"1": {{"a": "…", "b": "…"}}, ...}} with no explanation."""
+SHORTEN_PROMPT_EN = """You are a film dubbing script editor. Your job: REWRITE the translation SHORTER while KEEPING THE
+MAIN MEANING – the new line must be a complete, natural sentence that says what the character means. NEVER just delete
+words to hit the count. Each item is one line: the source line ("source"), the current {lang} translation
+("translation", "length" {unit} long), maybe the original full translation ("full" – the main meaning must match it),
+the length to aim for at most ("max"), how long the dubbed voice reads now ("voice_now"), how long the character speaks
+/ the room it must fit ("speech" / "room") and how many {unit} to cut ("cut").
+SHORTEN THE RIGHT WAY: drop minor words the main meaning does not need (suddenly, again, really, just, fillers…); say a
+long figurative / roundabout phrase plainly; use shorter words of the same meaning; drop a subject already clear.
+MUST KEEP: the main meaning (who, does what, to whom / what), negation, question, forms of address, names, the final
+punctuation. The new line must make sense on its own and be grammatical.
+NOT ALLOWED: clipped / meaningless / ungrammatical lines, splitting a compound word, losing or changing the main point,
+reversing the meaning, turning a question into a statement, adding ideas, changing / dropping names, changing forms of
+address (never change he / she, older / younger, or the grammatical person).
+If it cannot reach "max" and still be complete -> write the SHORTEST complete version (it may exceed "max" – the voice
+will read a little faster). If it cannot be shorter at all -> return "translation" unchanged.
+Write 2 DIFFERENT phrasings per item, both complete: "a" = as short as possible, "b" = an alternative keeping a bit more
+(may be slightly longer than "a"). Return ONLY JSON {{"1": {{"a": "…", "b": "…"}}, ...}} with no explanation."""
 
-SHORTEN_RETRY_EN = ("THESE ARE STILL LONGER THAN \"max\" – \"your_last\" is the version you just wrote (\"your_last_length\" "
-                    "long). Rewrite them SHORTER still, within \"max\", keeping the core meaning:")
+SHORTEN_RETRY_EN = ("THESE ARE STILL LONGER THAN \"max\" OR WERE REJECTED – \"your_last\" is the version you just wrote "
+                    "(\"your_last_length\" long; \"your_last_rejected\" = it was rejected for losing the main meaning / "
+                    "sounding clipped, with the reason). Try ONE DIFFERENT shorter phrasing that keeps the main meaning and "
+                    "is complete, natural and grammatical. If it cannot be shorter, return the shortest complete version – "
+                    "do NOT delete words so the line becomes clipped just to hit the count:")
+
+SHORTEN_CHECK_EN = """You check SHORTENED dubbing lines. Each item: the source line ("source"), the full translation
+("full") and the shortened versions ("short": {{"a": …, "b": …}}), in {lang}.
+A shortened version PASSES when: (1) it keeps the main meaning – the listener still understands what the character means;
+negation, question, forms of address and names are kept; nothing is added; (2) it is a complete, natural, grammatical
+sentence. Dropping minor words, saying a figurative phrase plainly or using shorter words of the same meaning still
+PASSES. It FAILS when it is clipped / meaningless / ungrammatical, splits a compound word, loses or changes the main
+point, reverses the meaning, turns a question into a statement, or changes forms of address / names.
+Return ONLY JSON {{"1": {{"a": "pass", "b": "fail: short reason"}}, ...}} – each version "pass" or "fail: …"."""
 
 
 CLAUSE_PROMPT = """Bạn là biên tập viên lồng tiếng phim. Mỗi mục có câu gốc đã chia thành các VẾ theo chỗ nhân vật ngắt hơi
@@ -480,6 +535,58 @@ def _sec_text(x: float) -> str:
 def syllables(text: str, lang: str = "vi") -> int:
     """Độ dài lời: số tiếng / từ (Việt, Anh), số chữ (Thái, Nhật, Hàn)."""
     return langs.units(text, lang)
+
+
+_NEG = {"vi": {"không", "chẳng", "chả", "chưa", "đừng", "chớ"},
+        "en": {"not", "no", "never", "none", "nothing", "nobody", "neither", "nor", "cannot"}}
+_Q_KHONG = re.compile(r"\bkhông\s*\?\s*[\"”’)\]]*\s*$", re.I)
+_CHECK_FAIL = re.compile(r"^\s*(sai|fail(ed)?|không đạt|khong dat|false|no)\b", re.I)
+SHORT_KEEP_MIN = 0.4      # bản rút gọn còn dưới 40 % số tiếng của bản đầy đủ (câu ≥ 6 tiếng) = chắc chắn mất ý
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[^\W_]+(?:'[^\W_]+)?", text or "")
+
+
+def _names_in(text: str) -> list[str]:
+    """Chữ viết hoa KHÔNG đứng đầu câu (tên riêng: Lâm Phàm, Thiên Kiếm Tông, iPhone…)."""
+    out = []
+    for m in re.finditer(r"[^\W\d_][\w'-]*", text or ""):
+        w = m.group(0)
+        before = (text[:m.start()]).rstrip(" \t\"“‘'([«")
+        if w[0].isupper() and before and before[-1] not in ".!?…:;\n":
+            out.append(w)
+    return out
+
+
+def meaning_lost(full: str, new: str, lang: str = "vi") -> str:
+    """Lý do bản rút gọn chắc chắn hỏng so với bản đầy đủ ("" = không thấy lỗi). Chỉ bắt lỗi rõ ràng: mất phủ định,
+    câu hỏi thành câu kể, mất số / tên riêng, ngắn còn < 40 % (cụt câu). Ý chính / câu cụt do AI soát (SHORTEN_CHECK)."""
+    lg = langs.norm(lang)
+    a, b = (full or "").strip(), (new or "").strip()
+    if not a or not b:
+        return "bản rút gọn trống"
+    neg = _NEG.get(lg)
+    if neg:
+        aw = [w.lower() for w in _words(_Q_KHONG.sub("?", a) if lg == "vi" else a)]
+        bw = {w.lower() for w in _words(b)}
+        if lg == "en":
+            aw += ["not" for w in aw if w.endswith("n't")]
+            bw |= {"not" for w in bw if w.endswith("n't")}
+        if any(w in neg for w in aw) and not (bw & neg) and not (lg == "vi" and _Q_KHONG.search(b)):
+            return "mất phủ định (không / chưa / đừng…)"
+    if re.search(r"[?？]\s*[\"”’)\]]*\s*$", a) and not re.search(r"[?？]", b):
+        return "câu hỏi thành câu kể"
+    nums = set(re.findall(r"\d+", a))
+    if nums - set(re.findall(r"\d+", b)):
+        return "mất con số"
+    lost = [w for w in dict.fromkeys(_names_in(a)) if w not in b]
+    if lost:
+        return "mất tên riêng: " + ", ".join(lost[:3])
+    na, nb = syllables(a, lg), syllables(b, lg)
+    if na >= 6 and nb < SHORT_KEEP_MIN * na:
+        return f"ngắn còn {nb}/{na} tiếng – chắc chắn mất ý"
+    return ""
 
 
 def budget_for(duration: float, speedup: float = 1.0, lang: str = "vi") -> int:
@@ -1492,6 +1599,8 @@ class Translator:
         self.fit_dub = bool(settings.get("dub_fit", False))   # AI rút gọn bản dịch cho vừa thời gian nói (2.4.10: mặc định tắt)
         # câu ngắn hơn hẳn chỗ trống -> nói đầy đủ hơn (2.1.13: mặc định TẮT – người dùng không muốn AI tự thêm từ)
         self.fill_short = bool(settings.get("translate_fill", False))
+        self.short_check = bool(settings.get("shorten_check", True))   # 2.4.18: AI soát nghĩa từng bản rút gọn
+        self.short_rejected: list[dict] = []   # bản rút gọn bị loại {"k": mục, "text", "why"} (lần shorten gần nhất)
         self.genre = genres.form(self.style, self.target, settings)   # form thể loại phim (sửa được) -> lời nhắc hệ thống
         self.addr = addr_mode(settings)   # không chắc xưng hô: bỏ đại từ / cặp trung tính / AI tự đoán (luật 5f, 2.4.0)
         # nam / nữ từng người nói (p.data["speaker_gender"], pipeline đặt) -> gửi kèm mỗi dòng cho AI biết ai nói với ai
@@ -1629,27 +1738,38 @@ class Translator:
         for k, (zh, tr, n) in enumerate(items):
             it = info[k] or {}
             cur = syllables(tr, self.target)
+            full = it.get("full") if it.get("full") and it.get("full") != tr else ""
+            pv = prev[k] if prev else None
+            pv_text, pv_why = (pv if isinstance(pv, tuple) else (pv, "")) if pv else (None, "")
             if vi:
                 d = {"goc": zh, "dich": tr, "so_tieng": cur, "toi_da": f"{n} tiếng"}
+                if full:
+                    d["ban_day_du"] = full
                 if it.get("now"):
                     d["giong_dang_doc"] = _sec_text(it["now"])
                 if it.get("have"):
                     d["cho_trong" if it.get("what") == "slot" else "nhan_vat_noi"] = _sec_text(it["have"])
                 if it.get("cut"):
                     d["can_bot"] = f"khoảng {it['cut']} tiếng"
-                if prev and prev[k]:
-                    d["ban_vua_viet"], d["ban_vua_viet_dai"] = prev[k], f"{syllables(prev[k], 'vi')} tiếng"
+                if pv_text:
+                    d["ban_vua_viet"], d["ban_vua_viet_dai"] = pv_text, f"{syllables(pv_text, 'vi')} tiếng"
+                    if pv_why:
+                        d["ban_vua_viet_bi_loai"] = pv_why
             else:
                 d = {"source": zh, "translation": tr, "length": f"{cur} {L['unit_ai']}", "max": f"{n} {L['unit_ai']}"}
+                if full:
+                    d["full"] = full
                 if it.get("now"):
                     d["voice_now"] = f"{it['now']:.1f} s"
                 if it.get("have"):
                     d["room" if it.get("what") == "slot" else "speech"] = f"{it['have']:.1f} s"
                 if it.get("cut"):
                     d["cut"] = f"about {it['cut']} {L['unit_ai']}"
-                if prev and prev[k]:
-                    d["your_last"] = prev[k]
-                    d["your_last_length"] = f"{syllables(prev[k], self.target)} {L['unit_ai']}"
+                if pv_text:
+                    d["your_last"] = pv_text
+                    d["your_last_length"] = f"{syllables(pv_text, self.target)} {L['unit_ai']}"
+                    if pv_why:
+                        d["your_last_rejected"] = pv_why
             payload[str(k + 1)] = d
         if vi:
             sysp = SHORTEN_PROMPT
@@ -1689,30 +1809,109 @@ class Translator:
             return min(ok, key=lambda c: syllables(c, self.target)), False
         return None, False
 
+    def _check_short(self, items: list[tuple[str, str, int]], info: list, cands: list[list[str]]) -> list[dict]:
+        """AI soát nghĩa từng bản rút gọn (SHORTEN_CHECK): mỗi mục {bản: lý do sai} – bản không có trong dict = đạt / AI
+        không trả lời (lỗi gửi -> coi như đạt, đã có lớp soát máy)."""
+        if not self.llm or not any(cands):
+            return [{} for _ in items]
+        vi = self.target == "vi"
+        payload = {}
+        for k, (zh, tr, _n) in enumerate(items):
+            if not cands[k]:
+                continue
+            full = (info[k] or {}).get("full") or tr
+            opts = {chr(97 + j): c for j, c in enumerate(cands[k])}
+            payload[str(k + 1)] = ({"goc": zh, "day_du": full, "rut_gon": opts} if vi
+                                   else {"source": zh, "full": full, "short": opts})
+        if vi:
+            sysp, head = SHORTEN_CHECK_VI, "SOÁT CÁC BẢN RÚT GỌN SAU:"
+        else:
+            sysp = SHORTEN_CHECK_EN.format(lang=langs.INFO[self.target]["english"])
+            head = "CHECK THESE SHORTENED LINES:"
+        try:
+            d = _extract_json(self.llm.chat(sysp, head + "\n" + json.dumps(payload, ensure_ascii=False, indent=0)))
+        except (Cancelled, net.NetworkDown):
+            raise
+        except Exception:  # noqa: BLE001 – soát lỗi: giữ kết quả soát máy
+            return [{} for _ in items]
+        out = []
+        for k in range(len(items)):
+            v = d.get(str(k + 1)) if isinstance(d, dict) else None
+            bad = {}
+            for j, c in enumerate(cands[k]):
+                r = v.get(chr(97 + j)) if isinstance(v, dict) else None
+                if r is None:          # AI không trả lời bản này -> coi như đạt (đã qua soát máy)
+                    continue
+                t = ("dat" if r else "sai") if isinstance(r, bool) else str(r).strip()
+                m = _CHECK_FAIL.match(t)
+                if m:
+                    bad[c] = "AI soát: " + (t[m.end():].strip(" :–-") or "mất ý chính / câu cụt")
+            out.append(bad)
+        return out
+
+    def _vet(self, items: list[tuple[str, str, int]], info: list, cands: list[list[str]], keys: list[int]) -> list[list[str]]:
+        """Bỏ bản rút gọn đổi nghĩa / cụt câu: soát máy (meaning_lost) rồi AI soát (short_check). Ghi bản bị loại vào
+        self.short_rejected; trả các bản còn lại."""
+        keep: list[list[str]] = []
+        for k, (_zh, tr, _n) in enumerate(items):
+            full = (info[k] or {}).get("full") or tr
+            ok = []
+            for c in cands[k]:
+                if c == tr:
+                    continue
+                why = meaning_lost(full, c, self.target)
+                if why:
+                    self.short_rejected.append({"k": keys[k], "text": c, "why": why})
+                else:
+                    ok.append(c)
+            keep.append(ok)
+        if self.short_check:
+            bad = self._check_short(items, info, keep)
+            for k in range(len(items)):
+                for c, why in bad[k].items():
+                    self.short_rejected.append({"k": keys[k], "text": c, "why": why})
+                keep[k] = [c for c in keep[k] if c not in bad[k]]
+        return keep
+
+    def _why_rejected(self, k: int) -> str:
+        return next((r["why"] for r in reversed(self.short_rejected) if r["k"] == k), "")
+
     def shorten(self, items: list[tuple[str, str, int]], info: list | None = None, retry: bool = True) -> list[str]:
         """Rút gọn bản dịch quá dài so với thời gian nói. items: (câu gốc, bản dịch, số tiếng tối đa); info (2.3.6):
-        mỗi mục {"now": giây giọng đang đọc, "have": giây phải vừa, "cut": số tiếng cần bớt, "what": speech / slot}
-        gửi kèm cho AI. AI viết 2 phương án -> chọn bản giữ ý nhiều nhất mà vẫn vừa số tiếng; bản nào vẫn quá số tiếng
-        thì hỏi lại riêng các câu đó 1 lần (retry). Không bản nào ngắn hơn -> giữ bản cũ."""
+        mỗi mục {"now": giây giọng đang đọc, "have": giây phải vừa, "cut": số tiếng cần bớt, "what": speech / slot,
+        "full": bản dịch đầy đủ ban đầu (2.4.18 – chuẩn nghĩa)} gửi kèm cho AI. AI VIẾT LẠI 2 cách nói ngắn hơn, nghĩa
+        không đổi -> soát nghĩa (máy + AI, bản đổi nghĩa / cụt câu bị loại) -> chọn bản giữ ý nhiều nhất mà vừa số tiếng;
+        không bản nào vừa thì hỏi lại riêng các câu đó 1 lần (retry, kèm lý do bản trước bị loại). Không bản đạt nào ngắn
+        hơn -> giữ bản cũ (tool cho đọc nhanh hơn / tích sẵn)."""
+        self.short_rejected = []
         if not self.llm or not items:
             return [vi for _, vi, _ in items]
         info = list(info or []) + [None] * (len(items) - len(info or []))
         try:
             first = self._shorten_call(items, info)
+            first_ok = self._vet(items, info, first, list(range(len(items))))
         except (Cancelled, net.NetworkDown):
             raise
         except Exception:  # noqa: BLE001
             return [vi for _, vi, _ in items]
         out, redo, prev = [], [], []
         for k, (_zh, tr, n) in enumerate(items):
-            best, ok = self._best_short(first[k], tr, n)
+            best, ok = self._best_short(first_ok[k], tr, n)
             out.append(best or tr)
             if not ok and retry:
                 redo.append(k)
-                prev.append(best or (min(first[k], key=lambda c: syllables(c, self.target)) if first[k] else None))
+                if best:
+                    prev.append((best, ""))
+                elif first[k]:
+                    shortest = min(first[k], key=lambda c: syllables(c, self.target))
+                    prev.append((shortest, self._why_rejected(k)))
+                else:
+                    prev.append(None)
         if redo:
+            sub_items, sub_info = [items[k] for k in redo], [info[k] for k in redo]
             try:
-                second = self._shorten_call([items[k] for k in redo], [info[k] for k in redo], prev=prev)
+                second = self._shorten_call(sub_items, sub_info, prev=prev)
+                second = self._vet(sub_items, sub_info, second, redo)
             except (Cancelled, net.NetworkDown):
                 raise
             except Exception:  # noqa: BLE001

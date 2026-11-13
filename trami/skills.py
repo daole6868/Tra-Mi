@@ -34,9 +34,10 @@ BUILTIN = [
         "- Bạn bè ngang hàng xưng tớ – cậu (hoặc tao – mày nếu cãi nhau), con – bố với người tạo ra / bố mẹ – chỉ khi dòng "
         "gốc không ghi rõ đại từ / cách gọi; ghi rõ (他 / 她, 哥 / 姐…) thì giữ đúng nam / nữ, vai vế.")},
     {"id": "dub_short", "name": "Lồng tiếng – vừa thời gian, dễ đọc", "builtin": True, "text": (
-        "- Bản dịch để LỒNG TIẾNG: câu nói tự nhiên, độ dài theo ký hiệu ⟪…⟫ của từng dòng. Dài hơn mức tối đa -> chọn "
-        "từ / cách nói ngắn hơn mà vẫn đủ ý (không bỏ ý); câu ngắn thì để ngắn – KHÔNG thêm từ đệm, tiếng cảm thán hay ý "
-        "mới cho dài ra; đừng lược tới mức câu cụt.\n"
+        "- Bản dịch để LỒNG TIẾNG: câu nói tự nhiên, độ dài theo ký hiệu ⟪…⟫ của từng dòng. Dài hơn mức tối đa -> VIẾT "
+        "LẠI ngắn hơn mà giữ ý chính, câu trọn nghĩa (bỏ từ phụ như tự dưng / lại / tùy tiện, nói thẳng thay cách nói "
+        "hình ảnh, từ ngắn cùng nghĩa) – không xoá chữ làm câu cụt / vô nghĩa; không ngắn được thì giữ câu trọn nghĩa. "
+        "Câu ngắn thì để ngắn – KHÔNG thêm từ đệm, tiếng cảm thán hay ý mới cho dài ra.\n"
         "- Tránh chuỗi số dài, ký hiệu, viết tắt khó đọc; số nhỏ viết bằng chữ.\n"
         "- Không thêm dấu ngoặc / chú thích trong câu; giữ dấu câu cuối (? ! .) để giọng đọc lên / xuống đúng.")},
     {"id": "co_trang_kn", "name": "Cổ trang – tiên hiệp (chuẩn truyện convert)", "builtin": True, "text": (
@@ -178,7 +179,9 @@ Chỉ trả về JSON: {{"<số>": {{"sua": "bản dịch mới", "ly_do": "lý 
 
 # mục độ dài của REVIEW_PROMPT: có / không "AI rút gọn bản dịch cho vừa thời gian nói" (Cài đặt dub_fit, 2.4.10)
 REVIEW_LEN_INTRO = ' và độ dài nói vừa thời gian câu thoại ("≤N" = tối đa N; "M–N" = từ M tới N)'
-REVIEW_LEN_RULE = """3. Độ dài: đếm số tiếng (âm tiết; số đếm theo cách đọc). Dài hơn N -> rút gọn, giữ ý (bỏ từ thừa, dùng từ ngắn hơn).
+REVIEW_LEN_RULE = """3. Độ dài: đếm số tiếng (âm tiết; số đếm theo cách đọc). Dài hơn N -> VIẾT LẠI ngắn hơn mà giữ ý chính, câu
+   trọn nghĩa (bỏ từ phụ, nói thẳng thay cách nói hình ảnh, từ ngắn cùng nghĩa) – không xoá chữ làm câu cụt / vô nghĩa /
+   sai ngữ pháp, không mất phủ định / câu hỏi; không ngắn được mà vẫn trọn nghĩa thì để nguyên.
    Ngắn hơn M -> có thể dùng câu đủ thành phần (chủ ngữ, xưng hô, từ nối) – KHÔNG thêm từ đệm, tiếng cảm thán, ý mới,
    tên / thông tin. Câu chỉ có "≤N": ngắn thì để nguyên. Dư / thiếu 1–2 tiếng thì để nguyên."""
 REVIEW_NOLEN_RULE = """3. Độ dài: KHÔNG sửa câu chỉ vì dài / ngắn – không rút gọn (bỏ từ, đổi sang cách nói ngắn hơn) bản dịch đã đúng
