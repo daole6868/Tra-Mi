@@ -17947,3 +17947,58 @@ def test_voxcpm_release_after_dub_2420(monkeypatch):
     vox.last_used = _t.time() - gpu.IDLE_STOP_VOX - 5
     assert gpu.reap_idle() == 0 and vox.stopped == 2
     assert gpu.release_vox({"voxcpm_keep": True}) is False and gpu.release_vox(force=True) and vox.stopped == 3
+
+
+def test_ocr_separates_when_switch_on_2421(tmp_path, monkeypatch):
+    """2.4.21: nguồn phụ đề OCR (giờ theo phụ đề) + bật "Tách giọng khỏi nhạc trước" -> quét chữ xong thì tách giọng /
+    nhạc nền (trước đây bỏ qua vì không cần nghe); tắt công tắc / giờ kết hợp (tự tách khi đo giọng) / tách theo đoạn
+    -> không tách thêm; chưa cài bộ tách / lỗi -> báo trong thông báo, phụ đề vẫn lấy được."""
+    from trami import ocr, pipeline
+    from trami import separate as sepmod
+    from trami.config import load_settings
+    from trami.gui.project_page import recognize_message
+    from trami.project import Project
+    from trami.subtitle import Segment
+
+    src = tmp_path / "phim.mp4"
+    src.write_bytes(b"x")
+    p = Project.create("ocr tach 2421")
+    p.data["source"] = str(src)
+    p.save()
+    monkeypatch.setattr(ocr, "extract_hardsubs", lambda *a, **k: [Segment(1.0, 2.0, "你好"), Segment(2.5, 3.5, "再见")])
+    monkeypatch.setattr(pipeline, "ocr_box", lambda p: {"x": 0, "y": 0.8, "w": 1, "h": 0.2, "exact": True})
+    monkeypatch.setattr(pipeline, "ocr_voice_timing", lambda p, segs, *a, **k: segs)
+    monkeypatch.setattr(pipeline, "snap_edges", lambda *a, **k: None)
+    monkeypatch.setattr(sepmod, "available", lambda model=None: True)
+    done = []
+    have = {}
+
+    def fake_sep(p, settings=None, progress=None, cancel=None, model=None):
+        done.append(1)
+        have.update(vocals="v.wav", instrumental="i.wav")
+        return "v.wav", "i.wav"
+    monkeypatch.setattr(pipeline, "separate_audio", fake_sep)
+    monkeypatch.setattr(pipeline, "stems", lambda p: dict(have))
+    monkeypatch.setattr(pipeline, "sep_model_name", lambda p: "Mel-RoFormer")
+    try:
+        st = {**load_settings(), "diarize": False, "ocr_timing": "sub", "sep_before_asr": True}
+        pipeline.recognize(p, "ocr", "zh", None, 4.0, st)
+        p.reload()
+        assert done == [1] and len(p.segments) == 2 and not p.data.get("sep_warning")
+        assert "đã tách giọng / nhạc nền bằng Mel-RoFormer" in recognize_message(p, 2, "ocr", True, st)
+        pipeline.recognize(p, "ocr", "zh", None, 4.0, {**st, "sep_before_asr": False})
+        pipeline.recognize(p, "ocr", "zh", None, 4.0, {**st, "ocr_timing": "mix"})
+        assert done == [1]
+        monkeypatch.setattr(pipeline, "separate_audio", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("hỏng")))
+        have.clear()
+        pipeline.recognize(p, "ocr", "zh", None, 4.0, st)
+        p.reload()
+        assert len(p.segments) == 2 and "hỏng" in p.data["sep_warning"]
+        assert "⚠ Tách giọng khỏi nhạc nền bị lỗi" in recognize_message(p, 2, "ocr", True, st)
+        assert "⚠" not in recognize_message(p, 2, "ocr", False, st)
+        monkeypatch.setattr(sepmod, "available", lambda model=None: False)
+        pipeline.recognize(p, "ocr", "zh", None, 4.0, st)
+        p.reload()
+        assert "chưa cài bộ tách giọng" in p.data["sep_warning"]
+    finally:
+        p.delete()

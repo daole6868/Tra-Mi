@@ -1810,6 +1810,32 @@ def _drop_orig_wav16(p: Project) -> None:
             pass
 
 
+def ocr_separate(p: Project, settings: dict, progress: Prog | None = None, cancel=None) -> bool:
+    """Nguồn phụ đề OCR + bật "Tách giọng khỏi nhạc trước" (2.4.21): quét chữ xong thì tách giọng / nhạc nền luôn
+    (bản tách có sẵn thì dùng lại). Lỗi / chưa cài -> p.data["sep_warning"], không chặn bước lấy phụ đề."""
+    from . import separate as sepmod
+
+    p.data.pop("sep_warning", None)
+    if not settings.get("sep_before_asr", True):
+        return False
+    if not sepmod.available(settings.get("sep_model")):
+        p.data["sep_warning"] = ("Chưa tách được giọng khỏi nhạc nền: chưa cài bộ tách giọng (audio-separator, cài AI "
+                                 "nâng cao)")
+        return False
+    try:
+        if progress:
+            progress(0.0, "Tách giọng / nhạc nền…")
+        separate_audio(p, settings, progress, cancel)
+        return True
+    except Exception as e:  # không chặn bước lấy phụ đề nếu tách giọng lỗi
+        if isinstance(e, ff.Cancelled):
+            raise
+        log_error("Tách giọng sau khi quét OCR")
+        p.data["sep_warning"] = (f"Tách giọng khỏi nhạc nền bị lỗi ({err_text(e)[:160]}) – thử lại ở tab Lồng tiếng mục "
+                                 "1 → 'Tách ngay'")
+        return False
+
+
 def recognize(p: Project, method: str = "asr", language: str = "zh", region: dict | None = None,
               ocr_fps: float = 4.0, settings: dict | None = None, progress: Prog | None = None, cancel=None,
               denoise: bool = False, engine: str | None = None,
@@ -1899,6 +1925,10 @@ def recognize(p: Project, method: str = "asr", language: str = "zh", region: dic
         p.data["ocr_timing"] = timing or "voice"
         if timing != "mix":
             p.data.pop("ocr_mix", None)
+        if method == "ocr" and timing != "mix" and not settings.get("_spans"):
+            # 2.4.21: giờ câu "Theo phụ đề" không cần nghe nên trước đây bỏ qua tách giọng dù đã bật "Tách giọng khỏi
+            # nhạc trước" -> tab Âm thanh / lồng tiếng / kiểm tra câu không có tiếng nói không có bản tách
+            ocr_separate(p, settings, _sub(progress, 0.85, 0.95), cancel)
     else:
         from . import asr_funasr
 

@@ -859,6 +859,10 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   `CUDNN_ORDER` (cudnn_graph64_9 TRƯỚC), không gọi preload_dlls; không thì `ort.preload_dlls()`; lỗi nạp -> `_CUDA_NOTE`
   (log + cảnh báo). `config.quiet_dll_errors` (SetErrorMode SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX, gọi ở
   `gui.main.run` + `__main__.main`, tiến trình phụ thừa hưởng): DLL lỗi không bật hộp thoại chặn tool.
+- OCR + tách giọng (2.4.21): nguồn "OCR", giờ câu "Theo phụ đề" (không cần nghe) mà bật "Tách giọng khỏi nhạc trước"
+  (`sep_before_asr`) -> `pipeline.ocr_separate` ngay sau khi quét (bản tách có sẵn dùng lại; chưa cài / lỗi ->
+  `sep_warning`, phụ đề vẫn lấy được); không chạy khi giờ "kết hợp" (tự tách lúc đo giọng) / tách theo đoạn (`_spans`).
+  `project_page.recognize_message` báo "đã tách giọng / nhạc nền bằng …" / ⚠ cho cả OCR khi bật tách.
 - Giờ câu phụ đề OCR (2.1.32): Cài đặt `ocr_timing` (`pipeline.OCR_TIMINGS`, ô "Giờ câu" tab Tự động nhóm 1 `a_ocrtime` –
   chỉ hiện khi nguồn "OCR", `_ocr_timing_changed`; Cài đặt → Nhận dạng giọng nói "Giờ câu khi OCR"; hộp Thiết lập tự động;
   `C.OCR_TIMINGS` / `OCR_TIMING_HELP`; `autoflow.summary` ghi "(giờ kết hợp giọng nói)"): "sub" (mặc định) = đúng giờ chữ
@@ -1273,7 +1277,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (375 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (376 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -3417,8 +3421,21 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   Manager card 6,8 / 8 GB sau khi VoxCPM2 đọc xong "vẫn liên tục chiếm GPU không nhả" -> do thiết kế giữ bộ đọc 5 phút cho
   'Tạo lại giọng' (VoxCPM2 ~7 GB = gần hết card) -> đọc xong tắt ngay, nghe thử 1 phút, ô "VoxCPM2 – giữ trên card" (tắt);
   bộ nhớ KV dựng lại cỡ 8192 cho câu dài giờ thu nhỏ lại sau câu đó.
+- 2.4.21: người dùng hỏi 4 việc: (1) AI rút gọn trước khi lồng không biết câu đọc dài / ngắn (đúng – chỉ ước 4,6 tiếng / s;
+  khuyên dịch đầy đủ -> lồng -> tích ⚠ -> AI rút gọn), (2) giọng tự đọc nhanh / chậm cho khớp (do "Tăng tốc tối đa" + "Câu
+  ngắn đọc chậm lại" – chỉnh được ở mục 3) – người dùng: 1, 2 không cần sửa; (3) OCR bật tách giọng mà chỉ thấy OCR -> sửa
+  (`ocr_separate`); (4) tab Tạo giọng -> tư vấn (mỗi bộ đọc chỉnh được gì, cao độ / âm sắc / EQ, cảm xúc thật chỉ VoxCPM2,
+  nghe ngay khi kéo thanh chỉnh sau khi đọc, câu mẫu giữ 1 người đọc, chia 3 đợt) -> người dùng chọn ĐỢT 1, bản thiết kế
+  artifact "Subvideo – Tạo giọng" (trang ở thanh bên: Giọng của bạn | Công thức giọng (1 Nguồn giọng – bộ đọc + giọng nền +
+  thông số riêng bộ đọc; 2 Chỉnh sau khi đọc – cao độ, âm sắc, tốc độ, ấm, rõ chữ, sáng, nén, vang phòng, màu đặc biệt; Mẫu
+  nhanh) | Nghe thử (ô tự gõ, câu mẫu, cảm xúc VoxCPM2, sóng âm + tiếng/giây, các bản vừa nghe, Lưu thành giọng mới / Lưu
+  đè); hộp Lưu giọng (tên, nam / nữ, hợp với, đo tốc độ đọc, mặc định cho video mới) + nhóm "⭐ Giọng của tôi" đầu mọi ô chọn
+  giọng) – chờ người dùng duyệt rồi mới code.
 
 ## Vấn đề đang mở
+- Tab Tạo giọng (đợt 1): chờ người dùng duyệt bản thiết kế artifact "Subvideo – Tạo giọng" (sửa gì / bỏ gì) rồi mới code.
+- 2.4.21: chờ người dùng chạy "1. Nghe & tách câu" nguồn OCR với "Tách giọng khỏi nhạc trước" bật: thông báo có "đã tách
+  giọng / nhạc nền bằng …", tab Âm thanh có bản tách.
 - 2.4.20: chờ người dùng chép file, tạo lại vài câu VoxCPM2 -> xong việc mở Task Manager: bộ nhớ GPU chuyên dụng phải về ~0,5–1
   GB (còn cao -> trang Việc đang làm → "Xem ai đang chiếm card", gửi ảnh); tab Phụ đề Lọc từ "á" chỉ còn câu có chữ Á đứng
   riêng; tab Lồng tiếng mục 3 → "Danh sách từ (N)…" thêm từ → "Lưu & lọc…" → bỏ tích câu muốn giữ → Áp dụng.

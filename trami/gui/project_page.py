@@ -147,9 +147,9 @@ def recognize_message(p, n: int, method: str, separate: bool, st: dict) -> str:
         msg += f" · nghe bằng {used}"
     if o["method"] != "ocr" and p.data.get("asr_warning"):
         msg += "  ⚠ " + p.data["asr_warning"]
-    if o["method"] != "ocr" and p.data.get("sep_warning"):
+    if p.data.get("sep_warning") and (o["method"] != "ocr" or o["separate"]):
         msg += "  ⚠ " + p.data["sep_warning"]
-    elif o["method"] != "ocr" and o["separate"] and pipeline.stems(p):
+    elif o["separate"] and pipeline.stems(p):   # 2.4.21: OCR cũng tách giọng khi bật
         msg += f" · đã tách giọng / nhạc nền bằng {pipeline.sep_model_name(p)} (dùng được ở tab Âm thanh)"
     if o["method"] != "ocr":
         msg += " · " + pipeline.speaker_note(p, st)
