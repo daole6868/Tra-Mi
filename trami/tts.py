@@ -616,6 +616,11 @@ class WorkerStuck(RuntimeError):
     """Tiến trình VieNeu / OmniVoice / Qwen3 / Hy-MT2 không trả lời quá lâu."""
 
 
+class VramFull(RuntimeError):
+    """2.4.17: bộ đọc AI dừng vì card đồ hoạ hết bộ nhớ (đọc gần như đứng) – không mở lại / đọc tiếp câu khác (mở lại
+    vẫn y vậy, chỉ giữ card thêm)."""
+
+
 class VieneuWorker:
     """Điều khiển tiến trình riêng chạy VieNeu (trami/vieneu_worker.py). Mỗi lúc chỉ 1 câu được đọc."""
 
@@ -633,6 +638,8 @@ class VieneuWorker:
         self._times: list[float] = []          # giây / chữ của các câu gần đây -> biết câu nào chậm bất thường
         self.note = ""                         # vừa phải mở lại bộ đọc vì chậm bất thường (báo lên dòng tiến độ)
         self.vram_free = None                  # phần card đồ hoạ còn trống (tiến trình báo sau mỗi câu)
+        self.beat: dict | None = None          # 2.4.17: câu đang đọc tới bước nào ({"i", "n", "t"} – VoxCPM2 báo)
+        self.ready_info: dict = {}             # tin "ready" của tiến trình (VoxCPM2: bộ nhớ card sau khi nạp)
 
     flag = "--vieneu-worker"
     log_name = "vieneu.txt"
@@ -680,6 +687,7 @@ class VieneuWorker:
             self.stop()
             raise RuntimeError(r["error"])
         self.sr = int(r.get("sr", 48000))
+        self.ready_info = r
 
     @staticmethod
     def _pump(proc: subprocess.Popen, q: queue.Queue) -> None:
@@ -726,6 +734,9 @@ class VieneuWorker:
             if not line.startswith("@@TRAMI@@"):
                 continue
             obj = json.loads(line[len("@@TRAMI@@"):])
+            if "beat" in obj:       # 2.4.17: đang đọc tới bước i/n (tiến trình còn chạy – không phải treo)
+                self.beat = obj["beat"] if isinstance(obj["beat"], dict) else None
+                continue
             if "progress" in obj:   # tiến độ tải / nạp mô hình từ tiến trình VieNeu
                 if progress:
                     progress(float(obj["progress"]), obj.get("msg", ""))
@@ -770,6 +781,7 @@ class VieneuWorker:
                         self._start()
                     assert self.proc and self.proc.stdin
                     t0 = time.time()
+                    self.beat = None
                     self.proc.stdin.write(req + "\n")
                     self.proc.stdin.flush()
                     r = self._read(stall=self._stall_for(text), on_wait=on_wait)
@@ -779,6 +791,9 @@ class VieneuWorker:
                         continue  # khởi động lại tiến trình 1 lần
                     raise RuntimeError(str(e)) from None
                 if "error" in r:
+                    if r.get("vram"):   # card hết bộ nhớ: tắt hẳn (trả card), không mở lại / đọc tiếp
+                        self.stop()
+                        raise VramFull(r["error"])
                     if attempt == 0 and "captur" in r["error"].lower():
                         self.fused = "0"   # GPU không chụp được CUDA graph -> chạy lại không dùng graph
                         self.stop()
@@ -788,6 +803,15 @@ class VieneuWorker:
                 self._timed(time.time() - t0, r, len(text))
                 return Path(out)
         raise RuntimeError(f"{self.title} không đọc được câu này")
+
+    def beat_text(self) -> str:
+        """" · bước 120/400" của câu đang đọc ("" khi tiến trình không báo bước)."""
+        b = self.beat or {}
+        try:
+            i, n = int(b.get("i", 0)), int(b.get("n", 0))
+        except (TypeError, ValueError):
+            return ""
+        return f" · bước {i}/{n}" if i and n else (f" · bước {i}" if i else "")
 
     def _typical(self, chars: int) -> float:
         """Thời gian đọc bình thường của 1 câu `chars` chữ (theo trung vị giây / chữ của 20 câu gần nhất);
@@ -977,6 +1001,23 @@ def _vox(settings: dict | None = None) -> VoxWorker:
         return _vox_model
 
 
+VOX_LOW_FREE = 400   # MB: VoxCPM2 nạp xong mà card còn ít hơn -> câu đầu đã có thể tràn sang RAM (đọc rất chậm)
+
+
+def vox_low_vram(info: dict | None) -> str:
+    """Cảnh báo khi VoxCPM2 nạp xong mà card gần đầy ("" = ổn / không đo được)."""
+    v = (info or {}).get("vram") or {}
+    try:
+        free, total, used = int(v.get("free", -1)), int(v.get("total", 0)), int(v.get("used", 0))
+    except (TypeError, ValueError):
+        return ""
+    if free < 0 or not total or free >= VOX_LOW_FREE:
+        return ""
+    return (f"VoxCPM2 nạp xong card chỉ còn {free} MB trống (card {total / 1024:.1f} GB, VoxCPM2 giữ {used / 1024:.1f} GB)"
+            " – thiếu chỗ thì Windows lấy RAM thay, đọc rất chậm. Tắt chương trình đang dùng card (trang Việc đang "
+            "làm → Xem ai đang chiếm card) hoặc dùng bộ đọc nhẹ hơn (VieNeu, KorvaTTS)")
+
+
 def _free_other_tts(keep) -> int:
     """2.4.14: trước khi nạp 1 bộ đọc AI, tắt bộ đọc AI khác đang để không (card 8 GB không chứa nổi VoxCPM2 + VieNeu /
     OmniVoice cùng lúc – tràn sang RAM thì đọc chậm như treo). Đang đọc dở thì để nguyên."""
@@ -1138,6 +1179,9 @@ def _loop_guard(worker, text: str, out: Path, a: np.ndarray, sr: int, watch: Rat
         b, sr2 = read_wav(out)
         d2 = len(b) / sr2 if sr2 else 0.0
         ok2 = not voice_problem(b, sr2) and d2 >= 0.6 * watch.expect(wkey, syl)
+    except (VramFull, Cancelled):
+        os.replace(first, out)
+        raise
     except Exception:  # noqa: BLE001 – đọc lại lỗi: giữ bản đầu
         ok2, d2 = False, dur
     if ok2 and d2 < dur:
@@ -2383,6 +2427,15 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         base = len(vn_items) + len(omni_items)
         vrefs: dict[tuple, object] = {}
         vwatch = RateWatch()
+        low = vox_low_vram(vx.ready_info)
+        if low:
+            stats["vox_vram"] = low
+            if progress:
+                progress(base / max(1, total_items) * 0.8, "⚠ " + low)
+
+        def vox_wait(n: int, what: str):
+            return lambda sec: progress and progress(
+                (base + n) / max(1, total_items) * 0.8, f"{what} – đã {sec:.0f} s{vx.beat_text()}")
 
         def vox_ref(spec: str, lg: str) -> tuple:
             """(file mẫu để đọc tiếp, lời file mẫu, file giọng tham chiếu) cho mã giọng VoxCPM2."""
@@ -2392,7 +2445,12 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             if ck not in vrefs:
                 try:
                     if spec.startswith("voxd:"):   # câu mẫu tạo 1 lần theo mô tả -> mọi câu nhái nó -> cả video 1 giọng
-                        a, at = vox_design.ensure_anchor(vx, spec, vox_repo, lg, settings)
+                        nm = (vox_design.get(spec, settings) or {}).get("name", spec)
+                        what = f"VoxCPM2 đang tạo câu mẫu giọng {nm} (chỉ lần đầu)"
+                        if progress and not vox_design.anchor_path(spec, vox_repo, lg, settings).exists():
+                            progress(base / max(1, total_items) * 0.8, what + "…")
+                        a, at = vox_design.ensure_anchor(vx, spec, vox_repo, lg, settings,
+                                                         on_wait=vox_wait(0, what) if progress else None)
                         vrefs[ck] = (a, at, a)
                     elif spec.startswith("vox:"):
                         sm = samples[spec[4:]]
@@ -2423,9 +2481,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                 tmp = p.with_suffix(".raw.wav")
                 synth_checked(vx, text, tmp, report=rep, watch=vwatch, wkey=spec + ("|emo" if ec else ""),
                               ref_audio=ra, ref_text=rt, reference=rf, control=ec, cfg=vox_cfg, steps=vox_steps,
-                              on_wait=lambda sec, n=n: progress and progress(
-                                  (base + n) / max(1, total_items) * 0.8,
-                                  f"VoxCPM2 đang đọc {n + 1}/{len(vox_items)} – câu này đã {sec:.0f} s"))
+                              on_wait=vox_wait(n, f"VoxCPM2 đang đọc {n + 1}/{len(vox_items)}"))
                 if rep.get("long") == 1:
                     stats["long_fixed"] = stats.get("long_fixed", 0) + 1
                 elif rep.get("long") == 2:
@@ -2438,6 +2494,10 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                     tmp.replace(p)
             except Cancelled:
                 raise
+            except VramFull as e:   # card hết bộ nhớ: dừng hẳn VoxCPM2 (đọc tiếp chỉ giữ card mãi, không xong)
+                errors.append(f"Câu {i + 1}: {e}")
+                stats["vox_vram_stop"] = len(vox_items) - n
+                break
             except Exception as e:
                 errors.append(f"Câu {i + 1}: {e}")
             if progress:

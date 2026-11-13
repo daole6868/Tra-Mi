@@ -69,7 +69,19 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   đọc AI (VieNeu / OmniVoice / VoxCPM2, cả nghe thử) tắt bộ đọc AI khác đang để không (card 8 GB). Tab Tài liệu
   `models` "voxcpm" (`vox_ready`: config + audiovae + model.safetensors | pytorch_model.bin; tải `VOX_FILES` rồi .pth /
   .bin nếu thiếu; ModelScope `OpenBMB/VoxCPM2` trong `hf_download.MS_MIRRORS`). gpu: `_workers` có `_vox_model`,
-  `vram_need` voxcpm 5500 MB, `WORKER_FLAGS` / `WORKER_CLASS`. `common.TTS_ENGINES` "voxcpm" (điện thoại tự có).
+  `vram_need` voxcpm 6500 MB (2.4.17; README VoxCPM2 ghi ~8 GB), `WORKER_FLAGS` / `WORKER_CLASS`. `common.TTS_ENGINES`
+  "voxcpm" (điện thoại tự có). Card 8 GB (2.4.17): `voxcpm_worker.cap_kv` (trước khi nạp bọc `MiniCPMModel.setup_cache`
+  -> bộ nhớ KV ≤ `KV_LEN` 4096 vị trí, thư viện dựng 8192 lên card trước cả trọng số; `shrink_kv` dự phòng sau khi nạp;
+  câu quá dài "KV cache is full" -> `restore_kv` cỡ gốc + đọc lại), `_load_beat` (nạp mà thư viện im 5 s -> "Đang nạp
+  VoxCPM2 – đã N s · card đã nhận x GB", ≤ 15 phút), `Steps` thay `voxcpm.model.voxcpm2.tqdm` của vòng sinh (`hook_steps`)
+  -> tin {"beat": {i, n, t}} ≤ 2 lần / s + `VramSpill` khi sau 20 s 1 giây giọng mất > `SPILL_RTF` 8 giây (không biết độ
+  dài bước: < 0,5 bước / s) VÀ card còn < 4 % -> {"error", "vram": true}; `max_len_for` (giới hạn bước mỗi câu = (0,5 s ×
+  `speech_units` + 3 s, ≥ 6 s) / `patch_seconds` – thư viện cho tới 4096 bước); tin ready có `vram` {free, total, used} MB,
+  `kv_len`, `patch_sec`; ghi tiến trình qua khoá (`send`). Tool: `VieneuWorker._read` nhận "beat" -> `self.beat`,
+  `beat_text()` " · bước i/n"; `ready_info`; lỗi "vram" -> `VramFull` (tắt tiến trình, KHÔNG mở lại); vòng VoxCPM2 của
+  `synthesize_dub` gặp VramFull -> dừng cả VoxCPM2 (`stats["vox_vram_stop"]` = số câu chưa đọc), `vox_low_vram`
+  (nạp xong card còn < `VOX_LOW_FREE` 400 MB -> `stats["vox_vram"]` + dòng tiến độ ⚠), câu mẫu báo "VoxCPM2 đang tạo câu
+  mẫu giọng X (chỉ lần đầu) – đã N s · bước i/n" (`ensure_anchor(on_wait=)`), `dub_summary` báo 2 trường hợp.
 - Học từ VoiceStudio (debpalash, AGPL-3.0 – chỉ học ý, 2.4.15) – 4 mục:
   A "Ngoài câu thoại giữ tiếng gốc": edit["audio"]["outside"] (None = theo Cài đặt `audio_outside`, mặc định bật; công tắc
   tab Âm thanh mục 1 `audio_tab.outside` – mờ khi chưa dùng bản tách, đổi = lưu cả Cài đặt) -> khi đang dùng bản tách:
@@ -1224,7 +1236,7 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (369 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- `tests/test_core.py` – `python -m pytest -q tests` (370 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -3342,7 +3354,20 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   giả (đọc, gán nam / nữ, nghe thử, chưa tải -> Edge), giao diện (hộp từ điển, khối tab Lồng tiếng). Chưa chạy VieNeu ONNX
   / KorvaTTS thật (huggingface.co bị chặn ở máy thử).
 
+- 2.4.17: ảnh "Tạo lại giọng 7 câu … Đang nạp VoxCPM2 9/9 · 0,9 %" + "nạp bị dừng liên tục chiếm GPU". Đọc mã voxcpm 2.0.3
+  + README: VoxCPM2 = 2B, README ghi ~8 GB card (2.4.14 ước 5,5 GB – sai) = cả card RTX 4060 laptop 8 GB -> thiếu chỗ thì
+  Windows lấy RAM thay, đọc chậm hẳn mà card bận 100 %; "9/9" là bước tìm file của lúc nạp – sau đó tool không báo gì cả
+  lúc nạp lẫn lúc tạo câu mẫu (ensure_anchor không có on_wait) -> trông như đứng; câu chậm quá 10 phút -> coi là treo, tắt,
+  mở lại, nạp lại (= "nạp liên tục"). Thư viện còn dựng bộ nhớ KV 8192 vị trí lên card trước cả trọng số và cho mỗi câu
+  sinh tới 4096 bước (đọc không dừng = hàng phút âm thanh rồi giải mã cả khối). Sửa: xem Cấu trúc VoxCPM2 "Card 8 GB".
+  Thử: gói voxcpm giả chạy thật qua tiến trình (nạp 6 s -> "đã 5 s", KV 4096, giới hạn 44 bước cho câu 8 tiếng, tin bước
+  tới tool), vòng sinh chậm + card đầy -> lỗi rõ, tool tắt bộ đọc không mở lại, dừng cả lượt VoxCPM2. Chưa chạy VoxCPM2 thật.
+
 ## Vấn đề đang mở
+- 2.4.17: chờ người dùng chép file, bấm lại Tạo lại giọng (VoxCPM2): dòng tiến độ phải đổi "Đang nạp VoxCPM2 – đã N s"
+  -> "đang tạo câu mẫu giọng … · bước i/n" -> "đang đọc 1/7 · bước …"; thông báo có ⚠ card chỉ còn N MB / VoxCPM2 dừng vì
+  card hết bộ nhớ -> trang Việc đang làm → "Xem ai đang chiếm card" (gửi ảnh) hoặc dùng VieNeu / KorvaTTS; xin
+  data\logs\voxcpm.txt (dòng "[Subvideo] VoxCPM2 đã nạp: card {…}") để biết VoxCPM2 chiếm bao nhiêu trên card 8 GB.
 - 2.4.16: chờ người dùng chép file + `.venv\Scripts\python -m pip install -U --no-deps "vieneu==3.8.4"` và
   `.venv\Scripts\python -m pip install --no-deps korvatts` (tắt tool trước): (A) tab Lồng tiếng mục 3 → Từ điển đọc → Sửa
   từ điển… thêm chữ hay đọc sai, Thử / Nghe thử, Lưu -> Tạo lại giọng các câu đã tích; (E) gõ "[cười]" vào bản dịch 1 câu

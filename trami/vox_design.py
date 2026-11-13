@@ -154,7 +154,8 @@ def _stale(f: Path, pid: str, lang: str) -> bool:
     return bool(m) and (m.group(1) or "vi") == lang
 
 
-def ensure_anchor(worker, pid: str, repo: str, lang: str = "vi", settings: dict | None = None) -> tuple[str, str]:
+def ensure_anchor(worker, pid: str, repo: str, lang: str = "vi", settings: dict | None = None,
+                  on_wait=None) -> tuple[str, str]:
     """(file câu mẫu, lời câu mẫu); chưa có thì cho VoxCPM2 tạo theo mô tả (vài giây, chỉ 1 lần). Câu mẫu hỏng (im lặng,
     tiếng bíp) / dài bất thường (đọc lặp) -> tạo lại với hạt khác, tối đa 3 lần."""
     from .tts import read_wav, syllables
@@ -171,7 +172,8 @@ def ensure_anchor(worker, pid: str, repo: str, lang: str = "vi", settings: dict 
     tmp = out.with_suffix(".tmp.wav")
     why = ""
     for k in range(3):
-        worker.synth(text, tmp, control=p["desc"], seed=p["seed"] + 7919 * k, cfg=ANCHOR_CFG, steps=ANCHOR_STEPS)
+        kw = {"on_wait": on_wait} if on_wait else {}   # dòng tiến độ: "đang tạo câu mẫu … – đã N s · bước i/n"
+        worker.synth(text, tmp, control=p["desc"], seed=p["seed"] + 7919 * k, cfg=ANCHOR_CFG, steps=ANCHOR_STEPS, **kw)
         try:
             a, sr = read_wav(tmp)
             why = voice_problem(a, sr) or ""

@@ -235,7 +235,7 @@ def vram_need(kind: str, settings: dict | None = None) -> int:
         if eng == "vieneu" and (str(st.get("vieneu_device", "auto")).startswith("cpu") or
                                 st.get("vieneu_mode") == "v3nano"):
             return 0      # 2.4.16: VieNeu chạy CPU – không cần chờ card
-        return {"vieneu": 2600, "omnivoice": 4600, "voxcpm": 5500}.get(eng, 0)
+        return {"vieneu": 2600, "omnivoice": 4600, "voxcpm": 6500}.get(eng, 0)   # VoxCPM2 2B: ~6–8 GB
     if kind == "translate":
         return 4600 if st.get("translate_engine") == "hymt" else 0
     return {"separate": 3000, "inpaint": 1600, "render": 1600, "realign": 2200, "diarize": 900,

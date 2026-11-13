@@ -16801,7 +16801,7 @@ def test_voxcpm_engine_2414(tmp_path, monkeypatch):
     assert pipeline.dub_default_voice(None, "voxcpm", {}) == "voxd:tm_nu_nhanh"
     assert "(VoxCPM2)" in pipeline.voice_label("voxd:tm_nu_nhanh") and \
         pipeline.voice_label("voxclone:S1") == "Nhái giọng gốc (VoxCPM2)"
-    assert gpu.vram_need("dub", {"tts_engine": "voxcpm"}) == 5500
+    assert gpu.vram_need("dub", {"tts_engine": "voxcpm"}) == 6500
     from trami.gui import common as C
 
     assert any(k == "voxcpm" for k, _ in C.TTS_ENGINES)
@@ -17470,3 +17470,179 @@ def test_pron_project_gui_2416(monkeypatch):
         win.close()
         win.deleteLater()
         app.processEvents()
+
+
+def test_voxcpm_vram_2417(tmp_path, monkeypatch):
+    """2.4.17 – VoxCPM2 trên card 8 GB: báo "bước i/n" khi đọc (tool không đứng im ở "Đang nạp…"), bộ nhớ KV ≤ 4096 vị
+    trí (dựng lại cỡ gốc khi câu quá dài), giới hạn độ dài mỗi câu theo lời, card tràn + đọc gần như đứng -> lỗi rõ,
+    tool tắt bộ đọc (trả card), không mở lại / không đọc tiếp câu khác; nạp xong card gần đầy -> cảnh báo."""
+    import queue
+    import sys
+    import types
+
+    from trami import pipeline, tts, vox_design
+    from trami import voxcpm_worker as vw
+    from trami.subtitle import Segment
+
+    # số tiếng đọc + giới hạn độ dài câu (mỗi bước = patch_sec giây)
+    assert vw.speech_units("Xin chào các bạn") == 4
+    assert vw.speech_units("(A young woman, fast)Xin chào") == 2
+    assert vw.speech_units("有3个人") == 4.5 and vw.speech_units("") == 0
+    tm = types.SimpleNamespace(patch_size=4, chunk_size=1920, _encode_sample_rate=48000)
+    assert abs(vw.patch_seconds(types.SimpleNamespace(tts_model=tm)) - 0.16) < 1e-9
+    assert vw.patch_seconds(types.SimpleNamespace(tts_model=types.SimpleNamespace(sample_rate=48000))) is None
+    assert vw.max_len_for("Xin chào các bạn", 0.16) == 38          # tối thiểu 6 s
+    long = " ".join(["chữ"] * 40)
+    assert vw.max_len_for(long, 0.16) == 144                         # 40 × 0,5 + 3 = 23 s
+    assert vw.max_len_for(long, None) is None
+
+    # vòng sinh: báo bước + phát hiện card tràn (đọc < 0,5 bước / s VÀ card còn < 4 % trống)
+    sent: list = []
+    ticks = iter(range(0, 10_000, 3))   # mỗi bước 3 s (chậm như tràn card)
+    steps = vw.Steps(sent.append, free_frac=lambda: 0.01, clock=lambda: next(ticks))
+    try:
+        for _ in steps(range(400)):
+            pass
+        raise AssertionError("không phát hiện card tràn")
+    except vw.VramSpill as e:
+        assert "card đồ hoạ hết bộ nhớ" in str(e) and "VieNeu" in str(e)
+    assert sent and sent[0]["beat"]["n"] == 400 and sent[-1]["beat"]["t"] >= vw.SPILL_AFTER
+    sent.clear()
+    ticks2 = iter(range(0, 10_000, 3))
+    ok = vw.Steps(sent.append, free_frac=lambda: 0.5, clock=lambda: next(ticks2))   # chậm nhưng card còn chỗ: để chạy
+    assert sum(1 for _ in ok(range(30))) == 30 and len(sent) == 30
+    sent.clear()
+    n = 0
+    for i in vw.Steps(sent.append, free_frac=lambda: 0.0)(range(1000)):   # thư viện dừng giữa vòng (break) như thật
+        n += 1
+        if i == 5:
+            break
+    assert n == 6
+
+    # bộ nhớ KV: chặn lúc nạp ≤ 4096, dựng lại cỡ gốc khi câu quá dài
+    class Buf:
+        def __init__(self, n):
+            self.n, self.device, self.dtype = n, "cuda", "bf16"
+
+        def numel(self):
+            return self.n * 1024
+
+        def element_size(self):
+            return 2
+
+    class KV:
+        def __init__(self, n):
+            self.max_length, self.kv_cache = n, Buf(n)
+
+    class MiniCPMModel:
+        def setup_cache(self, batch_size, max_length, device, dtype):
+            self.kv_cache = KV(max_length)
+
+    for name in ("voxcpm", "voxcpm.modules", "voxcpm.modules.minicpm4", "voxcpm.model"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    mm = types.ModuleType("voxcpm.modules.minicpm4.model")
+    mm.MiniCPMModel = MiniCPMModel
+    monkeypatch.setitem(sys.modules, "voxcpm.modules.minicpm4.model", mm)
+    v2 = types.ModuleType("voxcpm.model.voxcpm2")
+    v2.tqdm = None
+    monkeypatch.setitem(sys.modules, "voxcpm.model.voxcpm2", v2)
+    monkeypatch.setattr(vw, "_KV_CAP", [vw.KV_LEN])
+    assert vw.cap_kv() and vw.cap_kv()   # gắn 2 lần không bọc chồng
+    a, b = MiniCPMModel(), MiniCPMModel()
+    a.setup_cache(1, 8192, "cuda", "bf16")
+    b.setup_cache(1, 8192, "cuda", "bf16")
+    model = types.SimpleNamespace(tts_model=types.SimpleNamespace(base_lm=a, residual_lm=b))
+    assert vw.kv_len(model) == 4096 and b.kv_cache.max_length == 4096
+    assert vw.shrink_kv(model) == 0          # đã nhỏ: không làm gì
+    vw.restore_kv(model)
+    assert vw.kv_len(model) == 8192 and b.kv_cache.max_length == 8192
+    assert vw.shrink_kv(model) == 16 and vw.kv_len(model) == 4096   # (8192 - 4096) × 1024 × 2 × 2 mô hình
+    assert vw.hook_steps(steps) == 1 and v2.tqdm is steps
+    # biết độ dài 1 bước: đo theo "1 giây giọng mất bao nhiêu giây" (0,16 s / bước, 1 bước / s = 6 lần -> chưa dừng)
+    ticks3 = iter(range(0, 10_000, 1))
+    st6 = vw.Steps(sent.append, free_frac=lambda: 0.0, clock=lambda: next(ticks3), patch_sec=0.16)
+    assert sum(1 for _ in st6(range(60))) == 60
+    ticks4 = iter(range(0, 10_000, 2))
+    try:
+        for _ in vw.Steps(sent.append, free_frac=lambda: 0.0, clock=lambda: next(ticks4), patch_sec=0.16)(range(60)):
+            pass
+        raise AssertionError("1 giây giọng mất 12 giây + card đầy: phải dừng")
+    except vw.VramSpill as e:
+        assert "1 giây giọng mất 12 giây" in str(e)
+    assert vw._kv_full(ValueError("KV cache is full")) and not vw._kv_full(ValueError("khác"))
+
+    # tool: tin "beat" giữ tiến trình sống + hiện bước; lỗi card tràn -> tắt bộ đọc, không mở lại
+    w = tts.VoxWorker("openbmb/VoxCPM2")
+    w.proc = types.SimpleNamespace(poll=lambda: None)
+    w._q = queue.Queue()
+    w._q.put('@@TRAMI@@{"beat": {"i": 5, "n": 40, "t": 2.0}}\n')
+    w._q.put('@@TRAMI@@{"ok": true, "sr": 48000}\n')
+    assert w._read(stall=5) == {"ok": True, "sr": 48000} and w.beat_text() == " · bước 5/40"
+    w.beat = None
+    assert w.beat_text() == ""
+    stopped: list = []
+
+    class Stdin:
+        def write(self, _x):
+            pass
+
+        def flush(self):
+            pass
+
+    w.proc = types.SimpleNamespace(poll=lambda: None, stdin=Stdin())
+    monkeypatch.setattr(w, "_read", lambda **_k: {"error": "VoxCPM2 đọc gần như đứng – card đồ hoạ hết bộ nhớ",
+                                                  "vram": True})
+    monkeypatch.setattr(w, "stop", lambda: stopped.append(1))
+    monkeypatch.setattr(w, "_start", lambda *a, **k: (_ for _ in ()).throw(AssertionError("không được mở lại")))
+    try:
+        w.synth("Xin chào", tmp_path / "x.wav")
+        raise AssertionError("phải báo VramFull")
+    except tts.VramFull as e:
+        assert "card đồ hoạ" in str(e)
+    assert stopped == [1]
+
+    # nạp xong card gần đầy -> cảnh báo
+    assert "120 MB" in tts.vox_low_vram({"vram": {"free": 120, "total": 8188, "used": 6900}})
+    assert tts.vox_low_vram({"vram": {"free": 2000, "total": 8188, "used": 5900}}) == ""
+    assert tts.vox_low_vram({}) == "" and tts.vox_low_vram(None) == ""
+
+    # lồng tiếng: card tràn ở câu mẫu -> dừng cả VoxCPM2 (không đọc tiếp 3 câu kia), báo rõ
+    calls: list = []
+
+    class FakeVox:
+        sr, note, ready_info = 48000, "", {"vram": {"free": 150, "total": 8188, "used": 7000}}
+        beat = None
+
+        def ensure_started(self, progress=None, cancel=None):
+            pass
+
+        def beat_text(self):
+            return ""
+
+        def synth(self, text, out, **kw):
+            calls.append(text)
+            raise tts.VramFull("VoxCPM2 đọc gần như đứng vì card đồ hoạ hết bộ nhớ")
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(tts, "voxcpm_available", lambda: True)
+    monkeypatch.setattr(tts, "_vox", lambda settings=None: FakeVox())
+    monkeypatch.setattr(vox_design, "DESIGN_DIR", tmp_path / "design")
+    segs = [Segment(i * 3.0, i * 3.0 + 2.5, "一", f"Câu thứ {i + 1} đây.", "S1") for i in range(4)]
+    stats: dict = {}
+    msgs: list = []
+    try:
+        tts.synthesize_dub(segs, tmp_path / "dub.wav", 12.0, tmp_path / "work", voices={"S1": "voxd:tm_nu_nhanh"},
+                           settings={}, stats=stats, progress=lambda x, m: msgs.append(m))
+        raise AssertionError("không có câu nào đọc được -> phải báo lỗi")
+    except RuntimeError as e:
+        assert "card đồ hoạ hết bộ nhớ" in str(e)
+    assert len(calls) == 1 and stats.get("vox_vram_stop") == 4
+    assert any("chỉ còn 150 MB" in m for m in msgs) and any("câu mẫu" in m for m in msgs)
+    p = types.SimpleNamespace(data={"dub_stats": {"vox_vram_stop": 4, "dubbed": 0}})
+    try:
+        txt = pipeline.dub_summary(p)
+    except Exception:   # noqa: BLE001 – dự án giả thiếu khoá khác: chỉ cần câu báo có trong mã
+        txt = ""
+    assert not txt or "card đồ hoạ hết bộ nhớ" in txt

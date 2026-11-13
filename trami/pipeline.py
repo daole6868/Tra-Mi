@@ -6739,6 +6739,12 @@ def dub_summary(p: Project) -> str:
         extra.append(f"{st['errors']} câu lỗi")
     if st.get("slow_restarts"):
         extra.append(f"bộ đọc chậm bất thường {st['slow_restarts']} lần (card đồ hoạ đầy) – đã tự mở lại")
+    if st.get("vox_vram_stop"):
+        extra.append(f"⚠ VoxCPM2 dừng vì card đồ hoạ hết bộ nhớ – {st['vox_vram_stop']} câu chưa đọc. Tắt chương trình "
+                     "đang dùng card (trang Việc đang làm → Xem ai đang chiếm card) rồi bấm Tạo lại giọng, hoặc chọn bộ "
+                     "đọc nhẹ hơn (VieNeu, OmniVoice, KorvaTTS)")
+    elif st.get("vox_vram"):
+        extra.append("⚠ " + str(st["vox_vram"]))
     if st.get("babble_fixed"):
         extra.append(f"{st['babble_fixed']} câu ngắn VieNeu đọc lặp lời – đã tự cắt phần lặp / đọc lại")
     if st.get("babble_left"):
