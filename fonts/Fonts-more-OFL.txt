@@ -1,0 +1,58 @@
+Các font dưới đây lấy từ Google Fonts (github.com/google/fonts), giấy phép SIL Open Font License 1.1 – được dùng, nhúng, phân phối kèm phần mềm (kể cả thương mại). Bản quyền theo từng font:
+
+== anton
+Copyright 2020 The Anton Project Authors (https://github.com/googlefonts/AntonFont.git)
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+
+== paytoneone
+Copyright 2011 The Paytone Project Authors (https://github.com/googlefonts/paytoneFont),
+with Reserved Font Names "Paytone" and "Paytone One".
+
+
+== lobster
+Copyright 2010 The Lobster Project Authors (https://github.com/impallari/The-Lobster-Font), with Reserved Font Name "Lobster".
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+
+== pacifico
+Copyright 2018 The Pacifico Project Authors (https://github.com/googlefonts/Pacifico)
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+
+== patrickhand
+Copyright (c) 2010-2012 Patrick Wagesreiter (mail@patrickwagesreiter.at)
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+
+== bungee
+Copyright 2023 The Bungee Project Authors (https://github.com/djrrb/Bungee)
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+
+== chakrapetch
+Copyright 2018 The Chakra Petch Project Authors (https://github.com/m4rc1e/Chakra-Petch.git)
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+
+== barlowcondensed
+Copyright 2017 The Barlow Project Authors (https://github.com/jpt/barlow)
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+
+== pattaya
+Copyright (c) 2015, Cadson Demak (info@cadsondemak.com), Copyright (c) 2010, Pablo Impallari (www.impallari.com|impallari@gmail.com), Copyright (c) 2010, 2011, Alexei Vanyashin (www.cyreal.org|a@cyreal.org), with Reserved Font Name Lobster.
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+
+== baloo2
+﻿Copyright 2019 The Baloo 2 Project Authors (https://github.com/EkType/Baloo2)
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+
+== dancingscript
+Copyright 2016 The Dancing Script Project Authors (https://github.com/googlefonts/DancingScript), with Reserved Font Name 'Dancing Script'.
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+
+Toàn văn giấy phép: xem OFL.txt (cùng thư mục).

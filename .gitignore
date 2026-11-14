@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+data/
+bin/
+build/
+dist/
+*.log
+.pytest_cache/
+torch-constraints.txt
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
