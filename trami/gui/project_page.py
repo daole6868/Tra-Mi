@@ -2993,10 +2993,15 @@ class ProjectPage(QWidget):
         g_voice = Group("Giọng đọc", "users")
         g_voice.row("Bộ đọc mặc định", self.d_engine)
         g_voice.row("Giọng cho tất cả", field(self.d_voice_all, va_play))
+        # 2.4.22 trang Tạo giọng: giọng của tôi -> mở để sửa; giọng khác -> giọng mới có giọng nền là giọng đó
+        self.d_voicelab = button("Mở Tạo giọng để sửa giọng này", "wand", "Trang Tạo giọng: chỉnh cao độ / âm sắc / tốc độ "
+                                 "/ màu giọng, nghe thử câu bất kỳ, lưu thành giọng của bạn (nhóm ⭐ Giọng của tôi)",
+                                 flat=True, on_click=self._open_voicelab)
         g_voice.actions(button("Phân biệt người nói", "users", "Tìm xem câu nào của ai (S1, S2…) theo giọng gốc",
                                on_click=self.run_diarize),
                         button("Tự gán giọng khác nhau", "wand", "Mỗi người nói 1 giọng, nam / nữ theo giọng gốc",
-                               on_click=self._auto_voices))
+                               on_click=self._auto_voices),
+                        self.d_voicelab)
         # 2.4.0: cột Nam / nữ chọn tay được – AI dịch dùng để chọn xưng hô, Tự gán giọng dùng để chọn giọng nam / nữ
         self.spk_table = QTableWidget(0, 5)
         self.spk_table.setHorizontalHeaderLabels(["Người nói", "Nam / nữ", "Số câu", "Giọng lồng", ""])
@@ -5951,8 +5956,11 @@ class ProjectPage(QWidget):
             try:
                 if [(m.itemData(i), m.itemText(i)) for i in range(m.count())] != items:
                     m.clear()
-                    for d, t in items:
+                    for k, (d, t) in enumerate(items):
                         m.addItem(t, d)
+                        tip = src.itemData(k, Qt.ItemDataRole.ToolTipRole)
+                        if tip:      # giọng có "Hợp với…" (trend / giọng của tôi) – rê chuột ở ô gương cũng thấy
+                            m.setItemData(k, tip, Qt.ItemDataRole.ToolTipRole)
                 m.setCurrentIndex(src.currentIndex())
             finally:
                 m.blockSignals(False)
@@ -6672,6 +6680,13 @@ class ProjectPage(QWidget):
         self._update_voice_note()
         self._pron_note()
 
+    def _open_voicelab(self):
+        """Nút "Mở Tạo giọng để sửa giọng này" (tab Lồng tiếng mục 2): giọng cho tất cả đang chọn -> trang Tạo giọng."""
+        v = self.d_voice_all.currentData() or ""
+        if v in ("", "@auto"):
+            v = next((x for x in (self.p.data.get("voices") or {}).values() if x), "") if self.p else ""
+        self.win.open_voicelab(v)
+
     def _fill_auto_voices(self, voices: list[dict]):
         """Ô "Giọng lồng" ở tab Tự động = danh sách giọng của mục 2 (+ tự gán nam / nữ)."""
         cur = pipeline.voice_all(self.p, self.settings) if self.p else (self.a_voice.currentData() or "")
@@ -6682,6 +6697,7 @@ class ProjectPage(QWidget):
         _add_voices(self.a_voice, voices)
         set_combo(self.a_voice, cur)
         self.loading = was
+        self._sync_mirrors()      # cùng vị trí chọn -> không có tín hiệu đổi: ô gương ở tab Lồng tiếng tự nạp lại
 
     def _voice_all_changed(self, *_):
         """Chọn 1 giọng cho tất cả người nói (tab Tự động / mục 2): áp ngay cho dự án (mọi người nói, bỏ giọng riêng

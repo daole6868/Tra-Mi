@@ -26,6 +26,7 @@ import json
 import queue
 import os
 import re
+import shutil
 import subprocess
 import sys
 import unicodedata
@@ -56,7 +57,9 @@ VN_SAMPLE = "vieneu:mau:"   # giọng thu âm sạch đi kèm gói VieNeu
 VN_LIB = "vieneu:lib:"      # giọng mẫu trong thư viện của người dùng
 VN_TREND = "vieneu:trend:"  # giọng theo trend: giọng dựng sẵn + hiệu ứng (trami/trend_voices.py)
 # kiểu đọc VieNeu: "clear" bớt ngẫu nhiên khi lấy mẫu -> phát âm rõ, ổn định hơn; "natural" = mặc định của VieNeu
-VIENEU_STYLES = {"clear": {"temperature": 0.6, "top_k": 20, "top_p": 0.9}, "natural": {}}
+VIENEU_STYLES = {"clear": {"temperature": 0.6, "top_k": 20, "top_p": 0.9}, "natural": {},
+                 # "Biểu cảm" – chỉ chọn ở trang Tạo giọng (2.4.22), như kiểu đọc MC / ngôn tình của giọng trend
+                 "lively": {"temperature": 0.85, "top_k": 30, "top_p": 0.95}}
 SR = 24000
 _vn_model = None
 _vn_lock = threading.Lock()
@@ -203,7 +206,11 @@ def list_voices(settings: dict | None = None, lang: str = "vi") -> list[dict]:
         voices = omni + voices
     if voxcpm_available():
         voices = vox_voices(settings) + voices
-    return voices
+    from . import voicelab
+
+    mine = [v for v in voicelab.voices()   # ⭐ giọng của tôi (trang Tạo giọng): luôn đứng đầu mọi ô chọn giọng
+            if lang == "vi" or voicelab.engine_of((voicelab.get(v["id"]) or {}).get("base", "")) in ("edge", "omni", "vox")]
+    return mine + voices
 
 
 def vox_voices(settings: dict | None = None) -> list[dict]:
@@ -552,7 +559,7 @@ async def _edge_all(items: list[tuple[int, str, Path, str]], rate: str, pitch: s
         await net_ok.wait()
         return bool(state.get("back"))
 
-    async def one(i: int, text: str, out: Path, voice: str):
+    async def one(i: int, text: str, out: Path, voice: str, r: str | None = None, pt: str | None = None):
         nonlocal done, blocked
         async with sem:
             fails = 0
@@ -564,7 +571,7 @@ async def _edge_all(items: list[tuple[int, str, Path, str]], rate: str, pitch: s
                     errors.append(f"Câu {i + 1}: bỏ qua (Edge từ chối 403)")
                     break
                 try:
-                    await _edge_save(text, voice, out, rate, pitch)
+                    await _edge_save(text, voice, out, r or rate, pt or pitch)
                     break
                 except asyncio.CancelledError:
                     raise
@@ -2074,7 +2081,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     work = Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
     voices = voices or {}
-    if not voice.startswith(AI_PREFIXES) and voice not in (CLONE, OMNI_CLONE, VOX_CLONE):
+    if not voice.startswith(AI_PREFIXES + ("my:",)) and voice not in (CLONE, OMNI_CLONE, VOX_CLONE):
         voice = "edge:" + voice  # tương thích bản cũ
     mode = settings.get("vieneu_mode", "v3turbo")
 
@@ -2095,7 +2102,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         from . import voices as vlib
 
         samples = {v["id"]: v for v in vlib.list_samples()}
-    from . import korva, trend_voices
+    from . import korva, trend_voices, voicelab
 
     korva_ok = korva.ready()        # đã cài gói + đã tải mô hình (chưa -> đọc bằng Edge, báo trong thông báo)
     korva_steps, korva_speed = korva.opts(settings)
@@ -2117,6 +2124,11 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     vox_emo: dict[int, str] = {}      # 2.4.15: câu VoxCPM2 có cảm xúc -> chỉ dẫn cho bộ đọc
     pron = pronounce.for_settings(settings)   # 2.4.16 từ điển đọc: cách đọc riêng cho bộ đọc, phụ đề giữ nguyên
     n_pron = n_cue = 0
+    # 2.4.22 giọng của tôi (trang Tạo giọng): bộ đọc đọc bằng giọng nền + thông số riêng (iopt), rồi áp phần chỉnh lên
+    # file thô -> file cuối (fx_jobs). Có file thô sẵn (chỉ đổi phần chỉnh) -> không đọc lại.
+    iopt: dict[int, dict] = {}
+    fx_jobs: dict[str, tuple] = {}
+    n_refx = 0
     for i, s in enumerate(segs):
         lg = langs.detect(s.trans or "", lang)
         tp = pausetag.of(s)
@@ -2147,6 +2159,11 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         n_pron += pron_hit
         spec = s.extra.get("voice") or voices.get(s.speaker or "S1") or voice   # giọng riêng của câu (nếu có)
         want = spec
+        myrec = None
+        if spec.startswith(voicelab.PREFIX):
+            myrec = voicelab.get(spec)
+            spec = myrec["base"] if myrec else "edge:vi-VN-HoaiMyNeural"   # giọng của tôi đã bị xoá
+        base_want = spec
         if spec in (CLONE,) or spec.startswith("vieneu:"):
             if not vieneu_available() or (spec.startswith((VN_SAMPLE, VN_LIB)) and not vieneu_ref(spec)) or \
                     (spec.startswith(VN_TREND) and not trend_voices.get(spec)):
@@ -2161,14 +2178,30 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                 spec = "edge:vi-VN-HoaiMyNeural"   # chưa cài VoxCPM2 / giọng mẫu đã bị xoá / chưa có mô tả
         if spec.startswith(korva.PREFIX) and not korva_ok:
             spec = "edge:vi-VN-HoaiMyNeural"       # chưa cài KorvaTTS / chưa tải mô hình (tab Tài liệu)
-        if spec != want:   # không đọc được bằng giọng đã chọn -> báo rõ (trước đây đổi im lặng sang Hoài My)
+        voice_ok = spec == base_want and not (want.startswith(voicelab.PREFIX) and not myrec)
+        if not voice_ok:   # không đọc được bằng giọng đã chọn -> báo rõ (trước đây đổi im lặng sang Hoài My)
             fallback[want] = fallback.get(want, 0) + 1
-        s.extra["voice_used"] = want if spec == want else spec
+            myrec = None
+        s.extra["voice_used"] = want if voice_ok else spec
         if lg != "vi" and (spec == CLONE or spec.startswith(("vieneu:", korva.PREFIX))):
             # VieNeu / KorvaTTS chỉ đọc tiếng Việt -> câu tiếng Anh / Thái / Nhật / Hàn đọc bằng Edge cùng nam / nữ
-            g = vn_gender.get(spec) or korva.gender_of(spec) or (genders.get(s.speaker or "S1") or {}).get("g", "")
+            g = (myrec or {}).get("gender") or vn_gender.get(spec) or korva.gender_of(spec) or \
+                (genders.get(s.speaker or "S1") or {}).get("g", "")
             spec = langs.edge_voice(lg, g, _spk_index(s.speaker))
             n_lang += 1
+            myrec = None
+        iset = settings
+        r_i, p_i = rate, pitch
+        var_i = 0
+        my_fx: dict = {}
+        if myrec:
+            iset = voicelab.overlay(settings, myrec)
+            r_i, p_i = voicelab.edge_args(myrec, rate, pitch)
+            var_i = voicelab.variant(myrec)
+            my_fx = voicelab.fx_of(myrec)
+            c_i, st_i = vox_opts(iset)
+            iopt[i] = {"vn_params": vieneu_params(iset), "vox": (c_i, st_i), "korva": korva.opts(iset),
+                       "variant": var_i}
         if spec.startswith("edge:"):
             spec = edge_for(spec, lg)        # giọng Edge tiếng Việt gặp câu tiếng khác -> giọng tiếng đó
         by_lang[lg] = by_lang.get(lg, 0) + 1
@@ -2191,32 +2224,34 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             sm = samples[spec[5:]]
             extra = f"{sm.get('text', '')}|{sm.get('file')}|{settings.get('omnivoice_model', '')}"
         if spec.startswith("omnid:"):  # đổi mô tả / mô hình -> câu mẫu mới -> đọc lại
-            extra = omni_design.key(spec, settings.get("omnivoice_model", ""), lg) + omni_design.fx_key(spec)
+            extra = omni_design.key(spec, settings.get("omnivoice_model", ""), lg, var_i) + omni_design.fx_key(spec)
         if spec.startswith(VOX_PREFIXES):   # đổi mô tả / file mẫu / mô hình / chất lượng -> đọc lại
             if spec.startswith("voxd:"):
                 extra = vox_design.key(spec, vox_repo, lg, settings)
             elif spec.startswith("vox:"):
                 sm = samples[spec[4:]]
                 extra = f"{sm.get('text', '')}|{sm.get('file')}"
-            extra += f"|{vox_repo}|c{vox_cfg:g}|s{vox_steps}" + ("|" + lg if lg != "vi" else "")
+            c_i, st_i = (iopt.get(i) or {}).get("vox", (vox_cfg, vox_steps))
+            extra += f"|{vox_repo}|c{c_i:g}|s{st_i}" + ("|" + lg if lg != "vi" else "")
             ec = emotion.to_control(s.extra.get("emo"))    # 2.4.15 cảm xúc từng câu -> chỉ dẫn "(angry, …)"
             if ec:
                 extra += "|emo:" + ec
                 vox_emo[i] = ec
         elif spec.startswith(korva.PREFIX):     # đổi chất lượng / tốc độ KorvaTTS -> đọc lại
-            extra += f"|k{korva_steps}|v{korva_speed:g}"
+            ks_i, kv_i = (iopt.get(i) or {}).get("korva", (korva_steps, korva_speed))
+            extra += f"|k{ks_i}|v{kv_i:g}"
         elif spec.startswith(("omni:", "omniclone:", "omnid:")):
             extra += "|nofade"          # 2.0.34: bỏ đoạn nhỏ dần 0,1 s cuối câu (mất phụ âm cuối của câu ngắn)
             if lg != "vi":
                 extra += "|" + lg
         elif spec.startswith(("vieneu:", "clone:")):
-            extra += "|" + settings.get("vieneu_style", "clear")
+            extra += "|" + iset.get("vieneu_style", "clear")
             if spec.startswith(VN_LIB):     # đổi file mẫu cùng mã -> đọc lại
                 ref = vieneu_ref(spec)
                 extra += f"|{Path(ref).stat().st_mtime if ref else ''}"
             if spec.startswith(VN_TREND):   # đổi giọng gốc / hiệu ứng của giọng trend -> đọc lại
                 extra += "|" + trend_voices.key(spec) + "|" + trend_voices.base_voice(spec, vn_presets)
-        groups[i] = spec
+        groups[i] = want if myrec else spec    # cân âm lượng: các câu cùng 1 giọng của tôi cùng 1 nhóm
         take = int(s.extra.get("take", 0) or 0)   # "Tạo lại giọng": lần đọc mới của cùng câu
 
         def tts_path(text: str) -> Path:
@@ -2225,7 +2260,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                 ex += "|dur2"   # 2.1.5: câu ngắn đọc trước đó bị OmniVoice kéo dài -> đọc lặp lời -> đọc lại
             elif spec.startswith(("vieneu:", "clone:")) and mode != "v3nano" and vn_short(text):
                 ex += "|cap3"   # 2.1.7: câu VieNeu ≤ 4 tiếng đọc trước đó có thể lặp lời -> đọc lại (trần thấp + cắt lặp)
-            h = hashlib.md5((f"{text}|{spec}|{rate}|{pitch}|{mode}|{ex}" + (f"|take{take}" if take else ""))
+            h = hashlib.md5((f"{text}|{spec}|{r_i}|{p_i}|{mode}|{ex}" + (f"|take{take}" if take else ""))
                             .encode()).hexdigest()[:14]
             return work / (f"tts_{h}.mp3" if spec.startswith("edge:") else f"tts_{h}.wav")
 
@@ -2240,7 +2275,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             elif spec.startswith(korva.PREFIX):
                 korva_items.append((i, text, path, spec))
             elif spec.startswith("edge:"):
-                edge_items.append((i, text, path, spec[5:]))
+                # tốc độ / cao độ riêng (giọng của tôi) -> thêm vào cuối mục; mục thường giữ 4 phần như cũ
+                edge_items.append((i, text, path, spec[5:]) + ((r_i, p_i) if (r_i, p_i) != (rate, pitch) else ()))
             else:
                 vn_items.append((i, text, path, spec))
 
@@ -2248,7 +2284,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         # 2.1.12: CHỈ Edge đọc từng vế. Bộ đọc AI (VieNeu / OmniVoice) tự quyết lúc dừng -> vế càng ngắn càng hay trượt
         # chỗ dừng rồi đọc lặp lời (2.1.5–2.1.7) -> đọc CẢ CÂU 1 lần như bản 2.0.90; chỗ nghỉ vẫn đúng lúc nhân vật nói
         # tiếp nhờ chèn lặng vào đúng chỗ bộ đọc tự ngắt ở dấu phẩy (plan_pauses, như 2.0.96).
-        if by_clause and spec.startswith("edge:") and not keep and "ct" in s.extra and i not in tagged:
+        if by_clause and spec.startswith("edge:") and not keep and "ct" in s.extra and i not in tagged and not my_fx:
             cuts = [pt for _a, _b, _pz, pt in pause_points(s, lg, min_gap)]
             if cuts:
                 parts = [clean_tts_text(fix_txt(x), lg) for x in clause_texts(s.trans or "", cuts)]
@@ -2267,9 +2303,21 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             continue
         p = tts_path(t)
         have = p.exists() and p.stat().st_size > 0
+        pf = voicelab.final_path(p, myrec) if my_fx else None   # giọng của tôi: file đã áp phần chỉnh
         if keep:   # bản lồng cũ (trước 2.0.26) chưa ghi tts_file: dùng file đã đọc nếu còn, không đọc mới
-            if have:
+            if pf is not None and pf.exists():
+                s.extra["_tts"] = str(pf)
+            elif have and pf is None:
                 s.extra["_tts"] = str(p)
+            continue
+        if pf is not None:
+            if not (pf.exists() and pf.stat().st_size > 0):
+                if have:
+                    n_refx += 1           # chỉ đổi phần chỉnh: áp lại lên file thô đã đọc, không đọc lại
+                else:
+                    enqueue(t, p)
+                fx_jobs[str(pf)] = (i, p, pf, my_fx)
+            s.extra["_tts"] = str(pf)
             continue
         if not have:
             enqueue(t, p)
@@ -2277,6 +2325,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
     stats["clauses"] = n_clause
     stats["pron"] = n_pron
     stats["cues"] = n_cue
+    stats["my_refx"] = n_refx
     total_items = len(edge_items) + len(vn_items) + len(omni_items) + len(vox_items) + len(korva_items)
     if progress:
         progress(0.0, f"Đang tạo giọng đọc 0/{total_items}")
@@ -2310,19 +2359,20 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                    "watch": watch, "wkey": spec}
             try:
                 tmp = p.with_suffix(".raw.wav")
+                prm = (iopt.get(i) or {}).get("vn_params", vn_params)   # giọng của tôi: kiểu đọc riêng
                 if spec.startswith("clone:"):
                     spk = spec[6:]
                     if spk not in refs:
                         refs[spk] = build_reference(ref_audio, segs, spk, work / f"ref_{spk}.wav") if ref_audio else None
                     # không đủ mẫu giọng -> dùng giọng mặc định
-                    synth_checked(tts, text, tmp, ref_audio=str(refs[spk]) if refs[spk] else None, params=vn_params,
+                    synth_checked(tts, text, tmp, ref_audio=str(refs[spk]) if refs[spk] else None, params=prm,
                                   on_wait=waiting, **chk)
                 elif spec.startswith((VN_SAMPLE, VN_LIB)):
-                    synth_checked(tts, text, tmp, ref_audio=vieneu_ref(spec), params=vn_params, on_wait=waiting, **chk)
+                    synth_checked(tts, text, tmp, ref_audio=vieneu_ref(spec), params=prm, on_wait=waiting, **chk)
                 elif spec.startswith(VN_TREND):
-                    trend_synth(tts, spec, text, tmp, vn_params, vn_presets, on_wait=waiting, **chk)
+                    trend_synth(tts, spec, text, tmp, prm, vn_presets, on_wait=waiting, **chk)
                 else:
-                    synth_checked(tts, text, tmp, voice=spec[7:] or None, params=vn_params, on_wait=waiting, **chk)
+                    synth_checked(tts, text, tmp, voice=spec[7:] or None, params=prm, on_wait=waiting, **chk)
                 if rep.get("babble") == 1:
                     stats["babble_fixed"] = stats.get("babble_fixed", 0) + 1
                 elif rep.get("babble") == 2:
@@ -2352,9 +2402,10 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
 
     orefs: dict[tuple, tuple] = {}
 
-    def omni_ref(spec: str, lg: str = "vi") -> tuple:
-        """(file mẫu, lời trong file mẫu) cho mã giọng OmniVoice (giọng chọn sẵn: câu mẫu cùng tiếng với câu đọc)."""
-        ck = (spec, lg if spec.startswith("omnid:") else "")
+    def omni_ref(spec: str, lg: str = "vi", var: int = 0) -> tuple:
+        """(file mẫu, lời trong file mẫu) cho mã giọng OmniVoice (giọng chọn sẵn: câu mẫu cùng tiếng với câu đọc;
+        var = biến thể của giọng của tôi – cùng mô tả, người đọc khác)."""
+        ck = (spec, lg if spec.startswith("omnid:") else "", var if spec.startswith("omnid:") else 0)
         if isinstance(orefs.get(ck), Exception):   # câu mẫu đã lỗi: không thử lại ở mỗi câu
             raise orefs[ck]
         if ck not in orefs:
@@ -2364,7 +2415,8 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
             elif spec.startswith("omnid:"):   # giọng chọn sẵn: nhái câu mẫu tạo 1 lần -> cả video 1 giọng
                 try:
                     orefs[ck] = omni_design.ensure_anchor(om, spec,
-                                                          settings.get("omnivoice_model") or "k2-fsa/OmniVoice", lg)
+                                                          settings.get("omnivoice_model") or "k2-fsa/OmniVoice", lg,
+                                                          var)
                 except Exception as e:  # noqa: BLE001
                     orefs[ck] = e
                     raise
@@ -2390,7 +2442,7 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                 om.stop()
                 om.ensure_started(None, cancel)
             try:
-                ref, rtext = omni_ref(spec, lg)
+                ref, rtext = omni_ref(spec, lg, (iopt.get(i) or {}).get("variant", 0))
                 tmp = p.with_suffix(".raw.wav")
                 synth_checked(om, text, tmp, ref_audio=ref, ref_text=rtext, language=lg,
                               on_wait=lambda sec, n=n: progress and progress(
@@ -2479,8 +2531,9 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
                 if ec:   # có chỉ dẫn cảm xúc: chỉ dùng giọng tham chiếu (chế độ đọc tiếp không nhận chỉ dẫn)
                     ra, rt, rf = None, "", rf or ra
                 tmp = p.with_suffix(".raw.wav")
+                c_i, st_i = (iopt.get(i) or {}).get("vox", (vox_cfg, vox_steps))
                 synth_checked(vx, text, tmp, report=rep, watch=vwatch, wkey=spec + ("|emo" if ec else ""),
-                              ref_audio=ra, ref_text=rt, reference=rf, control=ec, cfg=vox_cfg, steps=vox_steps,
+                              ref_audio=ra, ref_text=rt, reference=rf, control=ec, cfg=c_i, steps=st_i,
                               on_wait=vox_wait(n, f"VoxCPM2 đang đọc {n + 1}/{len(vox_items)}"))
                 if rep.get("long") == 1:
                     stats["long_fixed"] = stats.get("long_fixed", 0) + 1
@@ -2515,12 +2568,13 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         kw_ = korva.KorvaWorker(settings)
         kw_.ensure_started()
         base = len(vn_items) + len(omni_items) + len(vox_items)
-        rate_k = korva_speed * _speed_tag(rate)
         for n, (i, text, p, spec) in enumerate(korva_items):
             if cancel and cancel():
                 raise Cancelled()
+            ks_i, kv_i = (iopt.get(i) or {}).get("korva", (korva_steps, korva_speed))
+            rate_k = kv_i * _speed_tag(rate)
             try:
-                synth_checked(kw_, text, p, voice=spec, steps=korva_steps, speed=min(2.0, max(0.5, rate_k)))
+                synth_checked(kw_, text, p, voice=spec, steps=ks_i, speed=min(2.0, max(0.5, rate_k)))
             except Cancelled:
                 raise
             except Exception as e:
@@ -2556,6 +2610,18 @@ def synthesize_dub(segs: list[Segment], out_wav: str | Path, total_duration: flo
         except Exception as e:  # noqa: BLE001
             errors.append(f"Câu {i + 1}: ghép các vế lỗi ({e})")
             pj.unlink(missing_ok=True)
+    if fx_jobs:    # giọng của tôi: áp phần chỉnh (cao độ, âm sắc, vang…) lên file thô vừa đọc / đã có
+        if progress:
+            progress(0.8, f"Đang áp phần chỉnh giọng của tôi cho {len(fx_jobs)} câu…")
+        for k, (i, p, pf, fx) in enumerate(fx_jobs.values()):
+            if cancel and cancel():
+                raise Cancelled()
+            if not (p.exists() and p.stat().st_size > 0):
+                continue                     # câu đọc lỗi (đã báo) -> không có giọng / giữ giọng cũ bên dưới
+            try:
+                voicelab.apply_file(p, fx, pf)
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"Câu {i + 1}: chỉnh giọng lỗi ({e})")
     redone = kept_old = 0
     for i, s in enumerate(segs):   # câu đọc (lại) bị lỗi nhưng đã có giọng ở bản trước -> dùng giọng cũ
         p = s.extra.get("_tts")
@@ -2876,11 +2942,26 @@ PREVIEW_TEXT = {"vi": "Xin chào, đây là giọng đọc thử nghiệm của 
 
 
 def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,
-                  ref_audio: str | Path | None = None, lang: str = "vi") -> Path:
-    """Tạo file nghe thử 1 giọng (lời đọc theo tiếng của câu / tiếng đích `lang`)."""
+                  ref_audio: str | Path | None = None, lang: str = "vi", rate: str = "+0%", pitch: str = "+0Hz",
+                  variant: int = 0, emo: str = "") -> Path:
+    """Tạo file nghe thử 1 giọng (lời đọc theo tiếng của câu / tiếng đích `lang`). rate / pitch: Edge; variant: biến
+    thể giọng OmniVoice chọn sẵn; emo: cảm xúc câu thử (VoxCPM2) – 3 tham số này cho trang Tạo giọng (2.4.22)."""
     settings = settings or {}
     lang = langs.norm(lang)
     from . import pausetag, pronounce
+
+    if spec.startswith("my:"):   # giọng của tôi: giọng nền + phần chỉnh (đệm ở data/voices/my/cache)
+        from . import voicelab
+
+        rec = voicelab.get(spec)
+        if not rec:
+            raise ValueError("Giọng của tôi này đã bị xoá – chọn giọng khác")
+        raw_t, _tp, _cu = pausetag.parse_all(text or "")
+        lg0 = langs.detect(raw_t, lang) if raw_t.strip() else lang
+        got = voicelab.preview(rec, text or PREVIEW_TEXT[lg0], settings, lg0, emo)
+        dst = Path(out).with_suffix(".wav")
+        shutil.copyfile(got, dst)
+        return dst
 
     raw, tps, cues = pausetag.parse_all(text or "")   # câu thử có thể kèm thẻ [nghỉ …] / [cười] (2.4.16)
     lg = langs.detect(raw, lang) if raw.strip() else lang
@@ -2900,7 +2981,7 @@ def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,
         from . import net
 
         try:
-            asyncio.run(_edge_save(text, spec[5:], out.with_suffix(".mp3")))
+            asyncio.run(_edge_save(text, spec[5:], out.with_suffix(".mp3"), rate, pitch))
         except Exception as e:  # noqa: BLE001
             if net.is_net_error(e):
                 raise RuntimeError("Không nối được tới Microsoft Edge để nghe thử (mất mạng / mạng chập chờn) – "
@@ -2925,8 +3006,13 @@ def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,
         cfg, steps = vox_opts(settings)
         text = vox_text(text)
         wav = out.with_suffix(".wav")
+        from . import emotion
+
+        ec = emotion.to_control(emo) if emo else ""   # có cảm xúc: chỉ giọng tham chiếu (đọc tiếp không nhận chỉ dẫn)
         if spec.startswith("voxd:"):
             a, at = vox_design.ensure_anchor(vx, spec, settings.get("voxcpm_model") or VOX_REPO, lg, settings)
+            if ec:
+                return synth_checked(vx, text, wav, reference=a, control=ec, cfg=cfg, steps=steps)
             return synth_checked(vx, text, wav, ref_audio=a, ref_text=at, reference=a, cfg=cfg, steps=steps)
         if spec.startswith("vox:"):
             from . import voices as vlib
@@ -2936,6 +3022,8 @@ def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,
                 raise ValueError("Giọng mẫu này đã bị xoá")
             f = str(vlib.path_of(sm))
             st = (sm.get("text") or "").strip()
+            if ec:
+                return synth_checked(vx, text, wav, reference=f, control=ec, cfg=cfg, steps=steps)
             return synth_checked(vx, text, wav, ref_audio=f if st else None, ref_text=st, reference=f, cfg=cfg,
                                  steps=steps)
         ref = ref_audio[0] if isinstance(ref_audio, tuple) else ref_audio
@@ -2946,7 +3034,8 @@ def preview_voice(spec: str, text: str, out: Path, settings: dict | None = None,
         if spec.startswith("omnid:"):
             from . import omni_design
 
-            ref, rtext = omni_design.ensure_anchor(om, spec, settings.get("omnivoice_model") or "k2-fsa/OmniVoice", lg)
+            ref, rtext = omni_design.ensure_anchor(om, spec, settings.get("omnivoice_model") or "k2-fsa/OmniVoice", lg,
+                                                   variant)
             got = om.synth(text, out.with_suffix(".wav"), ref_audio=ref, ref_text=rtext, language=lg)
             if omni_design.fx_key(spec):
                 _omni_fx(spec, Path(got or out.with_suffix(".wav")))

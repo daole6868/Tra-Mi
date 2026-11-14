@@ -4733,7 +4733,12 @@ VOX_SPECS = ("vox:", "voxd:", "voxclone")
 def line_voice(p: Project, s, voices: dict | None = None, default_voice: str = "") -> str:
     """Mã giọng câu sẽ đọc (giọng riêng câu > giọng người nói > giọng mặc định)."""
     v = voices if voices is not None else (p.data.get("voices") or {})
-    return s.extra.get("voice") or v.get(s.speaker or "S1") or default_voice or ""
+    spec = s.extra.get("voice") or v.get(s.speaker or "S1") or default_voice or ""
+    if spec.startswith("my:"):   # giọng của tôi -> giọng nền (cảm xúc VoxCPM2…)
+        from . import voicelab
+
+        spec = (voicelab.get(spec) or {}).get("base", spec)
+    return spec
 
 
 def emotion_items(p: Project, segs: list, rows) -> list[dict]:
@@ -6809,6 +6814,8 @@ def dub_summary(p: Project) -> str:
         extra.append(f"chèn {st['tag_pauses']} chỗ nghỉ theo thẻ [nghỉ …] trong bản dịch")
     if st.get("pron"):
         extra.append(f"từ điển đọc đổi cách đọc {st['pron']} câu")
+    if st.get("my_refx"):
+        extra.append(f"áp lại phần chỉnh giọng của tôi cho {st['my_refx']} câu (không đọc lại)")
     if st.get("cues"):
         extra.append(f"VieNeu đọc thẻ âm ([cười] / [thở dài] / [hắng giọng]) ở {st['cues']} câu")
     if st.get("emo_asked"):
@@ -6878,6 +6885,11 @@ def dub_summary(p: Project) -> str:
 def voice_label(spec: str) -> str:
     """Tên dễ đọc của mã giọng ("edge:vi-VN-NamMinhNeural" -> "Nam Minh (Edge)")."""
     from . import tts
+
+    if spec.startswith("my:"):   # giọng của tôi (trang Tạo giọng, 2.4.22)
+        from . import voicelab
+
+        return voicelab.label(spec)
 
     if spec in (tts.CLONE,) or spec.startswith("clone:"):
         return "Nhái giọng gốc (VieNeu)"

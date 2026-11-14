@@ -41,7 +41,7 @@ TMP_RE = re.compile(r"\.(tmp|part|incomplete)$|\.part\.|\.tmp\.|_tmp\.mp4$|_new\
 TMP_MIN_AGE = 600        # dọn tay: file tạm mới hơn 10 phút có thể đang được ghi -> để nguyên
 SWEEP_AGE = 86400        # mở tool: dọn file tạm cũ hơn 1 ngày
 RECENT_FILE = DATA_DIR / "recent_projects.json"
-_TTS_RE = re.compile(r"^(tts_[0-9a-f]+(?:_v)?\.(?:wav|mp3))")
+_TTS_RE = re.compile(r"^(tts_[0-9a-f]+(?:_v|_m[0-9a-f]+)?\.(?:wav|mp3))")
 
 
 def bar_of(group: str) -> str:
@@ -92,7 +92,11 @@ class _Ctx:
             ex = s.get("extra") or {}
             for k in ("tts_file", "_tts"):
                 if ex.get(k):
-                    self.tts_ref.add(Path(str(ex[k])).name)
+                    nm = Path(str(ex[k])).name
+                    self.tts_ref.add(nm)
+                    m = re.match(r"(tts_[0-9a-f]+)_m[0-9a-f]+\.wav$", nm)
+                    if m:   # giọng của tôi (2.4.22): giữ file thô – sửa phần chỉnh thì áp lại, không đọc lại
+                        self.tts_ref.update({m.group(1) + ".wav", m.group(1) + ".mp3"})
         cur = ((data.get("edit") or {}).get("dub") or {}).get("wav") or ""
         if cur:
             self.dub_keep.add(Path(cur).name)

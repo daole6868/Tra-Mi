@@ -179,10 +179,17 @@ def voices() -> list[dict]:
     return out
 
 
-def key(pid: str, repo: str, lang: str = "vi") -> str:
+VARIANT_STEP = 104729   # "biến thể" (trang Tạo giọng, 2.4.22): cùng mô tả, hạt khác -> người đọc khác
+
+
+def seed_of(p: dict, variant: int = 0) -> int:
+    return int(p["seed"]) + VARIANT_STEP * int(variant or 0)
+
+
+def key(pid: str, repo: str, lang: str = "vi", variant: int = 0) -> str:
     """Mã của câu mẫu: đổi mô tả / hạt / mô hình / câu mẫu -> tạo câu mẫu mới (bản lồng tiếng cũng đọc lại)."""
     p = get(pid)
-    raw = f"{p['instruct']}|{p['seed']}|{repo}|{anchor_text(lang, pid)}" if p else pid
+    raw = f"{p['instruct']}|{seed_of(p, variant)}|{repo}|{anchor_text(lang, pid)}" if p else pid
     return hashlib.md5(raw.encode()).hexdigest()[:10]
 
 
@@ -202,10 +209,12 @@ def process(pid: str, a, sr: int):
     return voicefx.apply(a, sr, fx) if fx else a
 
 
-def anchor_path(pid: str, repo: str, lang: str = "vi") -> Path:
+def anchor_path(pid: str, repo: str, lang: str = "vi", variant: int = 0) -> Path:
     p = get(pid)
     tag = "" if lang == "vi" else f"{lang}_"
-    return DESIGN_DIR / f"{p['id'] if p else 'x'}_{tag}{key(pid, repo, lang)}.wav"
+    if variant:
+        tag += f"v{int(variant)}_"
+    return DESIGN_DIR / f"{p['id'] if p else 'x'}_{tag}{key(pid, repo, lang, variant)}.wav"
 
 
 def _stale(f: Path, pid: str, lang: str) -> bool:
@@ -214,7 +223,7 @@ def _stale(f: Path, pid: str, lang: str) -> bool:
     return bool(m) and (m.group(1) or "vi") == lang
 
 
-def ensure_anchor(worker, pid: str, repo: str, lang: str = "vi") -> tuple[str, str]:
+def ensure_anchor(worker, pid: str, repo: str, lang: str = "vi", variant: int = 0) -> tuple[str, str]:
     """(file câu mẫu, lời câu mẫu) của 1 giọng chọn sẵn; chưa có thì cho OmniVoice tạo (≈ vài giây, chỉ 1 lần).
     Câu mẫu hỏng (im lặng, tiếng bíp) -> tạo lại với hạt khác, tối đa 3 lần. lang: tiếng của câu mẫu."""
     from .tts import read_wav
@@ -223,7 +232,7 @@ def ensure_anchor(worker, pid: str, repo: str, lang: str = "vi") -> tuple[str, s
     p = get(pid)
     if not p:
         raise ValueError("Giọng chọn sẵn này không còn trong danh sách")
-    out = anchor_path(pid, repo, lang)
+    out = anchor_path(pid, repo, lang, variant)
     text = anchor_text(lang, pid)
     if out.exists() and out.stat().st_size > 0:
         return str(out), text
@@ -231,7 +240,7 @@ def ensure_anchor(worker, pid: str, repo: str, lang: str = "vi") -> tuple[str, s
     tmp = out.with_suffix(".tmp.wav")
     why = ""
     for k in range(3):
-        worker.synth(text, tmp, instruct=p["instruct"], seed=p["seed"] + 7919 * k, language=lang)
+        worker.synth(text, tmp, instruct=p["instruct"], seed=seed_of(p, variant) + 7919 * k, language=lang)
         try:
             a, sr = read_wav(tmp)
             why = voice_problem(a, sr) or ""
@@ -240,7 +249,7 @@ def ensure_anchor(worker, pid: str, repo: str, lang: str = "vi") -> tuple[str, s
         if not why:
             tmp.replace(out)
             for old in out.parent.glob(f"{p['id']}_*.wav"):   # câu mẫu của mô hình / mô tả cũ
-                if old != out and _stale(old, p["id"], lang):
+                if old != out and not variant and _stale(old, p["id"], lang):
                     old.unlink(missing_ok=True)
             return str(out), text
     tmp.unlink(missing_ok=True)

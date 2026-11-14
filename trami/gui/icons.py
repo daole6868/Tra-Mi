@@ -525,6 +525,11 @@ def _disk(p: QPainter):
     p.drawLine(QPointF(6.5, 15.8), QPointF(11, 15.8))
 
 
+def _wave(p: QPainter):   # sóng âm: trang Tạo giọng (2.4.22)
+    for x, h in ((4, 4), (8, 10), (12, 16), (16, 8), (20, 12)):
+        p.drawLine(QPointF(x, 12 - h / 2), QPointF(x, 12 + h / 2))
+
+
 ICONS = {
     "home": _home, "folder": _folder, "link": _link, "upload": _upload, "download": _download, "film": _film,
     "subtitles": _subtitles, "eraser": _eraser, "scissors": _scissors, "palette": _palette, "mic": _mic,
@@ -535,7 +540,7 @@ ICONS = {
     "split": _split, "merge": _merge, "sparkle": _sparkle, "stack": _stack, "chev_left": _chev_left,
     "chev_right": _chev_right, "chev_down": _chev_down, "info": _info, "cpu": _cpu, "minus": _minus, "fit": _fit,
     "panel_right": _panel_right, "mute": _mute, "undo": _undo, "redo": _redo, "share": _share,
-    "eye_off": _eye_off, "aspect": _aspect, "silence": _silence, "disk": _disk,
+    "eye_off": _eye_off, "aspect": _aspect, "silence": _silence, "disk": _disk, "wave": _wave,
 }
 
 

@@ -282,7 +282,7 @@ class NavButton(QAbstractButton):
     def _paint_badge(self, p: QPainter, r: QRectF):
         if not self.badge:
             return
-        t = str(self.badge) if self.badge < 100 else "99+"
+        t = self.badge if isinstance(self.badge, str) else str(self.badge) if self.badge < 100 else "99+"
         f = theme.font(7.6, QFont.Weight.Bold)
         w = max(17.0, 8 + len(t) * 7.0)
         if self.compact:

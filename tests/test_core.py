@@ -18002,3 +18002,299 @@ def test_ocr_separates_when_switch_on_2421(tmp_path, monkeypatch):
         assert "chưa cài bộ tách giọng" in p.data["sep_warning"]
     finally:
         p.delete()
+
+
+# ------------------------------------------------------------------ 2.4.22 trang Tạo giọng (giọng của tôi)
+
+def _vl_fake_edge_save(calls):
+    async def fake(text, voice, out, rate="+0%", pitch="+0Hz"):
+        calls.append((text, voice, rate, pitch))
+        dur = 0.4 + 0.08 * len(text.split())
+        _fake_audio(out, dur, 300)
+    return fake
+
+
+def test_voicelab_core_2422(tmp_path, monkeypatch):
+    """Công thức giọng: chuẩn hoá (chặn cao độ ±4, âm sắc ±15 %), phần chỉnh -> hiệu ứng (âm sắc độc lập cao độ, màu
+    đặc biệt cộng dồn EQ / thay vang), tốc độ / cao độ Edge cộng với tốc độ chung, cài đặt riêng bộ đọc, lưu / nhân bản /
+    xuất / nhập / xoá, giọng của tôi đứng đầu danh sách giọng + tên dễ đọc, kho Dung lượng giữ file thô."""
+    from trami import pipeline, storage, tts, voicelab as VL
+
+    for r in VL.list_all():
+        VL.delete(r["id"])
+    r = VL.clean({"base": "edge:vi-VN-HoaiMyNeural", "eng": {"rate": 99, "pitch": -4},
+                  "adj": {"pitch": 9, "timbre": -40, "tempo": 3, "comp": 42, "room": "hall", "color": "speaker"}})
+    assert r["adj"]["pitch"] == 4.0 and r["adj"]["timbre"] == -15.0 and r["adj"]["tempo"] == 1.2
+    assert r["eng"] == {"rate": 30, "pitch": -4}
+    fx = VL.fx_of(r)
+    assert fx["pitch"] == 4.0 and fx["formant"] < 0 and fx["comp"] == 0.6      # màu loa phường: nén mạnh hơn
+    assert fx["reverb"] == [1.2, 0.12] and fx["presence"] == 5                  # màu đặc biệt thay vang phòng
+    only_pitch = VL.fx_of({"base": "edge:x", "adj": {"pitch": 2}})
+    assert only_pitch == {"pitch": 2.0, "formant": 0.0}                         # kéo cao độ giữ nguyên âm sắc
+    assert VL.fx_of({"base": "edge:x"}) == {} and VL.fx_key({}) == ""
+    assert VL.edge_args(r, "+10%", "+2Hz") == ("+43%", "-2Hz")                   # (1,1 × 1,3 − 1) = 43 %
+    vn = {"base": "vieneu:Bình", "eng": {"style": "lively"}}
+    assert VL.overlay({"vieneu_style": "clear"}, vn)["vieneu_style"] == "lively"
+    assert tts.vieneu_params(VL.overlay({}, vn))["temperature"] == 0.85
+    vx = VL.overlay({}, {"base": "voxd:tm_nu_nhanh", "eng": {"quality": "best", "cfg": 2.5}})
+    assert tts.vox_opts(vx) == (2.5, tts.VOX_STEPS["best"])
+    assert VL.variant({"base": "omnid:nu_tre", "eng": {"variant": 3}}) == 3
+    assert VL.variant(vn) == 0
+    a = VL.save({"name": "Thử", "base": "edge:vi-VN-NamMinhNeural", "gender": "male", "adj": {"pitch": -1}})
+    b = VL.save({"name": "Thử", "base": "edge:vi-VN-HoaiMyNeural"})
+    assert b["name"] == "Thử (2)"                                               # tên trùng tự đánh số
+    c = VL.duplicate(a["id"])
+    assert c["name"] == "Thử – bản sao" and c["adj"]["pitch"] == -1 and c["id"] != a["id"]
+    f = VL.export_file(a["id"], tmp_path / ("a" + VL.EXT))
+    imp, note = VL.import_file(f)
+    assert imp["id"] not in (a["id"], c["id"]) and imp["base"] == a["base"] and not note
+    bad = tmp_path / "x.json"
+    bad.write_text("{}")
+    with pytest.raises(ValueError):
+        VL.import_file(bad)
+    lib = tmp_path / "lib.json"
+    lib.write_text(json.dumps({"name": "Mẫu", "base": "vieneu:lib:khongco"}))
+    assert "giọng mẫu" in VL.import_file(lib)[1]
+    vs = tts.list_voices({}, "vi")
+    mine = [v["id"] for v in vs if v["id"].startswith("my:")]
+    assert vs[0]["id"].startswith("my:") and "my:" + a["id"] in mine and len(mine) == len(VL.list_all())
+    assert "giọng của tôi" in vs[0]["name"] and vs[0]["name"].startswith("⭐")
+    assert not any(v["id"].startswith("my:") and VL.get(v["id"])["base"].startswith("vieneu:")
+                   for v in tts.list_voices({}, "en"))                       # VieNeu chỉ đọc tiếng Việt
+    assert pipeline.voice_label("my:" + a["id"]) == "Thử (giọng của tôi · Edge)"
+    assert "đã xoá" in pipeline.voice_label("my:khongco")
+    assert VL.delete(a["id"]) and not VL.get(a["id"]) and not VL.delete(a["id"])
+    assert "cao độ -1" in VL.describe(c) and "nam" in VL.describe(c)
+    assert storage._TTS_RE.match("tts_ab12_m0f3c.wav").group(1) == "tts_ab12_m0f3c.wav"
+    pdir = tmp_path / "proj"
+    pdir.mkdir()
+    (pdir / "project.json").write_text(json.dumps({"segments": [{"extra": {"tts_file": "/x/tts_ab12_m0f3c.wav"}}]}))
+    ctx = storage._Ctx(pdir)
+    assert {"tts_ab12_m0f3c.wav", "tts_ab12.wav", "tts_ab12.mp3"} <= ctx.tts_ref   # file thô của giọng của tôi được giữ
+
+
+def test_voicelab_omni_variant_2422():
+    """Biến thể giọng OmniVoice chọn sẵn: cùng mô tả, hạt khác -> câu mẫu riêng; biến thể 0 = câu mẫu cũ (không đọc lại)."""
+    from trami import omni_design as od
+
+    pid = od.PREFIX + od.PRESETS[0][0]
+    assert od.key(pid, "r") == od.key(pid, "r", "vi", 0)
+    assert od.key(pid, "r", "vi", 2) != od.key(pid, "r")
+    assert od.anchor_path(pid, "r") == od.anchor_path(pid, "r", "vi", 0)
+    assert "_v2_" in od.anchor_path(pid, "r", "vi", 2).name
+
+    seeds = []
+
+    class W:
+        def synth(self, text, out, instruct=None, seed=None, language=None):
+            seeds.append(seed)
+            from trami import tts
+
+            tts.write_wav(out, _speech_like(24000), 24000)
+
+    import shutil as _sh
+
+    p0 = od.anchor_path(pid, "r", "vi", 5)
+    p0.unlink(missing_ok=True)
+    od.ensure_anchor(W(), pid, "r", "vi", 5)
+    assert seeds == [od.get(pid)["seed"] + od.VARIANT_STEP * 5]
+    _sh.rmtree(p0.parent, ignore_errors=True)
+
+
+def test_voicelab_dub_2422(tmp_path, monkeypatch):
+    """Lồng tiếng bằng giọng của tôi: bộ đọc đọc bằng giọng nền + thông số riêng (Edge: tốc độ / cao độ; VieNeu: kiểu
+    đọc), rồi áp phần chỉnh -> file cuối. Chỉ đổi phần chỉnh -> áp lại, KHÔNG đọc lại; đổi thông số bộ đọc -> đọc lại;
+    giọng bị xoá -> Hoài My + báo trong fallback. Giọng thường không đổi gì (mục Edge vẫn 4 phần, mã file như cũ).
+    VieNeu: kiểu đọc riêng của giọng; câu tiếng khác (Thái) -> Edge cùng nam / nữ, không áp phần chỉnh."""
+    from trami import tts, voicelab as VL
+
+    calls = []
+
+    async def fake_edge(items, rate, pitch, progress, cancel, total, done0, concurrency=6):
+        for it in items:
+            calls.append(it)
+            _fake_audio(it[2], 0.9, 300)
+        return []
+
+    monkeypatch.setattr(tts, "_edge_all", fake_edge)
+    rec = VL.save({"name": "Lồng", "base": "edge:vi-VN-HoaiMyNeural", "eng": {"rate": 10},
+                   "adj": {"pitch": 2, "warm": 3}})
+    segs = [Segment(0.5, 1.6, "a", "câu một"), Segment(2.0, 3.0, "b", "câu hai")]
+    st = {}
+    tts.synthesize_dub(segs, tmp_path / "d1.wav", 4.0, tmp_path / "t", voice="my:" + rec["id"], stats=st)
+    assert len(calls) == 2 and all(c[4:] == ("+10%", "+0Hz") for c in calls)
+    f1 = [s.extra["tts_file"] for s in segs]
+    assert all("_m" in Path(f).stem and Path(f).exists() for f in f1)
+    assert [s.extra["voice_used"] for s in segs] == ["my:" + rec["id"]] * 2 and not st["fallback"]
+    raw = Path(f1[0]).with_name(Path(f1[0]).stem.split("_m")[0] + ".mp3")
+    a_raw, a_fin = tts._decode(raw), tts._read_wav24(Path(f1[0]))
+    assert a_fin is not None and abs(len(a_fin) - len(a_raw)) < tts.SR * 0.05
+    rec["adj"]["pitch"] = -1                        # chỉ đổi phần chỉnh
+    VL.save(rec)
+    calls.clear()
+    st = {}
+    tts.synthesize_dub(segs, tmp_path / "d2.wav", 4.0, tmp_path / "t", voice="my:" + rec["id"], stats=st)
+    assert calls == [] and st["my_refx"] == 2
+    assert [s.extra["tts_file"] for s in segs] != f1
+    rec["eng"]["rate"] = 20                          # đổi thông số bộ đọc -> đọc lại
+    VL.save(rec)
+    calls.clear()
+    tts.synthesize_dub(segs, tmp_path / "d3.wav", 4.0, tmp_path / "t", voice="my:" + rec["id"])
+    assert len(calls) == 2 and calls[0][4] == "+20%"
+    VL.delete(rec["id"])
+    calls.clear()
+    st = {}
+    tts.synthesize_dub(segs, tmp_path / "d4.wav", 4.0, tmp_path / "t", voice="my:" + rec["id"], stats=st)
+    assert st["fallback"] == {"my:" + rec["id"]: 2} and len(calls[0]) == 4
+    assert segs[0].extra["voice_used"] == "edge:vi-VN-HoaiMyNeural"
+    # VieNeu: kiểu đọc riêng của giọng; câu tiếng Anh -> Edge cùng giới tính, không áp phần chỉnh
+    got = []
+
+    class FakeVN:
+        sr = 48000
+        note = ""
+
+        def ensure_started(self, progress=None, cancel=None):
+            pass
+
+        def synth(self, text, out, voice=None, ref_audio=None, params=None, **kw):
+            got.append((text, voice, dict(params or {})))
+            return tts.write_wav(out, _speech_like(48000), 48000)
+
+    monkeypatch.setattr(tts, "vieneu_available", lambda: True)
+    monkeypatch.setattr(tts, "vieneu_presets", lambda mode="v3turbo": [{"id": "vieneu:Bình", "name": "Bình",
+                                                                         "gender": "male"}])
+    monkeypatch.setattr(tts, "_vieneu", lambda mode, *_a: FakeVN())
+    monkeypatch.setattr(tts, "_free_other_tts", lambda keep: 0)
+    vr = VL.save({"name": "VN", "base": "vieneu:Bình", "gender": "male", "eng": {"style": "lively"},
+                  "adj": {"timbre": -8}})
+    segs2 = [Segment(0.5, 2.0, "a", "Xin chào các bạn"), Segment(2.5, 3.5, "b", "สวัสดีครับ เพื่อน")]
+    calls.clear()
+    tts.synthesize_dub(segs2, tmp_path / "d5.wav", 4.0, tmp_path / "t2", voice="my:" + vr["id"], lang="vi")
+    assert got and got[0][1] == "Bình" and got[0][2].get("temperature") == 0.85
+    assert "_m" in Path(segs2[0].extra["tts_file"]).stem
+    assert calls and calls[0][3].startswith("th-") and "_m" not in Path(segs2[1].extra["tts_file"]).stem
+    VL.delete(vr["id"])
+
+
+def test_voicelab_preview_2422(monkeypatch):
+    """Nghe thử ở trang Tạo giọng: bộ đọc đọc 1 lần (file thô có đệm), đổi phần chỉnh chỉ áp lại; đổi nguồn đọc lại;
+    stats (giây, tiếng, tiếng / giây, sóng âm); đo tốc độ đọc 3 câu chuẩn; tab Lồng tiếng nghe thử giọng của tôi."""
+    from trami import tts, voicelab as VL
+
+    calls = []
+    monkeypatch.setattr(tts, "_edge_save", _vl_fake_edge_save(calls))
+    rec = VL.clean({"base": "edge:vi-VN-HoaiMyNeural", "eng": {"pitch": 5}, "adj": {"tempo": 1.1}})
+    p1 = VL.preview(rec, "Một hai ba bốn năm sáu bảy tám", {}, "vi")
+    assert len(calls) == 1 and calls[0][3] == "+5Hz" and p1.exists()
+    assert VL.cached_raw(rec, "Một hai ba bốn năm sáu bảy tám", "vi", {})
+    rec["adj"]["tempo"] = 0.9
+    p2 = VL.preview(rec, "Một hai ba bốn năm sáu bảy tám", {}, "vi")
+    assert len(calls) == 1 and p2 != p1                   # chỉ áp lại phần chỉnh
+    st1, st2 = VL.stats(p1, "Một hai ba bốn năm sáu bảy tám"), VL.stats(p2, "Một hai ba bốn năm sáu bảy tám")
+    assert st1["syl"] == 8 and st2["dur"] > st1["dur"] * 1.1 and len(st1["peaks"]) == 120
+    rec["eng"]["pitch"] = 0
+    VL.preview(rec, "Một hai ba bốn năm sáu bảy tám", {}, "vi")
+    assert len(calls) == 2                                # đổi nguồn -> đọc lại
+    rate = VL.measure_rate(rec, {}, "vi")
+    assert 1.0 < rate < 40 and len(calls) == 5
+    saved = VL.save({**rec, "name": "Nghe"})
+    out = tts.preview_voice("my:" + saved["id"], "Một hai ba bốn năm sáu bảy tám", Path(VL.CACHE) / "pv_x")
+    assert out.suffix == ".wav" and out.exists() and len(calls) == 5
+    with pytest.raises(ValueError):
+        tts.preview_voice("my:khongco", "abc", Path(VL.CACHE) / "pv_y")
+    VL.delete(saved["id"])
+
+
+def test_gui_voicelab_2422(monkeypatch):
+    """Giao diện trang Tạo giọng: mục ở thanh bên (nhãn "Mới"), Nghe thử (đọc 1 lần, có bản vừa nghe), kéo phần chỉnh ->
+    áp lại không đọc lại, Mẫu nhanh, Lưu thành giọng mới (hộp Lưu: tên / nam nữ / tốc độ đo / mặc định) -> giọng hiện ở
+    ô Giọng cho tất cả tab Lồng tiếng, Lưu đè, Nhân bản, Xoá; nút "Mở Tạo giọng để sửa giọng này" ở tab Lồng tiếng."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication, QDialog, QMessageBox
+
+    from trami import tts, voicelab as VL
+    from trami.config import load_settings, save_settings
+    from trami.gui import voicelab_page as vlp
+    from trami.gui.main import MainWindow
+    from trami.project import Project
+
+    app = QApplication.instance() or QApplication([])
+    for r in VL.list_all():
+        VL.delete(r["id"])
+    calls = []
+    monkeypatch.setattr(tts, "_edge_save", _vl_fake_edge_save(calls))
+    monkeypatch.setattr(vlp, "run_async", lambda fn, done=None, err=None: done(fn()) if done else fn())
+    monkeypatch.setattr(vlp.VoiceLabPage, "_play", lambda self, path: setattr(self, "_played", str(path)))
+    old = load_settings()
+    win = MainWindow()
+    try:
+        assert win.sidebar.nav["voicelab"].badge == "Mới"
+        p = Project.create("tao giong 2422")
+        p.data["info"] = {"duration": 10}
+        p.segments = [Segment(0, 1, "你好", "Xin chào bạn", "S1")]
+        p.save()
+        win.open_project(p.id)
+        app.processEvents()
+        win.show_page("voicelab")
+        pg = win.voicelab_page
+        assert pg.editing.text() == "Giọng mới – chưa lưu" and not pg.b_save.isEnabled()
+        pg._proj_line()
+        assert pg.text.toPlainText() == "Xin chào bạn"
+        pg.text.setPlainText("Ba năm trước hắn chỉ là đệ tử")
+        pg._listen()
+        assert len(calls) == 1 and len(pg.history) == 1 and pg._played.endswith(".wav")
+        assert "tiếng/giây" in pg.stat.text() and pg.wave.peaks
+        pg.a_pitch.set(2.0)
+        pg._fx_changed_now()                                       # như vừa kéo thanh: áp lại, không đọc lại
+        assert len(calls) == 1 and len(pg.history) == 1 and "cao độ +2" in pg.history[0]["label"]
+        pg._apply_preset(dict(VL.PRESETS[1][1]))
+        assert pg.a_warm.value() == 3 and pg.a_pitch.value() == -1.5
+        pg.e_rate.set(10)
+        pg._src_changed()
+        pg._listen()                                               # nguồn đổi -> đọc lại, thêm bản mới
+        assert len(calls) == 2 and len(pg.history) == 2 and calls[-1][2] == "+10%"
+        h_old = pg.history[1]
+        pg._restore(h_old)
+        assert pg.e_rate.value() == 0
+
+        def fake_exec(dlg):
+            dlg.name.setText("Review nam trầm")
+            dlg.gender.button(1).setChecked(True)
+            dlg.default.setChecked(True)
+            dlg._ok()
+            return QDialog.DialogCode.Accepted
+
+        monkeypatch.setattr(vlp.SaveDialog, "exec", fake_exec)
+        pg._save_new()
+        mine = VL.list_all()
+        assert len(mine) == 1 and mine[0]["name"] == "Review nam trầm" and mine[0]["gender"] == "male"
+        assert mine[0]["rate"] and pg.cur_id == mine[0]["id"] and pg.b_save.isEnabled()
+        assert load_settings()["dub_voice_all"] == "my:" + mine[0]["id"]
+        pp = win.project_page
+        assert pp.d_voice_all.findData("my:" + mine[0]["id"]) >= 0          # nhóm ⭐ giọng của tôi ở tab Lồng tiếng
+        assert pp.d_voice_all.itemText(pp.d_voice_all.findData("my:" + mine[0]["id"])).startswith("⭐")
+        pg.a_pitch.set(-3.0)
+        pg._save_over()
+        assert VL.get(pg.cur_id)["adj"]["pitch"] == -3.0 and VL.get(pg.cur_id)["rate"] == mine[0]["rate"]
+        pg._dup()
+        assert len(VL.list_all()) == 2 and pg.lib.count() == 2
+        monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+        pg._delete()
+        assert len(VL.list_all()) == 1 and pg.cur_id == ""
+        # tab Lồng tiếng: mở Tạo giọng với giọng của tôi đang chọn
+        vid = "my:" + VL.list_all()[0]["id"]
+        pp.d_voice_all.setCurrentIndex(pp.d_voice_all.findData(vid))
+        pp._open_voicelab()
+        assert win.pages.currentWidget() is pg and pg.cur_id == VL.bare(vid)
+        win.open_voicelab("edge:vi-VN-NamMinhNeural")              # giọng thường -> giọng mới có giọng nền đó
+        assert pg.cur_id == "" and pg.base.currentData() == "edge:vi-VN-NamMinhNeural"
+        for b in (pg.b_new, pg.b_reset, *pg.preset_btns, *pg.sample_btns):
+            b.click()
+        app.processEvents()
+    finally:
+        win.close()
+        save_settings(old)
+        for r in VL.list_all():
+            VL.delete(r["id"])

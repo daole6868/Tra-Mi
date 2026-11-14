@@ -1277,7 +1277,43 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   báo `seen` -> không báo trùng). requirements thêm `aiohttp>=3.9`, `cryptography>=41`; Subvideo.spec gom web/ + vps/.
 - `trami/torchenv.py` (2.3.1) – bộ PyTorch: `versions` (torch / torchvision / torchaudio theo thông tin gói, không import), `mismatch` (theo `Requires-Dist: torch==…` của torchvision / torchaudio, không có thì 2.N ↔ 0.(N+15); torch bị thay bản CPU), `fix_cmd` (còn `torch-constraints.txt` mà torch đã đổi -> cài lại đúng bộ đó, không thì torchvision / torchaudio đúng bản torch + kho cu1xx; exe -> đóng gói lại), `guard_torchvision` (import thử + `torchvision.io` / `.transforms`; hỏng hoặc chỉ còn thư mục sót không có mã – `leftover` (2.3.2) -> `sys.modules["torchvision"] = None`: transformers coi như chưa cài – gọi đầu 5 tiến trình AI + trước audio-separator / speechbrain / funasr), `root_error` / `hint` / `load_error` ("Không nạp được X: … | lỗi gốc: … | cách sửa", traceback ra log tiến trình); Cài đặt dòng PyTorch có ⚠ khi lệch / cài dở (chữ chọn được để chép lệnh); lệnh dùng python.exe thay pythonw.exe.
 - `trami/hfoffline.py` (2.3.3) – VieNeu / OmniVoice nạp bản ĐÃ CÓ trên máy trước: `load_local_first(make, patterns, what, report, on_stall)` = `repair_refs` (kho tên chứa pattern mà refs/main trỏ bản chưa có file trọng số ≥ 1 MB – lần tải dở – trong khi bản khác có -> trỏ refs/main về bản đó) -> `offline(True)` (`HF_HUB_OFFLINE` + `huggingface_hub.constants.HF_HUB_OFFLINE`, transformers đọc cùng cờ) -> make(); lỗi thiếu file (`missing_local`: LocalEntryNotFoundError / offline / local cache…) -> có mạng + `_Watch` (dòng tiến độ "chưa nhận thêm dữ liệu N s" sau `DL_NOTE` 20 s; đứng im `DL_STALL` 180 s -> on_stall: worker trả lỗi rõ + `os._exit(3)`); lỗi khác -> ném luôn (không tải); xong luôn trả về có mạng. `progress_hook`: thanh tqdm bị tắt (huggingface_hub `disable=None` khi không có cửa sổ đen) không giữ unit / desc / n -> `__init__` nhớ `_sv_unit` / `_sv_unit_scale` / `_sv_desc`, `update` tự cộng n -> báo đúng MB; `download_state()` (số thanh tải, byte đã nhận / tổng, lúc nhận cuối) cho `_Watch`.
-- `tests/test_core.py` – `python -m pytest -q tests` (376 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
+- Tạo giọng (2.4.22, đợt 1 – người dùng duyệt bản thiết kế artifact "Subvideo – Tạo giọng"): `trami/voicelab.py` +
+  `gui/voicelab_page.VoiceLabPage` (mục "Tạo giọng" thanh bên – icon `wave`, nhãn "Mới" = `NavButton.set_badge` nhận
+  chuỗi; `MainWindow.open_voicelab(spec)` / `voices_changed` -> `project_page._fill_speakers`). Giọng của tôi mã "my:<id>"
+  = CÔNG THỨC {name, gender, use, base (giọng nền: edge / vieneu / omni / vox / korva – không nhái giọng gốc), eng (thông
+  số bộ đọc: Edge rate % / pitch Hz ±30 cộng với "Tốc độ đọc" chung – `edge_args`; VieNeu style clear / natural / lively
+  (`tts.VIENEU_STYLES["lively"]`); OmniVoice variant = hạt khác cho giọng chọn sẵn – `omni_design.seed_of` /
+  `VARIANT_STEP`, key / anchor_path / ensure_anchor(variant) – biến thể 0 = câu mẫu cũ; VoxCPM2 quality + cfg; KorvaTTS
+  quality + speed – `overlay(settings, rec)`), adj (phần chỉnh sau khi đọc: pitch ±`PITCH_MAX` 4 nửa cung, timbre
+  ±`TIMBRE_MAX` 15 % (formant ĐỘC LẬP cao độ – chỉ kéo cao độ giữ âm sắc), tempo 0,85–1,20, warm / clear / bright = low /
+  presence / high ±6 dB, comp %, room `ROOM_FX`, color `COLOR_FX` khàn / thì thầm / điện thoại / loa phường / vọng / robot –
+  EQ cộng dồn, vang thay vang phòng) -> `fx_of` -> `voicefx.apply`, rate (tiếng / giây đo bằng `RATE_TEXTS` 3 câu chuẩn
+  khi lưu – `measure_rate`)}; lưu data/voices/my/index.json (`clean` chuẩn hoá, tên trùng tự đánh số), đệm nghe thử
+  data/voices/my/cache (`read_raw` file thô theo `raw_key` = nguồn + lời + mô hình + cảm xúc, `render` áp phần chỉnh,
+  ≤ `CACHE_KEEP` 80 file), `export_file` / `import_file` ".subvoice.json" (chỉ công thức; giọng nền là giọng mẫu máy khác
+  -> ghi chú), `PRESETS` 8 mẫu nhanh, `SAMPLES` câu mẫu. Lồng tiếng: `tts.synthesize_dub` "my:" -> giọng nền (kiểm tra
+  dùng được như mọi giọng; giọng bị xoá / bộ đọc chưa cài -> fallback báo rõ) + `iopt[i]` thông số riêng từng câu (VieNeu
+  params, vox cfg / bước, korva bước / tốc độ, omni variant – mã file theo đó), Edge mục thêm (rate, pitch) chỉ khi khác
+  chung (mục thường vẫn 4 phần); có phần chỉnh -> file cuối `voicelab.final_path` = `tts_<mã thô>_m<fx_key>.wav`, chưa có
+  -> `fx_jobs` áp sau khi đọc (`voicelab.apply_file`), file thô có sẵn = chỉ áp lại (`stats["my_refx"]` -> `dub_summary`
+  "áp lại phần chỉnh giọng của tôi cho N câu (không đọc lại)"); Edge không đọc từng vế khi có phần chỉnh; câu tiếng khác
+  mà giọng nền VieNeu / Korva -> Edge cùng nam / nữ, không áp phần chỉnh; nhóm cân âm lượng = mã giọng của tôi.
+  `tts.preview_voice` nhận "my:" (bản trong đệm, chép ra out) + rate / pitch / variant / emo (VoxCPM2 có cảm xúc -> chỉ
+  giọng tham chiếu + control). `tts.list_voices`: `voicelab.voices()` "⭐ <tên> – giọng của tôi (bộ đọc)" + tip ĐỨNG ĐẦU
+  (tiếng khác tiếng Việt: chỉ giọng nền Edge / Omni / Vox) -> mọi ô chọn giọng, Thiết lập tự động, điện thoại.
+  `pipeline.voice_label` / `line_voice` (cảm xúc VoxCPM2 theo giọng nền), `storage`: `_TTS_RE` nhận `_m<mã>`, `_Ctx` giữ
+  file thô của file cuối đang dùng. Trang: cột Giọng của bạn (tìm, danh sách 2 dòng `describe`, Giọng mới / Nhân bản /
+  Xoá) | Công thức (Group "1 · Nguồn giọng": PillTabs bộ đọc, Giọng nền `base_voices`, ghi chú `ENGINE_NOTE` + ⚠
+  `engine_ready`, ô thông số theo bộ đọc `eng_rows` (setRowVisible); Group "2 · Chỉnh sau khi đọc" 7 SliderRow + Vang phòng
+  + Màu đặc biệt + Về gốc; Group Mẫu nhanh) | Nghe thử (ô gõ ≤ `MAX_TEXT`, câu mẫu, "Câu trong dự án đang mở", Cảm xúc
+  (VoxCPM2) `EMOS`, Nghe thử / Dừng – QMediaPlayer riêng, sóng âm `Wave` + "giây · tiếng · tiếng/giây", các bản vừa nghe
+  ≤ 6 (▶ / Lấy lại – `_restore`), "Lưu thành giọng mới…" `SaveDialog` (tên, Nữ / Nam / Không rõ, hợp với, đo tốc độ nền,
+  "Dùng làm giọng mặc định cho video mới" -> Cài đặt `dub_voice_all`), "Lưu đè giọng đang sửa" (nguồn / tốc độ đổi -> đo
+  lại). Kéo phần chỉnh: `_fx_timer` 350 ms -> có bản đọc cùng nguồn + lời -> áp lại + phát (thay "Bản N · đang chỉnh").
+  AI đang chạy việc GPU khác -> chặn nghe thử giọng AI như tab Lồng tiếng. Tab Lồng tiếng mục 2 khối Giọng đọc nút "Mở Tạo
+  giọng để sửa giọng này" (`d_voicelab` -> `_open_voicelab`: giọng của tôi -> sửa; giọng khác -> giọng mới có giọng nền đó).
+  `_sync_mirrors` chép cả tooltip, `_fill_auto_voices` gọi lại (ô gương "Giọng cho tất cả" trước không nạp giọng mới).
+- `tests/test_core.py` – `python -m pytest -q tests` (381 test; 3 test cần gói AI / PyTorch; `test_gui_click_every_button_237` bấm mọi nút / đổi mọi ô chọn mọi tab; test OCR vẽ video bằng font chữ Hán – Noto CJK / msyh / wqy-zenhei); `tests/conftest.py` bật lá chắn None như
   `config.guard_none_refcount` trước mọi test).
 
 ## Cài đặt trên Windows (bài học)
@@ -3432,8 +3468,19 @@ Phiên bản hiện tại: xem `trami/__init__.py`.
   đè); hộp Lưu giọng (tên, nam / nữ, hợp với, đo tốc độ đọc, mặc định cho video mới) + nhóm "⭐ Giọng của tôi" đầu mọi ô chọn
   giọng) – chờ người dùng duyệt rồi mới code.
 
+- 2.4.22: người dùng duyệt bản thiết kế "Subvideo – Tạo giọng" -> "làm đợt 1": trang Tạo giọng ở thanh bên (xem Cấu
+  trúc "Tạo giọng"): chọn bộ đọc + giọng nền + thông số bộ đọc, chỉnh cao độ / âm sắc / tốc độ / ấm / rõ chữ / sáng / nén /
+  vang / màu giọng, gõ câu bất kỳ nghe thử (kéo thanh = áp lại ngay, không đọc lại), lưu thành "⭐ giọng của tôi" dùng ở mọi
+  ô chọn giọng, mọi video. Thử: Edge / VieNeu giả qua lồng tiếng thật (đổi phần chỉnh không đọc lại, đổi thông số bộ đọc
+  đọc lại, giọng bị xoá -> Hoài My + báo, câu Thái -> Edge), nghe thử có đệm + đo tốc độ, biến thể OmniVoice, giao diện
+  offscreen (Nghe thử, kéo thanh, mẫu nhanh, Lưu / Lưu đè / Nhân bản / Xoá, ô Giọng cho tất cả có giọng mới, nút mở từ tab
+  Lồng tiếng). Chưa nghe trên bộ đọc thật (sandbox chặn Edge / HF).
+
 ## Vấn đề đang mở
-- Tab Tạo giọng (đợt 1): chờ người dùng duyệt bản thiết kế artifact "Subvideo – Tạo giọng" (sửa gì / bỏ gì) rồi mới code.
+- 2.4.22: chờ người dùng mở "Tạo giọng" (thanh bên) -> chọn bộ đọc + giọng nền -> Nghe thử -> kéo thanh Cao độ / Âm sắc /
+  Rõ chữ… (nghe lại ngay) -> "Lưu thành giọng mới…" -> tab Lồng tiếng → Giọng cho tất cả chọn "⭐ … – giọng của tôi" ->
+  Tạo bản lồng tiếng. Giọng nào nghe méo / giọng máy ở mức chỉnh nào -> báo để hạ giới hạn. Đợt 2 (chưa làm): mô tả giọng
+  tự do VoxCPM2, ghép 2 giọng, áp hiệu ứng theo từng nhân vật…
 - 2.4.21: chờ người dùng chạy "1. Nghe & tách câu" nguồn OCR với "Tách giọng khỏi nhạc trước" bật: thông báo có "đã tách
   giọng / nhạc nền bằng …", tab Âm thanh có bản tách.
 - 2.4.20: chờ người dùng chép file, tạo lại vài câu VoxCPM2 -> xong việc mở Task Manager: bộ nhớ GPU chuyên dụng phải về ~0,5–1

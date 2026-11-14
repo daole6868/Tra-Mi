@@ -22,6 +22,7 @@ from . import icons, theme
 from .common import run_async
 from .project_page import ProjectPage, scroll
 from .storage_page import StoragePage
+from .voicelab_page import VoiceLabPage
 from .widgets import (DropZone, Form, GradientButton, IconBadge, IconButton, NavButton, ProgressBar, SectionCard,
                       Switch, Toast, button, combo, flow, hbox, label, set_combo, shadow)
 
@@ -101,12 +102,14 @@ class Sidebar(QFrame):
         for key, text, ic in (("home", "Trang chủ", "home"), ("project", "Dự án đang mở", "film"),
                               ("jobs", "Việc đang làm", "cpu"),
                               ("batch", "Xử lý hàng loạt", "stack"), ("concat", "Ghép nhiều video", "merge"),
+                              ("voicelab", "Tạo giọng", "wave"),
                               ("storage", "Dung lượng", "disk"), ("settings", "Cài đặt", "settings")):
             b = NavButton(text, ic)
             b.clicked.connect(lambda _=False, k=key: win.show_page(k))
             self.group.addButton(b)
             self.nav[key] = b
             lay.addWidget(b)
+        self.nav["voicelab"].set_badge("Mới")   # 2.4.22: trang Tạo giọng mới có
         # thu gọn (chỉ icon): danh sách dự án gần đây ẩn đi -> khoảng trống dồn xuống dưới, các icon xếp sát nhau đều
         self._filler = QWidget()
         self._filler.hide()
@@ -1922,9 +1925,10 @@ class MainWindow(QMainWindow):
         self.settings_page = SettingsPage(self)
         self.jobs_page = JobsPage(self)
         self.storage_page = StoragePage(self)
+        self.voicelab_page = VoiceLabPage(self)
         self.page_keys = {"home": self.home, "project": self.project_page, "jobs": self.jobs_page,
-                          "batch": self.batch_page, "concat": self.concat_page, "storage": self.storage_page,
-                          "settings": self.settings_page}
+                          "batch": self.batch_page, "concat": self.concat_page, "voicelab": self.voicelab_page,
+                          "storage": self.storage_page, "settings": self.settings_page}
         for w in self.page_keys.values():
             self.pages.addWidget(w)
         self.jobsbar = JobsBar(self)
@@ -1967,12 +1971,30 @@ class MainWindow(QMainWindow):
             self.jobs_page.update_jobs(manager.list())
         if key == "storage":
             self.storage_page.refresh()
+        if key == "voicelab":
+            self.voicelab_page.refresh()
         self.pages.setCurrentWidget(self.page_keys[key])
         self.sidebar.nav[key].setChecked(True)
         self.sidebar.set_compact(key == "project")   # trang dự án: thanh bên chỉ còn icon, rộng chỗ cho timeline
 
     def go_home(self):
         self.show_page("home")
+
+    def open_voicelab(self, spec: str = ""):
+        """Trang Tạo giọng mở sẵn giọng `spec` (giọng của tôi: sửa; giọng khác: làm giọng nền cho giọng mới)."""
+        self.show_page("voicelab")
+        self.voicelab_page.open_voice(spec)
+
+    def voices_changed(self):
+        """Giọng của tôi vừa thêm / sửa / xoá: nạp lại các ô chọn giọng của dự án đang mở."""
+        pp = self.project_page
+        if getattr(pp, "p", None):
+            try:
+                pp._fill_speakers()
+            except Exception:  # noqa: BLE001
+                from ..config import log_error
+
+                log_error("Nạp lại danh sách giọng sau khi sửa giọng của tôi")
 
     def open_project(self, pid: str):
         self.project_page.flush()
